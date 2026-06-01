@@ -1,69 +1,66 @@
 # LogBrew Documentation
 
-> Source for **[furkanerday.mintlify.app](https://furkanerday.mintlify.app)** — the user-facing docs for LogBrew. (Custom domain coming later.)
+Source for the public LogBrew documentation site.
 
-LogBrew is a mobile-first iOS app for indie developers. It pulls together errors from Sentry, deployments from Vercel and Railway, exception logs from PostHog, SLA breaches from Linear, and payment failures from Stripe, and surfaces every one of them as a real-time push notification on your iPhone.
-
-This repo holds the public docs that explain how LogBrew works, how to connect each service, and how the product behaves once events start flowing. The app itself is closed source — only the documentation lives here.
+LogBrew is agent-first observability for developers. The docs explain how to
+send first-party telemetry, then read logs, traces, issues, actions, and
+releases through the native `logbrew` CLI and API.
 
 ## Sitemap
 
 | Section | What it covers |
 | --- | --- |
-| **Get Started** | Install LogBrew, sign in with GitHub / GitLab / Bitbucket, connect your first service. |
-| **Core Concepts** | Feed, Logs, Projects, Notifications. The mental model behind the app. |
-| **Integrations** | OAuth setup, severity mapping, and resolve-sync behavior for the six supported providers. New ones land via the Request page. |
-| **Features** | Live feed reconnection, two-way resolve sync, shareable links, saved filters. |
-| **Account & Settings** | Sign-in providers, language, push notifications, account deletion and recovery. |
+| Start | Product overview and first working CLI flow. |
+| Concepts | Telemetry streams, releases, projects, environments, and the mobile companion app. |
+| Guides | CLI usage, SDK ingestion, and issue triage workflows. |
+| Reference | Command grammar, telemetry API shape, and data storage behavior. |
 
 ## Working on the docs
 
-The docs use [Mintlify](https://mintlify.com), so authoring is plain MDX with a small set of built-in components (`<Card>`, `<Steps>`, `<Tabs>`, etc.).
+The docs use [Mintlify](https://mintlify.com). Authoring is MDX plus
+`docs.json` navigation.
 
 ```bash
 npm i -g mint
-mint dev           # localhost:3000, live reload on every save
-mint validate      # build check, run before pushing
-mint broken-links  # internal link sanity
+mint dev
+mint validate
+mint broken-links
+mint a11y
+mint score
 ```
 
-Every push to `main` redeploys [furkanerday.mintlify.app](https://furkanerday.mintlify.app) automatically through the Mintlify GitHub App. Open a PR and each commit gets a unique preview URL posted by the bot.
+Run validation before publishing any docs change. Use the preview site to check
+the first-run path, mobile readability, cards, code examples, and navigation.
 
 ## House style
 
-The docs are read by people who haven't opened the app yet. Keep the prose direct and concrete.
-
-- Active voice, second person.
-- Sentence flow over jargon. Cut filler ("in order to", "obviously", "simply").
-- ASCII only. No em-dashes — use commas, periods, or colons.
-- Internal links are root-relative without the extension: `/integrations/sentry`.
-- One idea per paragraph. One concept per heading. Sentence case for headings.
+- Write for developers and AI coding agents.
+- Use popular terms: logs, traces, issues, actions, releases, environments.
+- Keep pages short, task-oriented, and copy-paste friendly.
+- Prefer `Steps`, `CardGroup`, `CodeGroup`, callouts, and tables when they make
+  scanning easier.
+- Internal links are root-relative without `.mdx`.
+- Sentence case for headings.
+- ASCII only. Do not use em dashes.
+- Do not document removed provider-sync flows or private implementation plans.
 
 ## Layout
 
-```
+```text
 introduction.mdx
 quickstart.mdx
-concepts/      Feed, Logs, Projects, Notifications
-integrations/  Sentry, Vercel, Railway, PostHog, Linear, Stripe, Request
-features/      Live Feed, Resolve Sync, Sharing, Saved Filters
-settings/      Account, Notifications
-docs.json      Site config (navigation tree, theme, colors)
-custom.css     Light/dark icon swap for Vercel and Railway
+concepts/     Telemetry, releases, projects, mobile app
+guides/       CLI, SDK ingestion, issue workflow
+reference/    CLI, telemetry API, data storage
+docs.json     Mintlify site config and navigation
 ```
-
-## What's not here
-
-- The LogBrew iOS app source — closed.
-- The LogBrew backend (Rust, Postgres, APNs) — closed.
-- Marketing pages, pricing, blog posts — those live on [logbrew.co](https://logbrew.co).
 
 ## Related
 
-- **[logbrew.co](https://logbrew.co)** — main product site.
-- **[LogBrewCo](https://github.com/LogBrewCo)** — GitHub organization.
-- **App Store** — search **LogBrew** on iOS.
+- [logbrew.co](https://logbrew.co)
+- [LogBrewCo](https://github.com/LogBrewCo)
 
 ## License
 
-MIT for the documentation source. See [LICENSE](LICENSE). The LogBrew product, brand, and app are not covered.
+MIT for the documentation source. See [LICENSE](LICENSE). The LogBrew product
+and brand are not covered.
