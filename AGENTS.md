@@ -7,12 +7,17 @@ operational, and safe for a public repository.
 
 - LogBrew is agent-first observability for developers.
 - Document first-party logs, traces, issues, actions, releases, projects,
-  environments, CLI, SDK ingestion, mobile companion workflows, and data
-  storage.
+  environments, CLI, SDK ingestion, mobile companion workflows, and telemetry
+  data.
 - Do not reintroduce removed provider-sync docs for Sentry, PostHog, Vercel,
   Railway, Linear, or Stripe.
 - Do not mention private implementation plans, private repo paths, cleanup
   context, or launch-state caveats.
+- Do not publish infrastructure details: databases, backend framework choices,
+  hosting providers, backup providers, internal hostnames, operator commands,
+  storage paths, credentials, or private runbooks.
+- Public docs explain the product, marketing story, usage, and AI-agent best
+  practices. Keep implementation details in private repos.
 - Use popular terms that humans and AI coding agents understand.
 
 ## Mintlify UX
