@@ -40,6 +40,7 @@ before proposing code changes.
 
 ## Links
 
+- [LogBrew docs](https://docs.logbrew.co)
 - [LogBrew website](https://logbrew.co)
 - [LogBrewCo on GitHub](https://github.com/LogBrewCo)
 
