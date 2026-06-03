@@ -1,64 +1,47 @@
-# LogBrew Documentation
+# LogBrew Docs
 
-Source for the public LogBrew documentation site.
+LogBrew is agent-first observability for developers. It helps developers and AI
+coding agents understand production from the terminal by reading logs, traces,
+issues, actions, releases, projects, and environments through the native
+`logbrew` CLI and API.
 
-LogBrew is agent-first observability for developers. The docs explain how to
-send first-party telemetry, then read logs, traces, issues, actions, and
-releases through the native `logbrew` CLI and API.
+Telemetry is the structured data an app sends while it runs: log messages,
+trace spans, grouped issues, product actions, releases, and environments.
+LogBrew keeps that data readable from the CLI so agents can collect evidence
+before proposing code changes.
 
-## Sitemap
+## What LogBrew helps with
+
+- Read production context without opening a dashboard.
+- Use stable `--json` output for AI coding agents and local tools.
+- Connect logs, traces, issues, and actions with release and environment
+  filters.
+- Triage grouped issues from the terminal.
+- Keep humans aware with mobile companion workflows while agents use the CLI.
+
+## Start here
+
+| Page | Use it for |
+| --- | --- |
+| Introduction | What LogBrew is and what it tracks. |
+| Quickstart | Log in, set up telemetry, and read JSON from the CLI. |
+| Use with AI agents | Follow a read-first investigation loop for coding agents. |
+| CLI reference | Check command grammar and common filters. |
+| Telemetry data | Understand the data model shared by logs, traces, issues, and actions. |
+
+## Documentation map
 
 | Section | What it covers |
 | --- | --- |
 | Start | Product overview and first working CLI flow. |
-| Concepts | Telemetry streams, releases, projects, environments, and the mobile companion app. |
-| Guides | CLI usage, SDK ingestion, and issue triage workflows. |
-| Reference | Command grammar, telemetry API shape, and data storage behavior. |
+| Concepts | Telemetry streams, releases, projects, environments, and the mobile app. |
+| Guides | CLI usage, AI-agent workflow, SDK ingestion, and issue triage. |
+| Reference | CLI grammar, telemetry API shape, and telemetry data model. |
 
-## Working on the docs
+## Links
 
-The docs use [Mintlify](https://mintlify.com). Authoring is MDX plus
-`docs.json` navigation.
-
-```bash
-npm i -g mint
-mint dev
-mint validate
-mint broken-links
-mint a11y
-mint score
-```
-
-Run validation before publishing any docs change. Use the preview site to check
-the first-run path, mobile readability, cards, code examples, and navigation.
-
-## House style
-
-- Write for developers and AI coding agents.
-- Use popular terms: logs, traces, issues, actions, releases, environments.
-- Keep pages short, task-oriented, and copy-paste friendly.
-- Prefer `Steps`, `CardGroup`, `CodeGroup`, callouts, and tables when they make
-  scanning easier.
-- Internal links are root-relative without `.mdx`.
-- Sentence case for headings.
-- ASCII only. Do not use em dashes.
-- Do not document removed provider-sync flows or private implementation plans.
-
-## Layout
-
-```text
-introduction.mdx
-quickstart.mdx
-concepts/     Telemetry, releases, projects, mobile app
-guides/       CLI, SDK ingestion, issue workflow
-reference/    CLI, telemetry API, data storage
-docs.json     Mintlify site config and navigation
-```
-
-## Related
-
-- [logbrew.co](https://logbrew.co)
-- [LogBrewCo](https://github.com/LogBrewCo)
+- [LogBrew website](https://logbrew.co)
+- [LogBrewCo on GitHub](https://github.com/LogBrewCo)
 
 ## License
 
