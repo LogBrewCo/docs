@@ -13,6 +13,8 @@ quoted, and permanent. Keep instructions concise, operational, and safe.
 - Public docs cover product behavior, marketing story, workflows, CLI, API,
   SDK ingestion, mobile companion workflows, telemetry data, and AI-agent best
   practices.
+- Private or cross-repo context is source material only. Never copy private
+  names, paths, implementation details, or operational facts into public docs.
 
 Run this leak scan every time:
 
@@ -26,6 +28,14 @@ Safe bearer-token examples may remain only when they use placeholders.
 ## Product direction
 
 - LogBrew is agent-first observability for developers.
+- This repo documents the whole LogBrew product, not only this docs source.
+- Before substantial docs changes, gather read-only context from available
+  LogBrew project repos, public product surfaces, recent commits, and existing
+  docs so updates reflect what the product actually does.
+- Never edit, commit, push, run generators, or change state outside this docs
+  repo unless the user explicitly asks for that separate work.
+- Convert project context into public-safe usage, workflows, examples, and
+  guarantees. If behavior is not clear from available context, do not invent it.
 - Agent-friendly docs are the primary standard: CLI-first, JSON-first,
   copy-paste friendly, and clear enough for coding agents to use without
   guessing.
@@ -35,8 +45,9 @@ Safe bearer-token examples may remain only when they use placeholders.
 - Do not reintroduce removed provider-sync docs for Sentry, PostHog, Vercel,
   Railway, Linear, or Stripe.
 - Use popular terms that humans and AI coding agents understand.
-- Check competitor docs for user-friendly patterns and missing workflow ideas,
-  but only publish LogBrew behavior that is already true and safe to say.
+- Check competitor docs during substantial IA, quickstart, API, SDK, CLI, and
+  agent-workflow updates. Look for user-friendly patterns LogBrew should match
+  or beat, then adapt only ideas that fit true, safe LogBrew behavior.
 
 ## Mintlify UX
 
