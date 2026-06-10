@@ -53,6 +53,9 @@ Safe bearer-token examples may remain only when they use placeholders.
 
 - `docs.json` owns information architecture. Use one root navigation pattern
   with groups unless tabs or anchors are clearly needed.
+- Do not enable broad hidden-page indexing such as `seo.indexing: "all"`;
+  only intentional navigation pages should appear in sitemap, search,
+  `llms.txt`, and agent context.
 - Add `redirects` when moving or deleting published pages.
 - Every page needs frontmatter `title` and `description`.
 - Keep the first-run path obvious: what LogBrew is, how to log in, how to send
