@@ -48,6 +48,11 @@ Safe bearer-token examples may remain only when they use placeholders.
 - Check competitor docs during substantial IA, quickstart, API, SDK, CLI, and
   agent-workflow updates. Look for user-friendly patterns LogBrew should match
   or beat, then adapt only ideas that fit true, safe LogBrew behavior.
+- Use the public SDK brand assets as the durable LogBrew logo source. Use
+  espresso-background variants for favicon, social, store, preview, and app
+  icon surfaces; use transparent variants for in-page UI where the surrounding
+  surface should show through. Do not recolor, redraw, crop differently, add
+  outlines, add shadows, or alter logo geometry.
 
 ## Mintlify UX
 
