@@ -26,6 +26,7 @@ before proposing code changes.
 | Introduction | What LogBrew is and what it tracks. |
 | Quickstart | Log in, set up telemetry, and read JSON from the CLI. |
 | Use with AI agents | Follow a read-first investigation loop for coding agents. |
+| Troubleshooting | Fix common CLI, telemetry, filter, and trace lookup problems. |
 | CLI reference | Check command grammar and common filters. |
 | Telemetry data | Understand the data model shared by logs, traces, issues, and actions. |
 
@@ -35,7 +36,7 @@ before proposing code changes.
 | --- | --- |
 | Start | Product overview and first working CLI flow. |
 | Concepts | Telemetry streams, releases, projects, environments, and the mobile app. |
-| Guides | CLI usage, AI-agent workflow, SDK ingestion, and issue triage. |
+| Guides | CLI usage, AI-agent workflow, troubleshooting, SDK ingestion, and issue triage. |
 | Reference | CLI grammar, telemetry API shape, and telemetry data model. |
 
 ## Links
