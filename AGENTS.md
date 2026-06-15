@@ -48,6 +48,19 @@ Safe bearer-token examples may remain only when they use placeholders.
 - Check competitor docs during substantial IA, quickstart, API, SDK, CLI, and
   agent-workflow updates. Look for user-friendly patterns LogBrew should match
   or beat, then adapt only ideas that fit true, safe LogBrew behavior.
+- Keep docs visually aligned with the LogBrew website. The website product
+  shell is the source of truth for theme direction, brand feel, typography
+  choices, surfaces, and cross-links.
+- Before docs theme, logo, typography, routing, navigation, Markdown mirror,
+  `llms.txt`, sitemap, robots, or product cross-link changes, coordinate with
+  the website automation and inspect public-safe website style context.
+- Use LogBrew brand colors and website neutrals for docs styling: espresso
+  `#3C2B24`, beer gold `#FFC61A`, edge black `#111011`, foam white `#FFFFFF`,
+  and the neutral surface/text tokens already used by the website. Do not
+  introduce unrelated palettes.
+- Use Tovuk only as a documentation UX inspiration source, not as a design
+  source to copy. Adapt structure, readability, or navigation ideas only when
+  they fit LogBrew brand, accessibility, confidentiality, and true behavior.
 - Use the public SDK brand assets as the durable LogBrew logo source. Use
   espresso-background variants for favicon, social, store, preview, and app
   icon surfaces; use transparent variants for in-page UI where the surrounding
