@@ -21,6 +21,17 @@ before proposing code changes.
 
 ## Start here
 
+Install the native CLI, then ask it for the built-in examples.
+
+```bash
+brew install LogBrewCo/tap/logbrew
+logbrew examples
+logbrew --json status
+```
+
+Other install paths include the GitHub Release installers,
+`npm install -g logbrew-cli`, and `cargo install logbrew-cli`.
+
 | Page | Use it for |
 | --- | --- |
 | Introduction | What LogBrew is and what it tracks. |
