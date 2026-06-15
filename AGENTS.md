@@ -36,6 +36,11 @@ Safe bearer-token examples may remain only when they use placeholders.
   repo unless the user explicitly asks for that separate work.
 - Convert project context into public-safe usage, workflows, examples, and
   guarantees. If behavior is not clear from available context, do not invent it.
+- Auth, account, API, ingest, live feed, storage, deploy, and contract behavior
+  are backend-owned. Docs may publish stable public usage and contracts only.
+  If docs work finds drift, report the expected public contract, observed
+  behavior, source or reproduction, user impact, workaround, and requested
+  backend action.
 - Agent-friendly docs are the primary standard: CLI-first, JSON-first,
   copy-paste friendly, and clear enough for coding agents to use without
   guessing.
