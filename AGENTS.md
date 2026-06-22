@@ -36,6 +36,14 @@ Safe bearer-token examples may remain only when they use placeholders.
   repo unless the user explicitly asks for that separate work.
 - Convert project context into public-safe usage, workflows, examples, and
   guarantees. If behavior is not clear from available context, do not invent it.
+- Public docs files, mirrors, release notes, examples, and verifier docs must
+  contain only public user-facing documentation: SDK, CLI, and API usage,
+  public examples, verified install behavior, public troubleshooting, and
+  stable documented contracts.
+- Dogfooding context is source material only. Publish only the proven
+  user-safe result: placeholder environment variables, fake or safe examples,
+  verified setup steps, opt-in boundaries, and stable user-facing behavior.
+  Real dogfood telemetry and internal coordination belong outside public docs.
 - Auth, account, API, ingest, live feed, storage, deploy, and contract behavior
   are backend-owned. Docs may publish stable public usage and contracts only.
   If docs work finds drift, report the expected public contract, observed
