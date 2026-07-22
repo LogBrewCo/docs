@@ -1,6 +1,6 @@
 ---
 title: "Troubleshooting"
-description: "Fix common LogBrew CLI, telemetry, filter, and agent workflow problems."
+description: "Secure compromised account access, recover missing first telemetry, and fix common CLI and agent workflow problems."
 ---
 
 Start from access, then narrow by release, environment, severity, trace, or
@@ -22,6 +22,217 @@ same facts before changing code.
 | Too many logs appear | `logbrew read logs --severity error --json` | Add release, environment, search, or trace filters. |
 | Trace lookup is empty | Copy `trace_id` from a log or issue | Run `logbrew read trace <trace_id> --json`. |
 | Issue state changed too early | Read issue detail first | Resolve, ignore, or reopen only after collecting evidence. |
+
+## Secure a compromised account
+
+Choose the smallest scope that matches the incident. A single-session logout
+ends one refresh-token family. Account-wide logout is destructive across every
+LogBrew client authorized at or before its returned boundary.
+
+<Warning>
+  Use account-wide logout when credentials may be exposed beyond one known
+  client. It revokes all account access, browser, and refresh authorizations at
+  or before an inclusive timestamp, ends current live-feed sessions, and clears
+  the browser session cookie.
+</Warning>
+
+<Steps>
+  <Step title="Choose single-session or account-wide scope">
+    | Goal | Endpoint | Scope |
+    | --- | --- | --- |
+    | End one known client session | `POST /api/auth/logout` | Revokes one refresh-token family. Other account authorizations are not part of this request. |
+    | Secure an uncertain or broad compromise | `POST /api/auth/logout-all` | Revokes every account access, browser, and refresh authorization issued at or before the returned inclusive boundary. |
+
+    Neither endpoint returns a device or session inventory, device names, or
+    counts. They do not claim to revoke provider OAuth grants or sign out of a
+    third-party service.
+  </Step>
+
+  <Step title="End one refresh-token family">
+    `POST /api/auth/logout` does not require bearer authentication. Its body is:
+
+    ```json
+    {
+      "refresh_token": "<current refresh token>"
+    }
+    ```
+
+    Build this request inside the client that already holds the current refresh
+    value. Never ask a person or agent to print it, paste it into a shell or
+    ticket, or place it in command history. After success, that client can clear
+    its local credential. This request does not perform account-wide logout.
+  </Step>
+
+  <Step title="Revoke every LogBrew login">
+    `POST /api/auth/logout-all` requires account authentication and has no
+    request body. Do not send a refresh value in the body or expose an
+    authorization header in troubleshooting output.
+
+    A successful `200` response is:
+
+    ```json
+    {
+      "revoked": true,
+      "revoked_before": "2026-07-16T12:00:00Z",
+      "next_action": {
+        "code": "clear_local_session",
+        "target": "local_credentials"
+      }
+    }
+    ```
+
+    Treat `revoked_before` as inclusive. Access, browser, and refresh
+    authorizations issued at that timestamp or earlier are rejected. Current
+    live-feed sessions end, and the browser session cookie is cleared. A fresh
+    sign-in completed after that boundary remains valid.
+  </Step>
+
+  <Step title="Clear every local credential and sign in again">
+    After account-wide success, every client must remove all locally held
+    LogBrew credentials, discard cached authenticated state, and complete a
+    fresh sign-in. Do this on CLI, browser, mobile, and other clients that used
+    the account. Do not keep an older credential as a fallback.
+  </Step>
+
+  <Step title="Recover without exposing auth data">
+    | Response | Safe next step |
+    | --- | --- |
+    | `405`, `code: "method_not_allowed"` | Send `POST /api/auth/logout-all` with account auth. The stable `next` is `send POST /api/auth/logout-all with account auth to revoke every login session`. |
+    | `401` | Treat the request as unauthenticated, complete normal sign-in from a trusted client, then retry account-wide logout. Do not include the rejected credential in diagnostics. |
+
+    If the endpoint still cannot complete, [create a private support
+    ticket](/guides/report-a-problem). Tickets are private to the submitting
+    account and LogBrew support, but reports must omit credentials, refresh
+    values, cookies, authorization headers, hosts, raw logs, customer data,
+    local paths, and source code. Use only the support guide's strict diagnostic
+    allowlist.
+  </Step>
+</Steps>
+
+## Recover missing first telemetry
+
+Use this order when setup completed but no useful telemetry appears. Stop when
+one step identifies the mismatch instead of changing multiple inputs at once.
+
+<Steps>
+  <Step title="Check API and account access">
+    Confirm the released CLI can reach LogBrew and has account access for
+    reads.
+
+    ```bash
+    logbrew status --json
+    ```
+
+    If the response says authentication is missing or rejected, a human should
+    run `logbrew login`, then repeat the status check. Agents must not ask for
+    or print the credential value.
+  </Step>
+
+  <Step title="Keep the two credential roles separate">
+    Use an account access credential for CLI and authenticated API reads. Use
+    the project-scoped ingest credential from project setup only for SDK or
+    native telemetry writes.
+
+    Do not substitute one for the other. Keep both values in local protected
+    configuration, and never echo either value while troubleshooting.
+  </Step>
+
+  <Step title="Separate setup acknowledgement from ingest proof">
+    CLI v0.1.17 can record that setup was observed for an existing project:
+
+    ```bash
+    logbrew projects setup <project_id> --source sdk --environment production --json
+    ```
+
+    A successful response confirms shared setup acknowledgement. It does not
+    prove that an event was accepted. Continue until the ingest response and a
+    matching read both succeed.
+  </Step>
+
+  <Step title="Send one safe synthetic log">
+    Use the API URL, project ID, and project-scoped ingest credential already
+    held in local setup variables. Do not print their values. This request sends
+    one placeholder-only `info` log:
+
+    ```bash
+    curl -sS "$LOGBREW_API_URL/api/telemetry/ingest" \
+      -H "Authorization: Bearer $LOGBREW_INGEST_BEARER" \
+      -H "Content-Type: application/json" \
+      --data @- <<JSON
+    {
+      "project_id": "$LOGBREW_PROJECT_ID",
+      "environment": "production",
+      "release": "first-event@1",
+      "service_name": "checkout-api",
+      "sdk_name": "native-api",
+      "sdk_version": "0.1.0",
+      "items": [
+        {
+          "type": "log",
+          "data": {
+            "severity": "info",
+            "message": "first LogBrew event",
+            "source": "setup"
+          }
+        }
+      ]
+    }
+    JSON
+    ```
+
+    A successful response includes one accepted log. Keep this event free of
+    customer, request, session, or source-code data.
+  </Step>
+
+  <Step title="Read back the matching scope">
+    Start with the exact synthetic release and environment, then inspect issue
+    or trace data only when your app emitted those item types.
+
+    ```bash
+    logbrew logs info --json
+    logbrew read logs --release first-event@1 --environment production --since 1h --json
+    logbrew read issues --release first-event@1 --environment production --status unresolved --json
+    logbrew read trace <trace_id> --json
+    ```
+
+    The synthetic request creates one log, not an issue or trace span. An empty
+    issue result and no trace ID are expected for that request. Use the issue
+    and trace checks for matching telemetry emitted by your app; never invent
+    an ID.
+  </Step>
+
+  <Step title="Check correlation values exactly">
+    Confirm the write and read use the same project, release, and environment.
+    Compare the returned `service_name` with the service that sent the event.
+    If your app sets `occurred_at`, verify its clock is current UTC and that the
+    read window includes it. Check spelling, case, and whitespace before
+    widening filters.
+  </Step>
+
+  <Step title="Recover from a typed error">
+    Follow the returned `next` value when present. Use these boundaries rather
+    than guessing:
+
+    | Status | Safe next step |
+    | --- | --- |
+    | `401` | Run `logbrew status --json`; a human can run `logbrew login` for account reads, while ingest must use the current project-scoped ingest credential. |
+    | `403` | Confirm the credential role and that the project belongs to the authenticated account; do not swap or reveal credentials. |
+    | `404` | Recheck the project or resource ID against a current account-owned response. |
+    | `422` | Correct the required fields or accepted values named by the response, then retry once. |
+    | `429` | Stop retry loops and follow the returned quota guidance; do not infer usage from local state. |
+    | `5xx` | Do not repeatedly resend an uncertain event. Recheck `logbrew status --json`, wait briefly, and open a support ticket if the failure persists. |
+
+    If the ordered checks still fail, [create a private support
+    ticket](/guides/report-a-problem). Tickets are private to the submitting
+    account and LogBrew support, never public or visible to other users.
+
+    Include only the strict diagnostic allowlist: `steps`, `expected`,
+    `observed`, `command_name`, `exit_code`, `error_code`, `error_summary`, and
+    `retry_count`. Never include secrets, tokens, credentials, authorization
+    headers, ingest keys, hosts, raw logs, request bodies, payloads, customer
+    data, local paths, or source code.
+  </Step>
+</Steps>
 
 ## Fix common problems
 

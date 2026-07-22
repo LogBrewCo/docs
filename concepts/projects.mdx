@@ -1,6 +1,6 @@
 ---
 title: "Projects and environments"
-description: "Projects scope access in LogBrew. Environments and service names make telemetry easy to filter."
+description: "Diagnose project setup, scope telemetry, and rotate project ingest keys without a gap."
 ---
 
 A project is the access boundary for telemetry. Every native telemetry envelope
@@ -53,3 +53,223 @@ retention boundary. For most teams, that is one app, service, or product area.
     ```
   </Step>
 </Steps>
+
+## Diagnose project setup
+
+Call `GET /api/projects/{project_id}/doctor` before inferring setup state from
+logs. This read-only endpoint requires account bearer authentication, accepts a
+project UUID in the path, and has no query parameters or request body.
+
+<Steps>
+  <Step title="Read the canonical project diagnosis">
+    Keep the API base, project UUID, and account credential in protected local
+    variables. Do not print their values.
+
+    ```bash
+    : "${LOGBREW_API_URL:?set LOGBREW_API_URL}"
+    : "${LOGBREW_PROJECT_ID:?set a project UUID}"
+    : "${LOGBREW_ACCOUNT_BEARER:?set the account access bearer}"
+
+    curl -sS "$LOGBREW_API_URL/api/projects/$LOGBREW_PROJECT_ID/doctor" \
+      -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+      | jq '{project_id, state, setup_status, setup_acknowledged, has_active_ingest_key, first_telemetry_seen_at, last_seen_at, last_signal, next, next_action}'
+    ```
+
+    A successful `200` response has exactly these keys: `project_id`, `state`,
+    `setup_status`, `setup_acknowledged`, `has_active_ingest_key`,
+    `first_telemetry_seen_at`, `last_seen_at`, `last_signal`, `next`, and
+    `next_action`.
+
+    `first_telemetry_seen_at` and `last_seen_at` are RFC3339 timestamps or
+    `null`. `last_signal` is a display-safe project signal summary or `null`;
+    it is not a raw signal body.
+  </Step>
+
+  <Step title="Follow the returned state and action">
+    Do not derive setup state from local files or an empty telemetry query. Use
+    the exact state and action pair returned by the doctor response.
+
+    | `state` | `next_action.code` | `next_action.target` |
+    | --- | --- | --- |
+    | `needs_ingest_key` | `create_ingest_key` | `project_ingest_keys` |
+    | `needs_setup` | `choose_setup_path` | `project_setup` |
+    | `needs_telemetry` | `send_first_telemetry` | `telemetry_ingest` |
+    | `ready` | `inspect_recent_telemetry` | `telemetry_reads` |
+
+    `setup_status` is one of `created`, `setup_started`, `sdk_seen`,
+    `first_telemetry_seen`, or `active`. `setup_acknowledged` is `true` only
+    when the status is `sdk_seen`, `first_telemetry_seen`, or `active`.
+  </Step>
+
+  <Step title="Use a recent log only as optional visibility">
+    `GET /api/logs?project_id=<uuid>&limit=1` can check for one recent visible
+    log after the doctor response directs you to telemetry reads. A bare `[]`
+    means only that this query found no matching visible log. It does not mean
+    the project is missing, and it does not prove the project has never received
+    telemetry.
+  </Step>
+
+  <Step title="Recover without probing or exposing data">
+    | Response | Safe next step |
+    | --- | --- |
+    | `404`, `code: "not_found"` | Treat missing, archived, and other-account project IDs the same. Recheck the account-owned UUID; do not probe nearby IDs. |
+    | `405`, `code: "method_not_allowed"` | Retry with `GET /api/projects/{project_id}/doctor`; do not add a body or query parameters. |
+
+    If the read still fails, [create a private support
+    ticket](/guides/report-a-problem). Tickets are private to the submitting
+    account and LogBrew support, but reports must omit credentials,
+    authorization headers, hosts, raw signal bodies, customer data, project
+    IDs, local paths, and source code. Use only the support guide's strict
+    diagnostic allowlist.
+  </Step>
+</Steps>
+
+## Rotate an ingest key without telemetry loss
+
+Rotate in this order: create, deploy, verify, then revoke. Every key-management
+request uses account authentication. The examples use an account access bearer;
+an authenticated account session has the same management role. A project-scoped
+ingest key can send telemetry only and must not manage keys.
+
+<Warning>
+  Never revoke the old key first. Keep it active until the replacement is
+  deployed and a new synthetic event is visible through an authenticated read.
+</Warning>
+
+<Steps>
+  <Step title="Create the replacement key">
+    `POST /api/projects/{project_id}/ingest-keys` accepts a trimmed, non-empty
+    `label` up to 120 characters, a `kind` of exactly `cli`, `sdk`, `browser`,
+    or `server`, and an optional future RFC3339 `expires_at` timestamp.
+
+    Capture the response without printing it. This example requires `jq` and
+    keeps both account and project credentials in shell variables rather than
+    command history:
+
+    ```bash
+    : "${LOGBREW_API_URL:?set LOGBREW_API_URL}"
+    : "${LOGBREW_PROJECT_ID:?set LOGBREW_PROJECT_ID}"
+    : "${LOGBREW_ACCOUNT_BEARER:?set LOGBREW_ACCOUNT_BEARER}"
+
+    create_response="$(
+      curl -sS -X POST "$LOGBREW_API_URL/api/projects/$LOGBREW_PROJECT_ID/ingest-keys" \
+        -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+        -H "Content-Type: application/json" \
+        --data '{"label":"checkout production rotation","kind":"server"}'
+    )"
+    new_key_id="$(jq -er '.id' <<<"$create_response")"
+    new_ingest_key="$(jq -er '.token | select(startswith("lbw_ingest_"))' <<<"$create_response")"
+    unset create_response
+    ```
+
+    A successful `200` response contains `id`, `label`, `kind`, `token`,
+    `created_at`, `expires_at`, `next`, and `next_action`. The `token` starts
+    with `lbw_ingest_` and is returned once.
+
+    Never print the token, paste it into a ticket, commit it, or put its value
+    in command history. An optional `Idempotency-Key` can make an exact create
+    retry safe; keep that value private, do not print it, and reuse it only for
+    the identical request.
+  </Step>
+
+  <Step title="Deploy the new key while the old key stays active">
+    Write `new_ingest_key` directly into the existing protected deployment
+    setting for the same project, then deploy the app normally. Do not remove or
+    revoke the old key during this step, and do not place either value in source
+    files, build output, or logs.
+  </Step>
+
+  <Step title="Verify one synthetic event and read it back">
+    After configuring the replacement, send one placeholder-only `info` log
+    with the new key:
+
+    ```bash
+    curl -sS "$LOGBREW_API_URL/api/telemetry/ingest" \
+      -H "Authorization: Bearer $new_ingest_key" \
+      -H "Content-Type: application/json" \
+      --data @- <<JSON
+    {
+      "project_id": "$LOGBREW_PROJECT_ID",
+      "environment": "production",
+      "release": "ingest-key-rotation@1",
+      "service_name": "checkout-api",
+      "sdk_name": "native-api",
+      "sdk_version": "0.1.0",
+      "items": [
+        {
+          "type": "log",
+          "data": {
+            "severity": "info",
+            "message": "ingest key rotation check",
+            "source": "setup"
+          }
+        }
+      ]
+    }
+    JSON
+
+    logbrew read logs --project "$LOGBREW_PROJECT_ID" \
+      --release ingest-key-rotation@1 \
+      --environment production \
+      --since 1h \
+      --json
+    ```
+
+    Continue only after the ingest response accepts one log and the account-
+    authenticated read returns `ingest key rotation check`. Also confirm the
+    newly deployed app is producing telemetry before removing a key that older
+    instances may still use.
+  </Step>
+
+  <Step title="List secret-free key metadata">
+    Use account authentication to identify the old key ID and confirm the new
+    key is `active`:
+
+    ```bash
+    curl -sS "$LOGBREW_API_URL/api/projects/$LOGBREW_PROJECT_ID/ingest-keys" \
+      -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+      | jq '[.[] | {id, label, kind, token_prefix, status, created_at, expires_at, revoked_at}]'
+    ```
+
+    `GET` returns a bare array. Each item contains `id`, `label`, `kind`,
+    `token_prefix`, `status`, `created_at`, `expires_at`, and `revoked_at`.
+    Status is `active`, `expired`, or `revoked`. The list never contains
+    `token` or `token_hash`.
+  </Step>
+
+  <Step title="Revoke only the old key">
+    Set `OLD_KEY_ID` from the secret-free list, verify it is not `new_key_id`,
+    then revoke it with account authentication:
+
+    ```bash
+    : "${OLD_KEY_ID:?set OLD_KEY_ID from the metadata list}"
+    test "$OLD_KEY_ID" != "$new_key_id"
+
+    curl -sS -X DELETE \
+      "$LOGBREW_API_URL/api/projects/$LOGBREW_PROJECT_ID/ingest-keys/$OLD_KEY_ID" \
+      -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+      | jq '{id, label, kind, token_prefix, status, created_at, expires_at, revoked_at}'
+
+    unset new_ingest_key
+    ```
+
+    `DELETE` is idempotent and returns the same secret-free metadata. Success
+    reports `status: "revoked"` with `revoked_at` set, so an exact retry after
+    an uncertain response is safe.
+  </Step>
+</Steps>
+
+## Recover safely
+
+| Response | Next step |
+| --- | --- |
+| `404`, `code: "not_found"` | Recheck the account-owned project and key IDs. Follow `next_action.code: "check_resource"`; do not probe other IDs. |
+| `code: "validation_failed"` | Correct the named field, accepted value, or future timestamp, then follow the safe `next` and `next_action`. |
+| `401` or `403` | Confirm the management request uses account authentication, not a project ingest key, then follow the returned guidance. |
+
+If rotation still fails, [create a private support
+ticket](/guides/report-a-problem). Tickets are private to the submitting account
+and LogBrew support, but reports must still omit credentials, authorization
+headers, hosts, raw logs, request payloads, customer data, local paths, and
+source code. Share only secret-free key metadata and the strict diagnostic
+allowlist from the support guide.
