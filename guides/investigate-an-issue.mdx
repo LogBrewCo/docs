@@ -1,0 +1,148 @@
+---
+title: "Investigate an issue with the API"
+description: "Read an issue's typed next action, then inspect its scoped trace summary or related logs."
+---
+
+Use the issue detail response as the source of truth for the next read. This
+workflow is read-only: it does not change the issue status.
+
+<Warning>
+  Authenticate every read with an account access bearer such as
+  `$LOGBREW_TOKEN`. A project ingest key can send telemetry, but it must not be
+  used to read issues, traces, or logs.
+</Warning>
+
+## Read the issue detail
+
+Start with the issue ID returned by an authenticated issue list or live event.
+Keep the API base, issue UUID, and account credential in protected local
+variables. Do not print their values.
+
+```bash
+: "${LOGBREW_API_URL:?set LOGBREW_API_URL}"
+: "${LOGBREW_ISSUE_ID:?set the issue UUID}"
+: "${LOGBREW_TOKEN:?set the account access bearer}"
+
+curl -sS "$LOGBREW_API_URL/api/telemetry/issues/$LOGBREW_ISSUE_ID" \
+  -H "Authorization: Bearer $LOGBREW_TOKEN"
+```
+
+The response includes the scope required for the next read and a stable
+`next_action` object. A trace-correlated issue can look like this:
+
+```json
+{
+  "id": "<issue UUID>",
+  "project_id": "<project UUID>",
+  "service_name": "<issue service>",
+  "release": "<issue release>",
+  "environment": "<issue environment>",
+  "trace_id": "<issue trace ID>",
+  "first_seen_at": "<issue first_seen_at RFC3339>",
+  "next_action": {
+    "code": "inspect_trace",
+    "target": "trace_summary"
+  }
+}
+```
+
+Follow only an exact supported pair:
+
+| `next_action.code` | `next_action.target` | Next read |
+| --- | --- | --- |
+| `inspect_trace` | `trace_summary` | Read the scoped trace summary. |
+| `inspect_related_logs` | `telemetry_logs` | Read logs with the issue's exact scope. |
+
+If either field is missing, blank, or different, keep the issue visible and
+stop before constructing a request. Direct the person or agent to select a safe
+manual scope from the authenticated issue detail. Require its account-owned
+project, include only scope fields present on that issue, and never construct a
+broad cross-project query.
+
+## Follow a trace action
+
+For `inspect_trace` and `trace_summary`, require the issue's non-empty
+`trace_id` and `project_id`. Percent-encode the trace ID path segment and fail
+closed if either value is unavailable. Add `release` and `environment` only
+when they are present in the issue scope. Do not send `service_name` to the
+trace summary endpoint.
+
+```bash
+: "${LOGBREW_TRACE_ID:?issue trace_id is required}"
+: "${LOGBREW_PROJECT_ID:?issue project_id is required}"
+
+encoded_trace_id="$(jq -rn --arg value "$LOGBREW_TRACE_ID" '$value | @uri')"
+trace_query=(--data-urlencode "project_id=$LOGBREW_PROJECT_ID")
+[[ -z "${LOGBREW_RELEASE:-}" ]] || trace_query+=(
+  --data-urlencode "release=$LOGBREW_RELEASE"
+)
+[[ -z "${LOGBREW_ENVIRONMENT:-}" ]] || trace_query+=(
+  --data-urlencode "environment=$LOGBREW_ENVIRONMENT"
+)
+
+curl -sS -G "$LOGBREW_API_URL/api/telemetry/traces/$encoded_trace_id/summary" \
+  -H "Authorization: Bearer $LOGBREW_TOKEN" \
+  "${trace_query[@]}"
+
+unset encoded_trace_id trace_query
+```
+
+The summary identifies the trace's root span, errors, services, duration, and
+slow path without returning raw span attributes. A `404` means no trace
+matched that complete scope; do not retry by dropping filters.
+
+## Follow a related-logs action
+
+For `inspect_related_logs` and `telemetry_logs`, require the issue's
+`project_id`. Include `service_name`, `release`, `environment`, and
+`since=issue.first_seen_at` only when each value is present in the issue scope.
+Do not invent an `until` value or substitute scope from another issue.
+
+```bash
+: "${LOGBREW_PROJECT_ID:?issue project_id is required}"
+
+log_query=(--data-urlencode "project_id=$LOGBREW_PROJECT_ID")
+[[ -z "${LOGBREW_SERVICE_NAME:-}" ]] || log_query+=(
+  --data-urlencode "service_name=$LOGBREW_SERVICE_NAME"
+)
+[[ -z "${LOGBREW_RELEASE:-}" ]] || log_query+=(
+  --data-urlencode "release=$LOGBREW_RELEASE"
+)
+[[ -z "${LOGBREW_ENVIRONMENT:-}" ]] || log_query+=(
+  --data-urlencode "environment=$LOGBREW_ENVIRONMENT"
+)
+[[ -z "${LOGBREW_FIRST_SEEN_AT:-}" ]] || log_query+=(
+  --data-urlencode "since=$LOGBREW_FIRST_SEEN_AT"
+)
+
+curl -sS -G "$LOGBREW_API_URL/api/logs" \
+  -H "Authorization: Bearer $LOGBREW_TOKEN" \
+  "${log_query[@]}" \
+  --data-urlencode "pagination=cursor" \
+  --data-urlencode "limit=50"
+```
+
+When `next_cursor` is present, send its `time` as `cursor_time` and its `id` as
+`cursor_id`. Reuse the same `log_query` values and keep every original scope
+filter on the next request. An empty `logs` array is a valid result; report that
+no matching logs were found rather than automatically broadening the search.
+
+## Recover safely
+
+| Result | Recovery |
+| --- | --- |
+| `401` | Sign in again and retry with an account access bearer, never a project ingest key. |
+| `404` | Confirm the issue ID belongs to the authenticated account. For a trace summary, keep the issue's full scope and report that no matching trace was found. |
+| `422` | Keep the documented query names, use the issue's RFC3339 `first_seen_at` as `since` when present, do not invent `until`, and follow the typed recovery guidance. |
+| Empty log result | Keep the original scope, report the empty result, and stop instead of guessing wider filters. |
+| Unknown `next_action` | Fail closed: keep the issue visible, require safe manual scope selection, and do not invent a route, broaden across projects, or mutate the issue. |
+
+Error envelopes contain the value-safe fields `error`, `code`, `next`, and
+`next_action`. Use `code`, `next`, and `next_action` for control flow. Treat
+`error` as a bounded summary only. Do not render raw error text, arbitrary
+metadata, query values, authorization headers, request bodies, customer-like
+context, or any other returned field as recovery instructions.
+
+To update an issue only after investigation, use the separate
+[issue triage workflow](/guides/issue-workflow). For the complete read endpoint
+list, see the [Telemetry API reference](/reference/telemetry-api).
