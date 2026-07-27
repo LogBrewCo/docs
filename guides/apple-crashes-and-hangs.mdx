@@ -1,0 +1,252 @@
+---
+title: "Capture Apple crashes and hangs"
+description: "Capture Apple failures, upload exact dSYMs, and verify symbolicated issues from the LogBrew CLI."
+---
+
+Use this workflow for iOS or UIKit apps that need native crash and hang
+evidence. It connects runtime capture to exact debug artifacts and hosted issue
+readback.
+
+<Note>
+  Use LogBrew Swift 0.1.6 or later. Use native LogBrew CLI 0.1.24 or later for
+  debug artifact upload.
+</Note>
+
+<Warning>
+  Use project-scoped ingest configuration inside the app. Use an account login
+  for artifact uploads and issue reads.
+</Warning>
+
+## Add the crash product
+
+Add the public SDK through Swift Package Manager.
+
+```swift
+.package(
+    url: "https://github.com/LogBrewCo/sdk.git",
+    from: "0.1.6"
+)
+```
+
+Add the `LogBrew` product to send telemetry. Add `LogBrewCrash` only when the
+app explicitly enables native crash or hang capture.
+
+The capture integration supports iOS 15 or later. Keep one app-owned capture
+object because native fatal handlers are process-wide.
+
+## Configure one exact identity
+
+Use the same project, release, environment, and service in runtime setup and
+artifact upload. LogBrew does not derive or replace these values.
+
+```swift
+import Foundation
+import LogBrew
+import LogBrewCrash
+
+let applicationSupport = try FileManager.default.url(
+    for: .applicationSupportDirectory,
+    in: .userDomainMask,
+    appropriateFor: nil,
+    create: true
+)
+
+let identity = try NativeArtifactIdentity(
+    projectId: "550e8400-e29b-41d4-a716-446655440000",
+    release: "com.example.app@1.2.3+45",
+    environment: "production",
+    service: "ios-app"
+)
+
+let crashCapture = NativeCrashCapture(
+    configuration: try NativeCrashConfiguration(
+        storageDirectory: applicationSupport.appendingPathComponent(
+            "LogBrewCrash",
+            isDirectory: true
+        ),
+        artifactIdentity: identity
+    )
+)
+
+try crashCapture.install()
+```
+
+Install the capture object on the main thread before root UI registration.
+Create its parent directory first. Keep the storage directory app-owned and
+private.
+
+The raw crash report stays in that directory until replay accepts its exact
+issue. LogBrew sends bounded frame UUIDs, architectures, and offsets instead of
+the raw report.
+
+## Replay after launch
+
+Create the LogBrew client and transport through your normal SDK setup. Then
+replay pending reports after capture installation.
+
+```swift
+let replay = try crashCapture.replayPendingReports(
+    in: client,
+    transport: transport
+)
+
+print(
+    "acknowledged=\(replay.acknowledged) " +
+    "pending=\(replay.pending)"
+)
+```
+
+Replay uses a stable event ID and processes reports oldest first. It deletes a
+report only after accepted delivery.
+
+Enable durable delivery before replay when a failed request must survive
+another restart. Do not call `purge()` during routine network or authentication
+recovery.
+
+## Enable hang capture
+
+Use the same capture owner for UIKit hang detection.
+
+```swift
+let watchdog = try NativeHangWatchdogConfiguration(
+    threshold: 2
+)
+
+let crashCapture = NativeCrashCapture(
+    configuration: try NativeCrashConfiguration(
+        storageDirectory: applicationSupport.appendingPathComponent(
+            "LogBrewCrash",
+            isDirectory: true
+        ),
+        artifactIdentity: identity,
+        hangWatchdog: watchdog
+    )
+)
+```
+
+A recovered hang replays with `crash.handled` set to `true`. An ongoing hang
+left by process termination replays with `crash.handled` set to `false`.
+
+Both forms include numeric `durationMs` metadata. They keep the same exact
+artifact identity used by fatal crash frames.
+
+The watchdog pauses while the app is inactive or under a debugger. It also
+suppresses capture during serious thermal pressure.
+
+## Upload the matching dSYM
+
+Archive the app with debug information enabled. Keep the dSYM from the exact
+build that users run.
+
+Inspect its image UUIDs.
+
+```bash
+xcrun dwarfdump --uuid "path/to/App.app.dSYM"
+```
+
+Validate the artifact locally before upload.
+
+```bash
+logbrew debug-artifacts upload "path/to/App.app.dSYM" \
+  --project "<project UUID>" \
+  --release "com.example.app@1.2.3+45" \
+  --environment "production" \
+  --service "ios-app" \
+  --expect-image-uuid "<Mach-O UUID>" \
+  --dry-run \
+  --json
+```
+
+Repeat `--expect-image-uuid` for each required architecture. The command fails
+when the discovered UUID set differs from the expected set.
+
+Check account access. Then run the same command without `--dry-run`.
+
+```bash
+logbrew status --json
+
+logbrew debug-artifacts upload "path/to/App.app.dSYM" \
+  --project "<project UUID>" \
+  --release "com.example.app@1.2.3+45" \
+  --environment "production" \
+  --service "ios-app" \
+  --expect-image-uuid "<Mach-O UUID>" \
+  --json
+```
+
+The upload command validates supported Apple objects and verifies every
+uploaded identity. It does not include local paths or filenames in API
+metadata.
+
+## Verify hosted readback
+
+Filter the issue list with the same runtime scope.
+
+```bash
+logbrew read issues \
+  --project "<project UUID>" \
+  --release "com.example.app@1.2.3+45" \
+  --environment "production" \
+  --service "ios-app" \
+  --status "unresolved" \
+  --since "24h" \
+  --json
+```
+
+The list response identifies the grouped issue. Read its detail to request
+hosted symbolication.
+
+```bash
+logbrew read issue "<issue UUID>" --json
+```
+
+A matching artifact adds a `symbolication` object.
+
+```json
+{
+  "severity": "critical",
+  "attributes": {
+    "metadata": {
+      "crash.replayed": true
+    }
+  },
+  "symbolication": {
+    "status": "resolved",
+    "frames": [
+      {
+        "index": 0,
+        "status": "resolved",
+        "resolved": {
+          "source": "AppRuntime.swift",
+          "line": 42,
+          "column": 1,
+          "name": "terminateForCrash()"
+        }
+      }
+    ]
+  }
+}
+```
+
+Keep the full project, release, environment, and service scope during every
+read. Do not broaden a failed lookup across projects.
+
+## Recover safely
+
+| Result | Recovery |
+| --- | --- |
+| Upload authentication fails | Run `logbrew login`, confirm `logbrew status --json`, and repeat the exact upload. |
+| Upload UUID validation fails | Select the dSYM from the deployed build and repeat the dry run. |
+| `artifact_not_found` | Verify the event identity and upload the matching dSYM with the same scope. |
+| `source_not_resolved` | Preserve full build debug information and inspect the deployed build settings. |
+| `invalid_metadata` | Verify LogBrew Swift 0.1.6 or later. Capture a new event with exact identity. |
+| `unavailable` | Keep the issue visible and retry the same scoped detail read later. |
+| Replay remains pending | Correct transport or authentication state, then relaunch without purging the report. |
+
+After accepted replay, the local report count should reach zero. One later
+clean launch must not increase the issue occurrence count.
+
+For the complete SDK surface, see the
+[LogBrew Swift SDK](https://github.com/LogBrewCo/sdk/tree/main/swift/logbrew-swift).
+For general issue investigation, use
+[Investigate an issue with the API](/guides/investigate-an-issue).
