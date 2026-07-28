@@ -7,19 +7,22 @@ Use `--json` for machine-readable output.
 
 | Command | Purpose |
 | --- | --- |
-| `logbrew login [--json]` | Start browser login for the CLI. |
+| `logbrew login [--provider github\|gitlab\|bitbucket] [--no-open] [--json]` | Start account login. GitHub is the default provider. |
+| `logbrew whoami [--json]` | Read the authenticated account identity. |
+| `logbrew me [--json]` | Alias for `logbrew whoami`. |
+| `logbrew logout [--json]` | Revoke the stored server session when possible and remove local credentials. |
 | `logbrew setup [--auto] [--yes] [--json]` | Detect manifests and print a non-mutating SDK setup plan. |
-| `logbrew setup --create-project [--json]` | Show project creation discovery help. Help-only in v0.1.26. |
+| `logbrew setup --create-project [--json]` | Show project creation help without creating a project. |
 | `logbrew status [--json]` | Check local auth and API reachability. |
 | `logbrew version [--json]` | Print the installed native CLI version and platform metadata. |
 | `logbrew examples` | Show compact first-run, troubleshooting, live watch, and agent JSON examples. |
-| `logbrew projects [--json]` | Show project discovery help. Help-only in v0.1.26. |
-| `logbrew project [--json]` | Alias for project discovery help. Help-only in v0.1.26. |
-| `logbrew projects create <name> [--json]` | Show project creation discovery help. Help-only in v0.1.26. |
+| `logbrew projects [--json]` | Read the authenticated active project catalog. |
+| `logbrew project [--json]` | Alias for `logbrew projects`. |
+| `logbrew projects create <name> --ingest-key-file <path> [options] [--json]` | Create a project and store its one-time ingest key in a new private file. |
 | `logbrew projects setup <project_id> [options] [--json]` | Record setup observed for an existing project. |
 | `logbrew project setup <project_id> [options] [--json]` | Alias for setup-observed tracking. |
-| `logbrew usage [--json]` | Show usage discovery help. Help-only in v0.1.26. |
-| `logbrew account usage [--json]` | Show account usage discovery help. Help-only in v0.1.26. |
+| `logbrew usage [--json]` | Read account usage, limits, quota state, and reset dates. |
+| `logbrew account usage [--json]` | Alias for `logbrew usage`. |
 | `logbrew read logs [filters] [--json]` | Read structured logs. |
 | `logbrew read issues [filters] [--json]` | Read grouped issues. |
 | `logbrew read actions [filters] [--json]` | Read product actions. |
@@ -80,16 +83,35 @@ the examples guide.
 
 ## Login behavior
 
-`logbrew login` starts browser login for the native CLI. After login, verify
-the session with `logbrew status`.
+`logbrew login` uses GitHub by default. Select GitLab or Bitbucket when the
+account uses another provider.
 
 ```bash
-logbrew login
-logbrew status
+logbrew login --provider github
+logbrew status --json
+logbrew whoami --json
 ```
 
-Use `logbrew status --json` when an agent or script needs to check whether the
-CLI is authenticated. CLI output must not print stored auth material.
+`--no-open` prints the login URL without opening a browser. `--json` returns
+the same handoff as machine-readable JSON and also keeps the browser closed.
+`logbrew auth login` is an alias for `logbrew login`.
+
+Use `logbrew status --json` to check API reachability and authentication. Use
+`logbrew whoami --json` or `logbrew me --json` to read the exact validated
+account object from `GET /api/auth/account`:
+
+```json
+{
+  "id": "123e4567-e89b-42d3-a456-426614174000",
+  "email": "developer@example.com",
+  "display_name": "Example Developer",
+  "tier": "free"
+}
+```
+
+Account identity requires account authentication. A project-scoped
+`lbw_ingest_` key cannot read it. CLI output must not print stored auth
+material.
 
 ## SDK setup planning
 
@@ -128,7 +150,7 @@ returns the LogBrew project setup state as JSON.
 | Option | Use it for |
 | --- | --- |
 | `--runtime <runtime>` | Optional runtime label when your setup flow knows one. |
-| `--source api|cli|sdk` | Setup source. With normal account auth, the default is `cli`. |
+| `--source api\|cli\|sdk` | Setup source. With normal account auth, the default is `cli`. |
 | `--environment <environment>` | Environment associated with setup progress. |
 | `--env <environment>` | Alias for `--environment`. |
 
@@ -149,21 +171,46 @@ If authentication uses a project-scoped ingest key with the public
 `lbw_ingest_` prefix, the CLI omits `source` so LogBrew can derive the source
 from the key kind.
 
-## Project creation and usage discovery
+## Project catalog, creation, and usage
 
-CLI v0.1.26 exposes project creation and account usage commands as discovery
-surfaces. They are help-only today and are safe for agents to run because they
-do not create projects, calculate usage from local files, create local-only
-install state, or print SDK or ingest configuration.
+CLI v0.1.27 reads the active project catalog from `GET /api/projects`.
+`logbrew projects --json` preserves the exact validated bare array. Human
+output is bounded to project identity, setup status, and latest activity.
 
 ```bash
 logbrew projects --json
 logbrew project --json
-logbrew projects create checkout-api --json
-logbrew setup --create-project --json
+```
+
+Project creation requires a new ingest-key file path. The CLI creates an
+owner-only file, stores the one-time key before reporting success, and never
+prints the key or its file path.
+
+```bash
+logbrew projects create checkout-api \
+  --runtime rust \
+  --environment production \
+  --ingest-key-file "$HOME/.logbrew/checkout-api.ingest" \
+  --json
+```
+
+The destination file must not exist. If the result of a request is ambiguous,
+repeat the exact command. The CLI reuses the pending request identity. Use
+`--abandon-retry` only when you intend to discard that pending request and
+start a changed request. `logbrew setup --create-project --json` returns the
+project command help; it does not create a project.
+
+Read account usage from `GET /api/account/usage`:
+
+```bash
 logbrew usage --json
 logbrew account usage --json
 ```
+
+JSON preserves the exact validated account-usage object, including plan,
+limits, totals, quota state, reset dates, per-project totals, per-stream
+totals, and the next action. The CLI does not calculate or persist usage or
+quota state from local files.
 
 <Warning>
   Do not use an account bearer token as SDK or ingest configuration. Use only
