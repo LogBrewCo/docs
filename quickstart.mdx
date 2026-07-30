@@ -3,9 +3,10 @@ title: "Quickstart"
 description: "Create a first project, send one safe SDK event, verify readiness, and investigate without exposing credentials."
 ---
 
-This is the shortest supported path to first value with JavaScript or Node.js.
-A human handles browser sign-in and the one-time project setup value. A person
-or AI agent can complete the remaining steps using stable JSON and fixed scope.
+This is the shortest supported path to first value with Node.js 18 or newer,
+`jq`, and LogBrew CLI v0.1.30 or newer. The CLI creates the project and stores
+its one-time ingest key without a dashboard handoff. Browser interaction is
+needed only when the CLI does not already have approved account authentication.
 
 <Note>
   Use `--json` for agent workflows. Keep credentials in protected local
@@ -15,72 +16,125 @@ or AI agent can complete the remaining steps using stable JSON and fixed scope.
 ## First project success path
 
 <Steps>
-  <Step title="Sign in and confirm account access">
+  <Step title="Confirm account access">
     Install the CLI with the platform command in the [CLI guide](/guides/cli),
-    then complete browser sign-in.
+    then check its current account state before starting a new login.
 
     ```bash
-    logbrew login
     logbrew status --json
     ```
 
-    **Checkpoint:** status confirms authenticated account access. If an agent
-    detects missing auth, it must ask a human to run `logbrew login` and then
-    retry status.
+    **Checkpoint:** status reports authenticated account access. If it does
+    not, a human runs `logbrew login` once and retries `logbrew status --json`.
+    An agent must not start a new login when approved authentication already
+    works.
   </Step>
 
-  <Step title="Create or select one project">
-    Open **Add Project** in LogBrew and create or select the project that will
-    own this app's telemetry. Keep its UUID in protected local configuration.
+  <Step title="Create one project from the CLI">
+    Choose a new file in an owner-only directory. The CLI writes the one-time
+    project ingest key to that file before it reports success. It never returns
+    the key or its file path in output.
 
-    Copy the one-time project-scoped ingest key shown for SDK setup directly
-    into the app's protected configuration. The key is shown once. A human
-    should perform this handoff; an agent should work with the configured
-    variable name, not the value.
+    ```bash
+    install -d -m 700 "$HOME/.logbrew"
 
-    Never print, paste into a ticket, commit, or retain the value in command
-    history. An account access credential is for account and API reads; it is
-    not SDK ingest configuration.
+    project_result="$(
+      logbrew projects create quickstart-node \
+        --runtime node \
+        --environment development \
+        --ingest-key-file "$HOME/.logbrew/quickstart-node.ingest" \
+        --json
+    )"
+    export LOGBREW_PROJECT_ID="$(jq -er '.project.id' <<<"$project_result")"
+    jq '{status, setup_status: .setup.status, ingest_key_kind: .ingest_key.kind, next}' \
+      <<<"$project_result"
+    unset project_result
+    ```
 
-    **Checkpoint:** the project is selected and the one-time value is stored.
-    This confirms setup material exists, not that telemetry has arrived. See
+    Project creation changes account state. The destination file must not
+    exist. If a request has an ambiguous result, repeat the exact command so
+    the CLI reuses its pending request identity. Do not change the request or
+    use `--abandon-retry` unless you intend to start a different attempt.
+
+    **Checkpoint:** output reports `status: "created"`, setup status
+    `created`, and an ingest-key kind. This proves that the project exists and
+    the one-time key is stored; it does not prove telemetry delivery. See
     [project setup and credential roles](/concepts/projects).
   </Step>
 
-  <Step title="Install the current JavaScript and Node.js SDK path">
-    Use the published package names from the current website handoff.
+  <Step title="Install the Node.js SDK">
+    Install the two published packages and load the stored key into the
+    SDK-specific environment variable without printing it.
 
     ```bash
     npm install @logbrew/sdk @logbrew/node
+    export LOGBREW_SERVER_API_KEY="$(< "$HOME/.logbrew/quickstart-node.ingest")"
     ```
 
-    Apply the exact generated setup snippet shown by **Add Project**. Do not
-    replace its project-scoped configuration with account or session auth.
-    [Review the agent-safe SDK handoff](/guides/ai-agents#set-up-sdk-telemetry-from-a-website-handoff)
-    when an AI agent is making the code change.
+    An account access credential is for account reads. Never use it as SDK
+    configuration. Keep the project key out of command output, prompts,
+    tickets, source files, and package configuration.
   </Step>
 
-  <Step title="Send one safe first event">
-    Run the generated setup snippet with one placeholder-only `info` event.
-    Keep `release` and `environment` explicit and reuse those exact values
-    during verification.
+  <Step title="Send one safe SDK log">
+    Send explicit release and environment markers with one placeholder-only
+    `info` log. The stable event IDs make an exact retry deduplicate safely.
+
+    ```bash
+    node --input-type=module <<'JS'
+    import {
+      createLogBrewNodeClient,
+      createNodeFetchTransport
+    } from "@logbrew/node";
+
+    const client = createLogBrewNodeClient({
+      sdkName: "quickstart-node",
+      sdkVersion: "1.0.0"
+    });
+    const occurredAt = new Date().toISOString();
+
+    client.release("evt_release_quickstart", occurredAt, {
+      version: "quickstart@1",
+      metadata: { service: "quickstart-node" }
+    });
+    client.environment("evt_environment_quickstart", occurredAt, {
+      name: "development"
+    });
+    client.log("evt_log_quickstart", occurredAt, {
+      message: "LogBrew quickstart check",
+      level: "info",
+      logger: "quickstart-node"
+    });
+
+    const response = await client.shutdown(createNodeFetchTransport());
+    const ok = response.statusCode >= 200 && response.statusCode < 300;
+    console.log(JSON.stringify({
+      ok,
+      status_code: response.statusCode,
+      attempts: response.attempts
+    }));
+    if (!ok) process.exitCode = 1;
+    JS
+
+    unset LOGBREW_SERVER_API_KEY
+    ```
 
     The event must not contain credentials, headers, raw request bodies,
-    customer data, local paths, or unrelated source. A submitted request is not
-    the readiness checkpoint; continue to the project doctor.
+    customer data, local paths, or unrelated source.
+
+    **Checkpoint:** the SDK reports a successful status. Submission is not the
+    readiness checkpoint; continue to the project doctor and authenticated
+    readback.
   </Step>
 
   <Step title="Verify readiness with the project doctor">
-    Use account authentication for this read. Do not use the project ingest
-    value or print the account credential.
+    The CLI uses its stored account authentication for this read. Do not
+    replace it with the project ingest key.
 
     ```bash
-    : "${LOGBREW_API_URL:?set LOGBREW_API_URL}"
     : "${LOGBREW_PROJECT_ID:?set the project UUID}"
-    : "${LOGBREW_ACCOUNT_BEARER:?set the account access bearer}"
 
-    curl -sS "$LOGBREW_API_URL/api/projects/$LOGBREW_PROJECT_ID/doctor" \
-      -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+    logbrew doctor --project "$LOGBREW_PROJECT_ID" --json \
       | jq '{state, setup_status, setup_acknowledged, has_active_ingest_key, first_telemetry_seen_at, next, next_action}'
     ```
 
@@ -93,24 +147,21 @@ or AI agent can complete the remaining steps using stable JSON and fixed scope.
   </Step>
 
   <Step title="Read the event and follow typed issue routing">
-    Use the same project, release, and environment that sent the event.
+    Use the exact project, release, and environment from the SDK batch.
 
     ```bash
-    : "${LOGBREW_RELEASE:?set the event release}"
-    : "${LOGBREW_ENVIRONMENT:?set the event environment}"
-
     logbrew read logs --project "$LOGBREW_PROJECT_ID" \
-      --release "$LOGBREW_RELEASE" \
-      --environment "$LOGBREW_ENVIRONMENT" \
+      --release quickstart@1 \
+      --environment development \
       --since 1h \
       --json
     ```
 
-    **Checkpoint:** the safe `info` event appears in the fixed scope. If an
-    issue is present, start from its authenticated detail response and follow
-    only the returned `next_action.code` and `next_action.target`. Use the
-    [typed issue investigation workflow](/guides/investigate-an-issue); never
-    broaden the query across projects.
+    **Checkpoint:** `LogBrew quickstart check` appears in the fixed scope. If
+    an issue is present, start from its authenticated detail response and
+    follow only the returned `next_action.code` and `next_action.target`. Use
+    the [typed issue investigation workflow](/guides/investigate-an-issue);
+    never broaden the query across projects.
   </Step>
 
   <Step title="Recover safely or report privately">
