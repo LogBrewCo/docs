@@ -57,6 +57,7 @@ configuration.
 | --- | --- |
 | JavaScript | `npm install @logbrew/sdk` |
 | Node.js | `npm install @logbrew/sdk @logbrew/node` |
+| React Native | `npm install @logbrew/sdk @logbrew/react-native` |
 | Python | `python3 -m pip install logbrew-sdk` |
 | FastAPI | `python3 -m pip install logbrew-fastapi` |
 | Django | `python3 -m pip install logbrew-django` |
@@ -71,6 +72,76 @@ Use the `LogBrew` Swift product for telemetry. Add `LogBrewCrash` only for
 explicit Apple crash or hang capture. Follow
 [Capture Apple crashes and hangs](/guides/apple-crashes-and-hangs) for exact
 dSYM upload and hosted symbolication.
+
+## React Native hosted delivery
+
+Use `@logbrew/react-native` 0.1.7 or newer. Give the app a project-scoped,
+write-only ingest key. Expo includes every `EXPO_PUBLIC_*` value in the app
+bundle, so never put an account or server credential in that variable.
+
+```js
+import { AppState } from "react-native";
+import {
+  createAppStateListener,
+  createLogBrewReactNativeClient,
+  createReactNativeFetchTransport
+} from "@logbrew/react-native";
+
+const clientKey = process.env.EXPO_PUBLIC_LOGBREW_CLIENT_KEY;
+if (!clientKey) {
+  throw new Error("Set EXPO_PUBLIC_LOGBREW_CLIENT_KEY");
+}
+
+const client = createLogBrewReactNativeClient({
+  clientKey,
+  sdkName: "my-mobile-app",
+  sdkVersion: "1.0.0",
+  transport: createReactNativeFetchTransport()
+});
+
+const stopAppStateListener = createAppStateListener(client, AppState, {
+  flushOnBackground: true
+});
+
+export async function verifyLogBrewSetup() {
+  const occurredAt = new Date().toISOString();
+  client.log(`evt_react_native_setup_${Date.now()}`, occurredAt, {
+    level: "info",
+    message: "React Native setup check",
+    metadata: {
+      environment: __DEV__ ? "development" : "production",
+      service: "my-mobile-app"
+    }
+  });
+
+  const receipt = await client.flush();
+  if (receipt.statusCode < 200 || receipt.statusCode >= 300) {
+    throw new Error("LogBrew intake did not accept the setup event");
+  }
+  return {
+    status_code: receipt.statusCode,
+    attempts: receipt.attempts,
+    batches: receipt.batches
+  };
+}
+```
+
+Supplying the fetch transport enables the core SDK's bounded automatic
+delivery, retry, queue, and pause behavior. Do not add a second flush timer.
+The AppState listener requests a final flush when the app becomes inactive or
+enters the background. Call `stopAppStateListener()` during app teardown.
+
+A successful flush proves that the HTTPS intake accepted the batch. Confirm
+event visibility separately with the authenticated CLI:
+
+```bash
+logbrew read logs --project <project_id> \
+  --search "React Native setup check" --since 1h --json
+```
+
+`RecordingTransport.alwaysAccept()` is for local inspection. Its synthetic
+`202` response does not send a network request and does not prove hosted
+delivery.
 
 ## JavaScript queue tracing
 
