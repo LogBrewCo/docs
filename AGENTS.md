@@ -48,6 +48,18 @@ exist in Git history. Do not add alternate agent prompts, implementation plans,
 receipts, or private planning artifacts. Keep commit messages generic,
 product-focused, and free of agent attribution.
 
+## Code Review Rules
+
+- Flag availability claims without deployed or released public evidence,
+  duplicated canonical contracts, route replacements without redirects, and
+  any private signal entering public history.
+- Flag examples that hide required recovery, use ambiguous placeholders, or
+  cannot be followed against the documented public surface.
+- The safe path is to correct the canonical page or navigation owner, tie the
+  claim to current public evidence, add or preserve redirects, and run the
+  checks selected by the changed journey. Keep mechanical style and structure
+  policy in repository checks rather than expanding this guide.
+
 ## Risk-based validation
 
 Run the smallest set of repository checks that proves the changed behavior:
