@@ -1,5 +1,9 @@
 # LogBrew Docs
 
+<p align="center">
+  <img src="logo/logbrew-logo-transparent-512.png" alt="LogBrew pixel-art beer mug" width="96" height="96">
+</p>
+
 LogBrew is agent-first observability for developers. It helps developers and AI
 coding agents understand production from the terminal by reading logs, traces,
 issues, actions, releases, projects, and environments through the native
@@ -55,6 +59,15 @@ Other install paths include the GitHub Release installers,
 - [LogBrew docs](https://docs.logbrew.co)
 - [LogBrew website](https://logbrew.co)
 - [LogBrewCo on GitHub](https://github.com/LogBrewCo)
+
+## Brand asset check
+
+The documentation uses the approved assets published by the public SDK brand
+owner. Run the drift check after changing a logo, favicon, or its configuration:
+
+```bash
+python3 scripts/check_brand_assets.py
+```
 
 ## License
 
