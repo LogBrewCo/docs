@@ -48,8 +48,7 @@ def check() -> None:
         ):
             raise ValueError(f"brand PNG dimensions or alpha contract drifted: {relative}")
 
-    for relative_value in manifest["removedPaths"]:
-        relative = pathlib.Path(relative_value)
+    for relative in map(pathlib.Path, manifest["removedPaths"]):
         if (ROOT / relative).exists():
             raise ValueError(f"legacy brand path must stay removed: {relative}")
 
@@ -66,9 +65,9 @@ def check() -> None:
         raise ValueError(f"brand asset inventory drifted: unexpected={unexpected}, missing={missing}")
 
     legacy_hashes = set(manifest["legacySha256"])
-    for path in candidates:
-        if sha256(path) in legacy_hashes:
-            raise ValueError(f"legacy brand artwork returned at {path.relative_to(ROOT)}")
+    legacy = next((path for path in candidates if sha256(path) in legacy_hashes), None)
+    if legacy is not None:
+        raise ValueError(f"legacy brand artwork returned at {legacy.relative_to(ROOT)}")
 
     docs_config = json.loads((ROOT / "docs.json").read_text(encoding="utf-8"))
     expected_logo = "/logo/logbrew-logo-transparent-512.png"
