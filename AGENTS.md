@@ -60,6 +60,22 @@ product-focused, and free of agent attribution.
   checks selected by the changed journey. Keep mechanical style and structure
   policy in repository checks rather than expanding this guide.
 
+## Continuous Simplification Gate
+
+- Before each implementation step, record a reproducible handwritten source
+  LOC baseline for its exact scope. Use the same command and scope afterward,
+  then report the baseline, final count, and net change.
+- Complete a step or run only when net maintained production and test source
+  LOC decreases. Exclude generated, vendored, lock, cache, and build output.
+- Offset additions by deleting more duplication, obsolete branches, wrappers,
+  helpers, compatibility scaffolding, or parallel implementations. Prefer one
+  canonical flow and fewer concepts over equivalent reorganization.
+- Preserve required behavior, tests, type safety, coverage, compatibility,
+  documentation, validation, security, observability, and error handling.
+- Never manufacture reduction with minification, line packing, formatting
+  tricks, generated-code moves, or deletion of valuable tests or docs. If safe
+  reduction is not possible, leave the step incomplete and report the blocker.
+
 ## Risk-based validation
 
 Run the smallest set of repository checks that proves the changed behavior:
