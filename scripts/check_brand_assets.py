@@ -65,8 +65,7 @@ def check() -> None:
         raise ValueError(f"brand asset inventory drifted: unexpected={unexpected}, missing={missing}")
 
     legacy_hashes = set(manifest["legacySha256"])
-    legacy = next((path for path in candidates if sha256(path) in legacy_hashes), None)
-    if legacy is not None:
+    if (legacy := next((path for path in candidates if sha256(path) in legacy_hashes), None)) is not None:
         raise ValueError(f"legacy brand artwork returned at {legacy.relative_to(ROOT)}")
 
     docs_config = json.loads((ROOT / "docs.json").read_text(encoding="utf-8"))
