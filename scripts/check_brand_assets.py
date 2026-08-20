@@ -11,7 +11,6 @@ import sys
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-MANIFEST_PATH = ROOT / "brand-assets.json"
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 
@@ -28,7 +27,7 @@ def png_identity(path: pathlib.Path) -> tuple[int, int, int]:
 
 
 def check() -> None:
-    manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    manifest = json.loads((ROOT / "brand-assets.json").read_text(encoding="utf-8"))
     if manifest.get("schemaVersion") != 1:
         raise ValueError("brand-assets.json has an unsupported schemaVersion")
 
