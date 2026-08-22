@@ -7,7 +7,6 @@ import hashlib
 import json
 import pathlib
 import struct
-import sys
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -83,6 +82,5 @@ if __name__ == "__main__":
     try:
         check()
     except (OSError, ValueError, json.JSONDecodeError) as error:
-        print(f"brand asset check failed: {error}", file=sys.stderr)
-        raise SystemExit(1) from error
+        raise SystemExit(f"brand asset check failed: {error}") from error
     print("brand assets ok")
