@@ -79,15 +79,10 @@ def check() -> None:
         raise ValueError("docs.json must use the approved espresso favicon")
 
 
-def main() -> int:
+if __name__ == "__main__":
     try:
         check()
     except (OSError, ValueError, json.JSONDecodeError) as error:
         print(f"brand asset check failed: {error}", file=sys.stderr)
-        return 1
+        raise SystemExit(1) from error
     print("brand assets ok")
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
