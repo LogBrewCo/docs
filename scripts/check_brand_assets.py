@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """Verify the documentation logo and favicon against the public brand owner."""
 
-from __future__ import annotations
-
 import hashlib
 import json
 import pathlib
