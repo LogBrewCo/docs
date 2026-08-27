@@ -33,6 +33,13 @@ on one user journey or contract surface.
 - Keep terminology, routes, branding, and component patterns consistent with
   the LogBrew website and public agent-readable surfaces. Shared changes must
   remain compatible with localized website experiences.
+- Before adding a product term or language, confirm the public contract meaning
+  and current usage in official localized standards, product documentation, and
+  relevant sector writing. Record the approved public definition in
+  `reference/terminology.mdx`. Translation tools can draft prose but cannot
+  approve product, legal, billing, privacy, or destructive-action language.
+- Keep API fields, CLI flags, commands, enum values, event names, and attribute
+  keys exact. Translate their explanation, not the machine identifier.
 - Avoid parallel pages that compete for the same canonical intent. Preserve
   redirects when replacing a public route.
 
