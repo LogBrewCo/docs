@@ -37,11 +37,8 @@ def check() -> None:
             raise ValueError(f"missing approved brand asset: {relative}")
         if sha256(path) != asset["sha256"]:
             raise ValueError(f"brand asset digest drifted: {relative}")
-        if png_identity(path) != (
-            asset["width"],
-            asset["height"],
-            asset["colorType"],
-        ):
+        expected_identity = asset["width"], asset["height"], asset["colorType"]
+        if png_identity(path) != expected_identity:
             raise ValueError(f"brand PNG dimensions or alpha contract drifted: {relative}")
 
     for relative in map(pathlib.Path, manifest["removedPaths"]):
