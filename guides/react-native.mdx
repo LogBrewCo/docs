@@ -1,0 +1,227 @@
+---
+title: "React Native"
+description: "Install the React Native SDK, send a test log, and find it in the correct LogBrew project."
+---
+
+Send logs from a React Native app to LogBrew. Start with one test log, then
+use the CLI to find it in the correct project. This guide uses Expo. A bare
+React Native app loads the key through its own configuration.
+
+Before you start, you need:
+
+- A React Native app that you can run locally.
+- A LogBrew project. See [Projects](/concepts/projects).
+- A signed-in CLI. See [CLI setup](/guides/cli).
+
+## Install the SDK
+
+Install both packages in the app directory. Keep the app's React and React
+Native dependencies:
+
+```bash
+npm install @logbrew/sdk@0.1.27 @logbrew/react-native@0.1.34
+```
+
+## Create a project SDK key
+
+Give the app a project-scoped, write-only SDK key. Expo puts every
+`EXPO_PUBLIC_*` value in the app bundle. Never put an account or server
+credential in that variable.
+
+CLI v0.1.32 or newer creates a key for an existing project. It does not
+create a new project. Find the project ID:
+
+```bash
+logbrew projects --json
+```
+
+Create the key. Use a new file path in an owner-only directory:
+
+```bash
+install -d -m 700 "$HOME/.logbrew" &&
+logbrew projects keys create "<project_id>" \
+  --ingest-key-file "$HOME/.logbrew/my-mobile-app.ingest" \
+  --label "My mobile app" \
+  --kind sdk \
+  --json
+```
+
+Continue only after the command succeeds. If the result is unclear, run the
+same command again with the same arguments. Do not use `--abandon-retry`.
+
+Keep the key file out of source control. For local Expo development, put the
+key in an ignored `.env.local` file at the app root:
+
+```dotenv
+EXPO_PUBLIC_LOGBREW_CLIENT_KEY=<your_project_sdk_key>
+```
+
+Reload the app fully after you change the value. See
+[Expo environment variables](https://docs.expo.dev/guides/environment-variables/)
+for build-time configuration.
+
+## Create the client
+
+Put this setup in one module that the app loads at startup. Do not create a
+client on each render. Put the service, environment, and release in
+`context`:
+
+```js
+import { AppState } from "react-native";
+import {
+  createAppStateListener,
+  createLogBrewReactNativeClient,
+  createReactNativeFetchTransport
+} from "@logbrew/react-native";
+
+const clientKey = process.env.EXPO_PUBLIC_LOGBREW_CLIENT_KEY;
+if (!clientKey) {
+  throw new Error("Set EXPO_PUBLIC_LOGBREW_CLIENT_KEY");
+}
+
+const client = createLogBrewReactNativeClient({
+  clientKey,
+  context: {
+    schemaVersion: 1,
+    resource: {
+      service: { name: "my-mobile-app" },
+      deployment: {
+        environment: __DEV__ ? "development" : "production",
+        release: "mobile@1.0.0"
+      }
+    }
+  },
+  transport: createReactNativeFetchTransport()
+});
+
+const stopAppStateListener = createAppStateListener(client, AppState, {
+  flushOnBackground: true
+});
+
+export async function verifyLogBrewSetup() {
+  client.log(`evt_react_native_setup_${Date.now()}`, new Date().toISOString(), {
+    level: "info",
+    message: "React Native setup check"
+  });
+
+  const receipt = await client.flush();
+  if (receipt.statusCode < 200 || receipt.statusCode >= 300) {
+    throw new Error("LogBrew did not accept the setup event");
+  }
+  return {
+    status_code: receipt.statusCode,
+    attempts: receipt.attempts,
+    batches: receipt.batches
+  };
+}
+```
+
+The fetch transport turns on automatic delivery with bounded retries and a
+queue. Do not add a second flush timer. The AppState listener requests a
+final flush when the app becomes inactive or goes to the background. Call
+`stopAppStateListener()` when the app tears down.
+
+## Send and find the test log
+
+Call `verifyLogBrewSetup()` once from a development-only test action. Await
+the result and handle a rejected promise. Do not print the key or the event
+batch.
+
+A `2xx` result with `batches` above 0 shows that LogBrew accepted the batch.
+An empty flush returns `204` with 0 attempts and 0 batches, because automatic
+delivery can send the event first. In both cases, read the saved log with
+the CLI:
+
+```bash
+logbrew read logs --project "<project_id>" \
+  --search "React Native setup check" --since 1h --json
+```
+
+Check the event time and service in the result. An empty result does not
+show the cause. Check the project, key, and time range.
+
+`RecordingTransport.alwaysAccept()` is for local tests only. It returns a
+synthetic `202` and sends no request.
+
+## Offline and restart delivery
+
+Read `client.deliveryHealth().storage` in the running app:
+
+- `persistent`: the client uses the native queue. Pending events load again
+  after an app restart.
+- `memory`: pending events are lost when the JavaScript runtime restarts.
+
+The default `persistentQueue: "auto"` uses the native queue when the app
+binary contains the LogBrew native module. Expo Go and older binaries use
+memory. A JavaScript-only update cannot add the native module.
+
+If a production app needs restart delivery, set
+`persistentQueue: "required"`. Client creation then fails with
+`configuration_error` when the native queue is missing. Rebuild the app with
+the native module. Use `persistentQueue: "disabled"` only when you want a
+memory queue.
+
+The native queue holds at most 1,000 events and 4 MiB of event data. Smaller
+client limits also apply. Delivery is at least once, so retries can send an
+event two times. A background flush is an attempt, not proof of delivery.
+
+## Choose the log content
+
+Keep each message short and specific. Describe the app outcome, such as a
+failed request or a scheduled retry. Do not include names, email addresses,
+access tokens, form values, or request bodies.
+
+Use the severity that matches the event: `info`, `warning`, `error`, or
+`critical`. Keep the service, environment, and release consistent so you can
+find related records.
+
+`npx react-native log-ios` and `npx react-native log-android` show local
+device logs. They do not query LogBrew. See
+[React Native native debugging](https://reactnative.dev/docs/debugging-native-code).
+
+## Recover from a failed check
+
+A failed `flush()` rejects with an SDK error code. Keep keys and event
+bodies out of error reports.
+
+| Result | Next step |
+| --- | --- |
+| Missing client key | Setup stops before it sends. Load the project SDK key through the app configuration. |
+| `401`, `unauthenticated` | LogBrew rejected the key. Correct or replace the project SDK key before you create a new client. Never use an account credential. |
+| `429`, `rate_limited` | The SDK keeps the batch and pauses automatic delivery. Do not add a retry loop. |
+| `400`, `transport_error` | LogBrew rejected the request. Check the event fields and package versions. |
+| `network_failure` | The SDK has no delivery result. Check connectivity and `deliveryHealth()`. |
+| `5xx`, `transport_error` | The SDK already retried. Read the saved logs before you retry manually. |
+| Empty CLI result | Check the project, key, event time, and filters. |
+
+See [Troubleshooting](/guides/troubleshooting) for more checks.
+
+## Keep Expo Debug IDs in release bundles
+
+Create the Expo Metro config through LogBrew. The runtime bundle then gets
+the same Debug ID as its source map:
+
+```js
+// metro.config.js
+const { getLogBrewExpoConfig } = require("@logbrew/react-native/metro");
+
+module.exports = getLogBrewExpoConfig(__dirname);
+```
+
+If the app uses React Native Worklets bundle mode, apply that transform after
+the LogBrew helper:
+
+```js
+// metro.config.js
+const { getLogBrewExpoConfig } = require("@logbrew/react-native/metro");
+const { getBundleModeMetroConfig } = require("react-native-worklets/bundleMode");
+
+module.exports = getBundleModeMetroConfig(getLogBrewExpoConfig(__dirname));
+```
+
+The helper keeps existing Expo pre-serialization plugins.
+
+A bare React Native app wraps its finished Metro config with
+`withLogBrewMetroConfig()` instead. Do not use that wrapper with Expo. If you
+do, the production build stops with a message that points to
+`getLogBrewExpoConfig()`.

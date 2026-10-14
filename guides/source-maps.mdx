@@ -1,0 +1,202 @@
+---
+title: "JavaScript source maps"
+description: "Prepare, check, and upload JavaScript source maps from a Vite build with an artifact key."
+---
+
+A minified JavaScript file can put many source lines on one line. A stack
+frame from that file points to a generated line and column. A
+[source map](https://ecma-international.org/publications-and-standards/standards/ecma-426/)
+connects that position to the original file, line, and column.
+
+This guide uses the Vite plugin in `@logbrew/sdk` 0.1.27. You need a Vite app,
+access to its build output, and permission to create a project key. For Apple
+debug files, see [Apple crashes and hangs](/guides/apple-crashes-and-hangs).
+
+## Keep the build and the events together
+
+Use the same project, release, environment, and service for the upload and
+for the app's runtime events. See [Releases](/concepts/releases) for version
+names. This guide uses `web@1.2.3`, `staging`, and `checkout-web`.
+
+Change the release when the built code changes. Upload the prepared build,
+then deploy that same build. Do not rebuild or change its JavaScript after
+upload.
+
+## Add the Vite plugin
+
+Install the SDK in the app directory:
+
+```bash
+npm install @logbrew/sdk@0.1.27
+```
+
+Add the plugin to `vite.config.js`. Keep your other plugins and build
+settings. Replace the project ID:
+
+```js
+import { createLogBrewViteReleaseArtifactsPlugin } from "@logbrew/sdk/vite-release-artifacts";
+
+export default {
+  plugins: [
+    createLogBrewViteReleaseArtifactsPlugin({
+      projectId: "<project_id>",
+      release: "web@1.2.3",
+      environment: "staging",
+      service: "checkout-web",
+      minifiedPathPrefix: "https://app.example.com"
+    })
+  ]
+};
+```
+
+`minifiedPathPrefix` is the deployed URL of the build directory. The plugin
+adds each file's path in that directory. For example,
+`dist/assets/app.js` becomes `https://app.example.com/assets/app.js`. If you
+serve the build at `/web`, include `/web` in the prefix.
+
+Without an `upload` option, the plugin sends nothing to LogBrew. It also:
+
+- Sets `build.sourcemap` to `"hidden"` when you do not set it. If you set it
+  to `false`, change it to `"hidden"`.
+- Keeps function names when you do not set minifier options. If you set your
+  own, keep names there.
+
+Hidden source maps stay in the build output as normal files. They are not
+access-controlled.
+
+## Build and check locally
+
+Run the production build:
+
+```bash
+npm run build
+```
+
+The plugin gives each JavaScript file and its source map the same Debug ID.
+It removes embedded `sourcesContent` and the local app-root path. It writes
+`dist/logbrew-release-artifacts.json`.
+
+Open the manifest. Make sure that `validation.status` is `ready` and that it
+lists this build's files and deployed URLs. Hidden maps cause a
+`sourceMappingURL comment missing` warning. That warning is expected.
+
+Do not upload a map that contains a private path or source text you do not
+want to share. The upload also contains the compiled JavaScript, so keep
+secrets out of the app bundle.
+
+Check the upload locally. This command sends no request and needs no key:
+
+```bash
+npx --no-install logbrew-release-artifacts upload-js \
+  --build-dir dist \
+  --manifest dist/logbrew-release-artifacts.json \
+  --endpoint https://api.logbrew.co/api/release-artifacts \
+  --allow-hosted \
+  --dry-run
+```
+
+Continue only when the command exits with code `0` and prints
+`"status": "dry_run"`. This checks the local files and manifest. It does not
+test the server. If your build uses another output directory, change both
+paths.
+
+To check a mapping, run the built app and copy one generated stack frame with
+its file, line, and column:
+
+```bash
+npx --no-install logbrew-release-artifacts symbolicate-js \
+  --build-dir dist \
+  --manifest dist/logbrew-release-artifacts.json \
+  --stack-frame "at checkoutTotal (https://app.example.com/assets/index-a1b2c3.js:2:780)"
+```
+
+Make sure the result has `"status": "resolved"`. The `original` object shows
+the source file, line, and column. This command runs locally and uploads
+nothing.
+
+## Create an artifact key
+
+Sign in with the [LogBrew CLI](/guides/cli). Find the project ID:
+
+```bash
+logbrew projects --json
+```
+
+Create an artifact key for the project. Use a new file path in an owner-only
+directory:
+
+```bash
+install -d -m 700 "$HOME/.logbrew" &&
+logbrew projects keys create "<project_id>" \
+  --ingest-key-file "$HOME/.logbrew/checkout-web.artifact" \
+  --label "Checkout web build" \
+  --kind artifact \
+  --json
+```
+
+Continue only after the command succeeds. If the result is unclear, run the
+same command again with the same arguments. Do not use `--abandon-retry`.
+
+An artifact key is project-scoped and write-only. It uploads source maps and
+debug files. It cannot send telemetry or read artifact metadata. Do not use
+an account credential or a runtime SDK key in its place.
+
+Store the key as `LOGBREW_RELEASE_ARTIFACT_TOKEN` in your build environment's
+secret settings. Do not print or commit it. Do not put it in a client-visible
+variable, such as `VITE_*` or `EXPO_PUBLIC_*`.
+
+Set the variable in the process that runs the upload. The helper does not
+read `.env` files. Vite does not load them into `process.env` during
+[config evaluation](https://vite.dev/config/#using-environment-variables-in-config).
+
+## Upload the prepared build
+
+Use the same checked files and manifest. This command sends the upload to
+LogBrew:
+
+```bash
+npx --no-install logbrew-release-artifacts upload-js \
+  --build-dir dist \
+  --manifest dist/logbrew-release-artifacts.json \
+  --endpoint https://api.logbrew.co/api/release-artifacts \
+  --allow-hosted
+```
+
+`"status": "uploaded"` shows that LogBrew accepted the upload. If the command
+exits with an error, stop and use the table below.
+
+After the manual upload works, you can upload during the Vite build instead.
+Add this option to the plugin configuration:
+
+```js
+upload: {
+  endpoint: "https://api.logbrew.co/api/release-artifacts",
+  allowHostedUpload: true,
+  tokenEnv: "LOGBREW_RELEASE_ARTIFACT_TOKEN"
+}
+```
+
+Use one upload method. The plugin stops the build on a preparation or upload
+error. Add `dryRun: true` to test without an upload.
+
+The plugin does not delete source maps from the output directory. Do not
+deploy `.map` files or the manifest to the public website or CDN.
+
+To map a frame from a captured issue, run `symbolicate-js` with that frame
+against the same prepared build. See
+[Investigate an issue](/guides/investigate-an-issue) to read a captured issue.
+
+## Recover from a failed check
+
+| Result | Next step |
+| --- | --- |
+| Manifest status is not `ready` | Read `validation.errors`. Fix the build settings and build again. Do not edit the manifest. |
+| `auth_missing` | Set `LOGBREW_RELEASE_ARTIFACT_TOKEN` in the upload process. A dry run does not test the key. |
+| `auth_failed` (`401` or `403`) | Use an artifact key for the same project. Do not use a runtime or account key. |
+| `validation_failed` (`400` or `413`) | Check the prepared files and their size. Do not send the same upload again. |
+| `retryable_error` | All retries failed after a network error, `408`, `429`, or server error. Retry later with the same prepared files. |
+| Frame does not resolve | Check the Debug ID, the deployed URL prefix, and the build. Do not use a map from another build or release. |
+
+Keep source files, keys, and private paths out of support messages. See
+[Troubleshooting](/guides/troubleshooting) and
+[API errors](/reference/api-errors).
