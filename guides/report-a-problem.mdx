@@ -1,170 +1,144 @@
 ---
 title: "Report a problem"
-description: "Create and track LogBrew support tickets with the authenticated Support API."
+description: "Create, track, and update a private LogBrew support ticket from the CLI or the Support API."
 ---
 
-Use the Support API when a problem needs follow-up. Tickets belong to the
-authenticated LogBrew account, so humans and agents can create a report and
-read its current state later. Tickets are private to the submitting account and
-LogBrew support. They are not public or visible to other users.
+Create a support ticket when a problem needs follow-up. A person or an AI agent
+can then track the ticket and add requested context. Only the account that
+created the ticket and the LogBrew support team can read it.
 
 <Warning>
-  Authenticate support requests with an account access bearer such as
-  `$LOGBREW_TOKEN`. Never use a project ingest key.
+  Use an account access bearer such as `$LOGBREW_TOKEN`. Never use a project
+  ingest key. Remove private data before you write the title, description, or
+  diagnostics. Automatic redaction does not replace this review.
 </Warning>
 
 ## Create a ticket
 
-`POST /api/support/tickets` requires `source`, `category`, `title`, and
-`description`. The following example uses fake values and token-free
-diagnostics:
+From the CLI, run:
 
 ```bash
-curl -sS "$LOGBREW_API_URL/api/support/tickets" \
-  -H "Authorization: Bearer $LOGBREW_TOKEN" \
+logbrew support create --category docs_confusion \
+  --title "First event is not visible" \
+  --description "Steps: send one info event, then read logs in the same project. Expected: one row. Observed: no rows." \
+  --project "<project_id>" --json
+```
+
+The CLI sets `source` to `cli`. `--diagnostics` adds only the binary name, CLI
+version, operating system, and architecture. Run `logbrew support --help` for
+all flags.
+
+From the API, send `POST /api/support/tickets` with `source`, `category`,
+`title`, and `description`. This example uses synthetic values:
+
+```bash
+curl -sS "https://api.logbrew.co/api/support/tickets" \
+  -H "Authorization: Bearer ${LOGBREW_TOKEN:?Set an account access bearer}" \
   -H "Content-Type: application/json" \
   --data '{
     "source": "docs",
     "category": "docs_confusion",
     "title": "First event is not visible",
-    "description": "Steps: 1) send one info event; 2) read logs with the same project, release, and environment. Expected: one matching row. Observed: no matching rows.",
+    "description": "Steps: send one info event, then read logs in the same project. Expected: one row. Observed: no rows.",
     "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-    "environment": "production",
-    "runtime": "node",
-    "sdk_package": "@logbrew/node",
-    "sdk_version": "0.0.0-example",
-    "release": "checkout@1",
     "diagnostics": {
       "steps": 2,
       "expected": "one matching row",
-      "observed": "no matching rows",
-      "command_name": "logbrew logs",
-      "exit_code": 0,
-      "error_code": "no_matching_rows",
-      "error_summary": "The scoped read returned no rows.",
-      "retry_count": 1
+      "observed": "no matching rows"
     }
   }'
 ```
 
-Optional request keys are `project_id`, `environment`, `runtime`, `framework`,
+Optional fields are `project_id`, `environment`, `runtime`, `framework`,
 `sdk_package`, `sdk_version`, `release`, `trace_id`, `event_id`, and
-`diagnostics`.
+`diagnostics`. Omit `project_id` when the problem is not project-specific.
 
 | Field | Accepted values |
 | --- | --- |
 | `source` | `cli`, `sdk`, `website`, `docs`, `mobile` |
 | `category` | `sdk_install_failure`, `ingest_failure`, `auth_failure`, `project_setup`, `dashboard_issue`, `docs_confusion`, `cli_issue`, `mobile_issue`, `billing_question`, `other` |
 
-## Make the report actionable
+A successful request returns `ticket_id`, `status`, `created_at`, `next`, and
+`next_action`. Ticket IDs start with `sup_`. Use `next` as guidance for a
+person and `next_action` for program control.
 
-- Choose the closest `category` instead of defaulting to `other`.
-- Keep `title` concise and name one symptom and surface.
-- Write `description` as reproducible steps followed by the expected and
-  observed result.
-- Include the exact `project_id`, `release`, and `environment` involved. Add
-  `runtime`, `framework`, package versions, `trace_id`, or `event_id` only when
-  they directly identify the same failure.
+## Write a useful report
 
-For people and AI agents, the strict diagnostic allowlist is:
+- Report one problem in each ticket.
+- Choose the closest `category`. Use `other` only when no category fits.
+- Name one symptom and one surface in the `title`.
+- Write the `description` as steps, then the expected and observed result.
+- Add project, release, trace, or event IDs only when they identify the same
+  failure.
 
-| Diagnostic key | Safe content |
+Use only these `diagnostics` keys:
+
+| Key | Content |
 | --- | --- |
 | `steps` | Number of reproduction steps. |
 | `expected` | Short expected result. |
 | `observed` | Short observed result. |
-| `command_name` | Command and subcommand name only, without arguments. |
+| `command_name` | Command and subcommand name, without arguments. |
 | `exit_code` | Numeric process exit code. |
-| `error_code` | Stable machine-readable error code. |
-| `error_summary` | Short redacted error summary. |
-| `retry_count` | Number of equivalent retry attempts. |
+| `error_code` | Stable error code. |
+| `error_summary` | Short, redacted error summary. |
+| `retry_count` | Number of equal retry attempts. |
 
-Omit `diagnostics` when none of these keys add useful context. AI agents must
-omit secrets, tokens, authorization headers, ingest keys, raw logs, customer
-data, local paths, hosts, and unrelated source code. Summarize the relevant
-failure instead of attaching or pasting raw data.
+## Track the ticket
 
-A successful creation returns `ticket_id`, `status`, `created_at`, `next`, and
-`next_action`. Public ticket IDs start with `sup_`. Use `next` as human-readable
-guidance and `next_action` as the stable machine-readable product action. Do
-not infer internal routing from either field.
+| CLI command | API route | Result |
+| --- | --- | --- |
+| `logbrew support list` | `GET /api/support/tickets` | List the account's tickets. |
+| `logbrew support show <ticket_id>` | `GET /api/support/tickets/{ticket_id}` | Read one ticket and its next action. |
+| `logbrew support context <ticket_id>` | `GET /api/support/tickets/{ticket_id}/context` | Read the context added to the ticket. |
+| `logbrew support reply <ticket_id>` | `POST /api/support/tickets/{ticket_id}/context` | Add requested context. |
+| `logbrew support close <ticket_id>` | `PATCH /api/support/tickets/{ticket_id}` | Set `closed`. |
+| `logbrew support reopen <ticket_id>` | `PATCH /api/support/tickets/{ticket_id}` | Set `open`. |
 
-## List matching tickets
+The list accepts `project_id`, `status`, `source`, `category`, `release`, and
+`limit`. For cursor pagination, send `pagination=cursor`. On later pages,
+repeat the same filters and send `cursor_time` and `cursor_id` from
+`next_cursor`.
 
-`GET /api/support/tickets` lists tickets for the authenticated account. This
-example selects open documentation reports for one release:
+Status values are `open`, `routed`, `in_progress`, `waiting_on_user`,
+`resolved`, and `closed`. You can set only `open` or `closed`. A repeated close
+or reopen request is a successful no-op, so you can retry the exact request.
+Follow the returned status and `next_action`.
 
-```bash
-curl -sS -G "$LOGBREW_API_URL/api/support/tickets" \
-  -H "Authorization: Bearer $LOGBREW_TOKEN" \
-  --data-urlencode "status=open" \
-  --data-urlencode "source=docs" \
-  --data-urlencode "category=docs_confusion" \
-  --data-urlencode "release=checkout@1" \
-  --data-urlencode "pagination=cursor" \
-  --data-urlencode "limit=20"
-```
+## Add requested context
 
-Supported filters are `project_id`, `status`, `source`, `category`, `release`,
-`pagination=cursor`, `cursor_time`, `cursor_id`, and `limit`.
-
-Current lifecycle values are `open`, `routed`, `in_progress`,
-`waiting_on_user`, `resolved`, and `closed`. Treat the returned status as the
-source of truth.
-
-## Read one ticket
-
-Use the `sup_` ID returned by creation or listing:
+Reply only when the ticket asks for context. That ticket has status
+`waiting_on_user` and `next_action.code` `provide_context`.
 
 ```bash
-curl -sS "$LOGBREW_API_URL/api/support/tickets/sup_example123" \
-  -H "Authorization: Bearer $LOGBREW_TOKEN"
+logbrew support reply sup_11111111111141118111111111111111 \
+  --context "The same project and time filters still return no logs." \
+  --retry-key "<retry_key>" --json
 ```
 
-`GET /api/support/tickets/{ticket_id}` returns one ticket owned by the
-authenticated account.
+The API body has `context` and optional `diagnostics`. The `context` text must
+contain 1 to 4,000 characters. Send a retry key in the `Idempotency-Key`
+header. The key contains 1 to 128 visible ASCII characters, without spaces.
+Use a new key for each reply. Reuse a key only to retry the same reply.
 
-## Close or reopen a ticket
+A successful reply returns a `context_id` that starts with `ctx_`. Read the
+ticket again before you answer a later request.
 
-`PATCH /api/support/tickets/{ticket_id}` lets the ticket owner set only
-`closed` or `open`. Close a ticket with the account access bearer:
+## Recover from errors
 
-```bash
-curl -sS -X PATCH "$LOGBREW_API_URL/api/support/tickets/sup_example123" \
-  -H "Authorization: Bearer $LOGBREW_TOKEN" \
-  -H "Content-Type: application/json" \
-  --data '{ "status": "closed" }'
-```
-
-Reopen the same ticket when more investigation is needed:
-
-```bash
-curl -sS -X PATCH "$LOGBREW_API_URL/api/support/tickets/sup_example123" \
-  -H "Authorization: Bearer $LOGBREW_TOKEN" \
-  -H "Content-Type: application/json" \
-  --data '{ "status": "open" }'
-```
-
-A successful PATCH returns the existing full ticket object. Repeating the same
-close or reopen request is a successful no-op, so agents can safely retry an
-exact request after an uncertain response.
-
-The other lifecycle values returned by reads are not user-settable through
-this endpoint. There is no public ticket message or follow-up endpoint.
-
-| Response | Recovery |
+| HTTP status | Recovery |
 | --- | --- |
-| `404` | List the authenticated account's tickets and retry with a returned `sup_` ID. |
-| `422` | Send JSON with only `status: "open"` or `status: "closed"`; do not send another lifecycle value. |
+| `401` | Send a valid account access bearer. |
+| `404` | List the account's tickets and use a returned `sup_` ID. |
+| `409` | Read the ticket context. Reply only when context is requested. |
+| `422` | Correct the named field. For PATCH, send only `status: "open"` or `status: "closed"`. |
+| `429` | Wait, then retry. |
 
-## Keep reports safe and recoverable
+Error responses contain `error`, `code`, `next`, and `next_action`. See
+[API errors](/reference/api-errors).
 
-- Keep `diagnostics` within the allowlist and sanitize every value before
-  sending. The service also redacts and bounds the field.
-- If a request fails, confirm that the required keys and enum values are valid,
-  authenticate with an account access bearer, and follow the returned `next`
-  or `next_action`.
-- Read ticket detail to get the current status and next product action.
+## Keep the report safe
 
-For self-service checks before filing a report, see
-[Troubleshooting](/guides/troubleshooting).
+Never send secrets, tokens, authorization headers, ingest keys, raw logs,
+customer data, local paths, hosts, or unrelated source code. Send a short,
+redacted summary. For self-service checks, see [Troubleshooting](/guides/troubleshooting).
