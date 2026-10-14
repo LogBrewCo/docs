@@ -62,6 +62,15 @@ def check() -> None:
         raise ValueError(f"legacy brand artwork returned at {legacy.relative_to(ROOT)}")
 
     docs_config = json.loads((ROOT / "docs.json").read_text(encoding="utf-8"))
+    font = docs_config.get("fonts", {})
+    if font != {"family": "Outfit", "source": "/fonts/Outfit-Variable.woff2", "format": "woff2"}:
+        raise ValueError("documentation must use the shared Outfit font")
+    if not (ROOT / font["source"].lstrip("/")).is_file():
+        raise ValueError("Outfit font is missing")
+    if "geist" in (ROOT / "style.css").read_text(encoding="utf-8").lower():
+        raise ValueError("retired typography must not override Outfit")
+    if docs_config.get("colors", {}).get("light") != "#F4C914":
+        raise ValueError("documentation accent must match the product gold #F4C914")
     expected_logo = "/logo/logbrew-logo-transparent-512.png"
     if docs_config.get("logo") != {
         "light": expected_logo,
