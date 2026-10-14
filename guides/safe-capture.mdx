@@ -1,0 +1,188 @@
+---
+title: "Control captured data"
+description: "Select approved fields for JavaScript capture, test them locally, and use each SDK privacy control in its scope."
+---
+
+Select what your app sends before you enable capture. Keep passwords, access
+tokens, form contents, and private user data out of events.
+
+Build each event from approved fields. Do not copy a full request, response,
+or error object into metadata. Redaction replaces a sensitive value. A filter
+omits a whole event. A valid SDK event can still contain data that your app
+must not send.
+
+This guide applies to these package versions:
+
+- `@logbrew/sdk` 0.1.24
+- `@logbrew/node` 0.1.11
+- `@logbrew/browser` 0.1.10
+
+For other runtimes, read the package guide from
+[Send SDK telemetry](/guides/sdk-ingestion).
+
+## Select fields for capture
+
+For a failed checkout, record a fixed message, a route template, and a status
+code. Do not record names, email addresses, or payment data.
+
+| Field | Capture rule |
+| --- | --- |
+| Message | Use a fixed text such as `checkout.failed`. Do not insert form text or credentials. |
+| Route | Use a template such as `/orders/:id`. A URL path, query, or fragment can contain private values. |
+| Status | Accept only a valid status code, not a string from user input. |
+| Metadata | Select named fields. Do not copy all properties of a request, response, or error. |
+| Subject and session | Use approved telemetry identifiers, not a login token or session cookie. |
+
+For user and session context, see
+[Product event capture](/guides/product-events#set-users-and-sessions-on-each-event).
+An ID can identify a person even when it does not contain a name.
+
+## Test field selection locally
+
+Use Node.js 18 or newer. In an empty directory, install the package:
+
+```bash
+npm install --save-exact @logbrew/sdk@0.1.24
+```
+
+This test uses no real key and sends no request. Save it as
+`safe-capture.mjs`:
+
+```js
+import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import { LogBrewClient, SdkError } from "@logbrew/sdk";
+
+try {
+  const client = LogBrewClient.create({
+    apiKey: "local-preview-only",
+    sdkName: "privacy-check",
+    sdkVersion: "0.1.24",
+    automaticDelivery: false
+  });
+
+  function recordCheckoutFailure(input) {
+    const status = input?.status;
+    if (!Number.isInteger(status) || status < 400 || status > 599) {
+      return false;
+    }
+    client.log(randomUUID(), new Date().toISOString(), {
+      message: "checkout.failed",
+      level: "error",
+      metadata: { route: "/checkout", status }
+    });
+    return true;
+  }
+
+  const excludedValue = "SYNTHETIC_PRIVATE_VALUE";
+  assert.equal(recordCheckoutFailure({
+    status: 503,
+    authorization: excludedValue,
+    body: excludedValue
+  }), true);
+  assert.equal(recordCheckoutFailure({ status: excludedValue }), false);
+
+  const preview = client.previewJson();
+  const batch = JSON.parse(preview);
+  assert.equal(batch.events.length, 1);
+  assert.equal(preview.includes(excludedValue), false);
+  assert.deepEqual(batch.events[0].attributes.metadata, {
+    route: "/checkout",
+    status: 503
+  });
+  client.purgePendingEvents();
+  console.log(JSON.stringify({
+    ok: true,
+    checked_events: 1,
+    excluded_value_found: false
+  }));
+} catch (error) {
+  console.error(JSON.stringify({
+    ok: false,
+    error: error instanceof SdkError ? error.code : "privacy_check_failed"
+  }));
+  process.exitCode = 1;
+}
+```
+
+
+Run the test:
+
+```bash
+node safe-capture.mjs
+```
+
+Expected output:
+
+```json
+{"ok":true,"checked_events":1,"excluded_value_found":false}
+```
+
+A failed assertion prints `"ok":false` and exits with code 1. An SDK
+validation error prints its SDK error code. Do not print or upload a preview
+that contains real data.
+
+Use the same pattern in your capture code, and keep the assertions in your
+tests. Add a check for each field and value that your app must not send. If
+you use pattern-based redaction, run the checks again after each rule change.
+This test checks one queued log. It does not replace a privacy review.
+
+## Error messages and stacks
+
+| Capture path | Behavior |
+| --- | --- |
+| `createIssueAttributesFromError` (core) | Keeps the error text in the issue message and `metadata.errorMessage`. Adds `metadata.errorStack` only with `includeErrorStack: true`. |
+| Core console conversion | Can keep the error text in the log message and metadata. |
+| `createBrowserErrorEvent` (browser) | Uses a fixed error summary and marks exception-chain messages as redacted. |
+
+A custom `options.message` does not remove `metadata.errorMessage`. Check the
+full event, not only its title. Keep sensitive values out of error messages
+at their source.
+
+## Use each control in its scope
+
+### JavaScript core and Node.js
+
+`LogBrewClient.create` accepts `eventFilter`. Return `false` to omit an event
+before it enters the queue. The filter receives a copy of the event, so
+changes to it do not redact anything. `createLogBrewNodeClient` and
+`createLogBrewBrowserClient` do not apply `eventFilter` in these versions.
+
+`droppedEvents()` counts events dropped by size or queue limits. It does not
+count events that `eventFilter` omitted.
+
+The Node client adds runtime context, such as the Node version, operating
+system, and architecture. Set `captureRuntimeContext: false` to omit it.
+
+### Browser
+
+The browser client captures global errors, unhandled rejections, and an
+initial page view by default. Set `captureGlobalErrors`,
+`captureUnhandledRejections`, or `capturePageViews` to `false` to turn one off.
+
+Page views include the pathname. They omit the query string, fragment,
+document title, and full user agent unless you set `includeQueryString`,
+`includeHash`, `includeDocumentTitle`, or `includeUserAgent`. If a pathname can
+contain private values, turn off automatic page views and send your own page
+view with a safe route name.
+
+`sanitizeMetadata` changes metadata only. It does not change page-view or
+action names. `shouldCaptureError` omits browser issues only. It does not
+filter logs or other signals.
+
+Set `captureRuntimeContext: false` to omit browser brand, platform, and
+device family.
+
+## Before real capture
+
+Test each enabled capture path with synthetic data, including error paths and
+logging integrations.
+
+Capture changes apply only to new events. `purgePendingEvents()` clears an
+idle local queue and fails while delivery is active. It does not remove events
+that LogBrew accepted. Browser `uninstall()` removes listeners but keeps
+queued events. These methods are not a consent or deletion workflow.
+
+Then send one synthetic event with the [quickstart](/quickstart). If it is
+missing, see [Troubleshooting](/guides/troubleshooting). For HTTP errors, see
+[API errors](/reference/api-errors).
