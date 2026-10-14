@@ -1,0 +1,162 @@
+---
+title: "Rotate an ingest key"
+description: "Replace a project ingest key, test the replacement, and revoke the old key without exposing credentials."
+---
+
+Rotation replaces a project ingest key. It does not change the project or its
+stored telemetry. Manage keys with account authentication. An ingest key can
+send telemetry only. It cannot manage keys.
+
+Before you start, [install the CLI and sign in](/guides/cli). Set
+`LOGBREW_PROJECT_ID` to the project UUID. Set `LOGBREW_API_URL` to
+`https://api.logbrew.co`. The examples use Bash, curl 7.76.0 or newer, and jq.
+
+For planned rotation, create, deploy, and test the replacement before you
+revoke the old key. Set the rotation interval in your security policy. If a
+key has an expiry date, replace it before that date.
+
+<Warning>
+  An exposed key is a security incident. Revoke it immediately, even before
+  the replacement is deployed. Applications that still use a revoked key
+  cannot send telemetry.
+</Warning>
+
+<Steps>
+  <Step title="Create the replacement key">
+    `POST /api/projects/{project_id}/ingest-keys` accepts a non-empty `label`
+    of up to 120 characters. `kind` is `cli`, `sdk`, `browser`, `server`, or
+    `artifact`. An `artifact` key cannot send telemetry. An optional
+    `expires_at` must be a future RFC3339 time.
+
+    The CLI saves the one-time token to a new owner-only file outside source
+    control. It prints metadata, not the token:
+
+    ```bash
+    : "${LOGBREW_PROJECT_ID:?set LOGBREW_PROJECT_ID}" &&
+    : "${LOGBREW_REPLACEMENT_KEY_FILE:?choose a new private key file}" &&
+    logbrew projects keys create "$LOGBREW_PROJECT_ID" \
+      --ingest-key-file "$LOGBREW_REPLACEMENT_KEY_FILE" \
+      --label "checkout production rotation" --kind server --json
+    ```
+
+    Continue only after the command succeeds. Set `NEW_KEY_ID` to the returned
+    `ingest_key.id`.
+
+    If the result is uncertain, run the exact command again. The CLI reuses its
+    pending retry key. Do not use `--abandon-retry` for this retry.
+
+    A direct API client receives the token once in the response. To retry,
+    send the same `Idempotency-Key` header. Never print, commit, or share the
+    token.
+  </Step>
+
+  <Step title="Deploy the new key while the old key stays active">
+    Put the new token in the protected deployment setting. Deploy the app.
+    Keep the old key active. Keep both tokens out of source, build output, and
+    logs.
+  </Step>
+
+  <Step title="Send one synthetic event">
+    Load the new token into the `new_ingest_key` shell variable. Do not print
+    it. Send one synthetic log with the new key, then read it back:
+
+    ```bash
+    occurred_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+
+    curl --fail-with-body -sS "$LOGBREW_API_URL/api/telemetry/ingest" \
+      -H "Authorization: Bearer $new_ingest_key" \
+      -H "Content-Type: application/json" \
+      --data @- <<JSON &&
+    {
+      "project_id": "$LOGBREW_PROJECT_ID",
+      "environment": "production",
+      "release": "ingest-key-rotation@1",
+      "service_name": "checkout-api",
+      "sdk_name": "native-api",
+      "sdk_version": "0.1.0",
+      "items": [
+        {
+          "type": "log",
+          "data": {
+            "severity": "info",
+            "message": "ingest key rotation check",
+            "source": "setup",
+            "attributes": {},
+            "occurred_at": "$occurred_at"
+          }
+        }
+      ]
+    }
+    JSON
+
+    logbrew read logs --project "$LOGBREW_PROJECT_ID" \
+      --release ingest-key-rotation@1 \
+      --environment production \
+      --since "$occurred_at" \
+      --json
+    ```
+
+    Continue only when the read returns this log with the same `occurred_at`.
+    An older rotation-check log does not prove that the new key works. Also
+    confirm that the deployed app sends telemetry. If a command fails, stop
+    and read the response. Keep the old key active unless it is exposed.
+  </Step>
+
+  <Step title="List secret-free key metadata">
+    Set `LOGBREW_ACCOUNT_BEARER` from your account authentication. Find the
+    old key ID. Confirm that `NEW_KEY_ID` is `active`:
+
+    ```bash
+    (
+      set -o pipefail
+      curl --fail-with-body -sS "$LOGBREW_API_URL/api/projects/$LOGBREW_PROJECT_ID/ingest-keys" \
+        -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+        | jq -e 'select(type == "array") | map({id, label, kind, token_prefix, status, created_at, expires_at, revoked_at})'
+    )
+    ```
+
+    The response is an array of key metadata without tokens. Status is
+    `active`, `expired`, or `revoked`.
+  </Step>
+
+  <Step title="Revoke only the old key">
+    Set `OLD_KEY_ID` from the list. The command revokes the old key only when
+    the two IDs are different:
+
+    ```bash
+    if [ -n "${OLD_KEY_ID:-}" ] && [ -n "${NEW_KEY_ID:-}" ] \
+      && [ "$OLD_KEY_ID" != "$NEW_KEY_ID" ]; then
+      (
+        set -o pipefail
+        curl --fail-with-body -sS -X DELETE \
+          "$LOGBREW_API_URL/api/projects/$LOGBREW_PROJECT_ID/ingest-keys/$OLD_KEY_ID" \
+          -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+          | jq -e --arg id "$OLD_KEY_ID" \
+            'select(.id == $id and .status == "revoked") | {id, label, kind, token_prefix, status, created_at, expires_at, revoked_at}'
+      )
+    else
+      printf '%s\n' 'Set different old and replacement key IDs before revocation.' >&2
+      false
+    fi
+    ```
+
+    `DELETE` is idempotent. It returns the key metadata with
+    `status: "revoked"` and `revoked_at` set. You can safely repeat it after an
+    uncertain response.
+
+    Run `unset new_ingest_key`. Handle the key file under your secret policy.
+  </Step>
+</Steps>
+
+## Recover safely
+
+| Response | Next step |
+| --- | --- |
+| `404`, `code: "not_found"` | Confirm that the account owns the project and key IDs. Follow `next_action.code: "check_resource"`. Do not try other IDs. |
+| `code: "validation_failed"` | Correct the named field, value, or timestamp. Follow `next` and `next_action`. |
+| `401` or `403` on key management | Use account authentication, not an ingest key. |
+| `401` or `403` on the ingest request | Use the new ingest key for the selected project. Do not use an account credential. |
+
+If rotation still fails, [report a problem](/guides/report-a-problem). Share
+only key metadata. Do not include credentials, headers, raw telemetry,
+customer data, local paths, or source code.
