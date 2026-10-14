@@ -43,16 +43,16 @@ Other install paths include the GitHub Release installers,
 | Use with AI agents | Follow a read-first investigation loop for coding agents. |
 | Troubleshooting | Fix common CLI, telemetry, filter, and trace lookup problems. |
 | CLI reference | Check command grammar and common filters. |
-| Telemetry data | Understand the data model shared by logs, traces, issues, and actions. |
+| Telemetry response shapes | Read the JSON shapes for lists, cursor pages, and errors. |
 
 ## Documentation map
 
 | Section | What it covers |
 | --- | --- |
 | Start | Product overview and first working CLI flow. |
-| Concepts | Telemetry streams, releases, projects, environments, and the mobile app. |
-| Guides | CLI usage, AI-agent workflow, troubleshooting, SDK ingestion, and issue triage. |
-| Reference | CLI grammar, telemetry API shape, and telemetry data model. |
+| Concepts | Telemetry, distributed tracing, product analytics, releases, projects, and the mobile app. |
+| Guides | SDK setup, safe capture, key rotation, product events, source maps, CLI usage, AI-agent workflow, troubleshooting, and issue triage. |
+| Reference | Terminology, CLI grammar, telemetry API, filters, response shapes, errors, and account API. |
 
 ## Links
 
