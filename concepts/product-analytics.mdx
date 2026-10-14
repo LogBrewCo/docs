@@ -1,0 +1,158 @@
+---
+title: "Product analytics"
+description: "Read product activity, funnels, retention, and lifecycle for one project, and check data coverage before you act on the results."
+---
+
+Product analytics shows how people use your app. LogBrew reads the product
+actions that your app sends, including page views, screen views, and
+interactions. Use [Product event capture](/guides/product-events) to send
+these events with user and session context.
+
+Every result is for one project and one time range. A service name does not
+select a project. Logs and issues are separate signals. Their presence does
+not mean that analytics data exists for the same range.
+
+## Events, users, and sessions
+
+| Unit | Meaning |
+| --- | --- |
+| Event | One recorded action. One person can send many events. |
+| Identified user | A stable, opaque, app-supplied subject ID with kind `user`. |
+| Anonymous subject | A typed subject ID that is not a user. It is never counted as a user. |
+| Session | An explicit app-supplied session ID. One person can have many sessions. |
+
+For example, 200 actions in 20 sessions do not mean that 20 people used the
+app. Event totals are exact for the selected window. Unique user, session,
+and anonymous-subject counts are approximate.
+
+Use opaque IDs. Do not use names, email addresses, or other personal data as
+IDs. Analytics responses never return raw user or session IDs.
+
+## <span id="use-the-analytics-api">Read the project overview</span>
+
+```bash
+logbrew analytics overview --project "<project_id>" --since 7d --json
+```
+
+Add `--until <RFC3339>` for an exclusive end time. `--interval` accepts
+`auto`, `1m`, `5m`, `15m`, `1h`, `6h`, or `1d`. The API endpoint is
+`GET /api/telemetry/analytics/overview`.
+
+The overview contains activity totals, a time series, top actions, and
+classified activity. This excerpt shows the totals and their coverage:
+
+```json
+{
+  "analysis_level": "user_and_session",
+  "summary": {
+    "actions": 120,
+    "active_identified_users": 18,
+    "active_anonymous_subjects": 7,
+    "sessions": 24
+  },
+  "coverage": {
+    "identified_actions": 100,
+    "anonymous_actions": 20,
+    "subject_coverage": {
+      "identified_user_events": 100,
+      "anonymous_subject_events": 8,
+      "legacy_unknown_kind_events": 4,
+      "missing_subject_events": 6,
+      "historical_unindexed_events": 2
+    },
+    "sessionized_actions": 90,
+    "traced_actions": 60,
+    "top_actions_truncated": true
+  },
+  "next_action": { "code": "build_product_funnel" }
+}
+```
+
+The five `subject_coverage` counts add up to `summary.actions`. Only
+`identified_user_events` counts toward users. `anonymous_actions` includes the
+four other states. A truncated top list does not show that lower-volume events
+are absent.
+
+`analysis_level` is `no_data`, `event_only`, `user_level`, or
+`user_and_session`. It shows which questions the data can answer.
+`next_action` suggests the next capture or analysis step, such as
+`identify_product_users` or `sessionize_product_activity`. Make that change in
+the app, then check a new event. Older events do not show that the change
+works.
+
+`classified_activity` counts page views, screen views, and interactions.
+Some of those events are also actions. Do not add `summary.actions` to the
+classified totals.
+
+## Measure a funnel
+
+A funnel measures conversion through two to eight ordered steps:
+
+```bash
+logbrew analytics funnel --project "<project_id>" --since 7d \
+  --step page-view /pricing \
+  --step interaction checkout_started \
+  --step interaction checkout_completed \
+  --json
+```
+
+Each later step must occur after the earlier step. The default unit is the
+session. Use `--unit identified-user` to count users across sessions. Copy
+the event names from the overview. A ratio of two unrelated totals is not a
+conversion rate.
+
+## Read retention
+
+Retention shows whether identified users return after a start event:
+
+```bash
+logbrew analytics retention --project "<project_id>" --since 30d \
+  --start-kind page-view --start-event /signup \
+  --return-kind interaction --return-event report_opened \
+  --json
+```
+
+`--interval` is `hour`, `day`, `week`, or `thirty-day`. `--interval-count`
+is from `1` to `31`. `--mode return-on` counts returns in each exact period.
+`return-on-or-after` counts returns in or after each period.
+
+Read the retained count with the eligible count for each period. Users whose
+period has not ended yet are not eligible. They are not counted as lost.
+For example, 40 returned users of 100 eligible users is 40% retention. A
+lower return rate does not show why people left.
+
+## Read lifecycle
+
+Lifecycle puts identified users who did one event into one group per period:
+
+```bash
+logbrew analytics lifecycle --project "<project_id>" --since 30d \
+  --event-kind interaction --event report_opened \
+  --json
+```
+
+| Group | Meaning |
+| --- | --- |
+| New in observed history | Active now, with no earlier event in the history window. |
+| Returning | Active now and in the previous period. |
+| Resurrected | Active now after a gap. |
+| Dormant | Active in the previous period but not now. |
+
+New in observed history does not mean a first-time customer. Earlier activity
+can be outside the history window, set with `--history-periods`. Do not add
+period totals to count unique users across the range.
+
+## Compare two periods
+
+Request each period separately. Use the same project, duration, event names,
+and filters. Compare activity, the event mix, and identity and session
+coverage before you compare user counts. An incomplete period can show lower
+activity than a complete one.
+
+When a result points to a failure, read the related issues and logs for the
+same project and time. Open a trace only when an event has an exact trace
+link. A shared time range does not show that an error caused a drop.
+
+For response fields and errors, read the
+[Telemetry API](/reference/telemetry-api) and
+[API errors](/reference/api-errors).
