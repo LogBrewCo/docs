@@ -1,0 +1,245 @@
+---
+title: "Capture product events"
+sidebarTitle: "Product events"
+description: "Send classified product events with typed users and sessions from Node.js, test them locally, and read the results with the CLI."
+---
+
+Use product events to record named user actions in your app, such as
+opening checkout or completing a purchase. The SDK does not install click
+listeners or collect form contents. Your code records each event.
+
+For counting rules and report types, see
+[Product analytics](/concepts/product-analytics).
+
+## Prepare the test
+
+Use a Node.js 18 or newer app and a LogBrew project that you can read. If you
+have not sent telemetry before, start with the [quickstart](/quickstart).
+Keep this test separate from customer activity.
+
+Install the packages in the app directory:
+
+```bash
+npm install @logbrew/sdk@0.1.27 @logbrew/node@0.1.11
+```
+
+Use a server ingest key for the project. Keep it in `LOGBREW_SERVER_API_KEY`,
+outside source control. Never put a server key in a browser bundle. An account
+access token reads results. It does not configure the SDK.
+
+## Decide what one event means
+
+Start with a product question. For example: do users submit checkout after
+they open it? Give each event a fixed name, an exact trigger, and one place in
+the app that records it.
+
+| Event name | Trigger |
+| --- | --- |
+| `checkout.opened` | The app opens checkout. This is not a purchase. |
+| `checkout.submitted` | The app accepts the submit action. This is not a successful payment. |
+| `checkout.completed` | The app confirms completion. Do not record it for each click or network retry. |
+
+Keep event names stable across releases and languages. Do not build names from
+an email address, order number, URL, or user-entered text.
+
+Use custom properties with a small set of approved values. For example,
+`checkout_mode` can be `guest` or `signed_in`. Do not add a new event name for
+each value. Do not send form contents.
+
+Record each business action in one place only. If the browser and the server
+both record the same action, the totals double.
+
+## Use the correct activity kind
+
+| Kind | Meaning | Capture path |
+| --- | --- | --- |
+| `interaction` | An app-defined product action. | `createProductActionAttributes`, as shown below. |
+| `page_view` | A browser page view. | The browser SDK's page-view capture. |
+| `screen_view` | An app screen view. | A mobile screen-view helper. |
+
+`createProductActionAttributes` sets `analyticsSchemaVersion: 1` and
+`analyticsKind: "interaction"` in the event metadata. Its route template or
+screen name sets `analyticsSurface`. Use a route template, such as
+`/orders/:id`, not a concrete URL.
+
+The event name does not set the kind. An interaction named `page_view` is
+still an interaction. Logs, issues, and spans are not product events. For
+other runtimes, see [SDK ingestion](/guides/sdk-ingestion).
+
+## Set users and sessions on each event
+
+- For a signed-in user, set `context.subject` to a stable ID with
+  `kind: "user"`.
+- For an anonymous visitor, use a separate ID with `kind: "anonymous"`.
+- Put the app's session ID in `context.session.id`. Reuse it for the whole
+  session.
+
+Never use names, email addresses, IP addresses, or access tokens as IDs. A
+stable ID links a user's actions. It does not make the data anonymous.
+
+Do not set a default user or session on a shared server client. Pass the
+subject and session of the request that produced each event. The SDK does
+not create these IDs or detect login, logout, or account switches.
+
+## Run the example locally
+
+Save this example as `product-events.mjs`. It records five test actions across
+anonymous visits, sign-ins, and two users. The client holds only shared
+service and deployment context. Automatic delivery is off for this test.
+
+```js
+import { randomUUID } from "node:crypto";
+import { createProductActionAttributes, SdkError } from "@logbrew/sdk";
+import { createLogBrewNodeClient } from "@logbrew/node";
+
+try {
+  const client = createLogBrewNodeClient({
+    automaticDelivery: false,
+    context: {
+      schemaVersion: 1,
+      resource: {
+        service: { name: "analytics-check", version: "analytics@1" },
+        deployment: { environment: "development", release: "analytics@1" }
+      }
+    }
+  });
+  const startedAt = new Date().toISOString();
+  client.release(randomUUID(), startedAt, { version: "analytics@1" });
+  client.environment(randomUUID(), startedAt, { name: "development" });
+
+  function record(name, subject, sessionId) {
+    client.action(randomUUID(), new Date().toISOString(), {
+      ...createProductActionAttributes({
+        name,
+        routeTemplate: "/checkout",
+        metadata: { checkout_mode: subject.kind === "user" ? "signed_in" : "guest" }
+      }),
+      context: { schemaVersion: 1, subject, session: { id: sessionId } }
+    });
+  }
+
+  record("checkout.opened", { id: "anon_demo_a", kind: "anonymous" }, randomUUID());
+  const userSession = randomUUID();
+  record("checkout.submitted", { id: "user_demo_a", kind: "user" }, userSession);
+  record("checkout.completed", { id: "user_demo_a", kind: "user" }, userSession);
+  record("checkout.opened", { id: "anon_demo_b", kind: "anonymous" }, randomUUID());
+  record("checkout.submitted", { id: "user_demo_b", kind: "user" }, randomUUID());
+
+  if (process.argv.includes("--send")) {
+    const response = await client.shutdown();
+    console.log(JSON.stringify({
+      mode: "sent",
+      status_code: response.statusCode,
+      attempts: response.attempts
+    }));
+  } else {
+    const batch = JSON.parse(client.previewJson());
+    const actions = batch.events.filter(event => event.type === "action");
+    console.log(JSON.stringify({
+      mode: "local_preview",
+      actions: actions.length,
+      kinds: [...new Set(actions.map(event => event.attributes.metadata.analyticsKind))],
+      dropped: client.droppedEvents()
+    }));
+  }
+} catch (error) {
+  console.error(JSON.stringify({
+    ok: false,
+    error: error instanceof SdkError ? error.code : "capture_failed"
+  }));
+  process.exitCode = 1;
+}
+```
+
+Run the script without `--send`. This command sends no request:
+
+```bash
+LOGBREW_SERVER_API_KEY=local-preview-only node product-events.mjs
+```
+
+Expected output:
+
+```json
+{"mode":"local_preview","actions":5,"kinds":["interaction"],"dropped":0}
+```
+
+The release and environment markers are not product actions. This result
+shows the local queue only. It does not show that LogBrew received the
+events. Do not print `previewJson()` in an app with real customer context.
+
+## Handle login and logout
+
+- Before login, send the current anonymous subject with each event.
+- After login, send the user's stable ID with kind `user`.
+- On logout, stop using that user's context. Create a new anonymous subject
+  under your privacy policy.
+- On an account switch, use the new user's ID.
+
+The example starts a new session when the identity changes. Choose your own
+session rule and apply it to each event. Event context replaces the client's
+subject and session for that event. For work that runs later, keep the
+identity of the user who started it.
+
+## Send once and read the results
+
+Set the test project's server key in the process environment. Run this
+command once:
+
+```bash
+node product-events.mjs --send
+```
+
+Each run creates new event IDs, so a second run adds five more events. If the
+process fails, the output contains the SDK error code. A rejected key gives:
+
+```json
+{"ok":false,"error":"unauthenticated"}
+```
+
+Make sure that the ingest key is active and belongs to the test project.
+Signing in to your account does not fix an SDK key. See
+[API errors](/reference/api-errors) and
+[Troubleshooting](/guides/troubleshooting) for other failures.
+
+After LogBrew accepts the batch, read the overview with the signed-in
+[CLI](/guides/cli):
+
+```bash
+logbrew analytics overview --project "<project_id>" --since 1h \
+  --service analytics-check --release analytics@1 \
+  --environment development --json
+```
+
+For one run in an otherwise empty range, expect:
+
+- 5 interactions, all with session context, on the `/checkout` surface.
+- 3 events from users and 2 from anonymous subjects.
+- 2 users, 2 anonymous subjects, and 4 sessions.
+
+Unique user, subject, and session counts are approximate. Event totals are
+exact within the selected window. This test does not measure conversion or
+retention.
+
+| Result | Next check |
+| --- | --- |
+| No product activity | Check the delivery result, project, time range, service, release, and environment. |
+| Activity is unclassified | Use `createProductActionAttributes`. The event name alone does not set the kind. |
+| User counts differ | Check `context.subject` on each event. Anonymous subjects do not count as users. |
+| Session counts differ | Check `context.session.id` on each event and your session rule. |
+| More events than expected | Check for repeated runs and for actions recorded in two places. |
+
+## Test the events in your app
+
+Move the capture calls into the app's handlers. Keep each event's meaning,
+kind, and identity rule. Test with synthetic accounts first.
+
+| App test | Expected capture |
+| --- | --- |
+| Open checkout without submitting | `checkout.opened` only. |
+| Submit a form that fails validation | No `checkout.submitted`. Never send the form contents. |
+| Accept a submission, then fail the payment | `checkout.submitted`, no `checkout.completed`. |
+| Retry a request after a confirmed completion | No second `checkout.completed`. |
+| Log out, then use another account | Later events use the new subject and session. |
+
+A local preview tests capture. An accepted batch tests delivery. Neither
+shows that the capture call runs at the correct point in your app.
