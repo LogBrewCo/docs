@@ -1,66 +1,178 @@
 ---
-title: "Triage issues"
-description: "Read, explain, resolve, ignore, and reopen grouped LogBrew issues from the CLI."
+title: "Manage issues"
+description: "Read issue evidence from the CLI, then resolve, ignore, or reopen the exact issue."
 ---
 
-Issues are grouped failures. LogBrew uses stable fingerprints so repeated
-occurrences of the same error become one issue with a count.
+An issue groups error occurrences that share a fingerprint. Read the group
+summary and one occurrence before you change status. A status change records a
+team decision. It does not repair software or rewrite captured events.
+
+Install the [LogBrew CLI](/guides/cli) and run `logbrew login` before you start.
+
+## Issues and occurrences
+
+An issue list returns a group summary, not a full event. Read these fields
+before you open the detail:
+
+| Field | Meaning |
+| --- | --- |
+| `title` | Captured failure title. |
+| `severity` | Captured severity. |
+| `occurrence_count` | Number of retained occurrences in the group. |
+| `first_seen_at` | Time of the earliest retained occurrence. |
+| `last_seen_at` | Time of the latest retained occurrence. |
+| `project_id` | Project that contains the issue. |
+| `service_name` | Service that sent the occurrence. |
+| `release` | Release reported with the occurrence. |
+| `environment` | Environment reported with the occurrence. |
+
+The occurrence count is not an affected-user count. Counts and times apply to
+the returned scope, not to the full error history. When you report a count,
+also report the filters that produced it.
 
 ## Status values
 
 | Status | Meaning |
 | --- | --- |
-| `unresolved` | Needs attention. |
-| `resolved` | Fixed or no longer active. |
-| `ignored` | Intentionally muted from active triage. |
+| `unresolved` | The issue needs a decision. |
+| `resolved` | The team marked the issue as fixed. The status does not prove the fix. |
+| `ignored` | The team removed the issue from active triage. |
+
+Status applies to the whole issue, not to one occurrence. Severity shows
+urgency, and status records the decision. Keep the two separate. A `critical`
+issue can be `resolved` after a verified fix. An `ignored` issue keeps its
+captured severity.
 
 ## Recommended workflow
 
 <Steps>
-  <Step title="List unresolved issues">
+  <Step title="List unresolved issues in one scope">
     ```bash
-    logbrew read issues --status unresolved --environment production --json
+    logbrew read issues --project "<project_id>" --environment production \
+      --release api@1.2.3 --status unresolved --since 24h --json
     ```
+
+    Keep the same filters on later list reads. An empty result means that no
+    issue matches this scope. It does not prove that the project has no
+    errors. Copy the exact issue ID, not the title.
   </Step>
 
   <Step title="Read the issue detail">
     ```bash
-    logbrew read issue <issue_id> --json
+    logbrew read issue "<issue_id>" --json
     ```
+
+    Confirm that the returned project is correct before you continue. Reads
+    return a snapshot. Read the issue again before you change status.
   </Step>
 
-  <Step title="Follow related traces and logs">
+  <Step title="Investigate one occurrence">
     ```bash
-    logbrew read trace <trace_id> --json
-    logbrew read logs --trace <trace_id> --json
+    logbrew investigate issue "<issue_id>" --occurrence recommended --json
     ```
+
+    The detail and investigation reads do not use list filters. Compare
+    `subject.project_id`, `event.occurred_at`, release, and environment with
+    your scope. Follow [Investigate an issue](/guides/investigate-an-issue) for
+    the full evidence review.
   </Step>
 
-  <Step title="Explain the failure">
+  <Step title="Follow trace evidence only when available">
+    Read the trace only when `correlations.trace.status` is `available`. Use
+    the trace ID from the response. Never invent one.
+
     ```bash
-    logbrew explain issue <issue_id> --json
+    logbrew read trace "<trace_id>" --json
+    logbrew read logs --trace "<trace_id>" --project "<project_id>" \
+      --since 24h --json
     ```
+
+    If the status is `not_linked`, continue with the issue evidence.
   </Step>
 
-  <Step title="Update status">
+  <Step title="Verify the candidate deployment">
+    Use the investigated occurrence as the baseline. Get the deployment ID from
+    deployment evidence or your release process.
+
     ```bash
-    logbrew set issue <issue_id> resolved --json
-    logbrew set issue <issue_id> ignored --json
-    logbrew set issue <issue_id> unresolved --json
+    logbrew investigate issue "<issue_id>" verify \
+      --baseline-occurrence "<occurrence_id>" \
+      --candidate-deployment "<deployment_id>" \
+      --json
     ```
+
+    No recurrence in the observation window does not prove a permanent fix.
+    Follow the returned next action.
+  </Step>
+
+  <Step title="Change status">
+    Run one command. These commands do not ask for confirmation, so check the
+    issue ID first.
+
+    ```bash
+    logbrew set issue "<issue_id>" resolved --json
+    logbrew set issue "<issue_id>" ignored --json
+    logbrew set issue "<issue_id>" unresolved --json
+    ```
+
+    Check the exit code and the returned status. If the result is missing,
+    read the issue again before the next change.
   </Step>
 </Steps>
 
-## What makes a good issue
+## Choose the next status
 
-- Clear title.
-- Human-readable message.
-- Stable fingerprint.
-- Stack frames when available.
-- Release, environment, service, and trace context.
-- Attributes with the smallest useful context, not entire payload dumps.
+- **Keep it `unresolved`** when the failure is active or the fix is not
+  verified. A missing trace is not a reason to ignore an issue.
+- **Set `resolved`** after the team accepts the fix evidence. A proposed fix is
+  not evidence.
+- **Set `ignored`** for an accepted condition or a test-only signal. The
+  decision applies to every occurrence of the issue. The command has no reason
+  field, so record the reason in your team's work record.
+- **Reopen with `unresolved`** when a new occurrence arrives after
+  resolution. Compare it with the occurrence used for resolution. Do not
+  create a different issue.
 
-<Note>
-  Agents should not mark an issue resolved until they have read the issue,
-  checked related telemetry, and verified the code or deployment fix.
-</Note>
+## Hand off the investigation
+
+Give the next person references, not a raw event dump:
+
+- Issue ID, status, and severity.
+- Project, service, environment, and release.
+- First-seen time, last-seen time, and occurrence count.
+- Selected occurrence ID and why it was selected.
+- Trace status and trace ID, if available.
+- Reproduction status and missing evidence.
+- Candidate deployment verification result.
+
+Label proposed causes and fixes as proposals.
+
+## Recover from CLI errors
+
+Check the process exit code before you parse output. On success, JSON goes to
+standard output. A parse error exits with code `2`. A runtime error exits with
+code `1`. JSON errors go to standard error and contain `ok: false`, `error`,
+`message`, and `next`. Show `next` as guidance. Do not run it automatically.
+
+| Result | Recovery |
+| --- | --- |
+| `not_logged_in` | Ask a person to run `logbrew login`, then retry the read. |
+| Invalid issue ID | Copy the exact ID from an issue list or detail response. |
+| Issue not found | Confirm the signed-in account and the project. |
+| Trace status `not_linked` | Continue with the issue evidence. Do not read a trace. |
+| Trace status `unavailable` | Retry the investigation read later. |
+
+A failed response does not prove that a status change had no effect. Read the
+issue before you try again.
+
+## What makes a useful issue
+
+- A clear title and a readable message.
+- A stable fingerprint.
+- Stack frames, when available.
+- Release, environment, and service context.
+- Trace context, when captured with the occurrence.
+- Small, relevant attributes, not full payload dumps.
+
+See the [Telemetry API reference](/reference/telemetry-api) for list filters
+and response contracts.
