@@ -33,6 +33,11 @@ on one user journey or contract surface.
 - Keep terminology, routes, branding, and component patterns consistent with
   the LogBrew website and public agent-readable surfaces. Shared changes must
   remain compatible with localized website experiences.
+- Write English technical instructions and reference text in ASD-STE100
+  style: short active sentences, one instruction per sentence, and one
+  consistent term for each product concept.
+- Add a locale to `docs.json` only when every navigable page has a reviewed
+  localized counterpart. Do not publish partial locale navigation.
 - Before adding a product term or language, confirm the public contract meaning
   and current usage in official localized standards, product documentation, and
   relevant sector writing. Record the approved public definition in
