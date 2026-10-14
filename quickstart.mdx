@@ -1,39 +1,57 @@
 ---
 title: "Quickstart"
-description: "Create a first project, send one safe SDK event, verify readiness, and investigate without exposing credentials."
+description: "Create a project, send one safe Node.js log, and read it back without exposing credentials."
 ---
 
-This is the shortest supported path to first value with Node.js 18 or newer,
-`jq`, and LogBrew CLI v0.1.30 or newer. The CLI creates the project and stores
-its one-time ingest key without a dashboard handoff. Browser interaction is
-needed only when the CLI does not already have approved account authentication.
+Create a development project. Send one Node.js log. Read it back from
+LogBrew. The CLI creates the project and saves its ingest key. Browser
+sign-in is necessary only when the CLI has no valid account access.
 
 <Note>
   Use `--json` for agent workflows. Keep credentials in protected local
-  configuration and pass only variable names between people, tools, and agents.
+  configuration. Pass only variable names between people, tools, and agents.
 </Note>
 
-## First project success path
+## <span id="first-project-success-path">Before you start</span>
+
+Prepare:
+
+- Node.js 18 or newer.
+- LogBrew CLI v0.1.30 or newer.
+- `jq`.
+- Bash or Zsh.
+- A package directory for a server-side Node.js app.
+
+The sample uses project `quickstart-node`, environment `development`, and
+release `quickstart@1`. Keep this test separate from production. For another
+runtime, use the [SDK ingestion guide](/guides/sdk-ingestion).
+
+<Warning>
+  Keep the ingest-key file outside the repository, readable only by you. Do
+  not put this server key in browser code, a public bundle, or a prompt.
+</Warning>
+
+## Send and read your first log
 
 <Steps>
-  <Step title="Confirm account access">
-    Install the CLI with the platform command in the [CLI guide](/guides/cli),
-    then check its current account state before starting a new login.
+  <Step title="Read account status" id="confirm-account-access">
+    Install the CLI with the command in the [CLI guide](/guides/cli). Then
+    read its account state.
 
     ```bash
     logbrew status --json
     ```
 
     **Checkpoint:** status reports authenticated account access. If it does
-    not, a human runs `logbrew login` once and retries `logbrew status --json`.
-    An agent must not start a new login when approved authentication already
-    works.
+    not, a human runs `logbrew login` once. Then run `logbrew status --json`
+    again. An agent must not start a new login when the current
+    authentication works.
   </Step>
 
   <Step title="Create one project from the CLI">
-    Choose a new file in an owner-only directory. The CLI writes the one-time
-    project ingest key to that file before it reports success. It never returns
-    the key or its file path in output.
+    Select a new file in an owner-only directory. The CLI writes the project
+    ingest key to that file before it reports success. It never prints the key
+    or its file path.
 
     ```bash
     install -d -m 700 "$HOME/.logbrew"
@@ -52,102 +70,100 @@ needed only when the CLI does not already have approved account authentication.
     ```
 
     Project creation changes account state. The destination file must not
-    exist. If a request has an ambiguous result, repeat the exact command so
-    the CLI reuses its pending request identity. Do not change the request or
-    use `--abandon-retry` unless you intend to start a different attempt.
+    exist. If the result is not clear, run the exact command again. The CLI
+    reuses its pending request identity. Use `--abandon-retry` only to start a
+    different attempt.
 
     **Checkpoint:** output reports `status: "created"`, setup status
-    `created`, and an ingest-key kind. This proves that the project exists and
-    the one-time key is stored; it does not prove telemetry delivery. See
-    [project setup and credential roles](/concepts/projects).
+    `created`, and an ingest-key kind. The project exists and the key is
+    stored. This does not show telemetry delivery. See
+    [Projects](/concepts/projects).
   </Step>
 
   <Step title="Install the Node.js SDK">
-    Install the two published packages and load the stored key into the
-    SDK-specific environment variable without printing it.
-
     ```bash
     npm install @logbrew/sdk @logbrew/node
-    export LOGBREW_SERVER_API_KEY="$(< "$HOME/.logbrew/quickstart-node.ingest")"
     ```
 
-    An account access credential is for account reads. Never use it as SDK
-    configuration. Keep the project key out of command output, prompts,
-    tickets, source files, and package configuration.
+    Never use an account credential as SDK configuration. Keep the project
+    key out of command output, prompts, tickets, source files, and package
+    configuration.
   </Step>
 
   <Step title="Send one safe SDK log">
-    Send explicit release and environment markers with one placeholder-only
-    `info` log. The stable event IDs make an exact retry deduplicate safely.
+    Send release and environment markers with one placeholder-only `info` log.
+    The key is set only for this Node.js process. Application identity goes
+    in `context`.
 
     ```bash
-    node --input-type=module <<'JS'
-    import {
-      createLogBrewNodeClient,
-      createNodeFetchTransport
-    } from "@logbrew/node";
+    LOGBREW_SERVER_API_KEY="$(< "$HOME/.logbrew/quickstart-node.ingest")" \
+      node --input-type=module <<'JS'
+    import { randomUUID } from "node:crypto";
+    import { SdkError } from "@logbrew/sdk";
+    import { createLogBrewNodeClient } from "@logbrew/node";
 
     const client = createLogBrewNodeClient({
-      sdkName: "quickstart-node",
-      sdkVersion: "1.0.0"
+      context: {
+        schemaVersion: 1,
+        resource: { service: { name: "quickstart-node", version: "quickstart@1" } }
+      }
     });
     const occurredAt = new Date().toISOString();
 
-    client.release("evt_release_quickstart", occurredAt, {
+    client.release(randomUUID(), occurredAt, {
       version: "quickstart@1",
       metadata: { service: "quickstart-node" }
     });
-    client.environment("evt_environment_quickstart", occurredAt, {
-      name: "development"
-    });
-    client.log("evt_log_quickstart", occurredAt, {
+    client.environment(randomUUID(), occurredAt, { name: "development" });
+    client.log(randomUUID(), occurredAt, {
       message: "LogBrew quickstart check",
       level: "info",
       logger: "quickstart-node"
     });
 
-    const response = await client.shutdown(createNodeFetchTransport());
-    const ok = response.statusCode >= 200 && response.statusCode < 300;
-    console.log(JSON.stringify({
-      ok,
-      status_code: response.statusCode,
-      attempts: response.attempts
-    }));
-    if (!ok) process.exitCode = 1;
+    try {
+      const response = await client.shutdown();
+      console.log(JSON.stringify({
+        ok: true,
+        status_code: response.statusCode,
+        attempts: response.attempts
+      }));
+    } catch (error) {
+      console.error(JSON.stringify({
+        ok: false,
+        error: error instanceof SdkError ? error.code : "delivery_failed"
+      }));
+      process.exitCode = 1;
+    }
     JS
-
-    unset LOGBREW_SERVER_API_KEY
     ```
 
-    The event must not contain credentials, headers, raw request bodies,
-    customer data, local paths, or unrelated source.
+    **Checkpoint:** the script prints `"ok":true` with a `2xx`
+    `status_code`. `attempts` is higher than `1` after a retry. A successful
+    send is not the last check.
 
-    **Checkpoint:** the SDK reports a successful status. Submission is not the
-    readiness checkpoint; continue to the project doctor and authenticated
-    readback.
+    If delivery fails, the script exits with code `1` and prints a short JSON
+    error, such as `{"ok":false,"error":"unauthenticated"}`. It does not print
+    the request body or the key.
   </Step>
 
-  <Step title="Verify readiness with the project doctor">
-    The CLI uses its stored account authentication for this read. Do not
-    replace it with the project ingest key.
+  <Step title="Read the project doctor report" id="verify-readiness-with-the-project-doctor">
+    The CLI uses its saved account access for this read. Do not use the
+    project ingest key.
 
     ```bash
     : "${LOGBREW_PROJECT_ID:?set the project UUID}"
 
-    logbrew doctor --project "$LOGBREW_PROJECT_ID" --json \
-      | jq '{state, setup_status, setup_acknowledged, has_active_ingest_key, first_telemetry_seen_at, next, next_action}'
+    logbrew doctor --project "$LOGBREW_PROJECT_ID" --json
     ```
 
-    **Checkpoint:** `state: "ready"` with
-    `next_action.code: "inspect_recent_telemetry"` and
-    `next_action.target: "telemetry_reads"`. For any other state, follow the
-    returned typed action through the [project diagnosis
-    guide](/concepts/projects#diagnose-project-setup) instead of guessing from
-    logs.
+    **Checkpoint:** the report has `status: "ready"`. Also read each item in
+    `checks`. Exit code `0` does not show that all checks passed. For another
+    status, follow `next` and the [CLI reference](/reference/cli).
   </Step>
 
-  <Step title="Read the event and follow typed issue routing">
-    Use the exact project, release, and environment from the SDK batch.
+  <Step title="Read the test log">
+    Use the project, release, and environment from the SDK batch.
 
     ```bash
     logbrew read logs --project "$LOGBREW_PROJECT_ID" \
@@ -157,42 +173,71 @@ needed only when the CLI does not already have approved account authentication.
       --json
     ```
 
-    **Checkpoint:** `LogBrew quickstart check` appears in the fixed scope. If
-    an issue is present, start from its authenticated detail response and
-    follow only the returned `next_action.code` and `next_action.target`. Use
-    the [typed issue investigation workflow](/guides/investigate-an-issue);
-    never broaden the query across projects.
-  </Step>
-
-  <Step title="Recover safely or report privately">
-    Follow the doctor's typed action first. If telemetry is still missing, use
-    the ordered [first telemetry checks](/guides/troubleshooting#recover-missing-first-telemetry).
-
-    When those checks cannot recover the path, [create a private support
-    ticket](/guides/report-a-problem). Tickets are private to the submitting
-    account and LogBrew support, but reports must still omit credentials,
-    authorization headers, project IDs, hosts, raw logs or payloads, customer
-    data, local paths, and source code. Use only the support guide's strict
-    diagnostic allowlist.
+    **Checkpoint:** `LogBrew quickstart check` appears for that project,
+    release, and environment. This shows delivery of the test log only.
   </Step>
 </Steps>
 
-## Continue with one task
+## <span id="understand-the-test-result">Read the test result</span>
+
+The sample sends three events. Only one is a log. The release and environment
+markers give context to the log.
+
+The `console.log` line prints the delivery result to your terminal. The
+`client.log` call sends the log to LogBrew. The ingest key selects the
+project that receives the log. A CLI `--project` filter does not move events.
+
+This log has no trace context because the sample does not create a request
+span. That does not show that the log failed. The CLI read is a snapshot.
+Run it again to read later events, or use `logbrew watch logs --json` for a
+live stream.
+
+## Common recovery decisions
+
+| Result | Next step |
+| --- | --- |
+| CLI status is not authenticated | A human runs `logbrew login`. Then run the status command again. |
+| The ingest-key file exists | Select an unused path. Do not overwrite an unknown credential. |
+| Project creation result is not clear | Run the exact create command again. |
+| `unauthenticated` | Examine the project ingest key, not the CLI account credential. A new login does not fix it. |
+| `rate_limited` | Wait before you send again. Do not loop or create a new key. |
+| `transport_error` or `network_failure` | Examine connectivity. A failed response does not show that the earlier request had no effect. |
+| `delivery_failed` | Stop and examine the failure. Do not print secrets or the request body. |
+| Doctor `status` is not `ready` | Read `checks` and `next`. Keep the same project. |
+| The log read is empty | Compare the project, environment, release, and time range with the sent batch. |
+
+If telemetry is still missing, use the
+[first telemetry checks](/guides/troubleshooting#recover-missing-first-telemetry).
+If those checks do not help, [report a problem](/guides/report-a-problem).
+Do not attach credentials, raw telemetry, customer data, local paths, or
+source code.
+
+## Move to your application
+
+- Create the client once in your app's setup code.
+- Load the ingest key from your existing secret configuration.
+- Use stable service, environment, and release names from your deployment
+  configuration. See [Releases](/concepts/releases).
+- Write log messages that name the operation and its result, such as
+  `Report generation completed`. Keep private values out of the message.
+- Keep one sender for each application log to prevent duplicate records.
+- Before a production rollout, send one safe event through the real code path
+  and read it back.
 
 <CardGroup cols={2}>
-  <Card title="Project setup" icon="folder-kanban" href="/concepts/projects">
-    Diagnose setup state and manage project-scoped ingest credentials.
+  <Card title="Projects" icon="folder-kanban" href="/concepts/projects">
+    Read setup state and manage project ingest keys.
   </Card>
 
   <Card title="SDK ingestion" icon="cloud-upload" href="/guides/sdk-ingestion">
-    Review supported SDK packages and telemetry fields.
+    Select the SDK package for your runtime.
   </Card>
 
-  <Card title="Issue investigation" icon="bug" href="/guides/investigate-an-issue">
-    Follow typed trace or related-log actions without widening scope.
+  <Card title="Investigate an issue" icon="bug" href="/guides/investigate-an-issue">
+    Follow trace and related-log evidence for one issue.
   </Card>
 
-  <Card title="Private support" icon="life-buoy" href="/guides/report-a-problem">
-    Submit a sanitized, account-private recovery report.
+  <Card title="Report a problem" icon="life-buoy" href="/guides/report-a-problem">
+    Send a safe, private support report.
   </Card>
 </CardGroup>

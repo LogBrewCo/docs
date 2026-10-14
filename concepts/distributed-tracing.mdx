@@ -1,0 +1,110 @@
+---
+title: "Distributed tracing"
+description: "Learn how traces and spans connect one request across services, and how LogBrew links logs, issues, actions, and metrics to them."
+---
+
+Distributed tracing follows one request or operation through instrumented
+services. A trace groups the spans for that work. Each span is one timed
+operation, such as an HTTP request, a database call, a queue operation, or a
+background job.
+
+Use a trace when a log reports a failure but not the path of the operation.
+A trace can show where the request spent time and which dependency failed.
+
+## Trace and span fields
+
+| Field | Meaning |
+| --- | --- |
+| `trace_id` | Identifies the trace that owns the span. |
+| `span_id` | Identifies one operation in the trace. |
+| Parent span | Connects a child operation to the operation that started it. |
+| Operation | The type of work, such as `http.server` or `db.query`. |
+| Status | The reported result of the operation. |
+| Duration | How long the operation ran. |
+
+A root span starts a trace and has no parent. Child spans have the same trace
+ID, their own span IDs, and a parent ID. Only these IDs connect operations.
+Timestamps alone do not.
+
+## A request across services
+
+1. The web service starts a server span for the checkout route.
+2. A payment client creates a child span for its outbound HTTP request.
+3. The payment service continues the trace with its own server span.
+4. A database helper records a child span for the write.
+5. The app sends a safe error log inside the active payment span.
+
+All five records have the same trace ID. If a service does not receive trace
+context, its work does not join the trace, even when the times overlap.
+
+## Propagate context
+
+LogBrew SDKs use W3C trace context. For example, the Node.js SDK continues a
+valid incoming `traceparent` header with a new request span. If the header is
+missing or invalid, it starts a new root. Logs, issues, actions, and metrics
+captured inside that request scope carry the request trace.
+
+Outbound instrumentation writes a `traceparent` header only to the targets
+that you configure, such as `tracePropagationTargets`. Send trace context only
+to trusted, instrumented services. A trace ID correlates operations. It is not
+authentication.
+
+The SDKs do not record request or response bodies, query strings, arbitrary
+headers, or the raw `traceparent` value in spans. Name spans after route
+templates, not concrete URLs. For the integrations of your runtime, read the
+[SDK ingestion guide](/guides/sdk-ingestion).
+
+## Read a trace
+
+Use an exact trace ID from a log, an issue, or a trace list:
+
+```bash
+logbrew read traces --project "<project_id>" --status error --since 24h --json
+logbrew read trace "<trace_id>" --project "<project_id>" --json
+```
+
+Read the root span duration first. Then examine the longest child spans and
+error statuses. Keep the project, service, environment, and release in view,
+so that a staging trace does not become evidence about production.
+
+One trace shows one execution, not a performance baseline. Before you propose
+a performance change, compare several traces with the related metric trend.
+If the root span is missing, do not use the earliest span as the root.
+
+## Missing trace context
+
+Not every event has a trace. Read the trace state:
+
+| State | Meaning |
+| --- | --- |
+| `available` | Exact trace evidence can be read. |
+| `not_linked` | The event was captured without active trace context. |
+| `not_found` | A trace reference exists, but no trace matched the selected scope. |
+| `unavailable` | Trace evidence could not be read at that time. |
+
+`not_linked` is not an error. Background work outside a request scope is often
+`not_linked`. To find a missing relationship:
+
+1. Read the event's project, service, environment, release, and time.
+2. Check that the work ran inside an instrumented request or operation.
+3. Check that the client and server integrations propagate context across
+   that boundary.
+4. After you correct the instrumentation, capture a new event and read it.
+
+A new SDK version does not add trace context to events sent earlier. Do not
+link an event to a trace by timestamp, route, message, or release.
+
+## Plan tracing for one project
+
+Start with one important request or job, such as checkout. Instrument one
+boundary at a time:
+
+1. Create a span for the incoming request or the background operation.
+2. Add child spans for important outbound calls.
+3. Continue W3C trace context across trusted service boundaries.
+4. Send a safe log inside the active span.
+5. Read that log, open its trace ID, and check the root, children, service,
+   environment, release, status, and duration.
+
+Add the next boundary only after this check passes. A shared trace shows
+correlation. It does not prove that one span caused an issue.

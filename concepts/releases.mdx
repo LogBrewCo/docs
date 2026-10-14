@@ -1,62 +1,121 @@
 ---
 title: "Releases"
-description: "Release tracking in LogBrew assigns every log, trace span, issue, and action to a code version and environment."
+description: "Attach a release and environment to every signal, then read issues, logs, traces, and actions for one code version."
 ---
 
-Every telemetry envelope in LogBrew must include a non-empty `release` and
-`environment`. A release is the code version that emitted telemetry, such as
-`api@1.2.3`, `ios@2026.06.01`, or a git SHA.
+A release is the code version that sent telemetry, such as `api@1.2.3` or a
+Git commit. LogBrew does not create a release from a repository tag or a
+deployment. Every native telemetry envelope must include a non-empty
+`release` and `environment`. LogBrew rejects a request without them.
 
-Release tracking makes production questions precise:
+## Release, project, service, and environment
 
-- What changed in this version?
-- Which issues first appeared after deploy?
-- Did action failures increase in production?
-- Which traces and logs belong to the same release?
+| Field | Example | Question it answers |
+| --- | --- | --- |
+| Project | `checkout-platform` | Who owns this telemetry and who can read it? |
+| Service | `checkout-api` | Which app or process sent it? |
+| Environment | `production` | Where did the code run? |
+| Release | `api@1.2.3` | Which code version sent it? |
 
-## Release summary
+## <span id="naming-releases">Name releases</span>
 
-LogBrew keeps an append-friendly release summary with counts for each stream.
-
-| Count | Meaning |
-| --- | --- |
-| `issue_count` | Issue events assigned to the release. |
-| `log_count` | Logs assigned to the release. |
-| `trace_span_count` | Trace spans assigned to the release. |
-| `action_count` | Actions assigned to the release. |
-| `first_seen_at` | First telemetry observed for the release. |
-| `last_seen_at` | Most recent telemetry observed for the release. |
-
-```bash
-logbrew read releases --environment production --json
-```
-
-## Naming releases
-
-Use a release name that a human and an agent can map back to code.
+Use an immutable version, build number, or Git commit. In a monorepo, add a
+short service prefix, such as `web@b7f4d91` and `worker@3a9c120`. Use the
+same value for every signal from one artifact.
 
 <CardGroup cols={2}>
   <Card title="Good" icon="check">
-    `api@1.2.3`, `web@b7f4d91`, `ios@2026.06.01`, `worker@2026-06-01.1`
+    `api@1.2.3`, `web@b7f4d91`, `ios@2026.06.01`, and
+    `worker@2026-06-01.1` each identify one artifact.
   </Card>
 
   <Card title="Avoid" icon="x">
-    `latest`, `prod`, `new`, `build`, empty strings, or values that change
-    meaning after deploy.
+    `latest`, `prod`, `new`, and `build` do not identify a code version. An
+    empty string is rejected.
   </Card>
 </CardGroup>
 
-## Environment filters
+Use stable environment names such as `production`, `staging`, `preview`, and
+`local`. One release can run in more than one environment.
 
-Use `environment` to separate production from staging or local development.
-Release names can repeat across environments.
+Set both values in your deployment configuration, so that your CI/CD pipeline
+supplies them to the SDK. Put only a version label in the release value. Do
+not include secrets, customer names, or URLs. After a deployment, send one
+safe event and read it back with the release filter.
+
+## <span id="release-summary">Read release summaries</span>
 
 ```bash
-logbrew read issues --release api@1.2.3 --environment production --json
-logbrew read logs --release api@1.2.3 --environment staging --json
+logbrew read releases --project "<project_id>" --environment production --since 24h --json
 ```
 
-<Tip>
-  Keep release and environment on every SDK envelope. It is cheaper than trying
-  to reconstruct deploy context after an incident.
-</Tip>
+Each summary is for one release, environment, and service:
+
+| Field | Meaning |
+| --- | --- |
+| `issue_count` | Issue events for this release. |
+| `log_count` | Logs for this release. |
+| `trace_span_count` | Trace spans for this release. |
+| `action_count` | Product actions for this release. |
+| `first_seen_at` | First release activity in the selected scope. |
+| `last_seen_at` | Last release activity in the selected scope. |
+
+The counts measure different signals. Do not add them together.
+`first_seen_at` and `last_seen_at` are not deployment times. A service can
+send more telemetry with the same release later.
+
+## Investigate one release
+
+Copy the project, release, environment, and service from one release
+summary:
+
+```bash
+logbrew explain release "<release>" \
+  --project "<project_id>" \
+  --environment "<environment>" \
+  --service "<service_name>" \
+  --json
+```
+
+This command reads retained evidence for that release. It does not accept
+`--since` or `--until`. The response contains issue groups, trace summaries,
+high-severity logs, and action and metric aggregates. These collections are
+bounded and can be truncated.
+
+The response `subject` adds `metric_count` and `trace_health`. `trace_health` counts
+distinct traces, not spans:
+
+| `trace_health.status` | Meaning |
+| --- | --- |
+| `unknown` | No trace data for this release scope. |
+| `no_errors_observed` | The recorded traces have no error spans. |
+| `errors_observed` | One or more recorded traces contain an error span. |
+
+`error_rate_basis_points` is from `0` to `10000`. Divide it by `100` to get a
+percentage. With few traces, one more error trace can change the rate a lot.
+
+The comparison with a previous release reports `improved`, `regressed`,
+`unchanged`, or `not_determined` for the trace error rate. The observation
+windows can differ, and raw counts are not normalized for traffic. A
+deployment order does not show that a code change caused an error.
+
+## <span id="environment-filters">Filter related signals</span>
+
+Use the same filters for each read:
+
+```bash
+logbrew read issues --project "<project_id>" --service checkout-api --release api@1.2.3 --environment production --since 24h --json
+logbrew read logs --project "<project_id>" --service checkout-api --release api@1.2.3 --environment production --since 24h --json
+logbrew read traces --project "<project_id>" --service checkout-api --release api@1.2.3 --environment production --since 24h --json
+```
+
+An empty issue list does not mean that logs or traces are empty.
+
+## <span id="recover-missing-or-misleading-release-data">Find missing or incorrect release data</span>
+
+| Observation | Check |
+| --- | --- |
+| The release list is empty | Check the project, time range, and environment. Then check that the SDK sends a release. |
+| One service is missing | Check the service filter and the deployment configuration of that artifact. |
+| Different builds have the same value | Set an immutable version for new telemetry. LogBrew does not change release values on stored events. |
+| `trace_health.status` is `unknown` | Record the missing trace coverage. Read the other signals. |

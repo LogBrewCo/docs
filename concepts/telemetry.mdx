@@ -1,98 +1,166 @@
 ---
 title: "Telemetry"
-description: "How LogBrew models logs, traces, issues, and actions so developers and AI agents can correlate production behavior."
+description: "Compare logs, traces, metrics, issues, and actions, and select the LogBrew signal for your investigation."
 ---
 
-LogBrew stores first-party telemetry in four streams. They share the same
-project, service, release, environment, and trace context so agents can move
-between them without guessing.
+Telemetry is the structured evidence that an application sends about its
+behavior. Logs record reported events. Traces connect operations. Metrics
+measure values. Issues group failures. Actions record product activity.
 
-In plain terms, telemetry is the evidence your app sends out while it runs. A
-log says what happened, a trace shows where it happened in a request, an issue
-groups repeated failures, and an action records a product event.
+Project, service, environment, release, and time fields give the scope of each
+result. For the signals that your SDK captures, read the
+[SDK ingestion guide](/guides/sdk-ingestion).
 
-<CardGroup cols={2}>
-  <Card title="Logs" icon="file-text">
-    Point-in-time messages from runtime, build, or application code. Logs are
-    best for local facts such as route, user ID, status code, and error text.
-  </Card>
+## <span id="choose-the-correct-telemetry-data-type">Select a signal</span>
 
-  <Card title="Trace spans" icon="route">
-    Timed operations inside one distributed trace. Spans answer where time was
-    spent and which operation failed.
-  </Card>
-
-  <Card title="Issues" icon="bug">
-    Grouped failures. LogBrew turns issue events into stable fingerprints so
-    repeated crashes become one issue with an occurrence count.
-  </Card>
-
-  <Card title="Actions" icon="mouse-pointer-click">
-    Product events. Actions answer what users or systems did, such as
-    `checkout_failed`, `invite_sent`, or `plan_changed`.
-  </Card>
-</CardGroup>
-
-## Shared fields
-
-| Field | Why it matters |
+| Signal | Use it for |
 | --- | --- |
-| `project_id` | Owns the telemetry and controls access. |
-| `service_name` | Names the app or service that emitted the data. |
-| `release` | Required. Ties every signal to the deployed code version. |
+| Issues | Repeated failures, such as a checkout exception with 18 occurrences. |
+| Logs | One event that the app reported, such as a failed payment. |
+| Traces | The operations and duration of one request across instrumented services. |
+| Metrics | A measured value over time, such as request duration or completed jobs. |
+| Actions | Product activity, such as a page view, screen view, or interaction. |
+
+Start a failure investigation with issues or logs. Use an available trace to
+examine one execution. Use a metric trend to examine the wider period. For
+activity and retention, read [Product analytics](/concepts/product-analytics).
+
+Capture only the fields that an investigation needs. Use stable service,
+operation, and metric names. Do not send credentials, payment data, or raw
+request bodies. The [safe-capture guide](/guides/safe-capture) gives the
+controls.
+
+## Logs
+
+A log is a record from the application at one point in time. A useful log
+has:
+
+- The source time of the event.
+- A canonical severity.
+- Project and service scope.
+- Environment and release.
+- Trace and span identifiers when the log has active trace context.
+- Small, named attributes with context for the event.
+
+Logs from several services in one view do not have a trace relationship.
+Only trace context creates that relationship.
+
+## Traces
+
+A trace contains the spans of one request or operation. A root span has no
+parent. A child span identifies its parent. All spans in a trace have the same
+trace ID and different span IDs. See
+[Distributed tracing](/concepts/distributed-tracing).
+
+## <span id="read-the-metric-value">Metrics</span>
+
+A metric records a measured value over time. Read each metric with its name,
+unit, dimensions, project, time range, and interval. LogBrew selects each
+point's `value` from the metric `kind` and `temporality`:
+
+| Metric contract | `aggregation.code` | Point `value` |
+| --- | --- | --- |
+| `gauge` with `instant` | `gauge_last` | The last state in the interval, such as queue depth. |
+| `counter` with `delta` | `delta_sum` | The sum of changes in the interval, such as completed jobs. |
+| `histogram` with `delta` | `distribution_p95` | The approximate 95th percentile, such as request duration. |
+| A `cumulative` stream | `raw_cumulative_last` | The last raw total. It is not a rate. |
+| Another pair | `raw_last` | The last raw sample. |
+
+For `status: "ready"`, the derived aggregation is available. For
+`status: "limited"`, read `aggregation.limitation` and use only the raw
+values. Do not sum a gauge or a cumulative stream. An interval without a
+point is not a measured zero. For the query fields,
+read [Telemetry API filters](/reference/telemetry-api-filters).
+
+## Issues
+
+An issue groups repeated failures by a stable fingerprint. It has a
+severity, status, occurrence count, first-seen time, and last-seen time.
+Issue details can add exception chains, stack frames, breadcrumbs, related
+logs, and a trace relationship.
+
+`last_seen_at` is the newest occurrence in the group. The occurrence that you
+select can be older. Read both times.
+
+## Actions
+
+An action records product activity. Supported classification marks it as a
+page view, screen view, or interaction. An event name alone does not set the
+classification. Use [Product event capture](/guides/product-events) to add
+this context.
+
+Sessions are not users. Anonymous subjects are not identified users.
+
+## <span id="shared-fields">Shared fields</span>
+
+| Field | Use |
+| --- | --- |
+| `project_id` | Owns the telemetry and controls the read boundary. |
+| `service_name` | Identifies the app or service that sent the signal. |
 | `environment` | Separates production, staging, preview, and local data. |
-| `trace_id` | Correlates logs, spans, issues, and actions for one request. |
+| `release` | Identifies the deployed code version. |
+| `occurred_at` | Gives the source time of one event. |
+| `trace_id` | Links signals captured in the same trace context. |
 
 ## Severity values
 
-For streams that carry severity, LogBrew uses four canonical user-facing
-values: `info`, `warning`, `error`, and `critical`.
-
-| Canonical value | Common SDK or runtime aliases |
+| Canonical value | Accepted input aliases |
 | --- | --- |
 | `info` | `trace`, `debug`, `info` |
 | `warning` | `warn`, `warning` |
 | `error` | `error` |
 | `critical` | `fatal`, `critical` |
 
-Use the canonical values in dashboards, CLI output, API output, live responses,
-and examples. SDKs may accept common aliases as input compatibility, but
-unknown severity or level values are rejected.
+SDKs accept the aliases as input. The API, CLI, and live events use the
+canonical values. Unknown severity values are rejected. Severity is the
+recorded urgency. It does not show business impact or root cause.
 
-## Agent investigation pattern
+## Live and snapshot reads
+
+`logbrew read` returns a snapshot for the selected project, time range, and
+filters. Run it again to read new events. `logbrew watch` streams new events
+while the connection is open. A connection failure does not show that the
+project is empty.
+
+## <span id="evidence-quality-and-trace-lifecycle">Evidence states</span>
+
+Responses keep these states separate: captured, missing, redacted, truncated,
+and unavailable. Trace evidence has four states: `available`, `not_linked`,
+`not_found`, and `unavailable`. See the
+[introduction](/introduction#follow-exact-relationships) for their meaning.
+A newer SDK does not add fields to events that it sent earlier.
+
+## <span id="a-practical-investigation">Investigate one project</span>
 
 <Steps>
-  <Step title="Find the release">
-    Read release summaries first to see which version has new issues, logs,
-    trace spans, or actions.
-
+  <Step title="Find unresolved issues">
     ```bash
-    logbrew read releases --environment production --json
+    logbrew read issues --project '<project-id>' --status unresolved --since 24h --json
     ```
   </Step>
 
-  <Step title="Read unresolved issues">
-    Grouped issues show the title, severity, message, status, first seen time,
-    last seen time, and occurrence count.
+  <Step title="Read one issue">
+    This reads the retained issue history. The `--since` filter from the list
+    does not apply.
 
     ```bash
-    logbrew read issues --release api@1.2.3 --status unresolved --json
+    logbrew investigate issue '<issue-id>' --json
     ```
   </Step>
 
-  <Step title="Follow the trace">
-    Use the issue or log `trace_id` to read all spans for the request.
+  <Step title="Open an available trace">
+    Use the trace ID only when the selected occurrence returns one.
 
     ```bash
-    logbrew read trace 4bf92f3577b34da6a3ce929d0e0e4736 --json
+    logbrew read trace '<trace-id>' --project '<project-id>' --json
     ```
   </Step>
 
-  <Step title="Check actions">
-    Actions show product impact, such as which users hit a failed checkout.
-
-    ```bash
-    logbrew read actions --name checkout_failed --since 24h --json
-    ```
+  <Step title="Read related evidence">
+    Filter logs, actions, and metrics with the same project, service,
+    environment, and release. Do not link signals by time alone.
   </Step>
 </Steps>
+
+For response fields, read the [Telemetry API](/reference/telemetry-api) and
+[Telemetry response shapes](/reference/telemetry-response-shapes).
