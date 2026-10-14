@@ -1,0 +1,167 @@
+---
+title: "Telemetry API query filters"
+sidebarTitle: "Query filters"
+description: "Filter LogBrew telemetry reads by project, service, release, environment, severity, and time, and page through results with a cursor."
+---
+
+Each read route accepts its own query keys. Unknown keys fail closed. Friendly
+aliases such as `project`, `trace`, and `user` are not query keys. Do not move
+a filter from one route to another.
+
+## Build a filtered request
+
+Put the query string after the path. Use `--data-urlencode` so that reserved
+characters stay safe. This request reads critical logs for one project from
+the last 24 hours:
+
+```bash
+curl --get "https://api.logbrew.co/api/logs" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "severity=critical" \
+  --data-urlencode "since=24h"
+```
+
+Add filters in this order:
+
+1. Select the project with `project_id`.
+2. Add a time range with `since`.
+3. Add service, release, environment, status, or signal-specific filters.
+4. Set `limit` for a smaller page.
+5. Add cursor fields only after a cursor response returns them.
+
+Each returned row matches every filter in the request.
+
+## Filter matrix
+
+| Route | Query keys |
+| --- | --- |
+| `GET /api/logs` | `project_id`, `severity`, `level` (compatibility alias), `search`, `trace_id`, `service_name`, `release`, `environment`, `since`, `pagination`, `cursor_time`, `cursor_id`, `limit` |
+| `GET /api/telemetry/issues` | `project_id`, `status`, `service_name`, `release`, `environment`, `since`, `pagination`, `cursor_time`, `cursor_id`, `limit` |
+| `GET /api/telemetry/actions` | `project_id`, `name`, `distinct_id`, `service_name`, `release`, `environment`, `since`, `pagination`, `cursor_time`, `cursor_id`, `limit` |
+| `GET /api/telemetry/metrics` | `project_id`, `name`, `service_name`, `release`, `environment`, `since`, `pagination`, `cursor_time`, `cursor_id`, `limit` |
+| `GET /api/telemetry/releases` | `project_id`, `service_name`, `release`, `environment`, `since`, `pagination`, `cursor_time`, `cursor_project_id`, `cursor_release`, `cursor_environment`, `cursor_service_name`, `limit` |
+| `GET /api/telemetry/traces` | `project_id`, `service_name`, `release`, `environment`, `status`, `since`, `min_duration_ms`, `pagination`, `cursor_time`, `cursor_trace_id`, `limit` |
+| `GET /api/telemetry/traces/{trace_id}` and `.../summary` | `project_id`, with optional `release` and `environment` only |
+| `GET /api/telemetry/traces/{trace_id}/investigation` | `response_version` |
+| `GET /api/telemetry/traces/{trace_id}/spans/{span_id}/investigation` | `project_id`, `release`, `environment` |
+| `GET /api/telemetry/issues/{issue_id}/investigation` | `response_version`, and `selection` or `occurrence_id` |
+| `GET /api/telemetry/issues/{issue_id}/correction-verification` | `baseline_occurrence_id`, `candidate_deployment_id` |
+| `GET /api/telemetry/releases/investigation` | `project_id`, `release`, `environment`, `service_name`, `response_version` |
+| `GET /api/telemetry/metrics/investigation` | `project_id`, `name`, `since`, with optional `until`, `interval`, `group_by`, `service_name`, `release`, `environment`, `series_limit`, `response_version` |
+| `GET /api/telemetry/analytics/overview` | `project_id`, `since`, with optional `until`, `interval`, `top_limit`, `service_name`, `release`, `environment`, `response_version` |
+| `GET /api/telemetry/analytics/properties` | `project_id`, `since`, with optional `until`, `limit`, `service_name`, `release`, `environment` |
+
+For issue investigation, `selection` is `first`, `latest`, or `recommended`.
+Send `selection` or `occurrence_id`, not both.
+
+The `POST` analytics routes take a JSON body. See
+[Product analytics](/concepts/product-analytics).
+
+## Shared and signal-specific filters
+
+`service_name`, `release`, and `environment` narrow every telemetry list. Use
+the exact values that your SDK sends.
+
+Some filters belong to one signal:
+
+- Logs accept `search`, `trace_id`, and `severity`.
+- Issues accept issue `status`: `unresolved`, `resolved`, or `ignored`.
+- Actions and metrics accept `name`.
+- Actions accept `distinct_id`.
+- Traces accept trace `status` and `min_duration_ms`.
+
+`since` accepts a positive compact duration such as `24h` or `7d`, or an
+RFC3339 timestamp. A compact duration is relative to the time of each request.
+For a multi-page read, choose one RFC3339 start time and keep it on every page.
+
+## Severity filter
+
+Use `severity=info|warning|error|critical` on `GET /api/logs`. The older
+`level` key is a compatibility alias. It accepts the same values and common
+aliases such as `warn`.
+
+If a request sends both `severity` and `level`, LogBrew normalizes both first.
+Conflicting values are rejected with:
+
+```text
+log severity and level filters conflict; use one value
+```
+
+## Trace filters
+
+For trace discovery, `status` is `error` or `ok`. Omit it to include both.
+`min_duration_ms` must be zero or greater. It applies only to trace discovery.
+
+This request finds error traces that took at least 500 milliseconds:
+
+```bash
+curl --get "https://api.logbrew.co/api/telemetry/traces" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "status=error" \
+  --data-urlencode "min_duration_ms=500" \
+  --data-urlencode "since=7d"
+```
+
+For trace detail and summary, percent-encode `trace_id` as the path segment.
+Do not send it as a query key.
+
+## Project scope
+
+Use `project_id=<project-uuid>` to read one project. Keep the same project on
+every cursor page. Do not remove the project filter after an empty result,
+because that asks a different question.
+
+## Cursor pagination
+
+Cursor mode is opt-in. Send `pagination=cursor` without cursor fields for the
+first page. For each next page, repeat every filter and send the complete
+cursor field set:
+
+| Route | Continuation cursor fields |
+| --- | --- |
+| Logs, issues, actions, and metrics | `cursor_time` and `cursor_id` |
+| Releases | `cursor_time`, `cursor_project_id`, `cursor_release`, `cursor_environment`, and `cursor_service_name` |
+| Trace discovery | `cursor_time` and `cursor_trace_id` |
+
+Map the returned `next_cursor.time` to `cursor_time` and `next_cursor.id` to
+`cursor_id`. Stop when `next_cursor` is `null`. Do not calculate a cursor from
+the last row.
+
+```bash
+curl --get "https://api.logbrew.co/api/logs" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "severity=error" \
+  --data-urlencode "since=2026-06-01T00:00:00Z" \
+  --data-urlencode "pagination=cursor" \
+  --data-urlencode "limit=50"
+```
+
+`limit` sets the page size. A page can contain fewer rows. A cursor marks a
+position; it does not freeze the data. Start a new first page when you need a
+fresh view.
+
+The CLI uses the same fields:
+
+```bash
+logbrew read logs --severity error --pagination cursor --limit 50 --json
+logbrew read logs --severity error --pagination cursor --limit 50 \
+  --cursor-time <time> --cursor-id <id> --json
+```
+
+## Diagnose an empty result
+
+An empty list means that no row matched every filter. It says nothing about
+other signals. Check the request in this order:
+
+1. Confirm the project ID.
+2. Remove optional filters one at a time.
+3. Widen `since` if the expected event is older.
+4. Compare `service_name`, `release`, and `environment` with the values that
+   your SDK sends.
+5. Confirm that the route accepts each filter.
+
+For error codes and recovery, see [API errors](/reference/api-errors). For
+response bodies, see [Telemetry response shapes](/reference/telemetry-response-shapes).

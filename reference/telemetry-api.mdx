@@ -1,260 +1,124 @@
 ---
 title: "Telemetry API"
-description: "Native LogBrew telemetry ingestion and read endpoints."
+description: "Send telemetry to LogBrew and read logs, issues, traces, actions, metrics, releases, and analytics over HTTP."
 ---
 
-The telemetry API is JSON over HTTP. `POST /api/telemetry/ingest` requires a
-project-scoped ingest bearer. Authenticated reads and account-owned mutations
-use an account bearer. Never use an account or browser-session credential as
-SDK or ingest configuration.
+The telemetry API is JSON over HTTP at `https://api.logbrew.co`. Public SDKs
+send their managed batches to `POST /v1/events`. Custom native clients send
+native envelopes to `POST /api/telemetry/ingest`. Both ingest routes require a
+project-scoped ingest bearer.
+
+Reads and account-owned changes use an account bearer. Never use an account
+bearer or a browser session as SDK or ingest configuration. Never send an
+ingest bearer to a read route.
+
+## Send a bounded request
+
+Use this checklist before a client sends a request:
+
+1. Choose the route and HTTP method from the endpoint table.
+2. Use the correct bearer: an ingest bearer for ingestion, an account bearer
+   for everything else.
+3. Select the project scope that the route supports. Do not widen the scope
+   after an empty response.
+4. Add only query keys that the route accepts. See
+   [Telemetry API query filters](/reference/telemetry-api-filters).
+5. Send `Content-Type: application/json` when the route has a JSON body.
+6. Read the HTTP status and the response body before you retry.
+7. Keep bearers, feed tickets, and full response bodies out of logs and agent
+   prompts.
 
 ## Endpoints
 
+### Ingestion
+
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `POST` | `/api/telemetry/ingest` | Ingest native telemetry envelopes. |
+| `POST` | `/v1/events` | Ingest batches that public LogBrew SDKs build and send. |
+| `POST` | `/api/telemetry/ingest` | Ingest native telemetry envelopes from a custom client. |
+
+Let the SDK build `/v1/events` batches. Do not construct them by hand. For the
+native envelope, see [Send SDK telemetry](/guides/sdk-ingestion).
+
+### Telemetry reads
+
+| Method | Path | Purpose |
+| --- | --- | --- |
 | `GET` | `/api/logs` | List structured logs. |
 | `GET` | `/api/telemetry/issues` | List grouped issues. |
 | `GET` | `/api/telemetry/issues/{issue_id}` | Read one grouped issue. |
 | `PATCH` | `/api/telemetry/issues/{issue_id}` | Update issue status. |
+| `GET` | `/api/telemetry/traces` | Discover traces in a project scope. |
 | `GET` | `/api/telemetry/traces/{trace_id}` | List spans for one trace. |
+| `GET` | `/api/telemetry/traces/{trace_id}/summary` | Read a bounded summary of one trace. |
 | `GET` | `/api/telemetry/actions` | List product actions. |
+| `GET` | `/api/telemetry/metrics` | List metric samples. |
 | `GET` | `/api/telemetry/releases` | List release summaries. |
-| `GET` | `/api/account/usage` | Read account, project, and stream usage and quota state. |
-| `GET` | `/api/account/usage/history` | Read bounded account usage history buckets. |
-| `GET` | `/api/account/subscription` | Read subscription and organization-readiness state. |
-| `POST` | `/api/auth/web/logout` | Clear the browser session. |
 
-## Query filters
+### Investigations
 
-Use the deployed query keys for each endpoint. Friendly aliases such as
-`project`, `trace`, and `user` are not REST query keys.
+Each investigation route returns a bounded evidence bundle for one subject.
+The [CLI](/reference/cli) `logbrew explain` command reads these routes and
+validates the response.
 
-| Endpoint | Canonical query keys |
-| --- | --- |
-| `GET /api/logs` | `project_id`, `level` (compatibility alias), `severity` (canonical), `search`, `trace_id`, `service_name`, `release`, `environment`, `since`, `pagination`, `cursor_time`, `cursor_id`, `limit` |
-| `GET /api/telemetry/issues` | `project_id`, `status`, `service_name`, `release`, `environment`, `since`, `pagination`, `cursor_time`, `cursor_id`, `limit` |
-| `GET /api/telemetry/actions` | `project_id`, `name`, `distinct_id`, `service_name`, `release`, `environment`, `since`, `pagination`, `cursor_time`, `cursor_id`, `limit` |
-| `GET /api/telemetry/releases` | `project_id`, `service_name`, `release`, `environment`, `since`, `pagination`, `cursor_time`, `cursor_project_id`, `cursor_release`, `cursor_environment`, `cursor_service_name`, `limit` |
-| `GET /api/telemetry/traces` | `project_id`, `service_name`, `release`, `environment`, `status`, `since`, `min_duration_ms`, `pagination`, `cursor_time`, `cursor_trace_id`, `limit` |
-| `GET /api/telemetry/traces/{trace_id}` and `GET /api/telemetry/traces/{trace_id}/summary` | `project_id`, with optional `release` and `environment` only |
+| Method | Path | CLI command |
+| --- | --- | --- |
+| `GET` | `/api/logs/{log_id}/investigation` | `logbrew explain log` |
+| `GET` | `/api/telemetry/issues/{issue_id}/investigation` | `logbrew explain issue` |
+| `GET` | `/api/telemetry/issues/{issue_id}/correction-verification` | `logbrew investigate issue <issue_id> verify` |
+| `GET` | `/api/telemetry/traces/{trace_id}/investigation` | `logbrew explain trace` |
+| `GET` | `/api/telemetry/traces/{trace_id}/spans/{span_id}/investigation` | `logbrew explain span` |
+| `GET` | `/api/telemetry/actions/{action_id}/investigation` | `logbrew explain action` |
+| `GET` | `/api/telemetry/metrics/investigation` | `logbrew explain metric` |
+| `GET` | `/api/telemetry/releases/investigation` | `logbrew explain release` |
 
-For trace discovery, `status` is `error` or `ok`, and `min_duration_ms` is
-non-negative. `since` accepts a positive compact duration such as `24h` or
-`7d`, or an RFC3339 timestamp.
+### Product analytics
 
-For trace detail and summary, percent-encode `trace_id` as the path segment. It
-is never a query alias. Unknown query keys fail closed.
+| Method | Path | CLI command |
+| --- | --- | --- |
+| `GET` | `/api/telemetry/analytics/overview` | `logbrew analytics overview` |
+| `GET` | `/api/telemetry/analytics/properties` | `logbrew analytics properties` |
+| `POST` | `/api/telemetry/analytics/funnel` | `logbrew analytics funnel` |
+| `POST` | `/api/telemetry/analytics/retention` | `logbrew analytics retention` |
+| `POST` | `/api/telemetry/analytics/lifecycle` | `logbrew analytics lifecycle` |
+| `POST` | `/api/telemetry/analytics/paths` | `logbrew analytics paths` |
+| `POST` | `/api/telemetry/analytics/segments/compare` | `logbrew analytics compare` |
 
-### Cursor pagination
+The `POST` analytics routes take a JSON body, not query keys. See
+[Product analytics](/concepts/product-analytics).
 
-Cursor mode is opt-in. Send `pagination=cursor` by itself for the first page.
-For each continuation, send the endpoint's complete cursor fields together and
-repeat every active filter:
+### Live feed
 
-| Endpoint | Continuation cursor fields |
-| --- | --- |
-| Logs, issues, and actions | `cursor_time` and `cursor_id` |
-| Releases | `cursor_time`, `cursor_project_id`, `cursor_release`, `cursor_environment`, and `cursor_service_name` |
-| Trace discovery | `cursor_time` and `cursor_trace_id` |
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `POST` | `/api/feed/ticket` | Create a short-lived live-feed ticket with an account bearer. |
+| `GET` | `/api/feed/live?ticket=<ticket>` | Open a WebSocket connection with that ticket. |
 
-Legacy mode returns a bare array. Cursor mode returns the endpoint-owned
-envelope, with `next_cursor: null` on the terminal page. Query-string ordering
-does not affect filtering or pagination.
+### Account and sign-in
 
-Use `severity=info|warning|error|critical` on `GET /api/logs` when filtering
-logs by severity. The older `level` query parameter remains a compatibility
-alias and accepts the same canonical values and common aliases.
+Usage, quota, subscription, and logout routes are in the
+[Account API](/reference/account-api).
 
-## Severity values
+## Query filters and pagination
 
-User-facing severity values are `info`, `warning`, `error`, and `critical`.
-SDKs and runtimes may send common aliases such as `trace`, `debug`, `warn`, or
-`fatal`, but REST and live responses return canonical values. For example,
-`warn` may be accepted as input, while responses use `warning`.
+Each read route accepts its own query keys. Unknown keys fail closed. Friendly
+aliases such as `project`, `trace`, and `user` are not query keys. List routes
+return a bare array by default and a cursor envelope with `pagination=cursor`.
+See [Telemetry API query filters](/reference/telemetry-api-filters).
 
-Unknown severity or level values are rejected on ingest.
+## Responses and errors
 
-If a `GET /api/logs` request sends both `severity` and `level`, LogBrew
-normalizes both values first. Conflicting normalized values are rejected with:
+- [Telemetry response shapes](/reference/telemetry-response-shapes) shows one
+  example for each response family.
+- [API errors](/reference/api-errors) lists error codes and recovery actions.
 
-```text
-log severity and level filters conflict; use one value
-```
+Read `code` before the human message. Use `next_action` for program behavior
+and `next` for human guidance. Do not parse the wording of `error` or `next`.
 
-## Account usage and quota
+## Update issue status
 
-`GET /api/account/usage` is the canonical usage and quota endpoint. Use it when
-an app, dashboard, CLI, mobile client, or agent needs account usage totals,
-project breakdowns, stream breakdowns, reset timing, limits, and the current
-quota state.
-
-Do not infer usage or quota state from local CLI files, SDK files, or client
-counters. Treat the account usage response as the source of truth.
-
-| Field | Meaning |
-| --- | --- |
-| `period_start` | Start of the usage period. |
-| `period_end` | End of the usage period. |
-| `reset_at` | When usage resets. |
-| `plan` | Current plan identifier. |
-| `limits` | Configured limits for the account. |
-| `usage` | Current usage totals. |
-| `state` | `ok`, `warning`, or `blocked`. |
-| `warning_threshold` | Usage threshold for warning state. |
-| `percent_used` | Current usage percentage as a decimal. |
-| `warning` | Boolean shortcut for warning state. |
-| `blocked` | Boolean shortcut for blocked state. |
-| `limit` | `events`, `bytes`, `projects`, or `null`. |
-| `next` | Actionable next step for the current state. |
-| `by_project` | Usage breakdown by project. |
-| `by_stream` | Usage breakdown by telemetry stream. |
-
-<Note>
-  `GET /api/logs/usage` is a legacy mobile compatibility projection with
-  `bytes_used`, `limit_bytes`, and `month`. Use `GET /api/account/usage` for
-  new integrations and canonical quota behavior.
-</Note>
-
-## Account usage history
-
-`GET /api/account/usage/history?interval=daily|weekly|monthly|yearly` returns
-bounded usage history for graphs, reports, mobile views, and agent summaries.
-Current-period usage remains canonical on `GET /api/account/usage`.
-
-| Field | Meaning |
-| --- | --- |
-| `interval` | Requested interval: `daily`, `weekly`, `monthly`, or `yearly`. |
-| `period_start` | Start of the returned history window. |
-| `period_end` | End of the returned history window. |
-| `current` | Current `GET /api/account/usage` response. |
-| `buckets` | Usage buckets for the requested interval. |
-
-Each bucket includes:
-
-| Field | Meaning |
-| --- | --- |
-| `period_start` | Bucket start. |
-| `period_end` | Bucket end. |
-| `usage` | Bucket totals for `events`, `bytes`, and `projects`. |
-| `by_project` | Bucket usage breakdown by project. |
-| `by_stream` | Bucket usage breakdown by telemetry stream. |
-
-History windows are bounded and zero-filled:
-
-| Interval | Buckets |
-| --- | --- |
-| `daily` | 30 |
-| `weekly` | 12 |
-| `monthly` | 12 |
-| `yearly` | 5 |
-
-Unsupported intervals return a JSON error envelope with
-`code: "validation_failed"` and an actionable `next` value. Unsupported methods
-return a JSON `405` envelope with `code: "method_not_allowed"` and a `next`
-value that points callers back to `GET /api/account/usage/history`.
-
-## Account subscription readiness
-
-`GET /api/account/subscription` returns authenticated subscription and
-organization-readiness state. It is read-only today. Use
-`GET /api/account/usage` for usage and quota; use
-`GET /api/account/subscription` to decide whether paid-plan or organization
-controls should be enabled.
-
-Current Free-state fields include:
-
-| Field | Current value |
-| --- | --- |
-| `tier` | `free` |
-| `billing_interval` | `none` |
-| `state` | `free` |
-| `access_state` | `active` |
-| Period timestamps | `null` |
-| `organization_creation_allowed` | `false` |
-| `organization_creation_blocker` | `subscription_required` |
-| Organization, member, project, and invite limits | `0` |
-| `next` | `choose Pro or Scale before creating an organization` |
-
-Prepared enum values:
-
-| Field | Values |
-| --- | --- |
-| `tier` | `free`, `pro`, `scale` |
-| `billing_interval` | `none`, `monthly`, `yearly` |
-| `state` | `free`, `trialing`, `active`, `past_due`, `paused`, `canceled` |
-
-Unsupported methods such as `POST /api/account/subscription` return a JSON
-`405` envelope with `code: "method_not_allowed"` and a `next` value that points
-callers back to `GET /api/account/subscription`.
-
-<Note>
-  Organization creation, invitations, member roles, checkout, billing changes,
-  and paid-plan changes are not part of this endpoint unless separate public
-  contracts document them.
-</Note>
-
-## Browser logout
-
-`POST /api/auth/web/logout` clears the browser `logbrew_session` cookie and
-returns `204 No Content`.
-
-Use this endpoint for browser-session logout. It does not delete the account or
-change project, usage, subscription, telemetry, or mobile companion state.
-
-Unsupported methods return a JSON `405` envelope with
-`code: "method_not_allowed"` and an actionable `next` value.
-
-## Log response shape
-
-Log responses include canonical `level` for compatibility and canonical
-`severity` for user-facing consumers.
-
-```json
-{
-  "id": "log_123",
-  "timestamp": "2026-06-01T12:00:00Z",
-  "level": "warning",
-  "severity": "warning",
-  "message": "checkout retry scheduled",
-  "source": "runtime",
-  "release": "api@1.2.3",
-  "environment": "production",
-  "service_name": "checkout-api",
-  "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
-  "attributes": { "route": "/checkout" }
-}
-```
-
-## Live feed event shape
-
-Native live feed events use `{ "type": "...", "data": ... }` envelopes. The
-event type names are stable:
-
-| Event type | Data payload |
-| --- | --- |
-| `native_log` | Canonical log data with `level` and `severity`. |
-| `native_issue` | Canonical issue data. |
-| `native_trace_span` | Canonical trace span data. |
-| `native_action` | Canonical action data. |
-
-```json
-{
-  "type": "native_log",
-  "data": {
-    "level": "warning",
-    "severity": "warning",
-    "message": "checkout retry scheduled",
-    "release": "api@1.2.3",
-    "environment": "production"
-  }
-}
-```
-
-## Issue status update
-
-The variable below represents an account bearer for an authenticated API
-mutation. It is intentionally different from `LOGBREW_INGEST_BEARER`.
+This request uses an account bearer. It is intentionally different from
+`LOGBREW_INGEST_BEARER`.
 
 ```bash
 curl -X PATCH "$LOGBREW_API_URL/api/telemetry/issues/$ISSUE_ID" \
@@ -263,23 +127,9 @@ curl -X PATCH "$LOGBREW_API_URL/api/telemetry/issues/$ISSUE_ID" \
   --data '{ "status": "resolved" }'
 ```
 
-Valid status values are `unresolved`, `resolved`, and `ignored`.
-
-## Release summary shape
-
-```json
-{
-  "release": "api@1.2.3",
-  "environment": "production",
-  "service_name": "checkout-api",
-  "issue_count": 3,
-  "log_count": 824,
-  "trace_span_count": 421,
-  "action_count": 19,
-  "first_seen_at": "2026-06-01T12:00:00Z",
-  "last_seen_at": "2026-06-01T12:15:00Z"
-}
-```
+Valid status values are `unresolved`, `resolved`, and `ignored`. A timeout
+does not prove that the status did not change. Read the issue again before you
+send the update again.
 
 <Warning>
   Do not send blank releases. LogBrew rejects them so release tracking stays
