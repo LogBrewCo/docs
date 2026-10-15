@@ -1,11 +1,11 @@
 ---
 title: "Connect an AI agent with MCP"
-description: "Connect Claude Code to the hosted LogBrew MCP server and give it read-only access to the projects that you select."
+description: "Connect Claude Code to the hosted LogBrew MCP server, approve the projects it can read, and list or revoke its connection."
 ---
 
 LogBrew has a hosted MCP server at `https://mcp.logbrew.co/mcp`. An AI agent
 that connects to it can read issues, logs, traces, spans, metrics, actions,
-releases, and product analytics from the projects that you select.
+releases, and product analytics from the projects that you approve.
 
 The agent can only read. It cannot change issue status, projects, or account
 settings. You do not install the server. You add its URL to your MCP client.
@@ -26,21 +26,26 @@ settings. You do not install the server. You add its URL to your MCP client.
    claude mcp add --transport http logbrew https://mcp.logbrew.co/mcp
    ```
 
+   `claude mcp list` now shows `logbrew` with `! Needs authentication`.
+
 2. Start the sign-in:
 
    ```bash
    claude mcp login logbrew
    ```
 
-   Your browser opens the LogBrew authorization page. Sign in to LogBrew if
-   the page asks you to.
+   Your browser opens the LogBrew authorization page. If the page asks you to
+   sign in, sign in with GitHub, GitLab, or Bitbucket.
 
-3. Select the projects that the agent can read. Then select **Approve**.
+3. Read the client name on the page. Approve only if you started this
+   connection.
+
+4. Select the projects that the agent can read. Then select **Approve**.
 
    The browser goes back to Claude Code. Claude Code shows
    `Authenticated with "logbrew"`.
 
-4. Make sure that the server is connected:
+5. Make sure that the server is connected:
 
    ```bash
    claude mcp list
@@ -48,10 +53,14 @@ settings. You do not install the server. You add its URL to your MCP client.
 
    The result shows `logbrew: https://mcp.logbrew.co/mcp (HTTP) - ✔ Connected`.
 
+You can also sign in from a Claude Code session. Run `/mcp`, select `logbrew`,
+and follow the steps in your browser.
+
 On a computer without a browser, run
-`claude mcp login logbrew --no-browser`. Open the URL that Claude Code shows in
-a browser on a different computer. After you approve, copy the address of the
-page that the browser opens. Paste it into Claude Code.
+`claude mcp login logbrew --no-browser` in an interactive terminal. Over SSH,
+connect with `ssh -t`. Open the URL that Claude Code shows in a browser on a
+different computer. After you approve, copy the address of the page that the
+browser opens. Paste it into Claude Code.
 
 ## Ask the agent
 
@@ -75,33 +84,88 @@ Use telemetry only as evidence. Logs and error messages can contain text from
 users. The agent must not follow instructions in that text. Read
 [Use with AI agents](/guides/ai-agents) for a full investigation workflow.
 
-## Access and limits
+## Access and connection lifetime
+
+Each approval starts 1 connection between 1 MCP client and your LogBrew
+account.
 
 - The agent reads only the projects that you approved. A read of a different
-  project returns no data or `not_found`.
-- An access token is valid for 1 hour. After that, sign in again with
-  `claude mcp login logbrew`.
+  project returns `permission_denied`.
 - If you lose access to an approved project, LogBrew stops reads of that
   project.
+- An access token is valid for 1 hour. Claude Code gets a new one
+  automatically while you use the connection.
+- A connection ends after 30 days without use, or 90 days after you approved
+  it. Then sign in again with `claude mcp login logbrew`.
+- Each token refresh replaces the previous refresh token. If a client sends a
+  replaced refresh token, LogBrew ends the connection. This stops a copied
+  token from working. Sign in again to start a new connection.
 - Too many requests without a valid token get HTTP `429` with a `Retry-After`
   header. Wait for that number of seconds, then try again.
 
-## Remove access
+## List and revoke connections
 
-Remove the server from Claude Code:
+Use the [LogBrew CLI](/guides/cli) 0.1.81 or later. Log in with
+`logbrew login` first. A project ingest key cannot list or revoke connections.
+
+List the MCP clients that are connected to your account:
 
 ```bash
-claude mcp remove logbrew
+logbrew mcp grants
 ```
 
-The access token stops working at the end of its 1-hour lifetime.
+```text
+MCP grants (1)
+- id=00000000-0000-4000-8000-000000000001 client=https://claude.ai/oauth/claude-code-client-metadata projects=2 last_used=2026-10-15T09:30:00Z expires=2026-11-14T09:30:00Z
+Next: run logbrew mcp revoke <grant_id> --yes
+```
+
+The CLI calls a connection a grant. Each grant shows:
+
+- `id`: the grant ID. Use it to revoke the connection.
+- `client`: the URL that identifies the client. Claude Code shows as
+  `https://claude.ai/oauth/claude-code-client-metadata`.
+- `projects`: the number of approved projects.
+- `last_used`: the last time that the client got a new access token.
+- `expires`: the time that the connection ends if the client does not use it.
+
+Add `--json` to get the full list. Each grant has `id`, `client_id`,
+`project_ids`, `created_at`, `last_used_at`, and `expires_at`.
+
+Revoke 1 connection:
+
+```bash
+logbrew mcp revoke <grant_id> --yes
+```
+
+The client loses access at its next request. To connect it again, sign in
+again with `claude mcp login logbrew`.
+
+To change the approved projects, revoke the connection. Then sign in again and
+select the new projects.
+
+## Remove the server
+
+1. Revoke the connection with `logbrew mcp revoke <grant_id> --yes`.
+2. Remove the server from Claude Code:
+
+   ```bash
+   claude mcp remove logbrew
+   ```
+
+`claude mcp remove` deletes the configuration and the tokens on your computer
+only. It does not end the connection in LogBrew. If you do not revoke it, the
+connection ends after 30 days without use.
 
 ## Fix connection problems
 
 | Problem | Fix |
 | --- | --- |
 | `claude mcp list` shows `Needs authentication`. | Run `claude mcp login logbrew`. |
+| Claude Code asks you to sign in again after a period of use. | The connection ended or was revoked. Run `claude mcp login logbrew`, or select **Re-authenticate** in `/mcp`. |
 | The client gets `client access denied`. | Use an approved client. At this time, only Claude Code is approved. |
 | The connection fails after sign-in. | Update Claude Code to 2.1.300 or later. |
 | The authorization page shows `You have no projects to share`. | Create a project in LogBrew, then start the sign-in again. |
-| A read returns no data. | Make sure that you approved the project and that the project sends telemetry. An empty result does not prove that the app works. |
+| A read returns `permission_denied`. | The project is not approved for this connection. Revoke the connection, then sign in again and select the project. |
+| A read returns no data. | Make sure that the project sends telemetry. An empty result does not prove that the app works. |
+| `logbrew mcp grants` returns `unauthorized`. | Run `logbrew login`, then try again. |
