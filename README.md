@@ -73,3 +73,4 @@ python3 scripts/check_brand_assets.py
 
 MIT for the documentation source. See [LICENSE](LICENSE). The LogBrew product
 and brand are not covered.
+
