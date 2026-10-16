@@ -1,0 +1,186 @@
+---
+title: "Configurar proyectos y comprobar señales en LogBrew"
+sidebarTitle: "Proyectos y configuración"
+description: "Configura un proyecto de LogBrew. Elige nombres de servicio y entorno, lee el estado de configuración y encuentra los eventos de prueba de tu aplicación."
+---
+
+Un proyecto es el límite de acceso de la telemetría. Cada señal aceptada
+pertenece a un proyecto, y todos los comandos de lectura pueden filtrar por
+proyecto.
+
+Usa un proyecto aparte cuando la telemetría necesite un límite propio de
+responsabilidad o de acceso. Para la mayoría de los equipos, eso equivale a una
+app, un servicio o un área de producto. Un repositorio no tiene por qué
+corresponder a un proyecto. Un monorepo puede enviar varios servicios a un
+mismo proyecto. Usa los nombres de servicio para distinguirlos.
+
+## <span id="project-service-environment">Proyecto, servicio y entorno</span>
+
+| Término | Ejemplo | Úsalo para |
+| --- | --- | --- |
+| Proyecto | `checkout-platform` | Responsabilidad y acceso. |
+| Servicio | `checkout-api` | La app o el servicio que envió la señal. |
+| Entorno | `production` | Contexto de ejecución. |
+| Release | `api@1.2.3` | Versión del código. |
+
+## <span id="recommended-model">Configura un proyecto</span>
+
+[Instala la CLI](/es/guides/cli). Ejecuta `logbrew status --json` para leer el
+acceso de tu cuenta. Si el acceso no es válido, una persona ejecuta
+`logbrew login`. Una clave de ingesta del proyecto no sirve para iniciar
+sesión.
+
+<Steps>
+  <Step title="Crea o selecciona un proyecto">
+    Primero, lista tus proyectos. Crea un proyecto solo si no existe.
+
+    ```bash
+    logbrew projects --json
+    install -d -m 700 "$HOME/.logbrew"
+
+    logbrew projects create checkout-api \
+      --runtime node \
+      --environment production \
+      --ingest-key-file "$HOME/.logbrew/checkout-api.ingest" \
+      --json
+    ```
+
+    La CLI escribe la clave de ingesta en un archivo nuevo al que solo accede
+    su propietario. Nunca muestra la clave ni la ruta del archivo. Si el
+    resultado no está claro, vuelve a ejecutar exactamente el mismo comando.
+    No cambies el nombre del proyecto ni el archivo de la clave. La CLI
+    reutiliza la identidad de su solicitud pendiente. El
+    [Inicio rápido](/es/quickstart) muestra cómo leer el ID del proyecto en el
+    resultado.
+
+    Para un proyecto existente, registra el estado de configuración:
+
+    ```bash
+    logbrew projects setup "<project_id>" --source cli --environment production --json
+    ```
+
+    Para crear otra clave de ingesta para un proyecto existente, usa
+    `logbrew projects keys create`. [Rotar una clave de ingesta](/es/guides/rotate-ingest-key)
+    muestra el comando.
+
+    `logbrew setup --create-project` solo muestra la ayuda. No crea ningún
+    proyecto.
+  </Step>
+
+  <Step title="Define los nombres de servicio en el SDK">
+    Usa nombres de tu repositorio y tu despliegue, como `api`, `worker`,
+    `web`, `ios` o `checkout-api`. Un nombre de servicio es una etiqueta, no un
+    selector de proyecto. La clave de ingesta selecciona el proyecto. Cambiar
+    el nombre de un servicio no mueve los eventos guardados. Si no encuentras
+    un evento, comprueba el proyecto y la clave de ingesta que usa la
+    aplicación antes de crear otro proyecto.
+  </Step>
+
+  <Step title="Usa entornos estándar">
+    Usa `production`, `staging`, `preview` y `local`. Si tu despliegue usa
+    otros nombres, úsalos de forma coherente. Un nombre de entorno no puede
+    contener espacios, `/` ni una barra invertida.
+  </Step>
+
+  <Step title="Envía un evento de prueba y léelo">
+    Configura el SDK con la clave de ingesta del proyecto, como describe [Integración del SDK](/es/guides/sdk-ingestion). Crear un proyecto no
+    instala ningún SDK en tu aplicación. Mantén la clave fuera del control de
+    versiones. Define el servicio, el entorno y el release en la aplicación.
+    Envía un evento seguro y léelo:
+
+    ```bash
+    logbrew read logs --project "<project_id>" --json
+    ```
+
+    Cada señal tiene su propia lista. Una lista de logs vacía no significa que
+    el proyecto no tenga incidencias ni trazas.
+
+    En el panel, selecciona el mismo proyecto y un intervalo de tiempo que
+    incluya el evento de prueba. Comprueba que los filtros de servicio,
+    entorno y release coinciden con el evento.
+  </Step>
+</Steps>
+
+## <span id="diagnose-project-setup">Diagnostica la configuración del proyecto</span>
+
+Lee el estado de configuración con el doctor del proyecto. No deduzcas el
+estado de configuración a partir de archivos locales ni de una consulta de
+logs vacía.
+
+```bash
+: "${LOGBREW_PROJECT_ID:?set a project UUID}"
+
+logbrew doctor --project "$LOGBREW_PROJECT_ID" --json
+```
+
+La CLI devuelve un informe con `status`, `checks` y `next`. El código de
+salida `0` no demuestra que todas las comprobaciones se superaran. Lee cada
+elemento de `checks`. Consulta
+[Lee el informe de doctor de un proyecto](/es/reference/cli#read-a-project-doctor-report).
+
+### Respuesta directa de la API
+
+Los clientes de la API llaman a `GET /api/projects/{project_id}/doctor` con
+autenticación de cuenta. El endpoint no tiene parámetros de consulta ni cuerpo
+de solicitud. Nunca uses una clave de ingesta del proyecto para esta lectura.
+
+Una respuesta `200` tiene estas claves: `project_id`, `state`,
+`setup_status`, `setup_acknowledged`, `has_active_ingest_key`,
+`first_telemetry_seen_at`, `last_seen_at`, `last_signal`, `next` y
+`next_action`. Las marcas de tiempo son RFC3339 o `null`. `last_signal` es un
+resumen seguro para mostrar, no una señal sin procesar.
+
+| `state` | `next_action.code` | `next_action.target` |
+| --- | --- | --- |
+| `needs_ingest_key` | `create_ingest_key` | `project_ingest_keys` |
+| `needs_setup` | `choose_setup_path` | `project_setup` |
+| `needs_telemetry` | `send_first_telemetry` | `telemetry_ingest` |
+| `ready` | `inspect_recent_telemetry` | `telemetry_reads` |
+
+El doctor comprueba primero la clave de ingesta. Un proyecto sin una clave de
+ingesta activa está en `needs_ingest_key`, sea cual sea su estado de
+configuración.
+
+`setup_status` es `created`, `setup_started`, `sdk_seen`,
+`first_telemetry_seen` o `active`. `setup_acknowledged` es `true` solo con los
+tres últimos valores. `created` da `needs_setup`. `setup_started` y
+`sdk_seen` dan `needs_telemetry`. `first_telemetry_seen` y `active` dan
+`ready`.
+
+| Respuesta | Siguiente paso |
+| --- | --- |
+| `404`, `code: "not_found"` | Un proyecto inexistente, un proyecto archivado y un proyecto que tu cuenta no puede leer dan el mismo resultado. Vuelve a leer el ID del proyecto en `logbrew projects`. No pruebes otros ID. |
+| `405`, `code: "method_not_allowed"` | Usa `GET` sin cuerpo ni parámetros de consulta. |
+
+Si la lectura sigue fallando, [informa de un problema](/es/guides/report-a-problem).
+No incluyas credenciales, cabeceras, cuerpos de señales, datos de clientes,
+rutas locales ni código fuente.
+
+## <span id="archive-or-delete-a-project">Archiva o elimina un proyecto</span>
+
+Archiva un proyecto para quitarlo de la lista de proyectos activos:
+
+```bash
+logbrew projects archive "<project_id>" --yes --json
+```
+
+El comando necesita `--yes`. Después de archivarlo, las claves de ingesta del
+proyecto dejan de aceptar telemetría nueva. La ruta de la API es
+`DELETE /api/projects/{project_id}`. Devuelve `204` sin cuerpo. Lista los
+proyectos archivados con `GET /api/projects/archived`. Restaura uno con
+`POST /api/projects/{project_id}/restore`, que también devuelve `204`.
+
+Elimina un proyecto de forma permanente solo cuando estés seguro:
+
+```bash
+logbrew projects delete "<project_id>" --confirm "<project_id>" --json
+```
+
+Repite el ID exacto del proyecto después de `--confirm`. Una solicitud
+aceptada desactiva el proyecto de inmediato y programa su eliminación
+permanente. Después ya no puedes restaurar el proyecto.
+
+## <span id="rotate-an-ingest-key-without-telemetry-loss">Rota una clave de ingesta</span>
+
+[Rotar una clave de ingesta](/es/guides/rotate-ingest-key)
+describe el procedimiento de reemplazo, despliegue, prueba y revocación.

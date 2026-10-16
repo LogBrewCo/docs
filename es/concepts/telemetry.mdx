@@ -1,0 +1,225 @@
+---
+title: "Telemetría de aplicaciones: logs, trazas y métricas"
+sidebarTitle: "Telemetría"
+description: "Compara logs, trazas, métricas, incidencias y acciones de producto. Elige la señal de LogBrew para tu investigación."
+---
+
+La telemetría es la evidencia estructurada que una aplicación envía sobre su
+comportamiento. Los logs registran los eventos informados. Las trazas conectan
+operaciones. Las métricas miden valores. Las incidencias agrupan fallos. Las
+acciones registran la actividad de producto.
+
+Los campos de proyecto, servicio, entorno, release y tiempo definen el alcance
+de cada resultado. Para saber qué señales captura tu SDK, lee [Integración del SDK](/es/guides/sdk-ingestion).
+
+## <span id="choose-the-correct-telemetry-data-type">Elige una señal</span>
+
+| Señal | Úsala para |
+| --- | --- |
+| Incidencias | Fallos repetidos, como una excepción en el pago con 18 ocurrencias. |
+| Logs | Un evento que informó la app, como un pago fallido. |
+| Trazas | Las operaciones y la duración de una solicitud a través de los servicios instrumentados. |
+| Métricas | Un valor medido a lo largo del tiempo, como la duración de las solicitudes o las tareas completadas. |
+| Acciones | La actividad de producto, como una vista de página, una vista de pantalla o una interacción. |
+
+Empieza la investigación de un fallo con las incidencias o los logs. Usa una
+traza disponible para examinar una ejecución. Usa la tendencia de una métrica
+para examinar un periodo más amplio. Para la actividad y la retención, lee
+[Analíticas de producto](/es/concepts/product-analytics).
+
+Captura solo los campos que necesita una investigación. Usa nombres estables
+de servicios, operaciones y métricas. No envíes credenciales, datos de pago ni
+cuerpos de solicitud sin procesar. [Controlar los datos capturados](/es/guides/safe-capture) explica los controles.
+
+## Logs
+
+Un log es un registro de la aplicación en un momento concreto. Un log útil
+tiene:
+
+- La hora de origen del evento.
+- Una severidad canónica.
+- El alcance de proyecto y servicio.
+- El entorno y el release.
+- Los identificadores de traza y span, cuando el log tiene un contexto de
+  traza activo.
+- Atributos pequeños y con nombre que dan contexto al evento.
+
+Una respuesta de logs contiene estos valores en `occurred_at`, `severity`,
+`project_id`, `service_name`, `environment`, `release`, `trace_id`, `span_id`
+y `attributes`. Pon el contexto en atributos con nombre, no en el texto del
+mensaje.
+
+Los logs de varios servicios en una misma vista no tienen una relación de
+traza. Solo el contexto de la traza crea esa relación.
+
+## Trazas
+
+Una traza contiene los spans de una solicitud u operación. Un span raíz no
+tiene padre. Un span hijo identifica a su padre. Todos los spans de una traza
+tienen el mismo ID de traza y distintos ID de span. Consulta
+[Trazado distribuido](/es/concepts/distributed-tracing).
+
+Un log, una incidencia, una acción o una métrica que se envía sin contexto de
+traza activo recibe una traza de captura. Esa traza solo contiene spans de
+captura. No muestra la ruta de una solicitud. Consulta
+[Spans de captura](/es/concepts/distributed-tracing#capture-spans).
+
+## <span id="read-the-metric-value">Métricas</span>
+
+Una métrica registra un valor medido a lo largo del tiempo. Lee cada métrica
+con su nombre, unidad, dimensiones, proyecto, intervalo de tiempo e intervalo.
+LogBrew elige el `value` de cada punto según el `kind` y la `temporality` de
+la métrica:
+
+| Contrato de la métrica | `aggregation.code` | `value` del punto |
+| --- | --- | --- |
+| `gauge` con `instant` | `gauge_last` | El último estado del intervalo, como la profundidad de una cola. |
+| `counter` con `delta` | `delta_sum` | La suma de los cambios del intervalo, como las tareas completadas. |
+| `histogram` con `delta` | `distribution_p95` | El percentil 95 aproximado, como la duración de las solicitudes. |
+| Un flujo `cumulative` | `raw_cumulative_last` | El último total sin procesar. No es una tasa. |
+| Otro par | `raw_last` | La última muestra sin procesar. |
+
+Por ejemplo, tres muestras de un contador delta con los valores `2`, `3` y `5`
+en un intervalo dan un `value` de `10` en el punto y un `sample_count` de `3`.
+Tres muestras de un gauge con los mismos valores, en ese orden, dan un `value`
+de `5` en el punto. Un valor p95 no es una media. Alrededor del 95 % de las
+observaciones registradas son iguales o inferiores a él.
+
+Con `status: "ready"`, la agregación derivada está disponible. Con
+`status: "limited"`, lee `aggregation.limitation` y usa solo los valores sin
+procesar. No sumes un gauge ni un flujo acumulativo. Un intervalo sin punto no
+es un cero medido. Para los campos de consulta, lee
+[Filtros de consulta](/es/reference/telemetry-api-filters).
+
+`GET /api/telemetry/metrics/series` devuelve estos puntos. Requiere
+`project_id`, `name` y `since`. Cada serie tiene una `identity` con un `kind`,
+una `unit` y una `temporality`. Las series con identidades distintas se
+mantienen separadas. Cada punto también puede contener:
+
+| Campo | Significado |
+| --- | --- |
+| `min`, `max`, `average` | El rango y la media de las muestras del intervalo. |
+| `p50`, `p95`, `p99` | Percentiles aproximados de un histograma. |
+| `rate_per_second` | La suma del contador delta dividida entre la anchura del intervalo. |
+| `trace_exemplars` | ID de traza muestreados del intervalo. Abre uno para examinar una solicitud de ese intervalo. |
+
+`coverage.truncated` es `true` cuando `series_limit` omitió series de menor
+volumen. Para comparar el intervalo de tiempo de una métrica con el intervalo
+de tiempo anterior de la misma duración, ejecuta:
+
+```bash
+logbrew explain metric '<metric-name>' --project '<project-id>' --since 24h --json
+```
+
+## Incidencias
+
+Una incidencia agrupa fallos repetidos por una huella estable. Tiene una
+severidad, un estado, un número de ocurrencias, una hora en que se vio por
+primera vez y otra en que se vio por última vez. Los detalles de una
+incidencia pueden añadir cadenas de excepciones, marcos de pila, pasos
+anteriores, logs relacionados y una relación con una traza.
+
+`last_seen_at` es la ocurrencia más reciente del grupo. La ocurrencia que
+selecciones puede ser más antigua. Lee las dos horas.
+
+El `status` de una incidencia es `unresolved`, `resolved` o `archived`. La
+versión 1 de la respuesta de la API muestra `archived` como `ignored`. Las
+versiones 2 y 3 de la respuesta añaden `priority` (`high`, `medium` o `low`) y
+`priority_source`. La versión 3 también añade `assignee`. Consulta
+[Valores de estado](/es/guides/issue-workflow#status-values) y
+[Prioridad](/es/guides/issue-workflow#priority).
+
+## Acciones
+
+Una acción registra la actividad de producto. La clasificación admitida la
+marca como vista de página, vista de pantalla o interacción. El nombre del
+evento por sí solo no define la clasificación. Usa
+[Captura de eventos de producto](/es/guides/product-events) para añadir este
+contexto.
+
+Las sesiones no son usuarios. Los sujetos anónimos no son usuarios
+identificados.
+
+## <span id="shared-fields">Campos compartidos</span>
+
+| Campo | Uso |
+| --- | --- |
+| `project_id` | Es el dueño de la telemetría y controla el límite de lectura. |
+| `service_name` | Identifica la app o el servicio que envió la señal. |
+| `environment` | Separa los datos de producción, staging, preview y local. |
+| `release` | Identifica la versión del código desplegada. |
+| `occurred_at` | Da la hora de origen de un log o una acción. Los spans usan `started_at`. |
+| `trace_id` | Vincula las señales capturadas en el mismo contexto de traza. |
+| `span_id` | Identifica el span al que pertenece una señal dentro de su traza. |
+
+## <span id="severity-values">Valores de severidad</span>
+
+| Valor canónico | Alias aceptados como entrada |
+| --- | --- |
+| `info` | `trace`, `debug`, `info` |
+| `warning` | `warn`, `warning` |
+| `error` | `error` |
+| `critical` | `fatal`, `critical` |
+
+LogBrew acepta los alias como entrada en mayúsculas o minúsculas. La API, la
+CLI y los eventos en vivo usan los valores canónicos. Los valores de severidad
+desconocidos se rechazan. La severidad es la urgencia registrada. No muestra
+el impacto en el negocio ni la causa raíz.
+
+Un usuario puede cambiar la severidad que se muestra de una incidencia o un
+log. La respuesta contiene entonces un objeto `triage` con
+`effective_severity`. El campo `severity` conserva el valor capturado.
+
+## Lecturas en vivo e instantáneas
+
+`logbrew read` devuelve una instantánea del proyecto, el intervalo de tiempo y
+los filtros seleccionados. Vuelve a ejecutarlo para leer eventos nuevos.
+`logbrew watch` transmite los nuevos logs, incidencias y acciones mientras la
+conexión está abierta. No transmite trazas ni métricas. Un fallo de conexión
+no demuestra que el proyecto esté vacío.
+
+## <span id="evidence-quality-and-trace-lifecycle">Estados de la evidencia</span>
+
+Las respuestas mantienen separados estos estados: capturado, ausente, oculto,
+truncado y no disponible. La evidencia de una traza tiene cuatro estados:
+`available`, `not_linked`, `not_found` y `unavailable`. Consulta la
+[introducción](/es/introduction#follow-exact-relationships) para su
+significado, y
+[Límites de la evidencia](/es/introduction#read-evidence-states-before-drawing-a-conclusion)
+para los campos de cobertura. Un SDK más reciente no añade campos a los
+eventos que envió antes.
+
+## <span id="a-practical-investigation">Investiga un proyecto</span>
+
+<Steps>
+  <Step title="Encuentra las incidencias sin resolver">
+    ```bash
+    logbrew read issues --project '<project-id>' --status unresolved --since 24h --json
+    ```
+  </Step>
+
+  <Step title="Lee una incidencia">
+    Esto lee el historial conservado de la incidencia. El filtro `--since` de
+    la lista no se aplica.
+
+    ```bash
+    logbrew investigate issue '<issue-id>' --json
+    ```
+  </Step>
+
+  <Step title="Abre una traza disponible">
+    Usa el ID de traza solo cuando la ocurrencia seleccionada devuelva uno.
+
+    ```bash
+    logbrew read trace '<trace-id>' --project '<project-id>' --json
+    ```
+  </Step>
+
+  <Step title="Lee la evidencia relacionada">
+    Filtra los logs, las acciones y las métricas con el mismo proyecto,
+    servicio, entorno y release. No vincules señales solo por la hora.
+  </Step>
+</Steps>
+
+Para los campos de respuesta, lee la [API de telemetría](/es/reference/telemetry-api) y
+[Formatos de respuesta](/es/reference/telemetry-response-shapes).

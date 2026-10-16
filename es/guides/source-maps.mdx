@@ -1,0 +1,260 @@
+---
+title: "Mapas de origen de JavaScript con Vite"
+sidebarTitle: "Mapas de origen de JavaScript"
+description: "Sube los mapas de origen de JavaScript de un build de Vite. Mantén las credenciales fuera de tu app. Asocia los marcos minificados a su código original."
+---
+
+Un archivo JavaScript minificado puede poner muchas líneas de código en una
+sola. Un marco de pila de ese archivo apunta a una línea y una columna
+generadas. Un
+[mapa de origen](https://ecma-international.org/publications-and-standards/standards/ecma-426/)
+conecta esa posición con el archivo, la línea y la columna originales.
+
+Esta guía usa el plugin de Vite de `@logbrew/sdk` 0.1.28. Necesitas una app
+Vite, acceso a la salida de su build y permiso para crear una clave de
+proyecto. Para los archivos de depuración de Apple, consulta
+[Fallos y bloqueos de Apple](/es/guides/apple-crashes-and-hangs).
+
+## Mantén juntos el build y los eventos
+
+Usa el mismo proyecto, release, entorno y servicio para la carga y para los
+eventos de ejecución de la app. Consulta [Releases](/es/concepts/releases) para
+los nombres de versión. Esta guía usa `web@1.2.3`, `staging` y
+`checkout-web`.
+
+Cambia el release cuando cambie el código compilado. Sube el build preparado y
+después despliega ese mismo build. No vuelvas a compilar ni cambies su
+JavaScript después de la carga.
+
+## Añade el plugin de Vite
+
+Instala el SDK en el directorio de la app:
+
+```bash
+npm install @logbrew/sdk@0.1.28
+```
+
+Añade el plugin a `vite.config.js`. Mantén tus otros plugins y ajustes de
+build. Sustituye el ID del proyecto:
+
+```js
+import { createLogBrewViteReleaseArtifactsPlugin } from "@logbrew/sdk/vite-release-artifacts";
+
+export default {
+  plugins: [
+    createLogBrewViteReleaseArtifactsPlugin({
+      projectId: "<project_id>",
+      release: "web@1.2.3",
+      environment: "staging",
+      service: "checkout-web",
+      minifiedPathPrefix: "https://app.example.com"
+    })
+  ]
+};
+```
+
+`minifiedPathPrefix` es la URL desplegada del directorio del build. El plugin
+añade la ruta de cada archivo dentro de ese directorio. Por ejemplo,
+`dist/assets/app.js` se convierte en `https://app.example.com/assets/app.js`.
+Si sirves el build en `/web`, incluye `/web` en el prefijo. No añadas
+`/assets` al prefijo.
+
+Sin una opción `upload`, el plugin no envía nada a LogBrew. Además:
+
+- Define `build.sourcemap` como `"hidden"` si no lo defines tú. Si lo
+  defines como `false`, cámbialo a `"hidden"`.
+- Conserva los nombres de las funciones si no defines opciones del
+  minificador. Si defines las tuyas, conserva los nombres en ellas.
+
+Los mapas de origen ocultos quedan en la salida del build como archivos
+normales. No tienen control de acceso. No uses mapas de origen en línea. El
+plugin no acepta un mapa dentro del archivo JavaScript.
+
+## Compila y comprueba en local
+
+Ejecuta el build de producción:
+
+```bash
+npm run build
+```
+
+El plugin asigna a cada archivo JavaScript y a su mapa de origen el mismo
+Debug ID. Elimina el `sourcesContent` incrustado y la ruta local de la raíz de
+la app. Escribe `dist/logbrew-release-artifacts.json`.
+
+Abre el manifiesto. Comprueba que `validation.status` es `ready` y que
+incluye los archivos de este build y sus URL desplegadas. Los mapas ocultos
+generan el aviso `sourceMappingURL comment missing`. Ese aviso es esperado.
+
+No subas un mapa que contenga una ruta privada o código fuente que no quieras
+compartir. La carga también contiene el JavaScript compilado, así que mantén
+los secretos fuera del bundle de la app.
+
+Comprueba la carga en local. Este comando no envía ninguna solicitud y no
+necesita clave:
+
+```bash
+npx --no-install logbrew-release-artifacts upload-js \
+  --build-dir dist \
+  --manifest dist/logbrew-release-artifacts.json \
+  --endpoint https://api.logbrew.co/api/release-artifacts \
+  --allow-hosted \
+  --dry-run
+```
+
+Continúa solo cuando el comando termine con el código `0` y muestre
+`"status": "dry_run"`. Esto comprueba los archivos locales y el manifiesto. No
+prueba el servidor. Si tu build usa otro directorio de salida, cambia las dos
+rutas.
+
+Para comprobar una asociación, ejecuta la app compilada y copia un marco de
+pila generado con su archivo, línea y columna:
+
+```bash
+npx --no-install logbrew-release-artifacts symbolicate-js \
+  --build-dir dist \
+  --manifest dist/logbrew-release-artifacts.json \
+  --stack-frame "at checkoutTotal (https://app.example.com/assets/index-a1b2c3.js:2:780)"
+```
+
+Comprueba que el resultado tiene `"status": "resolved"`. El objeto `original`
+muestra el archivo de origen, la línea y la columna. Este comando se ejecuta
+en local y no sube nada.
+
+## <span id="create-an-artifact-key">Crea una clave de artefactos</span>
+
+Inicia sesión con la [CLI de LogBrew](/es/guides/cli). Busca el ID del
+proyecto:
+
+```bash
+logbrew projects --json
+```
+
+Crea una clave de artefactos para el proyecto. Usa una ruta de archivo nueva
+en un directorio al que solo accede su propietario:
+
+```bash
+install -d -m 700 "$HOME/.logbrew" &&
+logbrew projects keys create "<project_id>" \
+  --ingest-key-file "$HOME/.logbrew/checkout-web.artifact" \
+  --label "Checkout web build" \
+  --kind artifact \
+  --json
+```
+
+Continúa solo cuando el comando termine correctamente. Si el resultado no está
+claro, vuelve a ejecutar el mismo comando con los mismos argumentos. No uses
+`--abandon-retry`.
+
+Una clave de artefactos está limitada al proyecto y solo permite escribir.
+Sube mapas de origen y archivos de depuración. No puede enviar telemetría ni
+leer los metadatos de los artefactos. No uses en su lugar una credencial de
+cuenta ni una clave del SDK de ejecución.
+
+Guarda la clave como `LOGBREW_RELEASE_ARTIFACT_TOKEN` en los ajustes de
+secretos de tu entorno de build. No la muestres ni la incluyas en un commit.
+No la pongas en una variable visible para el cliente, como `VITE_*` o
+`EXPO_PUBLIC_*`.
+
+Define la variable en el proceso que ejecuta la carga. El helper no lee
+archivos `.env`. Vite no los carga en `process.env` durante la
+[evaluación de la configuración](https://vite.dev/config/#using-environment-variables-in-config).
+
+## Sube el build preparado
+
+Usa los mismos archivos y el mismo manifiesto que comprobaste. Este comando
+envía la carga a LogBrew:
+
+```bash
+npx --no-install logbrew-release-artifacts upload-js \
+  --build-dir dist \
+  --manifest dist/logbrew-release-artifacts.json \
+  --endpoint https://api.logbrew.co/api/release-artifacts \
+  --allow-hosted
+```
+
+`"status": "uploaded"` indica que LogBrew aceptó la carga. Si el comando
+termina con un error, detente y consulta la tabla de abajo.
+
+El helper reintenta hasta 2 veces ante un error de red o una respuesta `408`,
+`429` o `5xx`. Envía cada vez los mismos archivos preparados. Usa
+`--max-retries` para cambiar el número de reintentos.
+
+Cuando la carga manual funcione, puedes subir durante el build de Vite. Añade
+esta opción a la configuración del plugin:
+
+```js
+upload: {
+  endpoint: "https://api.logbrew.co/api/release-artifacts",
+  allowHostedUpload: true,
+  tokenEnv: "LOGBREW_RELEASE_ARTIFACT_TOKEN"
+}
+```
+
+Usa un solo método de carga. El plugin detiene el build si hay un error de
+preparación o de carga. Añade `dryRun: true` para probar sin subir nada.
+
+El plugin no elimina los mapas de origen del directorio de salida. No
+despliegues los archivos `.map` ni el manifiesto en el sitio web público ni en
+la CDN.
+
+Para asociar un marco de una incidencia capturada, ejecuta `symbolicate-js`
+con ese marco sobre el mismo build preparado.
+
+## <span id="verify-a-new-issue">Lee una incidencia nueva</span>
+
+Despliega el mismo build preparado en el entorno de pruebas. Provoca un error
+de prueba seguro a través de tu flujo de captura de incidencias. No envíes
+datos introducidos por usuarios, credenciales ni una pila sin procesar en esta
+prueba.
+
+Busca la nueva incidencia con el mismo contexto de proyecto y build:
+
+```bash
+logbrew read issues --project "<project_id>" \
+  --release "web@1.2.3" --environment staging \
+  --service checkout-web --since 1h --json
+```
+
+Copia el ID de la incidencia del resultado. Lee su ocurrencia más reciente:
+
+```bash
+logbrew investigate issue "<issue_id>" --occurrence latest --json
+```
+
+Lee primero la hora del evento, el proyecto, el servicio, el entorno y el
+release. Después, lee `event.stack_frames`. Un marco con
+`source: "symbolicated"` tiene el archivo, la línea y la columna originales de
+tu carga. Un marco con `source: "captured"` tiene la ubicación que envió la
+app.
+
+`logbrew read issue "<issue_id>" --json` también devuelve un objeto
+`symbolication`. Cada marco tiene en él un `status`: `resolved`,
+`artifact_not_found`, `source_not_resolved`, `invalid_metadata` o
+`unavailable`. Solo un marco `resolved` tiene una ubicación original.
+
+LogBrew asocia los marcos cuando lees la incidencia. Una carga posterior al
+error puede asociar un evento anterior que tenga el mismo Debug ID. Un marco
+asociado apunta al código que debes examinar. No muestra qué causó el error.
+Consulta [Investigar una incidencia](/es/guides/investigate-an-issue) para los
+demás campos.
+
+## Soluciona una comprobación fallida
+
+| Resultado | Siguiente paso |
+| --- | --- |
+| El estado del manifiesto no es `ready` | Lee `validation.errors`. Corrige los ajustes del build y vuelve a compilar. No edites el manifiesto. |
+| El build se detiene porque falta un mapa de origen o está en línea | Define `build.sourcemap` como `"hidden"` o `true`. Vuelve a compilar. |
+| `auth_missing` | Define `LOGBREW_RELEASE_ARTIFACT_TOKEN` en el proceso de carga. Una prueba en seco no prueba la clave. |
+| `auth_failed` (`401` o `403`) | Usa una clave de artefactos del mismo proyecto. No uses una clave de ejecución ni de cuenta. |
+| `validation_failed` (`400` o `413`) | Comprueba los archivos preparados y su tamaño. No vuelvas a enviar la misma carga. |
+| `validation_failed` con un error local | Lee `validation.errors`. Si un archivo cambió después del build, vuelve a compilar y comprobar. |
+| `retryable_error` | Todos los reintentos fallaron tras un error de red, `408`, `429` o un error del servidor. Reintenta más tarde con los mismos archivos preparados. |
+| `upload_failed` | El servidor devolvió otro estado. Comprueba el valor de `--endpoint`. |
+| El marco no se resuelve | Comprueba el Debug ID, el prefijo de la URL desplegada y el build. No uses un mapa de otro build o release. |
+| No aparece ninguna incidencia nueva | Comprueba la captura de incidencias, la clave de ejecución y el filtro de tiempo antes de probar los mapas de origen. |
+
+Mantén los archivos de código fuente, las claves y las rutas privadas fuera de
+los mensajes a soporte. Consulta
+[Solución de problemas](/es/guides/troubleshooting) y
+[Errores de la API](/es/reference/api-errors).
