@@ -43,6 +43,10 @@ has:
 - Trace and span identifiers when the log has active trace context.
 - Small, named attributes with context for the event.
 
+A log response contains these values in `occurred_at`, `severity`,
+`project_id`, `service_name`, `environment`, `release`, `trace_id`, `span_id`,
+and `attributes`. Put context in named attributes, not in the message text.
+
 Logs from several services in one view do not have a trace relationship.
 Only trace context creates that relationship.
 
@@ -52,6 +56,11 @@ A trace contains the spans of one request or operation. A root span has no
 parent. A child span identifies its parent. All spans in a trace have the same
 trace ID and different span IDs. See
 [Distributed tracing](/concepts/distributed-tracing).
+
+A log, issue, action, or metric sent without active trace context gets a
+capture trace. That trace contains only capture spans. It does not show a
+request path. See
+[Capture spans](/concepts/distributed-tracing#capture-spans).
 
 ## <span id="read-the-metric-value">Metrics</span>
 
@@ -67,11 +76,37 @@ point's `value` from the metric `kind` and `temporality`:
 | A `cumulative` stream | `raw_cumulative_last` | The last raw total. It is not a rate. |
 | Another pair | `raw_last` | The last raw sample. |
 
+For example, three delta-counter samples with the values `2`, `3`, and `5` in
+one interval give a point `value` of `10` and a `sample_count` of `3`. Three
+gauge samples with the same values, in that order, give a point `value` of
+`5`. A p95 value is not an average. About 95% of the recorded observations
+are at or below it.
+
 For `status: "ready"`, the derived aggregation is available. For
 `status: "limited"`, read `aggregation.limitation` and use only the raw
 values. Do not sum a gauge or a cumulative stream. An interval without a
 point is not a measured zero. For the query fields,
 read [Telemetry API filters](/reference/telemetry-api-filters).
+
+`GET /api/telemetry/metrics/series` returns these points. It requires
+`project_id`, `name`, and `since`. Each series has one `identity` with a
+`kind`, `unit`, and `temporality`. Series with different identities stay
+separate. Each point can also contain:
+
+| Field | Meaning |
+| --- | --- |
+| `min`, `max`, `average` | The range and mean of the samples in the interval. |
+| `p50`, `p95`, `p99` | Approximate percentiles for a histogram. |
+| `rate_per_second` | The delta-counter sum divided by the interval width. |
+| `trace_exemplars` | Trace IDs sampled from the interval. Open one to examine a request from that interval. |
+
+`coverage.truncated` is `true` when `series_limit` omitted lower-volume
+series. To compare a metric window with the previous window of the same
+length, run:
+
+```bash
+logbrew explain metric '<metric-name>' --project '<project-id>' --since 24h --json
+```
 
 ## Issues
 
@@ -82,6 +117,13 @@ logs, and a trace relationship.
 
 `last_seen_at` is the newest occurrence in the group. The occurrence that you
 select can be older. Read both times.
+
+An issue `status` is `unresolved`, `resolved`, or `archived`. API response
+version 1 shows `archived` as `ignored`. Response versions 2 and 3 add
+`priority` (`high`, `medium`, or `low`) and `priority_source`. Version 3 also
+adds `assignee`. See
+[Status values](/guides/issue-workflow#status-values) and
+[Priority](/guides/issue-workflow#priority).
 
 ## Actions
 
@@ -100,8 +142,9 @@ Sessions are not users. Anonymous subjects are not identified users.
 | `service_name` | Identifies the app or service that sent the signal. |
 | `environment` | Separates production, staging, preview, and local data. |
 | `release` | Identifies the deployed code version. |
-| `occurred_at` | Gives the source time of one event. |
+| `occurred_at` | Gives the source time of one log or action. Spans use `started_at`. |
 | `trace_id` | Links signals captured in the same trace context. |
+| `span_id` | Identifies the span that a signal belongs to in its trace. |
 
 ## Severity values
 
@@ -112,24 +155,31 @@ Sessions are not users. Anonymous subjects are not identified users.
 | `error` | `error` |
 | `critical` | `fatal`, `critical` |
 
-SDKs accept the aliases as input. The API, CLI, and live events use the
-canonical values. Unknown severity values are rejected. Severity is the
-recorded urgency. It does not show business impact or root cause.
+LogBrew accepts the aliases as input in any letter case. The API, CLI, and
+live events use the canonical values. Unknown severity values are rejected.
+Severity is the recorded urgency. It does not show business impact or root
+cause.
+
+A user can change the displayed severity of an issue or a log. The response
+then contains a `triage` object with `effective_severity`. The `severity`
+field keeps the captured value.
 
 ## Live and snapshot reads
 
 `logbrew read` returns a snapshot for the selected project, time range, and
-filters. Run it again to read new events. `logbrew watch` streams new events
-while the connection is open. A connection failure does not show that the
-project is empty.
+filters. Run it again to read new events. `logbrew watch` streams new logs,
+issues, and actions while the connection is open. It does not stream traces
+or metrics. A connection failure does not show that the project is empty.
 
 ## <span id="evidence-quality-and-trace-lifecycle">Evidence states</span>
 
 Responses keep these states separate: captured, missing, redacted, truncated,
 and unavailable. Trace evidence has four states: `available`, `not_linked`,
 `not_found`, and `unavailable`. See the
-[introduction](/introduction#follow-exact-relationships) for their meaning.
-A newer SDK does not add fields to events that it sent earlier.
+[introduction](/introduction#follow-exact-relationships) for their meaning,
+and [Evidence limits](/introduction#read-evidence-states-before-drawing-a-conclusion)
+for the coverage fields. A newer SDK does not add fields to events that it
+sent earlier.
 
 ## <span id="a-practical-investigation">Investigate one project</span>
 
