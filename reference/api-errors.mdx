@@ -29,7 +29,7 @@ wording of `error` or `next`.
 | `next_action.target` | The object that the recovery action applies to, such as `auth` or `request`. |
 
 Some responses add fields, such as `limit`, `reset_at`, or
-`retry_after_seconds`. The sections below name them.
+`retry_after_seconds`. The [error codes](#error-codes) table names them.
 
 ## Handle an error response
 
@@ -38,11 +38,16 @@ Some responses add fields, such as `limit`, `reset_at`, or
 3. Use the status and `code` together to select the client branch.
 4. Show `error` and `next` as plain text. Do not render them as HTML or run them as commands.
 5. Use `next_action` for automatic recovery. If the client does not recognize the action, stop and show the error.
-6. Before you retry, use the [retry rules](#retry-rules).
+6. Keep the returned `limit`, `reset_at`, and `retry_after_seconds` values with the failed request.
+7. Before you retry, use the [retry rules](#retry-rules).
 
 If the response has no JSON envelope, keep the HTTP status and record the code
 as unavailable. Do not invent a LogBrew `code`. A proxy or network failure can
 produce this result.
+
+Do not replace a LogBrew `code` with the HTTP status name. For example, a
+`400` response can contain `invalid_json` or `invalid_path`. Each code needs a
+different correction.
 
 For logs, record the HTTP status and `code`. Do not log the full body,
 credentials, or recovery tokens.
@@ -50,48 +55,87 @@ credentials, or recovery tokens.
 ## Error codes
 
 The same `code` can occur on more than one route. The `next` text and the
-`next_action` values can change by route. Use the returned values.
+`next_action` values can change by route. Use the returned values. An
+endpoint returns only the codes that apply to its authentication, method,
+body, and limits.
 
 | HTTP | `code` | Meaning | Client action |
 | --- | --- | --- | --- |
-| `400` or `422` | `validation_failed` | A query value, field, filter, cursor, or time range is not valid. | Correct the named value. Then send the request again. |
-| `400` or `422` | `invalid_json` | The body is not valid JSON or does not match the route's JSON shape. | Send valid JSON with `Content-Type: application/json`. |
+| `400`, `413`, `415`, or `422` | `invalid_json` | The body is not valid JSON, is too large, has the wrong content type, or does not match the route's JSON shape. | Send valid JSON with `Content-Type: application/json` and the fields that the route needs. |
+| `400`, `413`, or `500` | `invalid_multipart` | The server cannot read a `multipart/form-data` upload. | For `400` or `413`, correct the form or its size. For `500`, use the [retry rules](#retry-rules). |
+| `400` or `500` | `invalid_path` | The server cannot read a value in the URL path, such as a project or issue ID. | For `400`, correct the ID and its type. For `500`, use the [retry rules](#retry-rules). |
+| `400`, `405`, or `426` | `invalid_websocket_upgrade` | A live feed connection is not a valid WebSocket upgrade. | Connect with `GET` and WebSocket upgrade headers. See the [live event format](/reference/telemetry-response-shapes#live-event-response-format). |
 | `401` | `unauthorized` | Account authentication is missing, invalid, or expired. | Sign in again. For the CLI, run `logbrew login`. |
 | `401` | `ingest_key_invalid` | Telemetry ingestion has no valid project-scoped ingest key. | Configure a current ingest key for that project. |
+| `402` | `subscription_required` | The action needs a paid plan. | Follow `next`. It names the plan step or tells you to contact support. |
 | `403` | `forbidden` | The account cannot access the resource or action. | Use an account that has access. Do not try other IDs. |
-| `404` | `not_found` | The resource is not available to the account. | Read an owned list again. Then examine the ID and filters. |
+| `403` | `role_forbidden` | The account cannot make this organization role change. | Ask an organization owner or admin to make the change. |
+| `404` | `not_found` | The resource or API route is not available to the account. | Read an owned list again. Then examine the ID, the path, and the filters. |
 | `405` | `method_not_allowed` | The route exists, but the HTTP method is not supported. | Use the method that `next` names. |
 | `408` | `request_timeout` | The request did not complete in time. | Narrow the scope, or wait and send the request again. |
-| `409` | `idempotency_conflict` | An idempotency key was used again for a different request. | Retry the original request unchanged, or use a new key for new work. |
+| `409` | `idempotency_conflict` | An `Idempotency-Key` or `deployment_id` was used again for a different request. | Retry the original request unchanged, or use a new key for new work. |
+| `409` | `account_link_conflict` | The sign-in identity belongs to a different account. | Resolve the account link in account settings. Do not create a second account for the same identity. |
 | `409` | `account_recovery_available` | The account is in its recovery window. | Follow the returned recovery action. Keep the recovery token private. |
 | `410` | `account_recovery_expired` | The account recovery window ended. | Sign in to create a new account. |
-| `429` | `rate_limited` | The caller sent too many requests. | Wait for `retry_after_seconds` when present. Then retry with backoff. |
-| `429` | `usage_limit_exceeded` | Ingestion reached the account's event or byte allowance. | Read `limit` and `reset_at`. Wait for the reset or change the plan. |
-| `429` | `project_limit_exceeded` | The account reached its project allowance. | Archive an unused project or review account limits. |
-| `5xx` | `storage_error`, `json_error`, or `internal_error` | The server did not complete the request. | Use the [retry rules](#retry-rules). If the failure continues, [report a problem](/guides/report-a-problem). |
+| `422` | `validation_failed` | A query value, field, filter, cursor, header, or time range is not valid. | Correct the named value. Then send the request again. |
+| `422` | `invite_invalid` | An organization invitation has an invalid email address or role. | Correct the invitation. Then send it again. |
+| `422` | `member_limit_exceeded` | The organization has its maximum number of members. | Ask the organization owner to remove a member or change the plan. |
+| `422` | `organization_limit_exceeded` | The account has its maximum number of organizations. | Remove an organization, change the plan, or contact support. |
+| `423` | `organization_paused` | The organization is paused because its paid subscription is not active. | Resume an active paid subscription. |
+| `429` | `rate_limited` | The caller sent too many requests. Adds `retry_after_seconds`. | Wait for `retry_after_seconds`. Then retry with backoff. |
+| `429` | `usage_limit_exceeded` | Ingestion reached the account's allowance for the billing period. Adds `limit` and `reset_at`. | Stop ingestion until `reset_at`, or change the plan. |
+| `429` | `artifact_storage_limit_exceeded` | A release artifact or debug file upload reached a storage limit. Adds `limit`. | Wait before you upload again. If the limit stays, contact support. |
+| `429` | `invitation_limit_exceeded` | The organization reached its daily invitation allowance. Adds `limit` and `reset_at`. | Wait for `reset_at` or change the plan. |
+| `500` | `storage_error`, `json_error`, or `internal_error` | The server did not complete the request. | Use the [retry rules](#retry-rules). If the failure continues, [report a problem](/guides/report-a-problem). |
+| `503` | `service_unavailable` | The API cannot accept the request at this time. | Wait. Then send the request again. |
+| `503` | `artifact_storage_unavailable` | Release artifact and debug file uploads are temporarily unavailable. | Wait before you upload again. Do not start parallel uploads. |
+| `503` | `billing_unavailable` | Billing checkout or plan management is temporarily unavailable. | Wait. Then try the billing action again. |
 
 An unknown ID and an ID that you cannot access can return the same response.
-Do not use error text to find which account owns an ID.
+Do not use error text to find which account owns an ID. An unknown API path
+returns `404` with `not_found`.
+
+### Limit fields
+
+| `code` | `limit` values | Other fields |
+| --- | --- | --- |
+| `usage_limit_exceeded` | `issue_events`, `log_bytes`, `metric_bytes`, or `trace_spans` | `reset_at`: the end of the billing period (RFC3339). |
+| `invitation_limit_exceeded` | `invitations_per_day` | `reset_at`: the start of the next UTC day (RFC3339). |
+| `artifact_storage_limit_exceeded` | A storage boundary name, such as `artifact_completed_project_bytes` | None. |
+| `rate_limited` | None | `retry_after_seconds`: whole seconds to wait, at least `1`. |
+
+Read the current allowance and use from the
+[account API](/reference/account-api#account-usage).
 
 ## Retry rules
 
 Use the code and the operation to decide on a retry. The status alone is not
 sufficient.
 
-- Do not retry `validation_failed`, `invalid_json`, `unauthorized`,
-  `ingest_key_invalid`, `forbidden`, `not_found`, or `method_not_allowed`
-  without a change. Correct the request or the credential first.
-- For `rate_limited`, wait for `retry_after_seconds` or the `Retry-After`
-  header when present. Then use exponential backoff with jitter. Do not start
-  parallel retries for one failed request.
-- For `usage_limit_exceeded`, stop ingestion until `reset_at` or until the
-  plan changes. A fast retry loop cannot change an allowance.
-- For `request_timeout` and `5xx` responses, you can send a read again with
-  the same scope. A timeout does not prove that the result is empty.
+| Response | Retry rule |
+| --- | --- |
+| `validation_failed`, `invalid_json`, `invalid_path` (`400`), `invalid_multipart` (`400` or `413`), or `invalid_websocket_upgrade` | Correct the named request value first. Do not send the same request again. |
+| `unauthorized` or `ingest_key_invalid` | Replace or refresh the correct credential first. |
+| `forbidden`, `role_forbidden`, or `not_found` | Do not retry with other IDs. Read an owned list again, or get access from the owner. |
+| `method_not_allowed` | Use the method in `next`. Do not send the rejected method again. |
+| `idempotency_conflict` | Retry the original request unchanged, or use a new key for new work. |
+| `rate_limited` | Wait for `retry_after_seconds`. Then use exponential backoff with jitter. |
+| `usage_limit_exceeded` or `invitation_limit_exceeded` | Wait for `reset_at`, or change the plan. |
+| `artifact_storage_limit_exceeded` | Wait before you upload again. If the limit stays, contact support. |
+| `subscription_required`, `organization_paused`, `member_limit_exceeded`, or `organization_limit_exceeded` | Follow `next`. A retry without a plan or membership change fails again. |
+| `request_timeout`, `service_unavailable`, `artifact_storage_unavailable`, or `billing_unavailable` | Wait. Then send a read again with the same scope. For a write, use the [write rules](#writes). |
+| `storage_error`, `json_error`, `internal_error`, or another `5xx` | Wait. Then send a read again. For a write, use the [write rules](#writes). If the failure continues, [report a problem](/guides/report-a-problem). |
+
+- Do not start parallel retries for one failed request.
+- For `rate_limited`, the response also has the `Retry-After` and
+  `X-RateLimit-After` headers. Both contain the same number of seconds as
+  `retry_after_seconds`.
+- A timeout does not prove that the result is empty.
 
 A rate limit controls request frequency. A usage limit controls the account
-allowance for a period. Both use `429`. Keep their fields separate. Read the
-current allowance from the [account API](/reference/account-api#account-usage).
+allowance for a billing period. Both use `429`. Keep their fields separate.
+During either limit, show that collection or a read is delayed. Do not show
+old data as the result of a new read.
 
 ### Writes
 
@@ -104,21 +148,170 @@ failed. Before you send a write again:
    write again only if the change is not present.
 3. If you cannot find the result, stop automatic retries and tell the user.
 
+These routes accept a retry key:
+
+| Route | Retry key |
+| --- | --- |
+| `POST /api/projects` | Optional `Idempotency-Key` header. |
+| `POST /api/projects/{project_id}/ingest-keys` | Optional `Idempotency-Key` header. |
+| `POST /api/support/tickets` | Optional `Idempotency-Key` header. |
+| `POST /api/support/tickets/{ticket_id}/context` | Required `Idempotency-Key` header. |
+| `POST /api/telemetry/deployments` | The `deployment_id` field in the body. |
+
+An `Idempotency-Key` value has 1 to 128 visible ASCII characters. Other values
+return `422` with `validation_failed`.
+
 `idempotency_conflict` means that the key belongs to a different request. Do
 not change the body of a retry that uses the original key.
+
+## Request shape errors
+
+`invalid_json` means that the server cannot accept the body as the route's JSON
+shape. Examine the content type, body size, JSON syntax, required fields, and
+field types. The HTTP status shows which part failed:
+
+| HTTP | Cause |
+| --- | --- |
+| `400` | The body is not valid JSON. |
+| `413` | The body is too large. |
+| `415` | The `Content-Type` header is not `application/json`. |
+| `422` | The JSON is valid, but a field is missing or has the wrong type. |
+
+`validation_failed` with the error `invalid query parameters` means that the
+server cannot read the query string. Examine the parameter names and value
+types. Do not send unknown query parameters. The
+[query filters reference](/reference/telemetry-api-filters) lists the
+parameters for each route.
+
+`invalid_path` with status `400` means that a path value, such as a project ID,
+has the wrong format. Do not move a path value into a query parameter.
+
+A `500` response with `invalid_path` or `invalid_multipart` does not prove that
+the request was wrong. Use the [retry rules](#retry-rules).
+
+## Authentication and access errors
+
+- `unauthorized` means that account authentication is missing, invalid, or
+  expired. Send `Authorization: Bearer <token>`, or sign in again. Some
+  routes return `next_action.code` `authorize_request` with a route-specific
+  `next`, such as a live feed connection without a valid ticket.
+- `ingest_key_invalid` applies to telemetry ingestion only. Configure a
+  current key for the exact project.
+- `forbidden` means that the account cannot do the action. Do not retry with
+  other resource IDs.
+- `not_found` means that the resource is not available to the account.
+
+Do not use an ingest key in place of an account bearer. Do not use an account
+bearer in place of an ingest key.
+
+## Keep error details safe
+
+- An `account_recovery_available` response contains a short-lived
+  `recovery_token`. Keep it in protected client state. Do not put it in logs,
+  URLs, screenshots, support reports, or agent prompts.
+- The `500` codes always use the message `Internal error`. The response does
+  not name the component that failed. Do not guess the cause.
+- Do not add credentials, private diagnostics, or customer data to an error
+  that you show.
+- An API response does not give permission for a purchase, a deletion, or
+  another account change. Get the user's approval before those actions.
 
 ## Examples
 
 These examples show the envelope shape. The `error` and `next` text can be
 different on each route.
 
+### Validation failure
+
+```json
+{
+  "error": "issue status must be unresolved, resolved, or archived",
+  "code": "validation_failed",
+  "next": "use status=unresolved, status=resolved, or status=archived",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+### Invalid query parameters
+
+```json
+{
+  "error": "invalid query parameters",
+  "code": "validation_failed",
+  "next": "check query parameter names and value types, then retry",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+### Invalid JSON
+
+```json
+{
+  "error": "invalid JSON request body",
+  "code": "invalid_json",
+  "next": "send Content-Type: application/json with a body matching this endpoint",
+  "next_action": {
+    "code": "send_valid_json",
+    "target": "request"
+  }
+}
+```
+
+### Invalid path value
+
+```json
+{
+  "error": "invalid URL path parameters",
+  "code": "invalid_path",
+  "next": "check path resource IDs and value types, then retry",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+### Invalid multipart upload
+
+```json
+{
+  "error": "invalid multipart form-data request",
+  "code": "invalid_multipart",
+  "next": "send multipart/form-data with a valid boundary and expected parts",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+### Invalid WebSocket upgrade
+
+```json
+{
+  "error": "invalid WebSocket upgrade request",
+  "code": "invalid_websocket_upgrade",
+  "next": "connect with GET /api/feed/live?ticket=<ticket> using WebSocket upgrade headers",
+  "next_action": {
+    "code": "connect_live_feed",
+    "target": "live_feed"
+  }
+}
+```
+
 ### Authentication failure
 
 ```json
 {
-  "error": "Authentication required",
+  "error": "Invalid or expired token",
   "code": "unauthorized",
-  "next": "run logbrew login",
+  "next": "send Authorization: Bearer <token>, include the logbrew_session cookie, or sign in again",
   "next_action": {
     "code": "sign_in",
     "target": "auth"
@@ -126,8 +319,50 @@ different on each route.
 }
 ```
 
-Do not use an ingest key in place of an account bearer. Do not use an account
-bearer in place of an ingest key.
+### Invalid ingest key
+
+This response applies to telemetry ingestion, not to account reads. The key
+must belong to the project in the request.
+
+```json
+{
+  "error": "Invalid ingest key",
+  "code": "ingest_key_invalid",
+  "next": "create a project-scoped ingest key, then retry ingestion with that key",
+  "next_action": {
+    "code": "configure_ingest_key",
+    "target": "project_ingest_key"
+  }
+}
+```
+
+### Resource not found
+
+```json
+{
+  "error": "issue not found",
+  "code": "not_found",
+  "next": "check the resource id or filters and retry",
+  "next_action": {
+    "code": "check_resource",
+    "target": "resource"
+  }
+}
+```
+
+### Access denied
+
+```json
+{
+  "error": "Insufficient permissions",
+  "code": "forbidden",
+  "next": "use an account with access to this resource",
+  "next_action": {
+    "code": "request_access",
+    "target": "auth"
+  }
+}
+```
 
 ### Unsupported method
 
@@ -135,10 +370,38 @@ bearer in place of an ingest key.
 {
   "error": "Method not allowed",
   "code": "method_not_allowed",
-  "next": "send GET /api/account/usage with Authorization",
+  "next": "send GET /api/account/usage with Authorization or the logbrew_session cookie",
   "next_action": {
     "code": "use_supported_method",
     "target": "api_method"
+  }
+}
+```
+
+### Request timeout
+
+```json
+{
+  "error": "Request timed out",
+  "code": "request_timeout",
+  "next": "retry read-only requests later or narrow the request scope. Before repeating a write, check whether it succeeded and follow this endpoint's idempotency guidance",
+  "next_action": {
+    "code": "retry_or_narrow_scope",
+    "target": "request"
+  }
+}
+```
+
+### Idempotency conflict
+
+```json
+{
+  "error": "Idempotency key was already used",
+  "code": "idempotency_conflict",
+  "next": "retry the original support request or use a new Idempotency-Key",
+  "next_action": {
+    "code": "use_new_idempotency_key",
+    "target": "request"
   }
 }
 ```
@@ -149,29 +412,60 @@ bearer in place of an ingest key.
 {
   "error": "Rate limit exceeded",
   "code": "rate_limited",
-  "next": "retry the same request later",
+  "next": "wait for retry_after_seconds, then retry with exponential backoff and jitter",
   "next_action": {
-    "code": "retry",
+    "code": "retry_with_backoff",
     "target": "request"
   },
   "retry_after_seconds": 1
 }
 ```
 
-A `usage_limit_exceeded` response adds `limit` and `reset_at`. `limit` is
-`events` or `bytes`.
+### Usage limit
+
+The `next` text and `next_action` depend on whether a plan change is
+available. Without one, `next_action.code` is `wait_or_contact_support` and
+the target is `support`.
+
+```json
+{
+  "error": "Usage limit exceeded",
+  "code": "usage_limit_exceeded",
+  "next": "wait until reset_at or upgrade your plan before retrying ingestion",
+  "next_action": {
+    "code": "wait_or_upgrade",
+    "target": "billing"
+  },
+  "limit": "log_bytes",
+  "reset_at": "2026-11-01T00:00:00+00:00"
+}
+```
+
+### Artifact storage limit
+
+```json
+{
+  "error": "Release artifact storage limit exceeded",
+  "code": "artifact_storage_limit_exceeded",
+  "next": "wait before retrying the upload, or contact LogBrew support if the limit persists",
+  "next_action": {
+    "code": "wait_or_contact_support",
+    "target": "support"
+  },
+  "limit": "artifact_completed_project_bytes"
+}
+```
 
 ### Account recovery available
 
 This response adds `deleted_at` and a short-lived `recovery_token`. Keep the
-token in protected client state. Do not put it in logs, URLs, screenshots,
-support reports, or agent prompts.
+token in protected client state.
 
 ```json
 {
   "error": "Account recovery available",
   "code": "account_recovery_available",
-  "next": "restore the account to continue",
+  "next": "restore account with POST /api/auth/restore",
   "next_action": {
     "code": "restore_account",
     "target": "account_recovery"
@@ -181,8 +475,56 @@ support reports, or agent prompts.
 }
 ```
 
-An API response does not give permission for a purchase, a deletion, or
-another account change. Get the user's approval before those actions.
+### Account recovery expired
+
+```json
+{
+  "error": "Account recovery window expired",
+  "code": "account_recovery_expired",
+  "next": "create a new account after deletion completes",
+  "next_action": {
+    "code": "create_account",
+    "target": "auth"
+  }
+}
+```
+
+### Organization paused
+
+```json
+{
+  "error": "Organization paused",
+  "code": "organization_paused",
+  "next": "resume an active paid subscription before using this organization",
+  "next_action": {
+    "code": "resume_subscription",
+    "target": "billing"
+  }
+}
+```
+
+### Server error
+
+`storage_error`, `json_error`, and `internal_error` use the same `error`
+message. The `code`, `next`, and `next_action` values are different.
+
+```json
+{
+  "error": "Internal error",
+  "code": "internal_error",
+  "next": "retry read-only requests later. Before repeating a write, check whether it succeeded and follow this endpoint's idempotency guidance. Contact LogBrew support if the problem persists",
+  "next_action": {
+    "code": "retry_or_contact_support",
+    "target": "support"
+  }
+}
+```
+
+| `code` | `next_action.code` | `next_action.target` |
+| --- | --- | --- |
+| `storage_error` | `retry_or_check_storage` | `backend_status` |
+| `json_error` | `send_valid_json` | `request` |
+| `internal_error` | `retry_or_contact_support` | `support` |
 
 For endpoints, authentication, and filters, read the
 [Telemetry API](/reference/telemetry-api).
