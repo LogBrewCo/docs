@@ -1,0 +1,232 @@
+---
+title: "Pelacakan terdistribusi: trace, span, dan konteks"
+sidebarTitle: "Pelacakan terdistribusi"
+description: "Pelajari cara trace dan span terdistribusi menghubungkan permintaan, log, masalah, aksi, dan metrik di LogBrew."
+---
+
+Pelacakan terdistribusi (distributed tracing) mengikuti satu permintaan atau
+operasi melewati layanan yang diinstrumentasi. Trace mengelompokkan span untuk
+pekerjaan itu. Setiap span adalah satu operasi yang diukur waktunya, seperti
+permintaan HTTP, panggilan database, operasi antrean, atau job latar belakang.
+Span yang tidak terekam membuat sebagian jalur tidak diketahui.
+
+Gunakan trace saat log melaporkan kegagalan, tetapi tidak menunjukkan jalur
+operasinya. Trace dapat menunjukkan:
+
+- Operasi mana yang memulai permintaan.
+- Di mana permintaan menghabiskan waktu.
+- Operasi turunan mana yang mengembalikan error.
+- Log, masalah, aksi, dan metrik mana yang punya ID trace yang sama.
+- Layanan, lingkungan, dan rilis mana yang mengirim setiap span.
+
+## Kolom trace dan span
+
+| Kolom | Arti |
+| --- | --- |
+| `trace_id` | Mengidentifikasi trace yang memiliki span itu. |
+| `span_id` | Mengidentifikasi satu operasi dalam trace. |
+| `parent_span_id` | Menghubungkan operasi turunan dengan operasi yang memulainya. Root span tidak punya kolom ini. |
+| `name` | Menamai operasi, seperti template rute. |
+| `operation` | Jenis pekerjaan, seperti `http.server` atau `db.query`. |
+| `status` | Hasil yang dilaporkan, seperti `ok`, `error`, atau `cancelled`. |
+| `started_at` | Waktu operasi dimulai. |
+| `duration_ms` | Lama operasi berjalan, dalam milidetik. |
+| `service_name`, `environment`, `release` | Lingkup layanan yang mengirim span. |
+
+Root span memulai trace dan tidak punya parent. Child span punya ID trace yang
+sama, ID span-nya sendiri, dan ID parent. Hanya ID ini yang menghubungkan
+operasi. Stempel waktu saja tidak cukup. LogBrew menghitung span sebagai span
+error hanya jika `status`-nya `error`.
+
+## Permintaan yang melewati beberapa layanan
+
+1. Layanan web memulai server span untuk rute checkout.
+2. Klien pembayaran membuat child span untuk permintaan HTTP keluarnya.
+3. Layanan pembayaran melanjutkan trace dengan server span-nya sendiri.
+4. Helper database mencatat child span untuk operasi tulis.
+5. Aplikasi mengirim log error yang aman di dalam span pembayaran yang aktif.
+
+Kelima entri itu punya ID trace yang sama. Jika sebuah layanan tidak
+menerima konteks trace, pekerjaannya tidak bergabung ke trace, meskipun
+waktunya tumpang tindih.
+
+## Teruskan konteks
+
+SDK LogBrew memakai W3C trace context. Misalnya, SDK Node.js melanjutkan header
+`traceparent` masuk yang valid dengan span permintaan baru. Jika header itu
+tidak ada atau tidak valid, SDK memulai root baru. Log, masalah, aksi, dan
+metrik yang direkam di dalam lingkup permintaan itu membawa trace permintaan
+tersebut.
+
+Instrumentasi keluar hanya menulis header `traceparent` ke target yang Anda
+konfigurasi, seperti `tracePropagationTargets`. Kirim konteks trace hanya ke
+layanan tepercaya yang sudah diinstrumentasi. ID trace mengorelasikan operasi.
+ID trace bukan autentikasi.
+
+Pesan antrean juga dapat membawa konteks trace. Di Node.js, panggil
+`createLogBrewQueueTraceHeaders()` di operasi producer untuk menambahkan header
+`traceparent` ke pesan. Di consumer, teruskan header itu ke
+`queueOperationWithLogBrewSpan()` sebagai `traceparent`. Lihat
+[Pelacakan antrean JavaScript](/id/guides/sdk-ingestion#javascript-queue-tracing).
+
+Integrasi permintaan dan integrasi keluar untuk Node.js dan Python tidak
+mencatat body permintaan atau respons, string kueri, header sembarang, atau
+nilai `traceparent` mentah di span. Namai span berdasarkan template rute,
+bukan URL konkret. Untuk integrasi runtime Anda, baca panduan
+[Integrasi SDK](/id/guides/sdk-ingestion).
+
+## <span id="capture-spans">Span perekaman</span>
+
+LogBrew menyimpan setiap log, masalah, aksi, dan metrik baru dengan ID trace.
+Jika sebuah sinyal tidak merujuk ke span dalam pengiriman yang sama, LogBrew
+menambahkan satu span perekaman untuknya:
+
+| Kolom | Nilai |
+| --- | --- |
+| `name` | `log capture`, `issue capture`, `action capture`, atau `metric capture` |
+| `operation` | `logbrew.log`, `logbrew.issue`, `logbrew.action`, atau `logbrew.metric` |
+| `duration_ms` | `0` |
+| `parent_span_id` | Span yang aktif saat aplikasi merekam sinyal. Kosong jika tidak ada span yang aktif. |
+| `status` | `error` untuk masalah, log `error` atau `critical`, atau aksi yang gagal. Selain itu kosong. |
+| `attributes.logbrew.evidence` | `signal_capture` |
+
+Setelah itu, `span_id` sinyal mengidentifikasi span perekamannya. Jika sinyal
+tidak punya konteks trace, LogBrew membuat ID trace baru untuknya. Trace itu
+menunjukkan bahwa LogBrew menyimpan sinyal tersebut. Trace itu tidak
+menunjukkan jalur permintaan. Jangan membaca span perekaman dalam satu trace
+sebagai satu permintaan.
+
+Span perekaman ikut dihitung dalam `span_count` dan `error_span_count`. Jadi,
+log error dapat membuat `--status error` memilih trace yang tidak berisi
+operasi aplikasi yang gagal. Baca `operation` setiap span error sebelum Anda
+menarik kesimpulan.
+
+## Baca trace
+
+Gunakan ID trace yang tepat dari log, masalah, atau daftar trace:
+
+```bash
+logbrew read traces --project "<project_id>" --status error --since 24h --json
+logbrew read trace "<trace_id>" --project "<project_id>" --json
+```
+
+`--status error` memilih trace dengan setidaknya satu span error. `--status ok`
+memilih trace tanpa span error. `--min-duration-ms 500` memilih trace yang
+berjalan selama 500 milidetik atau lebih.
+
+Baca durasi root span terlebih dahulu. Lalu periksa child span terlama dan
+status error. Perhatikan proyek, layanan, lingkungan, dan rilisnya, agar trace
+dari staging tidak menjadi bukti tentang produksi.
+
+Satu trace menunjukkan satu eksekusi, bukan acuan performa. Sebelum Anda
+mengusulkan perubahan performa, bandingkan beberapa trace dengan tren metrik
+yang terkait.
+
+### Ringkasan trace
+
+`GET /api/telemetry/traces/{trace_id}/summary` mengembalikan ringkasan tanpa
+atribut span:
+
+| Kolom | Arti |
+| --- | --- |
+| `root_span` | Span paling awal yang parent-nya tidak ada di trace. Jika setiap span punya parent di trace, span paling awal. |
+| `slowest_child_span` | Span terlama yang punya parent. |
+| `slowest_path` | Rantai parent yang diketahui dari root hingga child span paling lambat. |
+| `error_spans` | Hingga 5 span terlama dengan status `error`. |
+| `services` | Jumlah span, jumlah span error, dan durasi span terlama untuk setiap layanan. |
+| `duration_ms` | Waktu dari awal span paling awal hingga akhir span paling akhir. |
+
+Jika `root_span.parent_span_id` punya nilai, root span yang sebenarnya tidak
+ada di trace. Jangan membaca `root_span` sebagai awal permintaan.
+
+### Jelaskan trace
+
+`logbrew explain trace` mengembalikan investigasi trace:
+
+```bash
+logbrew explain trace "<trace_id>" --json
+```
+
+| Kolom | Arti |
+| --- | --- |
+| `analysis.status` | `errors_observed`, `latency_focus`, atau `no_error_observed`. |
+| `analysis.first_error_span`, `analysis.first_error_path` | Span error paling awal dan rantai parent-nya yang diketahui. |
+| `analysis.bottleneck_span`, `analysis.bottleneck_path` | Span terlama yang punya parent, dan rantai parent-nya yang diketahui. |
+| `correlations` | Masalah, log, aksi, dan metrik dengan ID trace yang sama. Setiap daftar punya `status` dan `truncated`. |
+| `evidence` | Kolom yang terekam, tidak terekam, disamarkan, dan dipotong. |
+| `next_actions` | Pembacaan berikutnya, sesuai urutan prioritas. |
+
+`analysis.causality` bernilai `evidence_only`. Analisis ini tidak membuktikan
+akar penyebab. CLI meminta respons versi 3. Di versi ini, setiap masalah, aksi,
+dan metrik terkait juga punya `span_id` yang tepat.
+
+Untuk memeriksa satu span beserta parent, child, dan batas layanannya,
+jalankan:
+
+```bash
+logbrew explain span "<trace_id>" "<span_id>" --project "<project_id>" \
+  --environment production --release "<release>" --json
+```
+
+`topology.parent_chain_status` memberi tahu apakah rantai parent sudah
+lengkap:
+
+| Nilai | Arti |
+| --- | --- |
+| `root` | Span tidak punya ID parent. |
+| `complete` | Setiap parent hingga root span ada di trace. |
+| `missing` | ID parent merujuk ke span yang tidak ada di trace. |
+| `cycle` | ID parent membentuk loop. |
+| `truncated` | Batas respons mencegah rantai yang lengkap. |
+| `unavailable` | Pembacaan trace tidak dapat selesai. |
+
+## Konteks trace yang tidak terekam
+
+Tidak setiap peristiwa punya trace dari permintaannya. Baca status trace:
+
+| Status | Arti |
+| --- | --- |
+| `available` | Bukti trace yang tepat dapat dibaca. |
+| `not_linked` | Peristiwa tidak punya ID trace. Beberapa peristiwa lama tidak punya ID trace. |
+| `not_found` | Peristiwa punya ID trace, tetapi tidak ada trace yang cocok dengan lingkup yang dipilih. |
+| `unavailable` | Bukti trace tidak dapat dibaca saat itu. |
+
+`not_linked` bukan error. Trace `available` juga dapat menunjukkan bahwa
+peristiwa tidak punya konteks permintaan. Jika span perekaman peristiwa tidak
+punya `parent_span_id`, tidak ada span yang aktif saat aplikasi merekam
+peristiwa itu. Pekerjaan latar belakang di luar lingkup permintaan sering
+memberi hasil ini. Untuk menemukan hubungan yang tidak terekam:
+
+1. Baca proyek, layanan, lingkungan, rilis, dan waktu peristiwa.
+2. Periksa apakah pekerjaan itu berjalan di dalam permintaan atau operasi yang
+   diinstrumentasi.
+3. Periksa apakah integrasi klien dan server meneruskan konteks melewati batas
+   itu.
+4. Setelah Anda memperbaiki instrumentasi, rekam peristiwa baru dan baca.
+
+Versi SDK baru tidak menambahkan konteks trace ke peristiwa yang dikirim
+sebelumnya. Jangan menautkan peristiwa ke trace berdasarkan stempel waktu,
+rute, pesan, atau rilis.
+
+## Rencanakan pelacakan untuk satu proyek
+
+Mulai dari satu permintaan atau job yang penting, seperti checkout.
+Instrumentasikan batas satu per satu:
+
+1. Buat span untuk permintaan masuk atau operasi latar belakang.
+2. Tambahkan child span untuk panggilan keluar yang penting.
+3. Teruskan W3C trace context melewati batas layanan yang tepercaya.
+4. Kirim log yang aman di dalam span yang aktif.
+5. Baca log itu, buka ID trace-nya, lalu periksa root, child, layanan,
+   lingkungan, rilis, status, dan durasinya.
+
+Tambahkan batas berikutnya hanya setelah pemeriksaan ini lolos. Trace bersama
+menunjukkan korelasi. Trace bersama tidak membuktikan bahwa satu span
+menyebabkan masalah.
+
+Untuk memeriksa nama span, jalankan
+`logbrew traces --project "<project_id>" --pagination cursor --json`. Objek
+`naming_quality` menghitung trace di halaman itu yang punya nama root generik
+(`generic_name_traces`) atau rute yang tidak cocok (`unmatched_route_traces`).
+Jika penamaan perlu diperbaiki, `naming_quality.next_action.code` bernilai
+`improve_trace_naming`.

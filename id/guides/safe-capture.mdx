@@ -1,0 +1,204 @@
+---
+title: "Penyamaran log: jauhkan data sensitif dari log"
+sidebarTitle: "Kendalikan data yang direkam"
+description: "Pilih kolom log yang disetujui. Jalankan uji lokal untuk data sensitif. Pahami batas kontrol perekaman JavaScript, Node.js, dan browser LogBrew."
+---
+
+Pilih apa yang dikirim aplikasi Anda sebelum mengaktifkan perekaman. Jauhkan
+kata sandi, token akses, isi formulir, dan data pribadi pengguna dari
+peristiwa.
+
+Susun setiap peristiwa dari kolom yang disetujui. Jangan salin seluruh objek
+permintaan, respons, atau error ke metadata. Penyamaran mengganti nilai
+sensitif. Filter membuang satu peristiwa secara utuh. Peristiwa SDK yang valid
+tetap bisa berisi data yang tidak boleh dikirim aplikasi Anda.
+
+Panduan ini berlaku untuk versi paket berikut:
+
+- `@logbrew/sdk` 0.1.28
+- `@logbrew/node` 0.1.12
+- `@logbrew/browser` 0.1.11
+
+Untuk runtime lain, baca panduan paketnya di
+[Integrasi SDK](/id/guides/sdk-ingestion).
+
+## Pilih kolom untuk direkam
+
+Untuk checkout yang gagal, rekam pesan tetap, template rute, dan kode status.
+Jangan rekam nama, alamat email, atau data pembayaran.
+
+| Kolom | Aturan perekaman |
+| --- | --- |
+| Pesan | Gunakan teks tetap seperti `checkout.failed`. Jangan sisipkan teks formulir atau kredensial. |
+| Rute | Gunakan template seperti `/orders/:id`. Path, kueri, atau fragmen URL bisa berisi nilai pribadi. |
+| Status | Terima hanya kode status yang valid, bukan string dari input pengguna. |
+| Metadata | Pilih kolom tertentu berdasarkan nama. Jangan salin semua properti permintaan, respons, atau error. |
+| Subjek dan sesi | Gunakan ID telemetri yang disetujui, bukan token login atau cookie sesi. |
+
+Untuk konteks pengguna dan sesi, lihat
+[Perekaman peristiwa produk](/id/guides/product-events#set-users-and-sessions-on-each-event).
+ID tetap bisa mengidentifikasi seseorang meskipun tidak berisi nama.
+
+## Uji pemilihan kolom secara lokal
+
+Gunakan Node.js 18 atau yang lebih baru. Di direktori kosong, instal paket:
+
+```bash
+npm install --save-exact @logbrew/sdk@0.1.28
+```
+
+Pengujian ini tidak memakai kunci asli dan tidak mengirim permintaan. Simpan
+sebagai `safe-capture.mjs`:
+
+```js
+import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import { LogBrewClient, SdkError } from "@logbrew/sdk";
+
+try {
+  const client = LogBrewClient.create({
+    apiKey: "local-preview-only",
+    sdkName: "privacy-check",
+    sdkVersion: "0.1.28",
+    automaticDelivery: false
+  });
+
+  function recordCheckoutFailure(input) {
+    const status = input?.status;
+    if (!Number.isInteger(status) || status < 400 || status > 599) {
+      return false;
+    }
+    client.log(randomUUID(), new Date().toISOString(), {
+      message: "checkout.failed",
+      level: "error",
+      metadata: { route: "/checkout", status }
+    });
+    return true;
+  }
+
+  const excludedValue = "SYNTHETIC_PRIVATE_VALUE";
+  assert.equal(recordCheckoutFailure({
+    status: 503,
+    authorization: excludedValue,
+    body: excludedValue
+  }), true);
+  assert.equal(recordCheckoutFailure({ status: excludedValue }), false);
+
+  const preview = client.previewJson();
+  const batch = JSON.parse(preview);
+  assert.equal(batch.events.length, 1);
+  assert.equal(preview.includes(excludedValue), false);
+  assert.deepEqual(batch.events[0].attributes.metadata, {
+    route: "/checkout",
+    status: 503
+  });
+  client.purgePendingEvents();
+  console.log(JSON.stringify({
+    ok: true,
+    checked_events: 1,
+    excluded_value_found: false
+  }));
+} catch (error) {
+  console.error(JSON.stringify({
+    ok: false,
+    error: error instanceof SdkError ? error.code : "privacy_check_failed"
+  }));
+  process.exitCode = 1;
+}
+```
+
+
+Jalankan pengujian:
+
+```bash
+node safe-capture.mjs
+```
+
+Output yang diharapkan:
+
+```json
+{"ok":true,"checked_events":1,"excluded_value_found":false}
+```
+
+Asersi yang gagal mencetak `"ok":false` dan keluar dengan kode 1. Error
+validasi SDK mencetak kode error SDK-nya. Jangan cetak atau unggah pratinjau
+yang berisi data asli.
+
+Gunakan pola yang sama di kode perekaman Anda, dan pertahankan asersi itu di
+pengujian Anda. Tambahkan pemeriksaan untuk setiap kolom dan nilai yang tidak
+boleh dikirim aplikasi Anda. Jika Anda memakai penyamaran berbasis pola,
+jalankan lagi pemeriksaan setelah setiap perubahan aturan. Pengujian ini
+memeriksa satu log dalam antrean. Pengujian ini tidak menggantikan tinjauan privasi.
+
+## Pesan error dan stack
+
+| Jalur perekaman | Perilaku |
+| --- | --- |
+| `createIssueAttributesFromError` (core) | Menyimpan teks error di pesan masalah dan di `metadata.errorMessage`. Menambahkan `metadata.errorStack` hanya dengan `includeErrorStack: true`. Entri rantai exception menandai setiap pesan sebagai `redacted` dan tidak membawa teksnya. |
+| Konversi konsol di core | Bisa menyimpan teks error di pesan log dan metadata. |
+| `createBrowserErrorEvent` (browser) | Memakai ringkasan error tetap, menghapus `metadata.errorMessage`, dan menandai pesan di rantai exception sebagai disamarkan. |
+
+`options.message` kustom tidak menghapus `metadata.errorMessage`. Periksa
+seluruh peristiwa, bukan hanya judulnya. Jauhkan nilai sensitif dari pesan
+error sejak di sumbernya.
+
+## Gunakan setiap kontrol dalam lingkupnya
+
+### Core JavaScript dan Node.js
+
+`LogBrewClient.create` menerima `eventFilter`. Kembalikan `false` agar
+peristiwa tidak masuk ke antrean. Nilai kembalian lain mempertahankan
+peristiwa. Filter menerima salinan peristiwa, jadi mengubah salinan itu tidak
+menyamarkan apa pun. `createLogBrewNodeClient` dan
+`createLogBrewBrowserClient` tidak menerapkan `eventFilter` di versi ini.
+
+`droppedEvents()` menghitung peristiwa yang dibuang karena batas ukuran atau
+batas antrean. Fungsi ini tidak menghitung peristiwa yang disaring
+`eventFilter`.
+
+Klien Node menambahkan konteks runtime, seperti versi Node, sistem operasi,
+dan arsitektur. Atur `captureRuntimeContext: false` untuk menghilangkannya.
+Pengaturan ini tidak menghapus konteks yang diberikan aplikasi Anda, dan tidak
+menghentikan perekaman.
+
+### Browser
+
+Secara default, klien browser merekam error global, rejection yang tidak
+ditangani, dan satu tayangan halaman awal. Atur `captureGlobalErrors`,
+`captureUnhandledRejections`, atau `capturePageViews` ke `false` untuk
+mematikan salah satunya.
+
+Tayangan halaman menyertakan pathname. String kueri, fragmen, judul dokumen,
+dan user agent lengkap tidak disertakan, kecuali Anda mengatur
+`includeQueryString`, `includeHash`, `includeDocumentTitle`, atau
+`includeUserAgent`. Jika pathname bisa berisi nilai pribadi, matikan tayangan
+halaman otomatis dan kirim tayangan halaman Anda sendiri dengan nama rute yang
+aman.
+
+`sanitizeMetadata` hanya mengubah metadata. Fungsi ini tidak mengubah nama
+tayangan halaman atau nama aksi. Nama tayangan halaman berisi pathname
+konkret, seperti `page_view /orders/1234`. `routeTemplate` di metadata
+menentukan halaman atau layar di Analitik, tetapi tidak mengubah nama.
+`shouldCaptureError` hanya menyaring masalah browser. Opsi ini tidak memfilter
+log atau sinyal lain.
+
+Atur `captureRuntimeContext: false` untuk menghilangkan merek browser,
+platform, dan keluarga perangkat. Pengaturan ini tidak mengendalikan
+`includeUserAgent`.
+
+## Sebelum perekaman sungguhan
+
+Uji setiap jalur perekaman yang aktif dengan data sintetis, termasuk jalur
+error dan integrasi logging.
+
+Perubahan perekaman hanya berlaku untuk peristiwa baru.
+`purgePendingEvents()` mengosongkan antrean lokal yang sedang tidak aktif, dan
+gagal saat pengiriman sedang berjalan. Fungsi ini tidak menghentikan perekaman
+berikutnya dan tidak menghapus peristiwa yang sudah diterima LogBrew.
+`uninstall()` di browser menghapus listener, tetapi peristiwa dalam antrean
+tetap ada. Metode ini bukan alur persetujuan atau penghapusan data.
+
+Lalu kirim satu peristiwa sintetis dengan panduan
+[Mulai cepat](/id/quickstart). Jika peristiwa itu tidak muncul, lihat
+[Mengatasi kendala](/id/guides/troubleshooting). Untuk error HTTP, lihat
+[Error API](/id/reference/api-errors).

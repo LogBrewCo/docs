@@ -1,0 +1,227 @@
+---
+title: "Mengatasi kendala: log aplikasi tidak muncul"
+sidebarTitle: "Mengatasi kendala"
+description: "Atasi log aplikasi yang tidak muncul, penyiapan proyek, filter, bukti masalah, dan tautan trace dengan pemeriksaan LogBrew yang aman."
+---
+
+Gunakan halaman ini saat telemetri tidak muncul, tidak lengkap, atau terlalu
+luas. Periksa akses terlebih dahulu. Lalu jangan ubah proyek, layanan, rilis,
+lingkungan, dan rentang waktu selama Anda mencari penyebabnya.
+
+<Note>
+  Tambahkan `--json` untuk alur kerja agen. Pemeriksaan yang gagal
+  mengembalikan kolom `next` yang stabil.
+</Note>
+
+## Mulai dengan pemeriksaan cepat
+
+| Gejala | Pemeriksaan pertama | Langkah berikutnya |
+| --- | --- | --- |
+| CLI belum masuk | `logbrew status --json` | Manusia menjalankan `logbrew login`. |
+| Proyek tidak ditemukan | `logbrew projects --json` | Gunakan ID dari daftar proyek. |
+| Status penyiapan tidak jelas | `logbrew doctor --project "<project_id>" --json` | Ikuti nilai `next` yang dikembalikan. |
+| Log kosong | Baca log untuk proyek dan rentang waktu yang tepat | Periksa jenis sinyal lain secara terpisah. |
+| Hasil terlalu luas | Tambahkan filter proyek, layanan, rilis, dan lingkungan | Pertahankan lingkup yang sama di setiap pembacaan. |
+| Trace tidak muncul | Baca detail masalah | Baca trace hanya jika respons berisi ID trace. |
+| Frame JavaScript menampilkan kode hasil build | Periksa pasangan build dan source map | Ikuti [Source map JavaScript](/id/guides/source-maps). |
+| Agen MCP tidak bisa membaca proyek | Periksa proyek yang disetujui | Ikuti [Kendala koneksi MCP](/id/guides/mcp#fix-connection-problems). |
+
+## <span id="recover-missing-first-telemetry">Pulihkan telemetri pertama yang tidak muncul</span>
+
+Jalankan perintah hanya baca ini sebelum Anda mengubah konfigurasi SDK:
+
+```bash
+logbrew version --json
+logbrew status --json
+logbrew projects --json
+logbrew doctor --project "<project_id>" --json
+```
+
+`logbrew doctor` memeriksa akses API, autentikasi, proyek, kunci ingest,
+penyiapan, telemetri, dan visibilitas log. Perintah ini tidak mengubah
+proyek. Baca `status` keseluruhan dan setiap pemeriksaan di
+[laporan doctor](/id/reference/cli#read-a-project-doctor-report). Kode keluar
+`0` tidak berarti semua pemeriksaan lolos.
+
+| Status doctor | Langkah berikutnya |
+| --- | --- |
+| `needs_ingest_key` | Buat kunci ingest khusus proyek. Lihat [Rotasikan kunci ingest](/id/guides/rotate-ingest-key). |
+| `needs_setup` | Selesaikan penyiapan SDK. Lihat [Integrasi SDK](/id/guides/sdk-ingestion). |
+| `needs_telemetry` | Kirim satu peristiwa uji yang aman dari aplikasi, lalu jalankan doctor lagi. |
+| `ready` | Baca log, masalah, rilis, atau trace terbaru. |
+
+Laporan juga bisa berstatus `auth_invalid`, `project_missing`,
+`api_unreachable`, atau `check_failed`.
+[Laporan doctor](/id/reference/cli#read-a-project-doctor-report) memberikan
+langkah berikutnya untuk setiap status.
+
+Proyek yang `ready` tetap bisa tidak punya log, karena setiap jenis sinyal
+terpisah. Pemeriksaan `logs` bisa bernilai `empty` atau `unavailable`.
+Pembacaan log yang gagal bukan hasil kosong.
+
+### Kirim satu peristiwa uji yang aman
+
+Kirim satu log uji dengan pesan unik dari SDK yang sudah terinstal. Jangan
+sertakan token, data pengguna, atau body permintaan. Catat ID proyek, layanan,
+lingkungan, rilis, waktu mulai dalam UTC, dan versi SDK. Tunggu sampai
+terkirim, lalu baca rentang waktu yang pendek di proyek yang sama. Jangan
+kirim peristiwa uji lagi selama pengiriman masih tertunda.
+
+## Temukan log yang tidak muncul
+
+Baca lingkup yang kecil dan tepat terlebih dahulu:
+
+```bash
+logbrew read releases --project "<project_id>" --environment production --json
+logbrew read logs --project "<project_id>" --environment production \
+  --release checkout@1 --since 1h --limit 20 --json
+```
+
+Periksa hal berikut secara berurutan:
+
+1. ID proyek milik aplikasi yang mengirim peristiwa.
+2. Layanan, rilis, dan lingkungan cocok persis, termasuk huruf besar-kecil
+   dan spasi.
+3. Rentang waktu mencakup waktu peristiwa. LogBrew mengembalikan waktu
+   peristiwa dalam UTC. `--until` adalah batas atas yang eksklusif.
+4. Tidak ada filter pencarian atau tingkat keparahan yang menyembunyikan
+   peristiwa.
+5. Aplikasi mengirim jenis sinyal yang Anda baca. Log tidak membuat masalah
+   atau trace.
+
+Jika peristiwa masih tidak muncul, hapus filter satu per satu:
+
+1. Pertahankan proyek dan perlebar rentang waktu.
+2. Hapus filter rilis.
+3. Hapus filter lingkungan.
+4. Hapus filter layanan.
+5. Hapus filter pencarian dan tingkat keparahan.
+
+Berhenti saat peristiwa muncul. Filter terakhir yang Anda hapus tidak cocok
+dengan konfigurasi aplikasi. Jangan membaca semua proyek sebagai ganti proyek
+yang dikonfigurasi.
+
+| Hasil | Artinya | Pemeriksaan berikutnya |
+| --- | --- | --- |
+| Tidak ada baris di satu proyek | Tidak ada yang cocok dalam lingkup itu | Periksa waktu dan filter. |
+| Ada log, tetapi tidak ada masalah | Tidak ada error terkelompok yang cocok dengan filter | Pastikan aplikasi mengirim error. |
+| Masalah tanpa trace | Kemunculan tidak punya tautan trace yang bisa dipakai | Baca status trace di investigasi masalah. |
+| Ada rilis, tetapi tidak ada log | Rilis punya sinyal lain, tetapi tidak ada log dalam lingkup itu | Bandingkan jumlahnya di `logbrew read releases`. Baca setiap jenis sinyal di proyek yang sama. |
+| Peristiwa muncul setelah Anda menghapus filter | Filter itu mengecualikan peristiwa | Perbaiki filter atau nilai di aplikasi. |
+
+Satu halaman hasil bukan total. Dengan `--pagination cursor`, lanjutkan dengan
+`next_cursor` yang dikembalikan dan pertahankan filter yang sama. Lihat
+[Paginasi berbasis kursor](/id/reference/telemetry-api-filters#cursor-pagination).
+
+### Periksa tampilan dasbor
+
+Dasbor menampilkan snapshot dari setiap daftar. Di tampilan log, aktifkan
+**Live** agar log baru ditambahkan saat masuk. Tampilan lain tidak diperbarui
+secara live. Muat ulang halaman untuk mendapatkan snapshot baru. Snapshot
+yang usang berbeda dari hasil kosong.
+
+LogBrew hanya menyimpan telemetri yang dikirim aplikasi. Hapus kredensial,
+body permintaan, nilai kueri, dan data pribadi sebelum pengiriman. Periksa
+pemilihan kolom Anda dengan panduan
+[Kendalikan data yang direkam](/id/guides/safe-capture).
+
+## Periksa masalah dan trace
+
+Gunakan ID masalah atau ID trace yang dikembalikan LogBrew. Jangan pernah
+mengarangnya.
+
+```bash
+logbrew read issues --project "<project_id>" --environment production \
+  --status unresolved --since 24h --json
+logbrew read issue "<issue_id>" --json
+logbrew read trace "<trace_id>" --project "<project_id>" --json
+logbrew read logs --trace "<trace_id>" --project "<project_id>" --json
+```
+
+`--status` menerima `unresolved`, `resolved`, dan `archived`. `ignored`
+memilih masalah yang sama dengan `archived`.
+
+Status masalah dan status trace itu berbeda. Nilai status trace
+`not_linked`, `not_found`, dan `unavailable` punya arti yang berbeda. Lihat
+[Investigasi masalah](/id/guides/investigate-an-issue) untuk arti setiap
+nilai. Baca masalah dan log-nya sebelum Anda menyelesaikan, mengarsipkan, atau
+membuka kembali masalah itu.
+
+## Tangani error CLI dan API
+
+Dalam mode JSON, error CLI berisi `ok`, `error`, `message`, dan `next`:
+
+```json
+{
+  "ok": false,
+  "error": "not_logged_in",
+  "message": "not logged in: run logbrew login",
+  "next": "run logbrew login"
+}
+```
+
+Saat API mengembalikan error, `error` bernilai `api_error`. Error itu juga
+punya `status` (status HTTP), `api_code` (`code` dari API), `api_error`, dan
+`api_next`. Untuk error `rate_limited`, error itu juga punya
+`retry_after_seconds`. CLI tidak mencoba lagi secara otomatis.
+
+| Status atau error | Pemulihan |
+| --- | --- |
+| `not_logged_in` atau HTTP `401` | Manusia menjalankan `logbrew login`. Lalu coba lagi pembacaannya. |
+| HTTP `403` | Gunakan kredensial yang benar untuk proyek. Mengubah masalah juga memerlukan izin untuk mengelola masalah di proyek. Jangan tampilkan nilai kredensial. |
+| HTTP `404` | Gunakan ID proyek, masalah, atau trace terkini dari respons. |
+| HTTP `422` | Perbaiki kolom yang disebutkan. |
+| HTTP `429` dengan `rate_limited` | Tunggu selama `retry_after_seconds`, lalu coba lagi satu kali. |
+| HTTP `429` dengan kode lain | Hentikan percobaan ulang otomatis. Ikuti `api_next`. |
+| HTTP `5xx` | Tunggu, coba lagi satu pembacaan, dan laporkan masalah jika error masih berlanjut. |
+
+Lihat [Error API](/id/reference/api-errors) untuk setiap kode error.
+
+## <span id="secure-a-compromised-account">Amankan akun yang disusupi</span>
+
+Jika orang lain mungkin memegang token akses akun, refresh token, atau cookie
+sesi Anda, keluarkan semua klien LogBrew. Ikuti prosedur
+[keluar dari semua login](/id/reference/account-api#every-logbrew-login).
+Tindakan ini harus disetujui manusia. `logbrew logout` dan keluar dari
+browser hanya mengakhiri satu klien, jadi keduanya tidak cukup.
+
+Keluar dari semua login juga menghentikan setiap koneksi MCP yang disetujui
+sebelumnya. Setelah berhasil, hapus kredensial LogBrew lokal di setiap klien,
+lalu masuk lagi dari klien tepercaya. Setujui klien MCP lagi hanya setelah
+Anda memercayainya. Jika respons hilang, jangan laporkan bahwa semua klien
+sudah keluar, dan jangan ulangi permintaan secara otomatis.
+
+Keluar dari semua login tidak merotasi kunci ingest proyek. Jika kunci ingest
+bocor, [rotasikan kunci ingest](/id/guides/rotate-ingest-key).
+
+## Atasi kendala dengan aman
+
+Gunakan kredensial akses akun untuk pembacaan CLI. Gunakan kredensial ingest
+khusus proyek hanya untuk penulisan SDK. Jangan masukkan token,
+header otorisasi, log mentah, data pelanggan, body permintaan, path lokal,
+atau kode sumber ke perintah, chat, atau laporan dukungan.
+
+Sebelum Anda melaporkan masalah, ulangi satu pembacaan dengan lingkup terkecil
+yang masih gagal. Catat perintah tanpa nilai kredensial, kode error, ID
+proyek, dan nilai filter. Jika pemeriksaan ini tidak menyelesaikan kendala,
+[laporkan masalah](/id/guides/report-a-problem).
+
+## Halaman terkait
+
+<CardGroup cols={2}>
+  <Card title="Mulai cepat" icon="rocket" href="/id/quickstart">
+    Kirim dan baca peristiwa aman pertama.
+  </Card>
+
+  <Card title="Gunakan CLI" icon="square-terminal" href="/id/guides/cli">
+    Gunakan filter yang tepat dan output JSON.
+  </Card>
+
+  <Card title="Investigasi masalah" icon="search" href="/id/guides/investigate-an-issue">
+    Baca bukti masalah sebelum Anda mengubah status.
+  </Card>
+
+  <Card title="Error API" icon="triangle-alert" href="/id/reference/api-errors">
+    Pulihkan dari setiap kode error.
+  </Card>
+</CardGroup>

@@ -1,0 +1,221 @@
+---
+title: "Telemetri aplikasi: log, trace, dan metrik"
+sidebarTitle: "Telemetri"
+description: "Bandingkan log, trace, metrik, masalah, dan aksi produk. Pilih sinyal LogBrew untuk investigasi Anda."
+---
+
+Telemetri adalah bukti terstruktur yang dikirim aplikasi tentang perilakunya.
+Log mencatat peristiwa yang dilaporkan. Trace menghubungkan operasi. Metrik
+mengukur nilai. Masalah mengelompokkan kegagalan. Aksi mencatat aktivitas
+produk.
+
+Kolom proyek, layanan, lingkungan, rilis, dan waktu menentukan lingkup setiap
+hasil. Untuk sinyal yang direkam SDK Anda, baca panduan
+[Integrasi SDK](/id/guides/sdk-ingestion).
+
+## <span id="choose-the-correct-telemetry-data-type">Pilih sinyal</span>
+
+| Sinyal | Gunakan untuk |
+| --- | --- |
+| Masalah | Kegagalan berulang, seperti exception checkout dengan 18 kemunculan. |
+| Log | Satu peristiwa yang dilaporkan aplikasi, seperti pembayaran yang gagal. |
+| Trace | Operasi dan durasi satu permintaan yang melewati layanan yang diinstrumentasi. |
+| Metrik | Nilai terukur dari waktu ke waktu, seperti durasi permintaan atau job yang selesai. |
+| Aksi | Aktivitas produk, seperti tayangan halaman, tayangan layar, atau interaksi. |
+
+Mulai investigasi kegagalan dari masalah atau log. Gunakan trace yang tersedia
+untuk memeriksa satu eksekusi. Gunakan tren metrik untuk memeriksa periode
+yang lebih luas. Untuk aktivitas dan retensi, baca
+[Analitik produk](/id/concepts/product-analytics).
+
+Rekam hanya kolom yang dibutuhkan investigasi. Gunakan nama layanan, operasi,
+dan metrik yang stabil. Jangan kirim kredensial, data pembayaran, atau body
+permintaan mentah. Panduan
+[Kendalikan data yang direkam](/id/guides/safe-capture) berisi kontrolnya.
+
+## Log
+
+Log adalah entri dari aplikasi pada satu titik waktu. Log yang berguna punya:
+
+- Waktu sumber peristiwa.
+- Tingkat keparahan kanonis.
+- Lingkup proyek dan layanan.
+- Lingkungan dan rilis.
+- ID trace dan span jika log punya konteks trace yang aktif.
+- Atribut kecil yang diberi nama, berisi konteks peristiwa.
+
+Respons log memuat nilai ini di `occurred_at`, `severity`, `project_id`,
+`service_name`, `environment`, `release`, `trace_id`, `span_id`, dan
+`attributes`. Taruh konteks di atribut yang diberi nama, bukan di teks pesan.
+
+Log dari beberapa layanan dalam satu tampilan tidak punya hubungan trace.
+Hanya konteks trace yang membuat hubungan itu.
+
+## Trace
+
+Trace berisi span dari satu permintaan atau operasi. Root span tidak punya
+parent. Child span mengidentifikasi parent-nya. Semua span dalam satu trace
+punya ID trace yang sama dan ID span yang berbeda. Lihat
+[Pelacakan terdistribusi](/id/concepts/distributed-tracing).
+
+Log, masalah, aksi, atau metrik yang dikirim tanpa konteks trace yang aktif
+mendapat trace perekaman. Trace itu hanya berisi span perekaman. Trace itu
+tidak menunjukkan jalur permintaan. Lihat
+[Span perekaman](/id/concepts/distributed-tracing#capture-spans).
+
+## <span id="read-the-metric-value">Metrik</span>
+
+Metrik mencatat nilai terukur dari waktu ke waktu. Baca setiap metrik beserta
+nama, satuan, dimensi, proyek, rentang waktu, dan intervalnya. LogBrew memilih
+`value` setiap titik berdasarkan `kind` dan `temporality` metrik:
+
+| Kontrak metrik | `aggregation.code` | `value` titik |
+| --- | --- | --- |
+| `gauge` dengan `instant` | `gauge_last` | Keadaan terakhir dalam interval, seperti kedalaman antrean. |
+| `counter` dengan `delta` | `delta_sum` | Jumlah perubahan dalam interval, seperti job yang selesai. |
+| `histogram` dengan `delta` | `distribution_p95` | Perkiraan persentil ke-95, seperti durasi permintaan. |
+| Stream `cumulative` | `raw_cumulative_last` | Total mentah terakhir. Nilai ini bukan laju. |
+| Pasangan lain | `raw_last` | Sampel mentah terakhir. |
+
+Misalnya, tiga sampel delta counter dengan nilai `2`, `3`, dan `5` dalam satu
+interval memberi `value` titik `10` dan `sample_count` `3`. Tiga sampel gauge
+dengan nilai yang sama, dalam urutan itu, memberi `value` titik `5`. Nilai p95
+bukan rata-rata. Sekitar 95% observasi yang tercatat berada pada atau di bawah
+nilai itu.
+
+Untuk `status: "ready"`, agregasi turunan tersedia. Untuk
+`status: "limited"`, baca `aggregation.limitation` dan gunakan hanya nilai
+mentahnya. Jangan menjumlahkan gauge atau stream kumulatif. Interval tanpa
+titik bukan nilai nol yang terukur. Untuk parameter kueri, baca
+[Filter kueri](/id/reference/telemetry-api-filters).
+
+`GET /api/telemetry/metrics/series` mengembalikan titik-titik ini. Rute ini
+mewajibkan `project_id`, `name`, dan `since`. Setiap deret punya satu
+`identity` dengan `kind`, `unit`, dan `temporality`. Deret dengan identitas
+berbeda tetap terpisah. Setiap titik juga dapat berisi:
+
+| Kolom | Arti |
+| --- | --- |
+| `min`, `max`, `average` | Rentang dan rata-rata sampel dalam interval. |
+| `p50`, `p95`, `p99` | Perkiraan persentil untuk histogram. |
+| `rate_per_second` | Jumlah delta counter dibagi lebar interval. |
+| `trace_exemplars` | ID trace yang disampel dari interval. Buka salah satunya untuk memeriksa permintaan dari interval itu. |
+
+`coverage.truncated` bernilai `true` jika `series_limit` menghilangkan deret
+bervolume lebih rendah. Untuk membandingkan rentang waktu metrik dengan
+rentang waktu sebelumnya yang sama panjang, jalankan:
+
+```bash
+logbrew explain metric '<metric-name>' --project '<project-id>' --since 24h --json
+```
+
+## Masalah
+
+Masalah mengelompokkan kegagalan berulang berdasarkan fingerprint yang stabil.
+Masalah punya tingkat keparahan, status, jumlah kemunculan, waktu pertama
+terlihat, dan waktu terakhir terlihat. Detail masalah dapat menambahkan rantai
+exception, stack frame, breadcrumb, log terkait, dan hubungan trace.
+
+`last_seen_at` adalah kemunculan terbaru dalam kelompok. Kemunculan yang Anda
+pilih bisa lebih lama. Baca kedua waktu itu.
+
+`status` masalah bernilai `unresolved`, `resolved`, atau `archived`. Respons
+API versi 1 menampilkan `archived` sebagai `ignored`. Respons versi 2 dan 3
+menambahkan `priority` (`high`, `medium`, atau `low`) dan `priority_source`.
+Versi 3 juga menambahkan `assignee`. Lihat
+[Nilai status](/id/guides/issue-workflow#status-values) dan
+[Prioritas](/id/guides/issue-workflow#priority).
+
+## Aksi
+
+Aksi mencatat aktivitas produk. Klasifikasi yang didukung menandainya sebagai
+tayangan halaman, tayangan layar, atau interaksi. Nama peristiwa saja tidak
+menetapkan klasifikasi. Gunakan
+[Perekaman peristiwa produk](/id/guides/product-events) untuk menambahkan
+konteks ini.
+
+Sesi bukan pengguna. Subjek anonim bukan pengguna teridentifikasi.
+
+## <span id="shared-fields">Kolom bersama</span>
+
+| Kolom | Kegunaan |
+| --- | --- |
+| `project_id` | Memiliki telemetri dan mengontrol batas pembacaan. |
+| `service_name` | Mengidentifikasi aplikasi atau layanan yang mengirim sinyal. |
+| `environment` | Memisahkan data produksi, staging, preview, dan lokal. |
+| `release` | Mengidentifikasi versi kode yang di-deploy. |
+| `occurred_at` | Memberi waktu sumber satu log atau aksi. Span memakai `started_at`. |
+| `trace_id` | Menautkan sinyal yang direkam dalam konteks trace yang sama. |
+| `span_id` | Mengidentifikasi span tempat sinyal berada di trace-nya. |
+
+## <span id="severity-values">Nilai tingkat keparahan</span>
+
+| Nilai kanonis | Alias input yang diterima |
+| --- | --- |
+| `info` | `trace`, `debug`, `info` |
+| `warning` | `warn`, `warning` |
+| `error` | `error` |
+| `critical` | `fatal`, `critical` |
+
+LogBrew menerima alias sebagai input dengan huruf besar atau kecil apa pun.
+API, CLI, dan peristiwa langsung memakai nilai kanonis. Nilai tingkat
+keparahan yang tidak dikenal ditolak. Tingkat keparahan adalah urgensi yang
+tercatat. Tingkat keparahan tidak menunjukkan dampak bisnis atau akar
+penyebab.
+
+Pengguna dapat mengubah tingkat keparahan yang ditampilkan untuk masalah atau
+log. Setelah itu, respons berisi objek `triage` dengan `effective_severity`.
+Kolom `severity` tetap menyimpan nilai yang direkam.
+
+## Pembacaan langsung dan snapshot
+
+`logbrew read` mengembalikan snapshot untuk proyek, rentang waktu, dan filter
+yang dipilih. Jalankan lagi untuk membaca peristiwa baru. `logbrew watch`
+men-stream log, masalah, dan aksi baru selama koneksi terbuka. Perintah ini
+tidak men-stream trace atau metrik. Koneksi yang gagal tidak menunjukkan bahwa
+proyek kosong.
+
+## <span id="evidence-quality-and-trace-lifecycle">Status bukti</span>
+
+Respons memisahkan status berikut: terekam, tidak terekam, disamarkan,
+dipotong, dan tidak tersedia. Bukti trace punya empat status: `available`,
+`not_linked`, `not_found`, dan `unavailable`. Lihat
+[Hubungan trace](/id/introduction#follow-exact-relationships) untuk artinya, dan
+[Batas bukti](/id/introduction#read-evidence-states-before-drawing-a-conclusion)
+untuk kolom cakupan. SDK yang lebih baru tidak menambahkan kolom ke peristiwa
+yang dikirimnya sebelumnya.
+
+## <span id="a-practical-investigation">Investigasi satu proyek</span>
+
+<Steps>
+  <Step title="Temukan masalah yang belum selesai">
+    ```bash
+    logbrew read issues --project '<project-id>' --status unresolved --since 24h --json
+    ```
+  </Step>
+
+  <Step title="Baca satu masalah">
+    Perintah ini membaca riwayat masalah yang tersimpan. Filter `--since` dari
+    daftar tidak berlaku.
+
+    ```bash
+    logbrew investigate issue '<issue-id>' --json
+    ```
+  </Step>
+
+  <Step title="Buka trace yang tersedia">
+    Gunakan ID trace hanya jika kemunculan yang dipilih mengembalikannya.
+
+    ```bash
+    logbrew read trace '<trace-id>' --project '<project-id>' --json
+    ```
+  </Step>
+
+  <Step title="Baca bukti terkait">
+    Filter log, aksi, dan metrik dengan proyek, layanan, lingkungan, dan rilis
+    yang sama. Jangan menautkan sinyal hanya berdasarkan waktu.
+  </Step>
+</Steps>
+
+Untuk kolom respons, baca [API Telemetri](/id/reference/telemetry-api) dan
+[Format respons](/id/reference/telemetry-response-shapes).

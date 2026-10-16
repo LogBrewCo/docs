@@ -1,0 +1,398 @@
+---
+title: "Pelaporan crash iOS untuk crash dan hang Apple"
+sidebarTitle: "Crash dan hang Apple"
+description: "Siapkan pelaporan crash aplikasi iOS, unggah dSYM yang cocok, dan baca log crash aplikasi iOS yang sudah disimbolkan dari LogBrew."
+---
+
+Gunakan alur kerja ini untuk merekam crash native dan hang (aplikasi berhenti
+merespons) di main thread pada aplikasi iOS. Perekaman hang memerlukan UIKit.
+Unggah dSYM yang cocok untuk melihat lokasi sumber di stack frame.
+
+Aplikasi menyimpan laporan lokal saat crash. Pada peluncuran berikutnya,
+aplikasi Anda memanggil replay untuk mengirim bukti crash ke LogBrew. LogBrew
+tidak mengirim laporan Apple mentah.
+
+<Note>
+  Gunakan LogBrew Swift 0.1.6 atau yang lebih baru. Gunakan LogBrew CLI native
+  0.1.24 atau yang lebih baru untuk mengunggah artefak debug.
+</Note>
+
+<Warning>
+  Gunakan konfigurasi ingest khusus proyek di dalam aplikasi.
+  Gunakan login akun untuk mengunggah artefak dan membaca masalah. Kunci
+  artefak proyek juga bisa mengunggah dari mesin build.
+  Jangan pernah menyertakan token akses akun atau kunci artefak di aplikasi.
+</Warning>
+
+## Rencanakan batas perekaman
+
+Periksa kapan aplikasi Anda bisa me-replay setiap jenis kegagalan.
+
+| Kegagalan | Hasil perekaman | Waktu pengiriman |
+| --- | --- | --- |
+| Crash Apple yang fatal | Peristiwa crash native yang tidak ditangani | Peluncuran aplikasi berikutnya |
+| Hang main thread yang pulih | Peristiwa hang yang ditangani | Saat replay setelah pulih |
+| Hang yang diikuti penghentian proses | Peristiwa hang yang tidak ditangani | Peluncuran aplikasi berikutnya |
+
+Tetapkan nilai rilis sebelum build. Nilai ini harus mengidentifikasi versi dan
+build aplikasi. Gunakan nilai yang sama di SDK, unggahan dSYM, dan filter
+masalah.
+
+Jangan lampirkan payload pengguna, body permintaan, atau header ke metadata
+crash.
+
+## Tambahkan produk crash
+
+Pertama, siapkan telemetri SDK untuk aplikasi Anda dengan panduan
+[Integrasi SDK](/id/guides/sdk-ingestion). Replay memakai `client` dan
+`transport` dari penyiapan itu.
+
+Tambahkan SDK publik melalui Swift Package Manager.
+
+```swift
+.package(
+    url: "https://github.com/LogBrewCo/sdk.git",
+    from: "0.1.6"
+)
+```
+
+Tambahkan produk `LogBrew` untuk mengirim telemetri. Tambahkan `LogBrewCrash`
+hanya jika aplikasi secara eksplisit mengaktifkan perekaman crash atau hang
+native.
+
+Integrasi perekaman mendukung iOS 15 atau yang lebih baru. Simpan satu objek
+perekaman milik aplikasi, karena handler fatal native berlaku untuk seluruh
+proses.
+
+## Konfigurasikan satu identitas yang tepat
+
+Gunakan proyek, rilis, lingkungan, dan layanan yang sama di penyiapan runtime
+dan unggahan artefak. LogBrew tidak menyimpulkan nilai ini dari data lain dan
+tidak menggantinya.
+
+```swift
+import Foundation
+import LogBrew
+import LogBrewCrash
+
+let applicationSupport = try FileManager.default.url(
+    for: .applicationSupportDirectory,
+    in: .userDomainMask,
+    appropriateFor: nil,
+    create: true
+)
+
+let identity = try NativeArtifactIdentity(
+    projectId: "550e8400-e29b-41d4-a716-446655440000",
+    release: "com.example.app@1.2.3+45",
+    environment: "production",
+    service: "ios-app"
+)
+
+let watchdog: NativeHangWatchdogConfiguration? = nil
+
+let crashCapture = NativeCrashCapture(
+    configuration: try NativeCrashConfiguration(
+        storageDirectory: applicationSupport.appendingPathComponent(
+            "LogBrewCrash",
+            isDirectory: true
+        ),
+        artifactIdentity: identity,
+        hangWatchdog: watchdog
+    )
+)
+
+try crashCapture.install()
+```
+
+Pasang objek perekaman di main thread sebelum Anda membuat UI root. Buat
+direktori induknya terlebih dahulu. Pastikan direktori penyimpanan dimiliki
+aplikasi dan bersifat privat.
+
+Objek perekaman merekam exception Mach, signal, exception C++, dan exception
+Objective-C. Laporan lokal tidak menyertakan isi memori, nama antrean, atau
+log konsol.
+
+Laporan crash lokal bisa berisi detail aplikasi dan perangkat yang sensitif.
+Jauhkan laporan itu dari cadangan cloud dan direktori bersama. LogBrew
+mengirim UUID frame, arsitektur, dan offset, bukan laporan mentah.
+
+`NativeCrashConfiguration` punya dua batas opsional:
+
+| Parameter | Default | Rentang | Efek |
+| --- | --- | --- | --- |
+| `maxStoredReports` | `5` | 1 sampai 32 | Jumlah laporan lokal yang disimpan aplikasi. |
+| `maxReplayBytes` | 4 MiB | 1 KiB sampai 16 MiB | Replay membuang laporan yang lebih besar dari ukuran ini. |
+
+Nilai di luar rentangnya membuat konfigurasi melempar
+`crash_invalid_configuration`.
+
+## Aktifkan perekaman hang
+
+Perekaman hang mati jika `watchdog` bernilai `nil`. Untuk mengaktifkannya,
+ganti deklarasi `watchdog` di atas sebelum Anda memanggil `install()`:
+
+```swift
+let watchdog = try NativeHangWatchdogConfiguration(
+    threshold: 2
+)
+```
+
+Ambang batas dinyatakan dalam detik, dari 1 sampai 30. Perekaman hang juga memerlukan
+`artifactIdentity`. Tanpa itu, konfigurasi melempar
+`crash_invalid_configuration`.
+
+Simpan satu objek `crashCapture` selama proses berjalan. Objek perekaman
+kedua tidak bisa dipasang. Panggilan `install()` pada objek itu melempar
+`crash_capture_owned`. Untuk mengubah ambang batas, gunakan nilai baru pada
+peluncuran aplikasi berikutnya.
+
+Hang yang pulih di-replay dengan `crash.handled` bernilai `true`. Hang yang
+masih berlangsung saat proses dihentikan di-replay dengan `crash.handled`
+bernilai `false`.
+
+Kedua bentuk menyertakan metadata numerik `durationMs`. Keduanya
+mempertahankan identitas artefak yang sama dengan yang dipakai frame crash
+fatal.
+
+Watchdog berhenti sementara saat aplikasi tidak aktif atau sedang terhubung ke
+debugger. Watchdog juga menahan perekaman saat tekanan termal tinggi.
+
+Ambang batas yang pendek bisa melaporkan pekerjaan main thread yang normal
+sebagai hang. Uji ambang batas dengan konfigurasi build yang Anda rilis.
+Status ditangani menunjukkan bahwa aplikasi sudah pulih. Status itu tidak
+menandai masalah sebagai selesai. Hang yang ditangani tetap sempat memblokir antarmuka, jadi
+tinjau juga hang itu.
+
+## Replay setelah peluncuran
+
+Setelah objek perekaman terpasang, jalankan replay untuk laporan yang tertunda
+melalui klien SDK Anda.
+
+```swift
+let replay = try crashCapture.replayPendingReports(
+    in: client,
+    transport: transport
+)
+
+print(
+    "acknowledged=\(replay.acknowledged) " +
+    "discarded=\(replay.discarded) " +
+    "pending=\(replay.pending)"
+)
+```
+
+Aplikasi Anda harus memanggil replay. Pemulihan hang saja tidak mengirim
+peristiwa. Panggil metode yang sama setelah pemulihan atau pada peluncuran
+berikutnya.
+
+Replay memproses laporan yang valid mulai dari yang terlama dan
+mempertahankan ID peristiwanya yang stabil. Pengiriman yang gagal membiarkan
+laporannya tetap tertunda. Pengiriman yang diterima menghapus laporan itu.
+
+Replay membuang laporan yang tidak bisa dibaca dan laporan yang lebih besar
+dari `maxReplayBytes`. Periksa ketiga jumlah itu. Jumlah tertunda yang bernilai
+nol saja tidak membuktikan pengiriman.
+
+Aktifkan pengiriman tahan lama sebelum replay jika permintaan yang gagal
+harus bertahan setelah restart berikutnya. Jangan panggil `purge()` selama
+pemulihan jaringan atau autentikasi yang rutin.
+
+## Unggah dSYM yang cocok
+
+Arsipkan aplikasi dengan informasi debug aktif. Simpan dSYM dari build yang
+sama persis dengan yang dijalankan pengguna.
+
+Periksa UUID image di dalamnya.
+
+```bash
+xcrun dwarfdump --uuid "path/to/App.app.dSYM"
+```
+
+Validasi artefak secara lokal sebelum mengunggah.
+
+```bash
+logbrew debug-artifacts upload "path/to/App.app.dSYM" \
+  --project "<project UUID>" \
+  --release "com.example.app@1.2.3+45" \
+  --environment "production" \
+  --service "ios-app" \
+  --expect-image-uuid "<Mach-O UUID>" \
+  --dry-run \
+  --json
+```
+
+Ulangi `--expect-image-uuid` untuk setiap arsitektur yang diperlukan.
+Perintah gagal jika kumpulan UUID yang ditemukan berbeda dari kumpulan yang
+diharapkan.
+
+Periksa akses akun. Lalu jalankan perintah yang sama tanpa `--dry-run`.
+
+```bash
+logbrew status --json
+
+logbrew debug-artifacts upload "path/to/App.app.dSYM" \
+  --project "<project UUID>" \
+  --release "com.example.app@1.2.3+45" \
+  --environment "production" \
+  --service "ios-app" \
+  --expect-image-uuid "<Mach-O UUID>" \
+  --json
+```
+
+Perintah unggah memvalidasi objek Apple yang didukung dan memverifikasi
+setiap identitas yang diunggah. Perintah ini tidak menyertakan path lokal atau
+nama file di metadata API.
+
+`status` di JSON menunjukkan hasilnya:
+
+| `status` | Arti |
+| --- | --- |
+| `validated` | Dry run menemukan objek yang diharapkan. Tidak ada yang diunggah. |
+| `verified` | Akses akun mengunggah dan memverifikasi setiap identitas. |
+| `already_present` | LogBrew sudah punya setiap identitas. |
+| `uploaded` | Kunci artefak proyek mengunggah file. CLI tidak bisa memverifikasinya. |
+
+Mesin build bisa mengunggah dengan kunci artefak proyek di `LOGBREW_TOKEN`,
+bukan dengan akses akun. Buat kunci seperti yang ditunjukkan di
+[Buat kunci artefak](/id/guides/source-maps#create-an-artifact-key). Unggahan
+itu melaporkan `uploaded`. Verifikasi setiap identitas nanti dengan akses
+akun:
+
+```bash
+logbrew debug-artifacts lookup \
+  --project "<project UUID>" \
+  --release "com.example.app@1.2.3+45" \
+  --environment "production" \
+  --service "ios-app" \
+  --image-uuid "<Mach-O UUID>" \
+  --architecture arm64 \
+  --json
+```
+
+`status: "found"` mengonfirmasi artefak. `status: "missing"` berarti LogBrew
+tidak punya artefak untuk identitas itu.
+
+Pemetaan frame mencocokkan UUID image dan identitas artefak lengkap, bukan
+nama file sumber. Build ulang dari sumber yang sama bisa menghasilkan UUID
+yang berbeda. Unggah bundle dSYM yang persis, bukan seluruh direktori build.
+
+## Verifikasi hasil yang dibaca dari LogBrew
+
+Filter daftar masalah dengan lingkup runtime yang sama. Contoh ini memilih
+masalah `unresolved`. Masalah yang sudah selesai atau diarsipkan tidak
+muncul.
+
+```bash
+logbrew read issues \
+  --project "<project UUID>" \
+  --release "com.example.app@1.2.3+45" \
+  --environment "production" \
+  --service "ios-app" \
+  --status "unresolved" \
+  --since "24h" \
+  --json
+```
+
+Respons daftar mengidentifikasi masalah terkelompok. Baca detailnya untuk
+meminta pemetaan frame di LogBrew.
+
+```bash
+logbrew read issue "<issue UUID>" --json
+```
+
+Artefak yang cocok menambahkan objek `symbolication`. Contoh ini menampilkan
+sebagian kolom dari masalah dengan frame yang sudah dipetakan, bukan respons
+lengkap.
+
+```json
+{
+  "severity": "critical",
+  "attributes": {
+    "metadata": {
+      "crash.replayed": true
+    }
+  },
+  "symbolication": {
+    "status": "resolved",
+    "frames": [
+      {
+        "index": 0,
+        "status": "resolved",
+        "resolved": {
+          "source": "AppRuntime.swift",
+          "line": 42,
+          "column": 1,
+          "name": "terminateForCrash()"
+        }
+      }
+    ]
+  }
+}
+```
+
+## Baca bukti crash
+
+Setiap frame punya `status` sendiri. Kolom `symbolication.status` memakai
+nilai yang sama:
+
+| `status` | Arti |
+| --- | --- |
+| `resolved` | Artefak yang cocok berhasil memetakan frame. `resolved` berisi sumber, baris, kolom, atau nama fungsi yang disediakan artefak. |
+| `artifact_not_found` | Tidak ada artefak yang diunggah yang cocok dengan identitas peristiwa dan UUID image. |
+| `source_not_resolved` | Ada artefak yang cocok, tetapi artefak itu tidak memetakan frame ini. |
+| `invalid_metadata` | Peristiwa punya metadata artefak yang tidak lengkap atau tidak konsisten. |
+| `unavailable` | Pembacaan pemetaan frame tidak bisa diselesaikan. |
+
+Tetap catat frame yang belum dipetakan sebagai belum dipetakan. Jangan
+laporkan frame itu sebagai stack kosong.
+
+LogBrew memetakan frame saat Anda membaca masalah. dSYM yang diunggah
+belakangan bisa memetakan frame dari peristiwa yang lebih awal. dSYM itu
+tidak bisa menambahkan frame yang tidak direkam peristiwa.
+
+Frame aplikasi mempersempit pencarian kode, tetapi tidak membuktikan
+penyebab. Untuk breadcrumb, rantai exception, dan bukti trace, baca
+investigasi masalah:
+
+```bash
+logbrew investigate issue "<issue UUID>" --json
+```
+
+Dalam respons itu, frame dengan `source: "symbolicated"` berasal dari
+artefak yang diunggah. Frame dengan `source: "captured"` adalah lokasi yang
+dikirim aplikasi. Lihat [Investigasi masalah](/id/guides/investigate-an-issue)
+untuk kolom respons.
+
+Pertahankan lingkup lengkap proyek, rilis, lingkungan, dan layanan di setiap
+pembacaan. Jangan perluas pencarian yang gagal ke proyek lain.
+
+## Verifikasi penyiapan produksi
+
+Gunakan kegagalan uji yang disetujui di build yang sudah di-deploy. Jangan
+pernah memakai tindakan pelanggan sebagai pemicu. Periksa setiap item secara
+berurutan dan berhenti di kegagalan pertama:
+
+1. Identitas runtime cocok dengan identitas artefak yang diunggah.
+2. Peluncuran berikutnya me-replay satu peristiwa yang dikonfirmasi, dengan
+   nol laporan yang dibuang dan nol laporan yang tertunda.
+3. Daftar masalah dalam lingkup itu mengembalikan masalah uji dengan status
+   ditangani yang diharapkan.
+4. Frame aplikasi yang diharapkan berhasil dipetakan.
+5. Peluncuran bersih berikutnya tidak menambahkan kemunculan lain.
+
+## Pulihkan dengan aman
+
+| Hasil | Pemulihan |
+| --- | --- |
+| Autentikasi unggahan gagal | Jalankan `logbrew login`, periksa `logbrew status --json`, lalu ulangi unggahan yang sama persis. |
+| Validasi UUID unggahan gagal | Pilih dSYM dari build yang di-deploy dan ulangi dry run. |
+| `artifact_not_found` | Verifikasi identitas peristiwa dan unggah dSYM yang cocok dengan lingkup yang sama. |
+| `source_not_resolved` | Pertahankan informasi debug build yang lengkap dan periksa pengaturan build yang di-deploy. |
+| `invalid_metadata` | Pastikan Anda memakai LogBrew Swift 0.1.6 atau yang lebih baru. Rekam peristiwa baru dengan identitas yang tepat. |
+| `unavailable` | Biarkan masalah tetap terlihat, lalu ulangi pembacaan detail dengan lingkup yang sama nanti. |
+| Replay tetap tertunda | Perbaiki status transport atau autentikasi, lalu luncurkan ulang aplikasi tanpa menghapus laporan. |
+| Replay melaporkan entri yang dibuang | Jangan hitung entri itu sebagai terkirim. Periksa konfigurasi perekaman, lalu reproduksi kegagalan dengan peristiwa uji baru yang disetujui. |
+
+Untuk investigasi masalah secara umum lewat API, lihat
+[Investigasi masalah](/id/guides/investigate-an-issue).

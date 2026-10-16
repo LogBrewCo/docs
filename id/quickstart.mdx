@@ -1,0 +1,287 @@
+---
+title: "Logging Node.js: mulai cepat observabilitas LogBrew"
+sidebarTitle: "Mulai cepat"
+description: "Buat proyek, siapkan logging Node.js, kirim satu peristiwa SDK yang aman, lalu baca log yang tersimpan tanpa menampilkan kredensial."
+---
+
+Buat proyek pengembangan. Kirim satu log Node.js. Baca kembali log itu dari
+LogBrew. CLI membuat proyek dan menyimpan kunci ingest-nya. Masuk lewat
+browser hanya diperlukan jika CLI tidak memiliki akses akun yang valid.
+
+<Note>
+  Gunakan `--json` untuk alur kerja agen. Simpan kredensial di konfigurasi
+  lokal yang terlindungi. Teruskan hanya nama variabel antara manusia, tool,
+  dan agen.
+</Note>
+
+## <span id="first-project-success-path">Sebelum memulai</span>
+
+Siapkan:
+
+- Node.js 18 atau yang lebih baru.
+- LogBrew CLI v0.1.30 atau yang lebih baru.
+- `jq`.
+- Bash atau Zsh.
+- Direktori paket untuk aplikasi Node.js sisi server.
+
+Contoh ini memakai proyek `quickstart-node`, lingkungan `development`, dan
+rilis `quickstart@1`. Pisahkan pengujian ini dari produksi. Untuk runtime
+lain, gunakan panduan [Integrasi SDK](/id/guides/sdk-ingestion).
+
+<Warning>
+  Simpan file kunci ingest di luar repositori, dan pastikan hanya Anda yang
+  dapat membacanya. Jangan masukkan kunci server ini ke kode browser, bundle
+  publik, atau prompt.
+</Warning>
+
+## Kirim dan baca log pertama Anda
+
+<Steps>
+  <Step title="Baca status akun" id="confirm-account-access">
+    Instal CLI dengan perintah di panduan [Gunakan CLI](/id/guides/cli). Lalu
+    baca status akunnya.
+
+    ```bash
+    logbrew status --json
+    ```
+
+    **Titik periksa:** status melaporkan akses akun yang sudah
+    terautentikasi. Jika tidak, manusia menjalankan `logbrew login` satu
+    kali. Lalu jalankan `logbrew status --json` lagi. Agen tidak boleh
+    memulai login baru jika autentikasi saat ini masih berfungsi.
+  </Step>
+
+  <Step title="Buat satu proyek dari CLI">
+    Pilih file baru di direktori yang hanya dapat diakses pemiliknya. CLI
+    menulis kunci ingest proyek ke file itu sebelum melaporkan keberhasilan.
+    CLI tidak pernah mencetak kunci atau path file-nya.
+
+    ```bash
+    install -d -m 700 "$HOME/.logbrew"
+
+    project_result="$(
+      logbrew projects create quickstart-node \
+        --runtime node \
+        --environment development \
+        --ingest-key-file "$HOME/.logbrew/quickstart-node.ingest" \
+        --json
+    )"
+    export LOGBREW_PROJECT_ID="$(jq -er '.project.id' <<<"$project_result")"
+    jq '{status, setup_status: .setup.status, ingest_key_kind: .ingest_key.kind, next}' \
+      <<<"$project_result"
+    unset project_result
+    ```
+
+    Pembuatan proyek mengubah status akun. File tujuan tidak boleh sudah ada.
+    Jika hasilnya tidak jelas, jalankan perintah yang persis sama lagi. CLI
+    memakai ulang identitas permintaan yang masih tertunda. Gunakan
+    `--abandon-retry` hanya untuk memulai percobaan yang berbeda.
+
+    **Titik periksa:** output melaporkan `status: "created"`, status
+    penyiapan `created`, dan jenis kunci ingest. Proyek sudah ada dan kunci
+    sudah tersimpan. Ini belum menunjukkan pengiriman telemetri. Lihat
+    [Proyek dan penyiapan](/id/concepts/projects).
+  </Step>
+
+  <Step title="Instal SDK Node.js">
+    ```bash
+    npm install @logbrew/sdk @logbrew/node
+    ```
+
+    Jangan pernah memakai kredensial akun sebagai konfigurasi SDK. Jauhkan
+    kunci proyek dari output perintah, prompt, tiket, file sumber,
+    dan konfigurasi paket.
+  </Step>
+
+  <Step title="Kirim satu log SDK yang aman">
+    Kirim penanda rilis dan lingkungan bersama satu log `info` yang hanya
+    berisi placeholder. Kunci hanya diatur untuk proses Node.js ini.
+    Identitas aplikasi dimasukkan ke `context`.
+
+    Setiap eksekusi membuat ID peristiwa baru. Jika SDK mencoba ulang
+    pengiriman dalam eksekusi yang sama, SDK mengirim body yang sama dengan
+    ID yang sama. LogBrew tidak menyimpan peristiwa yang sudah diterima untuk
+    kedua kalinya saat percobaan ulang mengirimnya lagi.
+
+    ```bash
+    LOGBREW_SERVER_API_KEY="$(< "$HOME/.logbrew/quickstart-node.ingest")" \
+      node --input-type=module <<'JS'
+    import { randomUUID } from "node:crypto";
+    import { SdkError } from "@logbrew/sdk";
+    import { createLogBrewNodeClient } from "@logbrew/node";
+
+    const client = createLogBrewNodeClient({
+      context: {
+        schemaVersion: 1,
+        resource: { service: { name: "quickstart-node", version: "quickstart@1" } }
+      }
+    });
+    const occurredAt = new Date().toISOString();
+
+    client.release(randomUUID(), occurredAt, {
+      version: "quickstart@1",
+      metadata: { service: "quickstart-node" }
+    });
+    client.environment(randomUUID(), occurredAt, { name: "development" });
+    client.log(randomUUID(), occurredAt, {
+      message: "LogBrew quickstart check",
+      level: "info",
+      logger: "quickstart-node"
+    });
+
+    try {
+      const response = await client.shutdown();
+      console.log(JSON.stringify({
+        ok: true,
+        status_code: response.statusCode,
+        attempts: response.attempts
+      }));
+    } catch (error) {
+      console.error(JSON.stringify({
+        ok: false,
+        error: error instanceof SdkError ? error.code : "delivery_failed"
+      }));
+      process.exitCode = 1;
+    }
+    JS
+    ```
+
+    Jangan masukkan kredensial, header, body permintaan, data pelanggan, atau
+    path lokal ke peristiwa.
+
+    **Titik periksa:** skrip mencetak `"ok":true` dengan `status_code`
+    `2xx`. `attempts` lebih dari `1` setelah percobaan ulang. Pengiriman yang
+    berhasil bukan pemeriksaan terakhir.
+
+    Jika pengiriman gagal, skrip keluar dengan kode `1` dan mencetak error
+    JSON singkat, misalnya `{"ok":false,"error":"unauthenticated"}`. Skrip
+    tidak mencetak body permintaan atau kunci. Kunci proyek yang ditolak
+    menyebabkan `unauthenticated`. Login CLI baru tidak memperbaikinya.
+  </Step>
+
+  <Step title="Baca laporan doctor proyek" id="verify-readiness-with-the-project-doctor">
+    CLI memakai akses akun yang tersimpan untuk pembacaan ini. Jangan memakai
+    kunci ingest proyek.
+
+    ```bash
+    : "${LOGBREW_PROJECT_ID:?set the project UUID}"
+
+    logbrew doctor --project "$LOGBREW_PROJECT_ID" --json
+    ```
+
+    **Titik periksa:** laporan berisi `status: "ready"`. Baca juga setiap
+    item di `checks`. Kode keluar `0` tidak menunjukkan bahwa semua
+    pemeriksaan lolos. Untuk status lain, ikuti `next` dan
+    [Baca laporan doctor proyek](/id/reference/cli#read-a-project-doctor-report).
+    Proyek yang `ready` tidak menunjukkan bahwa log uji ini sudah sampai.
+  </Step>
+
+  <Step title="Baca log uji">
+    Gunakan proyek, rilis, dan lingkungan dari batch SDK.
+
+    ```bash
+    logbrew read logs --project "$LOGBREW_PROJECT_ID" \
+      --release quickstart@1 \
+      --environment development \
+      --since 1h \
+      --json
+    ```
+
+    **Titik periksa:** `LogBrew quickstart check` muncul untuk proyek, rilis,
+    dan lingkungan tersebut. Ini hanya menunjukkan bahwa log uji berhasil
+    dikirim.
+  </Step>
+</Steps>
+
+## <span id="understand-the-test-result">Baca hasil pengujian</span>
+
+Contoh ini mengirim tiga peristiwa. Hanya satu yang berupa log. Penanda rilis
+dan lingkungan memberi konteks pada log.
+
+| Kolom dalam contoh | Data yang dicatat |
+| --- | --- |
+| `message` | Operasi yang dicatat pengujian, `LogBrew quickstart check`. |
+| `level: "info"` | Peristiwa uji biasa, bukan kegagalan. |
+| `logger` | Logger aplikasi yang membuat catatan ini. |
+| `occurredAt` | Waktu eksekusi ini membuat peristiwa, sebagai stempel waktu UTC. |
+| `context.resource.service` | Layanan aplikasi dan versinya, bukan identitas SDK. |
+
+Biarkan pengujian di `info`. Jangan mengubahnya ke `error` agar lebih mudah
+ditemukan. Gunakan filter proyek dan waktu sebagai gantinya. Lihat
+[Nilai tingkat keparahan](/id/concepts/telemetry#severity-values).
+
+Baris `console.log` mencetak hasil pengiriman ke terminal Anda. Panggilan
+`client.log` mengirim log ke LogBrew. Pengiriman pertama yang berhasil
+mencetak:
+
+```json
+{ "ok": true, "status_code": 200, "attempts": 1 }
+```
+
+Kunci ingest menentukan proyek yang menerima log. Filter `--project` di CLI
+tidak memindahkan peristiwa.
+
+Log ini tidak memiliki konteks trace karena contoh ini tidak membuat span
+permintaan. Itu tidak berarti log gagal. Pembacaan CLI adalah snapshot.
+Jalankan lagi untuk membaca peristiwa yang datang kemudian, atau gunakan
+`logbrew watch logs --json` untuk stream langsung.
+
+## Keputusan pemulihan umum
+
+| Hasil | Langkah berikutnya |
+| --- | --- |
+| Status CLI belum terautentikasi | Manusia menjalankan `logbrew login`. Lalu jalankan perintah status lagi. |
+| File kunci ingest sudah ada | Pilih path yang belum dipakai. Jangan menimpa kredensial yang tidak dikenal. |
+| Hasil pembuatan proyek tidak jelas | Jalankan lagi perintah create yang persis sama. |
+| `unauthenticated` | Periksa kunci ingest proyek, bukan kredensial akun CLI. Login baru tidak memperbaikinya. |
+| `rate_limited` | Tunggu sebelum mengirim lagi. Jangan membuat loop atau kunci baru. |
+| `transport_error` atau `network_failure` | Periksa konektivitas. Respons yang gagal tidak menunjukkan bahwa permintaan sebelumnya tidak berdampak. |
+| `delivery_failed` | Berhenti dan periksa kegagalannya. Jangan mencetak rahasia atau body permintaan. |
+| `status` doctor bukan `ready` | Baca `checks` dan `next` di [laporan doctor](/id/reference/cli#read-a-project-doctor-report). Tetap gunakan proyek yang sama. |
+| Pembacaan log kosong | Bandingkan proyek, lingkungan, rilis, dan rentang waktu dengan batch yang dikirim. |
+
+Jika telemetri masih belum muncul, gunakan
+[pemeriksaan telemetri pertama](/id/guides/troubleshooting#recover-missing-first-telemetry).
+Jika pemeriksaan itu tidak membantu,
+[laporkan masalah](/id/guides/report-a-problem). Jangan lampirkan kredensial,
+telemetri mentah, data pelanggan, path lokal, atau kode sumber.
+
+## Terapkan di aplikasi Anda
+
+- Buat klien satu kali di kode penyiapan aplikasi Anda.
+- Tetapkan versi SDK di file paket Anda. Uji upgrade di luar produksi.
+- Muat kunci ingest dari konfigurasi rahasia yang sudah Anda miliki.
+  Rotasikan kunci jika mungkin sudah terekspos. Lihat
+  [Rotasikan kunci ingest](/id/guides/rotate-ingest-key).
+- Gunakan nama layanan, lingkungan, dan rilis yang stabil dari konfigurasi
+  deployment Anda. Lihat [Rilis](/id/concepts/releases).
+- Tulis pesan log yang menyebut operasi dan hasilnya, misalnya
+  `Report generation completed`. Jangan masukkan nilai privat ke pesan.
+  Jangan salin seluruh permintaan atau data pengguna ke log.
+- Gunakan satu pengirim untuk setiap log aplikasi agar tidak ada catatan
+  ganda. Temukan integrasi yang sudah mengirim setiap catatan sebelum
+  menambahkan LogBrew.
+- Sebelum rollout produksi, kirim satu peristiwa yang aman melalui jalur kode
+  yang sebenarnya, lalu baca kembali. Periksa pesan, layanan, rilis, dan
+  lingkungannya. Contoh mandiri tidak menguji jalur kode aplikasi Anda.
+
+Contoh ini tidak menyiapkan perekaman browser, source map, atau perekaman
+seluler. Untuk itu, mulai dari panduan [Integrasi SDK](/id/guides/sdk-ingestion).
+
+<CardGroup cols={2}>
+  <Card title="Proyek dan penyiapan" icon="folder-kanban" href="/id/concepts/projects">
+    Baca status penyiapan dan kelola kunci ingest proyek.
+  </Card>
+
+  <Card title="Integrasi SDK" icon="cloud-upload" href="/id/guides/sdk-ingestion">
+    Pilih paket SDK untuk runtime Anda.
+  </Card>
+
+  <Card title="Investigasi masalah" icon="bug" href="/id/guides/investigate-an-issue">
+    Ikuti bukti trace dan log terkait untuk satu masalah.
+  </Card>
+
+  <Card title="Laporkan masalah" icon="life-buoy" href="/id/guides/report-a-problem">
+    Kirim laporan dukungan yang aman dan privat.
+  </Card>
+</CardGroup>

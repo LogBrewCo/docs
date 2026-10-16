@@ -1,0 +1,227 @@
+---
+title: "API Dukungan: buat dan lacak laporan dukungan"
+sidebarTitle: "Laporkan masalah"
+description: "Buat laporan dukungan LogBrew dari CLI atau API Dukungan. Tambahkan diagnostik yang aman, lacak statusnya, dan kirim konteks lanjutan."
+---
+
+Buat laporan dukungan jika sebuah kendala perlu ditindaklanjuti. Setelah itu,
+manusia atau agen AI dapat melacak laporan dan menambahkan konteks yang
+diminta. Hanya akun yang membuat laporan dan tim dukungan LogBrew yang dapat
+membacanya.
+
+<Warning>
+  Gunakan bearer akses akun, misalnya `$LOGBREW_TOKEN`. Jangan pernah memakai
+  kunci ingest proyek. Hapus data privat sebelum menulis judul, deskripsi,
+  atau diagnostik. Penyamaran otomatis tidak menggantikan pemeriksaan ini.
+</Warning>
+
+## Buat laporan dukungan
+
+Dari CLI, jalankan:
+
+```bash
+logbrew support create --category docs_confusion \
+  --title "First event is not visible" \
+  --description "Steps: send one info event, then read logs in the same project. Expected: one row. Observed: no rows." \
+  --project "<project_id>" --json
+```
+
+CLI menetapkan `source` ke `cli`. `--diagnostics` hanya menambahkan nama biner,
+versi CLI, sistem operasi, dan arsitektur. Jalankan `logbrew support --help`
+untuk melihat semua flag.
+
+CLI tidak mengirim kunci percobaan ulang saat membuat laporan. Jika hasilnya
+tidak pasti, jalankan `logbrew support list --json` sebelum menjalankan
+perintah lagi. Jika tidak, Anda dapat membuat laporan ganda tanpa sengaja.
+
+Dari API, kirim `POST /api/support/tickets` dengan `source`, `category`,
+`title`, dan `description`. Agar percobaan ulang aman, buat satu kunci
+percobaan ulang untuk laporan ini dan kirim di header `Idempotency-Key`.
+Contoh ini memakai nilai sintetis:
+
+```bash
+LOGBREW_SUPPORT_RETRY_KEY="$(uuidgen)"
+
+curl -sS "https://api.logbrew.co/api/support/tickets" \
+  -H "Authorization: Bearer ${LOGBREW_TOKEN:?Set an account access bearer}" \
+  -H "Idempotency-Key: ${LOGBREW_SUPPORT_RETRY_KEY:?Create a retry key for this report}" \
+  -H "Content-Type: application/json" \
+  --data '{
+    "source": "docs",
+    "category": "docs_confusion",
+    "title": "First event is not visible",
+    "description": "Steps: send one info event, then read logs in the same project. Expected: one row. Observed: no rows.",
+    "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    "diagnostics": {
+      "steps": 2,
+      "expected": "one matching row",
+      "observed": "no matching rows"
+    }
+  }'
+```
+
+Kunci percobaan ulang berisi 1 sampai 128 karakter ASCII yang terlihat, tanpa
+spasi. Untuk mencoba lagi, kirim kunci yang sama dengan body yang sama.
+Respons akan mengembalikan laporan yang sama. Gunakan kunci baru untuk laporan
+yang berbeda. Timeout tidak membuktikan bahwa pembuatan laporan gagal. Header
+`Idempotency-Key` bersifat opsional. Tanpa header ini, permintaan yang diulang
+dapat membuat laporan lain.
+
+Kolom opsionalnya adalah `project_id`, `environment`, `runtime`, `framework`,
+`sdk_package`, `sdk_version`, `release`, `trace_id`, `event_id`, dan
+`diagnostics`. Jangan sertakan `project_id` jika kendala tidak terkait proyek
+tertentu. `project_id` harus menunjuk proyek aktif di akun Anda.
+
+| Kolom | Nilai yang diterima |
+| --- | --- |
+| `source` | `cli`, `sdk`, `website`, `docs`, `mobile` |
+| `category` | `sdk_install_failure`, `ingest_failure`, `auth_failure`, `project_setup`, `dashboard_issue`, `docs_confusion`, `cli_issue`, `mobile_issue`, `billing_question`, `other` |
+| `title` | 1 sampai 160 karakter setelah LogBrew menghapus spasi di awal dan akhir. |
+| `description` | 1 sampai 4.000 karakter setelah LogBrew menghapus spasi di awal dan akhir. |
+| Kolom teks lain | Masing-masing maksimal 256 karakter. |
+
+Permintaan yang berhasil mengembalikan HTTP `200`:
+
+```json
+{
+  "ticket_id": "sup_11111111111141118111111111111111",
+  "status": "open",
+  "created_at": "2026-10-01T09:30:00Z",
+  "next": "Support ticket created. LogBrew will review the attached diagnostics.",
+  "next_action": {
+    "code": "review_ticket",
+    "target": "support_ticket"
+  }
+}
+```
+
+ID laporan diawali dengan `sup_`. Gunakan `next` sebagai panduan bagi manusia
+dan `next_action` untuk kontrol program.
+
+Untuk menghapus proyek, gunakan pengaturan proyek atau
+`logbrew projects delete`. Jangan meminta penghapusan proyek lewat laporan
+dukungan.
+
+## Tulis laporan yang berguna
+
+- Laporkan satu kendala di setiap laporan.
+- Pilih `category` yang paling sesuai. Gunakan `other` hanya jika tidak ada
+  kategori yang cocok.
+- Sebutkan satu gejala dan satu bagian produk di `title`.
+- Tulis `description` sebagai langkah-langkah, lalu hasil yang diharapkan dan
+  hasil yang teramati.
+- Tambahkan ID proyek, rilis, trace, atau peristiwa hanya jika ID itu menunjuk
+  kegagalan yang sama.
+
+Gunakan kunci `diagnostics` berikut:
+
+| Kunci | Isi |
+| --- | --- |
+| `steps` | Jumlah langkah reproduksi. |
+| `expected` | Hasil yang diharapkan, dalam bentuk singkat. |
+| `observed` | Hasil yang teramati, dalam bentuk singkat. |
+| `command_name` | Nama perintah dan subperintah, tanpa argumen. |
+| `exit_code` | Kode keluar proses dalam bentuk angka. |
+| `error_code` | Kode error yang stabil. |
+| `error_summary` | Ringkasan error yang singkat dan sudah disamarkan. |
+| `retry_count` | Jumlah percobaan ulang yang sama. |
+| `last_delivery_status` | Status HTTP dari percobaan pengiriman terakhir, misalnya `401`. |
+
+`diagnostics` adalah objek JSON berukuran maksimal 16 KB setelah penyamaran.
+LogBrew mengganti nilai dengan `[redacted]` jika nama kuncinya menyebut kredensial,
+sesi, atau alamat email. LogBrew juga mengganti teks yang terlihat seperti
+kredensial, URL, atau path lokal. Selain itu, LogBrew memendekkan string yang
+panjang dan membatasi tingkat nesting, jumlah kunci, dan item daftar. Jangan
+mengandalkan penyamaran ini. Hapus data privat sebelum mengirim permintaan.
+
+## <span id="track-the-ticket">Lacak laporan dukungan</span>
+
+| Perintah CLI | Rute API | Hasil |
+| --- | --- | --- |
+| `logbrew support list` | `GET /api/support/tickets` | Tampilkan daftar laporan milik akun. |
+| `logbrew support show <ticket_id>` | `GET /api/support/tickets/{ticket_id}` | Baca satu laporan dan langkah berikutnya. |
+| `logbrew support context <ticket_id>` | `GET /api/support/tickets/{ticket_id}/context` | Baca konteks yang ditambahkan ke laporan. |
+| `logbrew support reply <ticket_id>` | `POST /api/support/tickets/{ticket_id}/context` | Tambahkan konteks yang diminta. |
+| `logbrew support close <ticket_id>` | `PATCH /api/support/tickets/{ticket_id}` | Atur ke `closed`. |
+| `logbrew support reopen <ticket_id>` | `PATCH /api/support/tickets/{ticket_id}` | Atur ke `open`. |
+
+Daftar ini menerima `project_id`, `status`, `source`, `category`, `release`,
+dan `limit`. Nilai default `limit` adalah 100, dan maksimalnya 500. Untuk
+paginasi berbasis kursor, kirim `pagination=cursor`. Di halaman berikutnya,
+ulangi filter yang sama dan kirim `cursor_time` serta `cursor_id` dari
+`next_cursor`. ID kursor adalah ID laporan `sup_`. Berhenti jika
+`next_cursor` bernilai `null`. CLI memakai flag `--project`, `--status`,
+`--source`, `--category`, `--release`, `--limit`, `--pagination`,
+`--cursor-time`, dan `--cursor-id`.
+
+Nilai status adalah `open`, `routed`, `in_progress`, `waiting_on_user`,
+`resolved`, dan `closed`. Anda hanya dapat mengatur `open` atau `closed`.
+Permintaan tutup atau buka kembali yang diulang tetap berhasil tanpa mengubah
+apa pun, jadi Anda dapat mengulang permintaan yang persis sama. Ikuti status
+dan `next_action` yang dikembalikan:
+
+| Status | `next_action.code` | Langkah berikutnya |
+| --- | --- | --- |
+| `open`, `routed`, `in_progress` | `await_owner_update` | Tunggu pembaruan. Baca laporan lagi nanti. |
+| `waiting_on_user` | `provide_context` | Kirim konteks yang diminta. |
+| `resolved`, `closed` | `open_new_ticket_if_needed` | Buat laporan baru jika kendala terjadi lagi. |
+
+## Tambahkan konteks yang diminta
+
+Balas jika laporan meminta konteks. Laporan seperti itu berstatus
+`waiting_on_user` dan memiliki `next_action.code` bernilai `provide_context`.
+
+```bash
+logbrew support reply sup_11111111111141118111111111111111 \
+  --context "The same project and time filters still return no logs." \
+  --retry-key "<retry_key>" --json
+```
+
+Body API berisi `context` dan `diagnostics` yang opsional. Teks `context`
+harus berisi 1 sampai 4.000 karakter. Jangan masukkan kredensial, URL, nama
+host, atau path lokal ke `context`. API menolak teks seperti itu dengan `422`.
+Kirim kunci percobaan ulang di header `Idempotency-Key`. Rute konteks
+mewajibkan header ini. Kunci berisi 1 sampai 128 karakter ASCII yang terlihat,
+tanpa spasi. Gunakan kunci baru untuk setiap balasan. Pakai ulang kunci hanya
+untuk mencoba lagi balasan yang sama.
+
+API menerima konteks selama laporan berstatus `open`, `routed`,
+`in_progress`, atau `waiting_on_user`. API menerima 1 balasan untuk setiap
+status laporan. Setelah membalas, tunggu perubahan status sebelum mengirim
+konteks lagi. Balasan untuk laporan `waiting_on_user` mengubah status laporan
+menjadi `open`. Baca `status` yang dikembalikan, jangan mengasumsikan
+perubahan ini.
+
+Balasan yang berhasil mengembalikan `ticket_id`, `context_id`, `status`,
+`created_at`, `next`, dan `next_action`. `context_id` diawali dengan `ctx_`.
+Baca laporan lagi sebelum menjawab permintaan berikutnya.
+
+`GET /api/support/tickets/{ticket_id}/context` mengembalikan 20 entri konteks
+terbaru, diurutkan dari yang paling lama. Setiap entri berisi `context_id`,
+`context`, `diagnostics`, dan `created_at`. Daftar ini tidak memiliki kursor.
+
+Balasan untuk laporan `resolved` atau `closed` mengembalikan `422` dengan
+`code: "validation_failed"`. Buka kembali laporan hanya jika pengguna ingin
+melanjutkan permintaan dukungan tersebut. `next_action` tidak memberi agen
+izin untuk mengubah status akun.
+
+## Pulihkan dari error
+
+| Status HTTP | `code` | Pemulihan |
+| --- | --- | --- |
+| `401` | `unauthorized` | Kirim bearer akses akun yang valid. |
+| `404` | `not_found` | Tampilkan daftar laporan milik akun dan gunakan ID `sup_` yang dikembalikan. Untuk error proyek, periksa `project_id` atau jangan sertakan kolom itu. |
+| `405` | `method_not_allowed` | Gunakan metode dari tabel di [Lacak laporan dukungan](#track-the-ticket). |
+| `409` | `idempotency_conflict` | Kunci percobaan ulang sudah dipakai untuk permintaan lain. Ulangi permintaan awal, atau baca laporan dan gunakan kunci baru. |
+| `422` | `validation_failed` | Perbaiki kolom yang disebutkan. Untuk PATCH, kirim hanya `status: "open"` atau `status: "closed"`. |
+| `429` | `rate_limited` | Tunggu, lalu coba lagi. |
+
+Respons error berisi `error`, `code`, `next`, dan `next_action`. Lihat
+[Error API](/id/reference/api-errors).
+
+## Jaga keamanan laporan
+
+Jangan pernah mengirim rahasia, token, header otorisasi, kunci ingest,
+log mentah, data pelanggan, path lokal, host, atau kode sumber yang tidak
+terkait. Kirim ringkasan singkat yang sudah disamarkan. Untuk pemeriksaan
+mandiri, lihat [Mengatasi kendala](/id/guides/troubleshooting).

@@ -1,0 +1,263 @@
+---
+title: "Logging React Native dengan LogBrew"
+sidebarTitle: "React Native"
+description: "Instal SDK React Native, kirim log uji, dan temukan log itu di proyek LogBrew yang benar. Konfigurasikan Expo dengan aman dan tangani error pengiriman."
+---
+
+Kirim log dari aplikasi React Native ke LogBrew. Mulai dengan satu log uji,
+lalu gunakan CLI untuk menemukannya di proyek yang benar. Panduan ini memakai
+Expo. Aplikasi React Native bare memuat kunci melalui konfigurasinya sendiri.
+
+Sebelum mulai, Anda memerlukan:
+
+- Aplikasi React Native yang bisa Anda jalankan secara lokal.
+- Proyek LogBrew. Lihat [Proyek dan penyiapan](/id/concepts/projects).
+- CLI yang sudah masuk. Lihat [Gunakan CLI](/id/guides/cli).
+
+## Instal SDK
+
+Instal kedua paket di direktori aplikasi. Pertahankan dependensi React dan
+React Native milik aplikasi:
+
+```bash
+npm install @logbrew/sdk@0.1.28 @logbrew/react-native@0.1.35
+```
+
+## Buat kunci SDK proyek
+
+Berikan aplikasi kunci SDK khusus proyek yang hanya bisa menulis.
+Expo memasukkan setiap nilai `EXPO_PUBLIC_*` ke bundle aplikasi. Jangan pernah
+memasukkan kredensial akun atau server ke variabel itu.
+
+CLI v0.1.32 atau yang lebih baru membuat kunci untuk proyek yang sudah ada.
+CLI tidak membuat proyek baru. Cari ID proyek:
+
+```bash
+logbrew projects --json
+```
+
+Buat kunci. Gunakan path file baru di direktori yang hanya bisa diakses
+pemiliknya:
+
+```bash
+install -d -m 700 "$HOME/.logbrew" &&
+logbrew projects keys create "<project_id>" \
+  --ingest-key-file "$HOME/.logbrew/my-mobile-app.ingest" \
+  --label "My mobile app" \
+  --kind sdk \
+  --json
+```
+
+Lanjutkan hanya setelah perintah berhasil. Jika hasilnya tidak jelas,
+jalankan lagi perintah yang sama dengan argumen yang sama. Jangan pakai
+`--abandon-retry`.
+
+Jauhkan file kunci dari source control. Jangan pakai kredensial akun yang
+mengotorisasi CLI. Untuk pengembangan Expo lokal, simpan kunci di file
+`.env.local` yang diabaikan source control, di root aplikasi:
+
+```dotenv
+EXPO_PUBLIC_LOGBREW_CLIENT_KEY=<your_project_sdk_key>
+```
+
+Pertahankan referensi langsung `process.env.EXPO_PUBLIC_LOGBREW_CLIENT_KEY` di
+modul penyiapan di bawah. Muat ulang aplikasi sepenuhnya setelah Anda
+mengubah nilainya. Lihat
+[variabel lingkungan Expo](https://docs.expo.dev/guides/environment-variables/)
+untuk konfigurasi saat build. Aplikasi React Native bare memuat kunci melalui
+konfigurasinya sendiri sebagai gantinya.
+
+## Buat klien
+
+Letakkan penyiapan ini di satu modul yang dimuat aplikasi saat startup.
+Jangan membuat klien di setiap render. Masukkan layanan, lingkungan, dan
+rilis ke `context`:
+
+```js
+import { AppState } from "react-native";
+import {
+  createAppStateListener,
+  createLogBrewReactNativeClient,
+  createReactNativeFetchTransport
+} from "@logbrew/react-native";
+
+const clientKey = process.env.EXPO_PUBLIC_LOGBREW_CLIENT_KEY;
+if (!clientKey) {
+  throw new Error("Set EXPO_PUBLIC_LOGBREW_CLIENT_KEY");
+}
+
+const client = createLogBrewReactNativeClient({
+  clientKey,
+  context: {
+    schemaVersion: 1,
+    resource: {
+      service: { name: "my-mobile-app" },
+      deployment: {
+        environment: __DEV__ ? "development" : "production",
+        release: "mobile@1.0.0"
+      }
+    }
+  },
+  transport: createReactNativeFetchTransport()
+});
+
+const stopAppStateListener = createAppStateListener(client, AppState, {
+  flushOnBackground: true
+});
+
+export async function verifyLogBrewSetup() {
+  client.log(`evt_react_native_setup_${Date.now()}`, new Date().toISOString(), {
+    level: "info",
+    message: "React Native setup check"
+  });
+
+  const receipt = await client.flush();
+  if (receipt.statusCode < 200 || receipt.statusCode >= 300) {
+    throw new Error("LogBrew did not accept the setup event");
+  }
+  return {
+    status_code: receipt.statusCode,
+    attempts: receipt.attempts,
+    batches: receipt.batches
+  };
+}
+```
+
+Transport fetch mengaktifkan pengiriman otomatis dengan percobaan ulang yang
+terbatas dan antrean. Jangan tambahkan timer flush kedua. Listener AppState
+meminta flush terakhir saat aplikasi menjadi tidak aktif atau masuk ke latar
+belakang. Panggil `stopAppStateListener()` saat aplikasi dihentikan.
+
+Dengan antrean native, hanya satu klien aktif yang bisa memakai satu kunci.
+Klien kedua untuk kunci yang sama gagal dengan `configuration_error`. Ini satu
+alasan lagi untuk membuat klien sekali saja.
+
+## Kirim dan temukan log uji
+
+Panggil `verifyLogBrewSetup()` sekali dari tindakan uji khusus development.
+Tunggu hasilnya dengan await dan tangani promise yang ditolak. Jangan cetak
+kunci atau batch peristiwa.
+
+Hasil `2xx` dengan `batches` di atas 0 menunjukkan bahwa LogBrew menerima
+batch. Flush kosong mengembalikan `204` dengan 0 percobaan dan 0 batch, karena
+pengiriman otomatis bisa mengirim peristiwa lebih dulu. Dalam kedua kasus,
+baca log yang tersimpan dengan CLI:
+
+```bash
+logbrew read logs --project "<project_id>" \
+  --search "React Native setup check" --since 1h --json
+```
+
+Periksa waktu peristiwa dan layanan di hasil. Hasil kosong tidak menunjukkan
+penyebabnya. Periksa proyek, kunci, dan rentang waktu.
+
+`RecordingTransport.alwaysAccept()` hanya untuk pengujian lokal. Fungsi ini
+mengembalikan `202` sintetis dan tidak mengirim permintaan.
+
+## Pengiriman saat offline dan setelah restart
+
+Baca `client.deliveryHealth().storage` di aplikasi yang sedang berjalan:
+
+- `persistent`: klien memakai antrean native. Peristiwa yang tertunda dimuat
+  lagi setelah aplikasi di-restart.
+- `memory`: peristiwa yang tertunda hilang saat runtime JavaScript
+  di-restart.
+
+Nilai default `persistentQueue: "auto"` memakai antrean native jika biner
+aplikasi berisi modul native LogBrew. Expo Go dan biner lama memakai memori.
+Pembaruan yang hanya berisi JavaScript tidak bisa menambahkan modul native.
+
+Jika aplikasi produksi memerlukan pengiriman setelah restart, atur
+`persistentQueue: "required"`. Dengan begitu, pembuatan klien gagal dengan
+`configuration_error` jika antrean native tidak ada. Build ulang aplikasi
+dengan modul native. Gunakan `persistentQueue: "disabled"` hanya jika Anda
+memang menginginkan antrean memori.
+
+Antrean native menampung paling banyak 1.000 peristiwa dan 4 MiB data
+peristiwa. Batas klien yang lebih kecil juga berlaku. Peristiwa di antrean
+native mempertahankan ID peristiwanya setelah restart.
+
+Pengiriman dijamin minimal sekali (at least once), jadi percobaan ulang bisa
+mengirim satu peristiwa dua kali. Jika ID dan isi peristiwa cocok dengan
+peristiwa yang sudah diterima LogBrew, LogBrew tidak menyimpannya lagi. Flush
+di latar belakang adalah percobaan, bukan bukti pengiriman. Uji perekaman saat
+offline dan restart aplikasi. Lalu temukan peristiwa yang tersimpan di
+proyek.
+
+### Baca status pengiriman
+
+`client.deliveryHealth()` mengembalikan status antrean dan pengiriman tanpa
+isi peristiwa. Baca kolom berikut terlebih dahulu:
+
+| Kolom | Arti |
+| --- | --- |
+| `storage` | `persistent` atau `memory`. |
+| `deliveryState` | Status pengiriman otomatis saat ini. |
+| `lastOutcome` | Hasil percobaan pengiriman terakhir. |
+| `lastStatusClass` | Kelas status respons terakhir, atau error jaringan. |
+| `pausedReason` | `authentication` setelah `401`. `rate_limit` setelah `429`. |
+| `queueEvents` | Jumlah peristiwa yang menunggu pengiriman. |
+| `acceptedEvents` | Jumlah peristiwa yang diterima LogBrew. |
+| `droppedByReason` | Jumlah peristiwa yang dibuang klien, per alasan. |
+
+## Pilih isi log
+
+Buat setiap pesan singkat dan spesifik. Jelaskan apa yang terjadi di
+aplikasi, seperti permintaan yang gagal atau percobaan ulang yang dijadwalkan.
+Jangan sertakan nama, alamat email, token akses, nilai formulir, atau body permintaan.
+
+Gunakan tingkat keparahan yang sesuai dengan peristiwa: `info`, `warning`,
+`error`, atau `critical`. Jaga agar layanan, lingkungan, dan rilis konsisten
+supaya Anda bisa menemukan data yang saling terkait.
+
+`npx react-native log-ios` dan `npx react-native log-android` menampilkan log
+perangkat lokal. Perintah ini tidak mengambil data dari LogBrew. Lihat
+[debugging native React Native](https://reactnative.dev/docs/debugging-native-code).
+
+## Pulihkan dari pemeriksaan yang gagal
+
+Jika `flush()` gagal, promise-nya ditolak dengan kode error SDK. Jauhkan kunci
+dan body peristiwa dari laporan error.
+
+| Hasil | Langkah berikutnya |
+| --- | --- |
+| Kunci klien tidak ada | Penyiapan berhenti sebelum mengirim. Muat kunci SDK proyek melalui konfigurasi aplikasi. |
+| `401`, `unauthenticated` | LogBrew menolak kunci. Pengiriman otomatis dijeda dengan `pausedReason: "authentication"`. Perbaiki atau ganti kunci SDK proyek sebelum Anda membuat klien baru. Jangan pernah memakai kredensial akun. |
+| `429`, `rate_limited` | SDK menyimpan batch dan menjeda pengiriman otomatis dengan `pausedReason: "rate_limit"`. Jangan tambahkan loop percobaan ulang. |
+| `400`, `transport_error` | LogBrew menolak permintaan. Periksa kolom peristiwa dan versi paket. |
+| `network_failure` | SDK tidak punya hasil pengiriman. LogBrew mungkin sudah menerima peristiwa. Periksa konektivitas dan `deliveryHealth()`. |
+| `5xx`, `transport_error` | SDK sudah mencoba lagi. Baca log yang tersimpan sebelum Anda mencoba lagi secara manual. |
+| Hasil CLI kosong | Periksa proyek, kunci, waktu peristiwa, dan filter. |
+
+Lihat [Mengatasi kendala](/id/guides/troubleshooting) untuk pemeriksaan
+lainnya.
+
+## Pertahankan Debug ID Expo di bundle rilis
+
+Buat konfigurasi Metro Expo melalui LogBrew. Dengan begitu, bundle runtime
+mendapatkan Debug ID yang sama dengan source map-nya:
+
+```js
+// metro.config.js
+const { getLogBrewExpoConfig } = require("@logbrew/react-native/metro");
+
+module.exports = getLogBrewExpoConfig(__dirname);
+```
+
+Jika aplikasi memakai mode bundle React Native Worklets, terapkan transformasi
+itu setelah helper LogBrew:
+
+```js
+// metro.config.js
+const { getLogBrewExpoConfig } = require("@logbrew/react-native/metro");
+const { getBundleModeMetroConfig } = require("react-native-worklets/bundleMode");
+
+module.exports = getBundleModeMetroConfig(getLogBrewExpoConfig(__dirname));
+```
+
+Helper ini mempertahankan plugin pra-serialisasi Expo yang sudah ada.
+
+Sebagai gantinya, aplikasi React Native bare membungkus konfigurasi Metro
+finalnya dengan `withLogBrewMetroConfig()`. Jangan pakai pembungkus itu dengan Expo. Jika Anda
+memakainya, build produksi berhenti dengan pesan yang mengarah ke
+`getLogBrewExpoConfig()`.
