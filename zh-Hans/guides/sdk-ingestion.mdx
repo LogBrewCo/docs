@@ -1,0 +1,363 @@
+---
+title: "SDK 接入：发送应用遥测数据"
+sidebarTitle: "SDK 接入"
+description: "为你的运行时选择 LogBrew SDK，配置接入密钥，发送应用遥测数据，并在项目中找到测试信号。"
+---
+
+安装适合你运行时的 LogBrew SDK 包。SDK 负责格式化并投递信号。每个包的指南列出了它的信号类型、限制和重试行为。
+
+每次接入都完成以下步骤：
+
+1. 安装适合你运行时的 SDK 包。
+2. 把项目级接入密钥放在版本控制之外。
+3. 设置稳定的服务、环境和版本值。
+4. 从应用发送一条安全的测试信号。
+5. 查看投递结果。然后在 LogBrew 中找到这条信号。
+
+批次被接受，说明它已到达 LogBrew API。但筛选条件仍可能隐藏其中的信号。选择正确的项目和时间范围。然后核对服务、环境、版本和信号类型。
+
+启用采集之前，先[选择并测试允许采集的字段](/zh-Hans/guides/safe-capture)。要让“分析”中有数据，按[产品事件采集](/zh-Hans/guides/product-events)操作。
+
+## <span id="item-types">信号和共享上下文</span>
+
+前 5 张卡片是信号。版本和环境是这些信号的上下文。它们不是单独的信号类型。
+
+<CardGroup cols={2}>
+  <Card title="log" icon="file-text">
+    带有严重程度、来源、时间和安全上下文的结构化消息。
+  </Card>
+
+  <Card title="trace_span" icon="route">
+    一次计时操作，通过 Trace ID 和 Span ID 关联到所属链路。
+  </Card>
+
+  <Card title="issue" icon="bug">
+    一次已采集的故障，包括严重程度和应用发送的错误详情。
+  </Card>
+
+  <Card title="action" icon="mouse-pointer-click">
+    应用中的一次操作，可选附带主体、会话和安全属性。
+  </Card>
+
+  <Card title="metric" icon="chart-line">
+    一次数值测量，包含名称、类型、值、单位和时间性（temporality）。
+  </Card>
+
+  <Card title="release 和 environment" icon="tags">
+    附加到同一 SDK 作用域中后续信号的代码版本和环境。
+  </Card>
+</CardGroup>
+
+## 严重程度取值
+
+日志和问题使用 `info`、`warning`、`error` 或 `critical`。SDK 和运行时可能发送 `trace`、`debug`、`warn` 或 `fatal` 等别名。LogBrew 会把接受的别名转换为对应的规范值。
+
+## 通过包管理器安装
+
+为发送遥测数据的运行时安装 SDK 包。使用 LogBrew 提供的项目级 SDK 或接入配置。不要把账号登录信息用作 SDK 配置。
+
+| 运行时 | 安装 |
+| --- | --- |
+| JavaScript | `npm install @logbrew/sdk` |
+| 浏览器 | `npm install @logbrew/sdk @logbrew/browser` |
+| Node.js | `npm install @logbrew/sdk @logbrew/node` |
+| Express | `npm install @logbrew/sdk @logbrew/node @logbrew/express` |
+| Fastify | `npm install @logbrew/sdk @logbrew/node @logbrew/fastify` |
+| NestJS | `npm install @logbrew/sdk @logbrew/node @logbrew/nestjs` |
+| React | `npm install @logbrew/sdk @logbrew/browser @logbrew/react` |
+| Next.js | `npm install @logbrew/sdk @logbrew/node @logbrew/next` |
+| Angular | `npm install @logbrew/sdk @logbrew/angular` |
+| Vue | `npm install @logbrew/sdk @logbrew/vue` |
+| Svelte | `npm install @logbrew/sdk @logbrew/browser @logbrew/svelte` |
+| [React Native](/zh-Hans/guides/react-native) | `npm install @logbrew/sdk @logbrew/react-native` |
+| Python | `python3 -m pip install logbrew-sdk` |
+| FastAPI | `python3 -m pip install logbrew-fastapi` |
+| Flask | `python3 -m pip install "logbrew-flask>=0.1.5,<0.2"` |
+| Django | `python3 -m pip install logbrew-django` |
+| Swift / Apple | 通过 SwiftPM 添加 `https://github.com/LogBrewCo/sdk.git`。 |
+| PHP | `composer require logbrew/sdk:^0.1.1` |
+| Ruby | `gem install logbrew-sdk` |
+| Go | `go get github.com/LogBrewCo/sdk/go/logbrew@latest` |
+| Rust | `cargo add logbrew` |
+| Java / Spring | 从 Maven Central 添加 `co.logbrew:logbrew-sdk:0.1.9`。 |
+| .NET | `dotnet add package LogBrew --version 0.1.7` |
+| ASP.NET Core | `dotnet add package LogBrew.AspNetCore --version 0.1.2` |
+| C++ / CMake | 用 CMake `FetchContent` 固定 `cpp/logbrew-cpp/v0.2.3`。 |
+
+### Node.js 请求链路追踪
+
+要实现以请求为根 Span 的链路关联，使用 `@logbrew/sdk` 0.1.16 或更高版本，以及 `@logbrew/node` 0.1.11 或更高版本。
+
+Express 需要 `@logbrew/express` 0.1.5 或更高版本。Fastify 和 NestJS 需要各自的 LogBrew 包为 0.1.6 或更高版本。
+
+这些集成会创建或延续一个请求 Span。Span 名称使用匹配到的路由模板。请求内的日志、问题、操作和指标会继承它的链路和 Span 上下文。升级包不会为升级前已发送的信号补充上下文。
+
+默认的请求集成不会采集请求体或响应体、查询字符串、任意请求头，或原始 `traceparent` 值。
+
+### ASP.NET Core
+
+CLI v0.1.55 或更高版本可以检测使用 `Microsoft.NET.Sdk.Web` 的 .NET 10 项目。在项目根目录预览接入计划。该命令不会修改你的文件：
+
+```bash
+logbrew setup --json
+```
+
+已发布的计划会安装宿主集成：
+
+```bash
+dotnet add package LogBrew.AspNetCore --version 0.1.2
+```
+
+在版本控制之外设置 `LOGBREW_SERVER_API_KEY`、`LOGBREW_SERVICE_NAME`、`LOGBREW_ENVIRONMENT` 和 `LOGBREW_RELEASE`。在宿主中注册 LogBrew，并把它的中间件放在路由之后：
+
+```csharp
+using LogBrew;
+
+var builder = WebApplication.CreateBuilder(args);
+builder.AddLogBrew();
+
+var app = builder.Build();
+app.UseRouting();
+app.UseLogBrew();
+app.MapGet("/", () => "ok");
+app.Run();
+```
+
+未设置 `LOGBREW_SERVER_API_KEY` 时，这两个注册调用都是安全的空操作。[ASP.NET Core NuGet 包](https://www.nuget.org/packages/LogBrew.AspNetCore/0.1.2)标识了已发布的宿主集成。它的公开包指南介绍了宿主生命周期、请求采集、问题采集、隐私限制和恢复方法。
+
+### 使用 Maven 或 Gradle 的 Java
+
+CLI v0.1.54 或更高版本可以检测 `pom.xml`、`build.gradle` 和 `build.gradle.kts`。在项目根目录预览接入计划。该命令不会修改你的文件：
+
+```bash
+logbrew setup --json
+```
+
+使用 Maven 时，添加已发布的包：
+
+```xml
+<dependency>
+  <groupId>co.logbrew</groupId>
+  <artifactId>logbrew-sdk</artifactId>
+  <version>0.1.9</version>
+</dependency>
+```
+
+使用 Gradle Kotlin DSL 时，添加同一个 Maven Central 构件：
+
+```kotlin
+implementation("co.logbrew:logbrew-sdk:0.1.9")
+```
+
+使用 Java 11 或更高版本。
+
+Spring Boot 3 和 4 应用可以暴露一个由应用持有的 `LogBrewClient` bean。它会启用可选的请求、异常、HTTP 客户端、JDBC 和缓存集成。
+
+Spring Kafka 采集需要显式开启：设置 `logbrew.kafka.enabled=true`。它使用应用已有的 Spring Kafka 依赖和客户端 bean。
+
+[Maven Central 上的 Java SDK 构件](https://central.sonatype.com/artifact/co.logbrew/logbrew-sdk/0.1.9)标识了已发布的包。它的公开指南介绍了有上限的 HTTP 投递、关闭流程、日志、Spring 配置、Kafka 关联和隐私限制。
+
+### 使用 CMake 的 C++
+
+C++ SDK 需要 C++17 和 CMake 3.16 或更高版本。CLI v0.1.39 或更高版本可以检测根目录下的 `CMakeLists.txt`。运行 `logbrew setup --json` 可以预览以下接入计划，不会修改你的文件：
+
+```cmake
+include(FetchContent)
+FetchContent_Declare(
+  logbrew
+  GIT_REPOSITORY https://github.com/LogBrewCo/sdk.git
+  GIT_TAG cpp/logbrew-cpp/v0.2.3
+  GIT_SHALLOW TRUE
+  SOURCE_SUBDIR cpp/logbrew-cpp
+)
+FetchContent_MakeAvailable(logbrew)
+
+target_link_libraries(your_app PRIVATE LogBrew::LogBrew)
+```
+
+核心 target 没有外部依赖。要通过可选的 libcurl 传输发送批次，把上面最后的 `FetchContent_MakeAvailable` 调用和 target 链接替换为：
+
+```cmake
+set(LOGBREW_BUILD_HTTP_TRANSPORT ON CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(logbrew)
+target_link_libraries(your_app PRIVATE LogBrew::HttpTransport)
+```
+
+配置应用。然后构建应用，测试所选的 SDK 版本：
+
+```bash
+cmake -S . -B build &&
+cmake --build build
+```
+
+如果构建环境无法拉取 SDK monorepo，使用 [C++ 0.2.3 版本](https://github.com/LogBrewCo/sdk/releases/tag/cpp/logbrew-cpp/v0.2.3)中单独提供的 `logbrew-cpp-0.2.3.tar.gz` 资源文件。解压后的包支持 `cmake --install` 和 `find_package(LogBrew 0.2.3 CONFIG REQUIRED)`。它的包指南介绍了类型化上下文、问题证据、Span 事件、指标、操作和 HTTP 投递。
+
+### JavaScript Source Map
+
+Vite 构建请按 [JavaScript Source Map](/zh-Hans/guides/source-maps) 操作。它介绍了插件、构建产物密钥、上传检查，以及如何得到一个带原始源码位置的新问题。
+
+### Apple、Flask 和 React Native
+
+使用 Swift 包中的 `LogBrew` 产品发送遥测数据。只有需要采集 Apple 崩溃或卡顿时，才添加 `LogBrewCrash`。dSYM 上传和托管符号化见 [Apple 崩溃与卡顿](/zh-Hans/guides/apple-crashes-and-hangs)。
+
+Flask 请按 [Flask](/zh-Hans/guides/flask) 指南操作。
+
+React Native 和 Expo 请按 [React Native](/zh-Hans/guides/react-native) 操作。它介绍了项目密钥、安全的测试日志、投递错误，以及生产环境 Source Map 所需的 Expo Metro 配置。
+
+## <span id="javascript-queue-tracing">JavaScript 队列链路追踪</span>
+
+Node 队列集成是独立的 npm 包。安装 LogBrew JavaScript 基础包、对应的集成包，以及应用已在使用的队列或消息代理客户端。
+
+| 队列或消息代理 | 安装 |
+| --- | --- |
+| BullMQ | `npm install @logbrew/sdk @logbrew/node @logbrew/bullmq bullmq` |
+| KafkaJS | `npm install @logbrew/sdk @logbrew/node @logbrew/kafkajs kafkajs` |
+| RabbitMQ / amqplib | `npm install @logbrew/sdk @logbrew/node @logbrew/amqplib amqplib` |
+| Amazon SQS | `npm install @logbrew/sdk @logbrew/node @logbrew/aws-sqs @aws-sdk/client-sqs` |
+
+这些包用于在你选定的队列调用周围，由应用显式完成链路关联。默认情况下，LogBrew 不接管你的消息代理连接，不创建队列，也不会全局修补每个客户端。
+
+<Warning>
+  不要把队列消息体、任意消息头、消息代理 URL，以及会话或账号 Bearer 令牌写进 SDK 配置。使用 LogBrew 提供的项目级服务端接入配置。
+</Warning>
+
+## <span id="required-envelope-fields">直接发送原生封装</span>
+
+只有在没有公开 LogBrew SDK 支持的自定义客户端中，才使用 `POST /api/telemetry/ingest`。公开 SDK 使用自己的批次格式。该端点不接受这种格式。
+
+每个原生封装发送 1 到 512 个条目。同一封装中的所有条目共享项目、服务、版本、环境和可选的链路上下文。
+
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `project_id` | 是 | LogBrew 项目的 UUID。必须与接入密钥所属的项目一致。 |
+| `environment` | 是 | 部署环境。不超过 64 个字符，不能包含空白字符、`/` 或 `\`。值 `None` 会被拒绝。 |
+| `release` | 是 | 代码版本。不超过 200 个字符，不能包含 `/`、`\`、制表符或换行符。不能是 `.` 或 `..`。 |
+| `service_name` | 是 | 逻辑服务名，例如 `checkout-api`。不能为空。 |
+| `sdk_name` | 是 | SDK 或自定义客户端的标识。 |
+| `sdk_version` | 是 | SDK 或自定义客户端的版本。 |
+| `items` | 是 | 1 到 512 个 `log`、`trace_span`、`issue` 或 `action` 条目。 |
+| `trace_id` | 否 | 封装中相互关联的条目共享的 Trace ID。如果某个条目有 `span_id`，则必须提供。 |
+
+### 条目字段
+
+每个条目都有 `type` 和一个 `data` 对象。日志条目使用 `level`。问题条目使用 `severity`。两者都接受[严重程度值](/zh-Hans/concepts/telemetry#severity-values)中列出的值。
+
+| 条目字段 | 适用于 | 说明 |
+| --- | --- | --- |
+| `id` | 所有条目 | 可选的客户端事件 ID。1 到 200 个字符，在封装内唯一。 |
+| `span_id` | `log`、`issue`、`action` | 可选。16 个十六进制字符，不能全为零。封装必须有 `trace_id`。 |
+| `name` | `action` | 必填。不超过 64 个 UTF-8 字节。不能以 `$` 开头，不能以空白字符开头或结尾，也不能包含控制字符或不可见的格式字符。 |
+
+如果客户端可能重试，为每个条目发送 `id`。重试时，如果再次发送 `id` 和内容都相同的已接受条目，LogBrew 不会重复存储。响应会把该条目计入 `already_accepted`。
+
+### 请求示例
+
+把下面的 JSON 保存为 `telemetry-envelope.json`。将示例项目 ID 替换为接入密钥对应的确切项目 ID。把时间戳设为发送测试信号时的当前 UTC 时间。使用你自己的服务和版本值。
+
+```json telemetry-envelope.json
+{
+  "project_id": "11111111-1111-4111-8111-111111111111",
+  "environment": "production",
+  "release": "api@1.2.3",
+  "service_name": "checkout-api",
+  "sdk_name": "custom-native-client",
+  "sdk_version": "1.0.0",
+  "items": [
+    {
+      "type": "log",
+      "data": {
+        "id": "evt_example_log_0001",
+        "level": "warning",
+        "message": "checkout retry scheduled",
+        "source": "runtime",
+        "attributes": { "route": "/checkout" },
+        "occurred_at": "2026-06-01T12:00:00Z"
+      }
+    },
+    {
+      "type": "action",
+      "data": {
+        "id": "evt_example_action_0001",
+        "name": "checkout_failed",
+        "distinct_id": "user_123",
+        "session_id": "session_456",
+        "occurred_at": "2026-06-01T12:00:00Z",
+        "properties": { "cart_total": 4200 }
+      }
+    }
+  ]
+}
+```
+
+通过受保护的配置，把项目级接入密钥加载到 `LOGBREW_INGEST_BEARER`。不要打印它，也不要使用账号凭据。以下命令会发送一次该文件。它需要 curl 7.76.0 或更高版本：
+
+```bash
+: "${LOGBREW_INGEST_BEARER:?load the project-scoped ingest key}" &&
+curl --fail-with-body --silent --show-error \
+  "https://api.logbrew.co/api/telemetry/ingest" \
+  -H "Authorization: Bearer $LOGBREW_INGEST_BEARER" \
+  -H "Content-Type: application/json" \
+  --data-binary @telemetry-envelope.json \
+  --write-out '\nHTTP %{http_code}\n'
+```
+
+查看 HTTP 状态和响应体。`--fail-with-body` 会保留错误响应体，并在 HTTP 出错时返回非零退出状态。网络故障或超时无法说明 LogBrew 是否已接受请求。只有当条目都带有 `id` 值时，才再次发送同一个文件。没有 `id` 值时，第二次发送可能导致条目被存储两次。
+
+### 响应
+
+请求成功时返回 `200`，以及按数据流统计的新条目数量。`already_accepted` 统计之前的请求已经投递过的条目。
+
+```json
+{
+  "issues": 0,
+  "logs": 1,
+  "trace_spans": 0,
+  "actions": 1,
+  "already_accepted": 0,
+  "next": "review accepted telemetry in logs, issues, traces, actions, or live feed",
+  "next_action": {
+    "code": "review_ingested_telemetry",
+    "target": "telemetry_reads"
+  }
+}
+```
+
+### 错误
+
+无效或已撤销的接入密钥会返回 `401`。属于其他项目的密钥也会返回 `401`：
+
+```json
+{
+  "error": "Invalid ingest key",
+  "code": "ingest_key_invalid",
+  "next": "create a project-scoped ingest key, then retry ingestion with that key",
+  "next_action": {
+    "code": "configure_ingest_key",
+    "target": "project_ingest_key"
+  }
+}
+```
+
+使用项目级接入密钥。不要用账号凭据代替它。构建产物密钥不能发送遥测数据。
+
+违反字段规则的封装会返回 `422` 和错误码 `validation_failed`。`error` 字段指出违反的规则。`next` 字段说明如何修正请求。例如，`"items": []` 会返回：
+
+```json
+{
+  "error": "native telemetry envelope cannot be empty",
+  "code": "validation_failed",
+  "next": "send at least one native telemetry item",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+没有信号时不要发送封装。超过 512 个条目的封装会返回 `422` 和错误 `native telemetry envelope exceeds the item limit`。把它拆分成每批不超过 512 个条目。每个批次都保留项目和共享上下文。
+
+遇到用量限制、速率限制和服务故障时，按 [API 错误](/zh-Hans/reference/api-errors)中返回的 `code` 处理。
+
+<Tip>
+  在 SDK 接入时设置版本和环境。为每项独立的工作创建或延续链路上下文。不要让不相关的工作复用同一个 Trace ID。
+</Tip>

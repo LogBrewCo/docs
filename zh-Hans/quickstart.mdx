@@ -1,0 +1,224 @@
+---
+title: "Node.js 日志接入：LogBrew 可观测性快速入门"
+sidebarTitle: "快速入门"
+description: "创建项目，接入 Node.js 日志，通过 SDK 发送一条安全的信号，并在不暴露凭据的情况下读取已存储的日志。"
+---
+
+创建一个开发项目。发送一条 Node.js 日志。再从 LogBrew 读回这条日志。CLI 会创建项目并保存它的接入密钥。只有当 CLI 没有有效的账号访问权限时，才需要在浏览器中登录。
+
+<Note>
+  智能体工作流使用 `--json`。把凭据保存在受保护的本地配置中。人、工具和智能体之间只传递变量名。
+</Note>
+
+## <span id="first-project-success-path">开始之前</span>
+
+准备以下内容：
+
+- Node.js 18 或更高版本。
+- LogBrew CLI v0.1.30 或更高版本。
+- `jq`。
+- Bash 或 Zsh。
+- 一个服务端 Node.js 应用的包目录。
+
+示例使用项目 `quickstart-node`、环境 `development` 和版本 `quickstart@1`。让这次测试与生产环境分开。其他运行时请参阅 [SDK 接入](/zh-Hans/guides/sdk-ingestion)。
+
+<Warning>
+  把接入密钥文件放在仓库之外，并且只有你可以读取。不要把这个服务端密钥放进浏览器代码、公开的打包文件或提示词中。
+</Warning>
+
+## 发送并读取第一条日志
+
+<Steps>
+  <Step title="查看账号状态" id="confirm-account-access">
+    按[使用 CLI](/zh-Hans/guides/cli) 页面中的命令安装 CLI。然后查看它的账号状态。
+
+    ```bash
+    logbrew status --json
+    ```
+
+    **检查点**：status 输出显示账号访问已通过认证。如果没有，由人运行一次 `logbrew login`。然后再次运行 `logbrew status --json`。当前认证有效时，智能体不得发起新的登录。
+  </Step>
+
+  <Step title="用 CLI 创建一个项目">
+    在仅所有者可访问的目录中选择一个新文件。CLI 会先把项目接入密钥写入该文件，再报告成功。它从不打印密钥或文件路径。
+
+    ```bash
+    install -d -m 700 "$HOME/.logbrew"
+
+    project_result="$(
+      logbrew projects create quickstart-node \
+        --runtime node \
+        --environment development \
+        --ingest-key-file "$HOME/.logbrew/quickstart-node.ingest" \
+        --json
+    )"
+    export LOGBREW_PROJECT_ID="$(jq -er '.project.id' <<<"$project_result")"
+    jq '{status, setup_status: .setup.status, ingest_key_kind: .ingest_key.kind, next}' \
+      <<<"$project_result"
+    unset project_result
+    ```
+
+    创建项目会改变账号状态。目标文件不能已经存在。如果结果不明确，原样再运行一次该命令。CLI 会复用尚未完成的请求标识。只有要开始另一次尝试时，才使用 `--abandon-retry`。
+
+    **检查点**：输出显示 `status: "created"`、接入状态 `created` 和接入密钥类型。项目已存在，密钥已保存。这并不说明遥测数据已投递。参见[项目与接入](/zh-Hans/concepts/projects)。
+  </Step>
+
+  <Step title="安装 Node.js SDK">
+    ```bash
+    npm install @logbrew/sdk @logbrew/node
+    ```
+
+    不要把账号凭据用作 SDK 配置。不要让项目密钥出现在命令输出、提示词、工单、源文件或包配置中。
+  </Step>
+
+  <Step title="通过 SDK 发送一条安全的日志">
+    发送版本和环境标记，以及一条只含占位内容的 `info` 日志。密钥只为这个 Node.js 进程设置。应用身份信息放在 `context` 中。
+
+    每次运行都会生成新的事件 ID。如果 SDK 在同一次运行中重试投递，它会用相同的 ID 发送相同的请求体。重试再次发送已接受的信号时，LogBrew 不会重复存储。
+
+    ```bash
+    LOGBREW_SERVER_API_KEY="$(< "$HOME/.logbrew/quickstart-node.ingest")" \
+      node --input-type=module <<'JS'
+    import { randomUUID } from "node:crypto";
+    import { SdkError } from "@logbrew/sdk";
+    import { createLogBrewNodeClient } from "@logbrew/node";
+
+    const client = createLogBrewNodeClient({
+      context: {
+        schemaVersion: 1,
+        resource: { service: { name: "quickstart-node", version: "quickstart@1" } }
+      }
+    });
+    const occurredAt = new Date().toISOString();
+
+    client.release(randomUUID(), occurredAt, {
+      version: "quickstart@1",
+      metadata: { service: "quickstart-node" }
+    });
+    client.environment(randomUUID(), occurredAt, { name: "development" });
+    client.log(randomUUID(), occurredAt, {
+      message: "LogBrew quickstart check",
+      level: "info",
+      logger: "quickstart-node"
+    });
+
+    try {
+      const response = await client.shutdown();
+      console.log(JSON.stringify({
+        ok: true,
+        status_code: response.statusCode,
+        attempts: response.attempts
+      }));
+    } catch (error) {
+      console.error(JSON.stringify({
+        ok: false,
+        error: error instanceof SdkError ? error.code : "delivery_failed"
+      }));
+      process.exitCode = 1;
+    }
+    JS
+    ```
+
+    不要在信号中放入凭据、请求头、请求体、客户数据或本地路径。
+
+    **检查点**：脚本打印 `"ok":true`，且 `status_code` 为 `2xx`。发生重试时，`attempts` 大于 `1`。发送成功并不是最后一项检查。
+
+    如果投递失败，脚本以退出码 `1` 退出，并打印一条简短的 JSON 错误，例如 `{"ok":false,"error":"unauthenticated"}`。它不会打印请求体或密钥。项目密钥被拒绝时会出现 `unauthenticated`。重新登录 CLI 也无法解决。
+  </Step>
+
+  <Step title="查看项目 doctor 报告" id="verify-readiness-with-the-project-doctor">
+    这次读取使用 CLI 已保存的账号访问权限。不要使用项目接入密钥。
+
+    ```bash
+    : "${LOGBREW_PROJECT_ID:?set the project UUID}"
+
+    logbrew doctor --project "$LOGBREW_PROJECT_ID" --json
+    ```
+
+    **检查点**：报告包含 `status: "ready"`。同时查看 `checks` 中的每一项。退出码 `0` 并不表示所有检查都通过。如果是其他状态，按照 `next` 和 [doctor 报告参考](/zh-Hans/reference/cli#read-a-project-doctor-report)处理。项目为 `ready` 并不表示这条测试日志已经到达。
+  </Step>
+
+  <Step title="读取测试日志">
+    使用 SDK 批次中的项目、版本和环境。
+
+    ```bash
+    logbrew read logs --project "$LOGBREW_PROJECT_ID" \
+      --release quickstart@1 \
+      --environment development \
+      --since 1h \
+      --json
+    ```
+
+    **检查点**：在该项目、版本和环境下能看到 `LogBrew quickstart check`。这只说明测试日志已投递。
+  </Step>
+</Steps>
+
+## <span id="understand-the-test-result">解读测试结果</span>
+
+示例发送了 3 条信号，其中只有 1 条是日志。版本和环境标记为这条日志提供上下文。
+
+| 示例中的字段 | 记录的数据 |
+| --- | --- |
+| `message` | 这次测试要记录的动作：`LogBrew quickstart check`。 |
+| `level: "info"` | 一条正常的测试信号，不是故障。 |
+| `logger` | 生成这条记录的应用 logger。 |
+| `occurredAt` | 本次运行生成该信号的时间，为 UTC 时间戳。 |
+| `context.resource.service` | 应用服务及其版本，而不是 SDK 的标识。 |
+
+测试日志保持 `info` 级别。不要为了更容易找到而改成 `error`。改用项目和时间筛选条件。参见[严重程度值](/zh-Hans/concepts/telemetry#severity-values)。
+
+`console.log` 这一行把投递结果打印到终端。`client.log` 调用把日志发送到 LogBrew。首次投递成功时会打印：
+
+```json
+{ "ok": true, "status_code": 200, "attempts": 1 }
+```
+
+接入密钥决定由哪个项目接收日志。CLI 的 `--project` 筛选条件不会移动信号。
+
+这条日志没有链路上下文，因为示例没有创建请求 Span（一次计时操作）。这并不说明日志发送失败。CLI 读取的是快照。再次运行可以读取之后的信号，或者用 `logbrew watch logs --json` 实时查看。
+
+## 常见恢复方法
+
+| 结果 | 下一步 |
+| --- | --- |
+| CLI 状态显示未认证 | 由人运行 `logbrew login`。然后再次运行状态命令。 |
+| 接入密钥文件已存在 | 选择一个未使用的路径。不要覆盖来历不明的凭据。 |
+| 创建项目的结果不明确 | 原样再次运行创建命令。 |
+| `unauthenticated` | 检查项目接入密钥，而不是 CLI 账号凭据。重新登录无法解决。 |
+| `rate_limited` | 等待一段时间再发送。不要循环重试，也不要创建新密钥。 |
+| `transport_error` 或 `network_failure` | 检查网络连接。响应失败并不说明之前的请求没有生效。 |
+| `delivery_failed` | 停下来检查失败原因。不要打印机密信息或请求体。 |
+| doctor 的 `status` 不是 `ready` | 读取 [doctor 报告](/zh-Hans/reference/cli#read-a-project-doctor-report)中的 `checks` 和 `next`。继续使用同一个项目。 |
+| 读取日志结果为空 | 将项目、环境、版本和时间范围与发送的批次进行比对。 |
+
+如果遥测数据仍然缺失，按[首次遥测检查](/zh-Hans/guides/troubleshooting#recover-missing-first-telemetry)排查。如果这些检查没有帮助，[报告问题](/zh-Hans/guides/report-a-problem)。不要附上凭据、原始遥测数据、客户数据、本地路径或源代码。
+
+## 迁移到你的应用
+
+- 在应用的初始化代码中只创建一次客户端。
+- 在包文件中固定 SDK 版本。在生产环境之外测试升级。
+- 从现有的机密配置中加载接入密钥。密钥可能已泄露时，轮换密钥。参见[轮换接入密钥](/zh-Hans/guides/rotate-ingest-key)。
+- 使用部署配置中稳定的服务、环境和版本名称。参见[版本](/zh-Hans/concepts/releases)。
+- 日志消息应写明执行的动作及其结果，例如 `Report generation completed`。不要在消息中包含私密信息。不要把整个请求或用户记录复制到日志中。
+- 每条应用日志只保留一个发送方，避免重复记录。添加 LogBrew 之前，先找出已经在发送每条记录的集成。
+- 在生产环境上线之前，通过真实的代码路径发送一条安全的信号并读回。检查它的消息、服务、版本和环境。独立的示例无法测试应用的代码路径。
+
+此示例不涉及浏览器采集、Source Map 或移动端采集。这些内容请从 [SDK 接入](/zh-Hans/guides/sdk-ingestion)开始。
+
+<CardGroup cols={2}>
+  <Card title="项目与接入" icon="folder-kanban" href="/zh-Hans/concepts/projects">
+    查看接入状态并管理项目接入密钥。
+  </Card>
+
+  <Card title="SDK 接入" icon="cloud-upload" href="/zh-Hans/guides/sdk-ingestion">
+    选择适合你运行时的 SDK 包。
+  </Card>
+
+  <Card title="排查问题" icon="bug" href="/zh-Hans/guides/investigate-an-issue">
+    沿着链路和相关日志证据排查某个问题。
+  </Card>
+
+  <Card title="报告问题" icon="life-buoy" href="/zh-Hans/guides/report-a-problem">
+    发送安全、私密的支持报告。
+  </Card>
+</CardGroup>

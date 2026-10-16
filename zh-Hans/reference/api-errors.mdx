@@ -1,0 +1,479 @@
+---
+title: "API 错误处理和 API 错误码"
+sidebarTitle: "API 错误"
+description: "查看 LogBrew API 的错误码、HTTP 状态和 JSON 示例。按照返回的恢复说明修正请求，并安全地重试。"
+---
+
+LogBrew API 错误使用统一的 JSON 错误响应格式。程序逻辑使用 `code` 和 `next_action`。`error` 和 `next` 以纯文本展示。不要匹配 `error` 或 `next` 的措辞。
+
+```json
+{
+  "error": "invalid since value",
+  "code": "validation_failed",
+  "next": "use since=24h, since=7d, or an RFC3339 timestamp",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+| 字段 | 含义 |
+| --- | --- |
+| `error` | 简短的、供人阅读的错误描述。 |
+| `code` | 稳定的错误码。用它选择客户端的处理分支。 |
+| `next` | 供人阅读的恢复步骤。文本因路由而异。 |
+| `next_action.code` | 稳定的恢复动作，用于程序路由。 |
+| `next_action.target` | 恢复动作作用的对象，例如 `auth` 或 `request`。 |
+
+部分响应会附加字段，例如 `limit`、`reset_at` 或 `retry_after_seconds`。[错误码](#error-codes)表格列出了这些字段。
+
+## 处理错误响应
+
+1. 读取 HTTP 状态。
+2. 读取 `code` 之前，先确认响应体是 JSON。
+3. 结合状态和 `code` 选择客户端的处理分支。
+4. `error` 和 `next` 以纯文本展示。不要将它们渲染为 HTML，也不要当作命令执行。
+5. 使用 `next_action` 自动恢复。如果客户端无法识别该动作，停止处理并展示错误。
+6. 把返回的 `limit`、`reset_at` 和 `retry_after_seconds` 值与失败的请求一起保存。
+7. 重试之前，遵循[重试规则](#retry-rules)。
+
+如果响应体不是这种 JSON 格式，保留 HTTP 状态，并把错误码记为不可用。不要编造 LogBrew `code`。代理或网络故障可能导致这种结果。
+
+不要用 HTTP 状态名称代替 LogBrew `code`。例如，`400` 响应可能包含 `invalid_json` 或 `invalid_path`。每个错误码需要不同的修正方法。
+
+写日志时，记录 HTTP 状态和 `code`。不要记录完整的响应体、凭据或恢复令牌。
+
+## <span id="error-codes">错误码</span>
+
+同一个 `code` 可能出现在多个路由上。`next` 文本和 `next_action` 的值可能因路由而异。以返回的值为准。每个端点只返回与其认证方式、方法、请求体和限制相关的错误码。
+
+| HTTP | `code` | 含义 | 客户端处理 |
+| --- | --- | --- | --- |
+| `400`、`413`、`415` 或 `422` | `invalid_json` | 请求体不是有效的 JSON、过大、内容类型错误，或不符合该路由的 JSON 结构。 | 发送有效的 JSON，带上 `Content-Type: application/json` 和该路由需要的字段。 |
+| `400`、`413` 或 `500` | `invalid_multipart` | 服务器无法读取 `multipart/form-data` 上传。 | 对于 `400` 或 `413`，修正表单或它的大小。对于 `500`，遵循[重试规则](#retry-rules)。 |
+| `400` 或 `500` | `invalid_path` | 服务器无法读取 URL 路径中的某个值，例如项目 ID 或问题 ID。 | 对于 `400`，修正 ID 及其类型。对于 `500`，遵循[重试规则](#retry-rules)。 |
+| `400`、`405` 或 `426` | `invalid_websocket_upgrade` | 实时动态连接不是有效的 WebSocket 升级请求。 | 使用 `GET` 和 WebSocket 升级请求头连接。参见[实时事件格式](/zh-Hans/reference/telemetry-response-shapes#live-event-response-format)。 |
+| `401` | `unauthorized` | 账号认证缺失、无效或已过期。 | 重新登录。使用 CLI 时，运行 `logbrew login`。 |
+| `401` | `ingest_key_invalid` | 遥测数据接收时没有有效的项目级接入密钥。 | 为该项目配置当前有效的接入密钥。 |
+| `402` | `subscription_required` | 此请求需要付费套餐。 | 按 `next` 操作。它会说明需要完成的套餐步骤，或让你联系支持团队。 |
+| `403` | `forbidden` | 账号无权访问该资源，或无权执行该请求。 | 使用有访问权限的账号。不要尝试其他 ID。 |
+| `403` | `role_forbidden` | 账号无法进行这项组织角色变更。 | 请组织所有者或管理员进行变更。 |
+| `404` | `not_found` | 该资源或 API 路由对此账号不可用。 | 重新读取你拥有的列表。然后检查 ID、路径和筛选条件。 |
+| `405` | `method_not_allowed` | 路由存在，但不支持该 HTTP 方法。 | 使用 `next` 中指定的方法。 |
+| `408` | `request_timeout` | 请求未能及时完成。 | 缩小范围，或稍后再次发送请求。 |
+| `409` | `idempotency_conflict` | 同一个 `Idempotency-Key` 或 `deployment_id` 被再次用于不同的请求。 | 原样重试原始请求，或为新的工作使用新的键。 |
+| `409` | `account_link_conflict` | 该登录身份属于另一个账号。 | 在账号设置中处理账号关联。不要为同一身份再创建一个账号。 |
+| `409` | `account_recovery_available` | 账号处于恢复期内。 | 按返回的恢复动作操作。不要泄露恢复令牌。 |
+| `410` | `account_recovery_expired` | 账号恢复期已结束。 | 登录以创建新账号。 |
+| `422` | `validation_failed` | 某个查询值、字段、筛选条件、游标、请求头或时间范围无效。 | 修正错误中指出的值。然后再次发送请求。 |
+| `422` | `invite_invalid` | 组织邀请中的邮箱地址或角色无效。 | 修正邀请。然后重新发送。 |
+| `422` | `member_limit_exceeded` | 组织成员数已达上限。 | 请组织所有者移除成员或更改套餐。 |
+| `422` | `organization_limit_exceeded` | 账号的组织数已达上限。 | 移除一个组织、更改套餐或联系支持团队。 |
+| `423` | `organization_paused` | 组织的付费订阅未生效，因此已暂停。 | 恢复有效的付费订阅。 |
+| `429` | `rate_limited` | 调用方发送的请求过多。附加 `retry_after_seconds`。 | 等待 `retry_after_seconds`。然后以退避方式重试。 |
+| `429` | `usage_limit_exceeded` | 数据接收已达到账号在当前计费周期的额度。附加 `limit` 和 `reset_at`。 | 在 `reset_at` 之前停止发送数据，或更改套餐。 |
+| `429` | `artifact_storage_limit_exceeded` | 版本构建产物或调试文件的上传达到存储上限。附加 `limit`。 | 稍后再上传。如果仍然受限，联系支持团队。 |
+| `429` | `invitation_limit_exceeded` | 组织已达到每日邀请额度。附加 `limit` 和 `reset_at`。 | 等到 `reset_at`，或更改套餐。 |
+| `500` | `storage_error`、`json_error` 或 `internal_error` | 服务器未能完成请求。 | 遵循[重试规则](#retry-rules)。如果故障持续，[报告问题](/zh-Hans/guides/report-a-problem)。 |
+| `503` | `service_unavailable` | API 目前无法接受请求。 | 稍等。然后再次发送请求。 |
+| `503` | `artifact_storage_unavailable` | 版本构建产物和调试文件上传暂时不可用。 | 稍后再上传。不要发起并行上传。 |
+| `503` | `billing_unavailable` | 计费结账或套餐管理暂时不可用。 | 稍等。然后重试计费操作。 |
+
+未知的 ID 和你无权访问的 ID 可能返回相同的响应。不要通过错误文本判断某个 ID 属于哪个账号。未知的 API 路径返回 `404` 和 `not_found`。
+
+### 限制字段
+
+| `code` | `limit` 值 | 其他字段 |
+| --- | --- | --- |
+| `usage_limit_exceeded` | `issue_events`、`log_bytes`、`metric_bytes` 或 `trace_spans` | `reset_at`：计费周期的结束时间（RFC3339）。 |
+| `invitation_limit_exceeded` | `invitations_per_day` | `reset_at`：下一个 UTC 日的开始时间（RFC3339）。 |
+| `artifact_storage_limit_exceeded` | 存储边界名称，例如 `artifact_completed_project_bytes` | 无。 |
+| `rate_limited` | 无 | `retry_after_seconds`：需要等待的整秒数，至少为 `1`。 |
+
+通过[账号 API](/zh-Hans/reference/account-api#account-usage) 读取当前额度和用量。
+
+## <span id="retry-rules">重试规则</span>
+
+根据错误码和所执行的请求决定是否重试。仅凭状态不足以判断。
+
+| 响应 | 重试规则 |
+| --- | --- |
+| `validation_failed`、`invalid_json`、`invalid_path`（`400`）、`invalid_multipart`（`400` 或 `413`）或 `invalid_websocket_upgrade` | 先修正错误中指出的请求值。不要原样再次发送同一请求。 |
+| `unauthorized` 或 `ingest_key_invalid` | 先替换或刷新正确的凭据。 |
+| `forbidden`、`role_forbidden` 或 `not_found` | 不要换用其他 ID 重试。重新读取你拥有的列表，或向所有者申请访问权限。 |
+| `method_not_allowed` | 使用 `next` 中的方法。不要再次发送被拒绝的方法。 |
+| `idempotency_conflict` | 原样重试原始请求，或为新的工作使用新的键。 |
+| `rate_limited` | 等待 `retry_after_seconds`。然后使用带随机抖动的指数退避。 |
+| `usage_limit_exceeded` 或 `invitation_limit_exceeded` | 等到 `reset_at`，或更改套餐。 |
+| `artifact_storage_limit_exceeded` | 稍后再上传。如果仍然受限，联系支持团队。 |
+| `subscription_required`、`organization_paused`、`member_limit_exceeded` 或 `organization_limit_exceeded` | 按 `next` 操作。不更改套餐或成员就重试，仍会失败。 |
+| `request_timeout`、`service_unavailable`、`artifact_storage_unavailable` 或 `billing_unavailable` | 稍等。然后以相同范围再次发送读取请求。写请求请遵循[写入规则](#writes)。 |
+| `storage_error`、`json_error`、`internal_error` 或其他 `5xx` | 稍等。然后再次发送读取请求。写请求请遵循[写入规则](#writes)。如果故障持续，[报告问题](/zh-Hans/guides/report-a-problem)。 |
+
+- 不要为同一个失败的请求发起并行重试。
+- 对于 `rate_limited`，响应还包含 `Retry-After` 和 `X-RateLimit-After` 响应头。两者的秒数与 `retry_after_seconds` 相同。
+- 超时并不能证明结果为空。
+
+速率限制控制请求频率。用量限制控制账号在一个计费周期内的额度。两者都使用 `429`。分别处理它们的字段。处于任一限制期间，提示数据采集或读取已延迟。不要把旧数据当作新一次读取的结果展示。
+
+### <span id="writes">写入</span>
+
+超时、`5xx` 响应或网络故障都不能证明写入失败。再次发送写请求之前：
+
+1. 如果路由支持幂等键，再次发送相同的键和相同的请求体。只有新的工作才使用新的键。
+2. 如果路由没有幂等键，先读取资源。只有更改不存在时，才再次发送写请求。
+3. 如果找不到结果，停止自动重试并告知用户。
+
+以下路由接受重试键：
+
+| 路由 | 重试键 |
+| --- | --- |
+| `POST /api/projects` | 可选的 `Idempotency-Key` 请求头。 |
+| `POST /api/projects/{project_id}/ingest-keys` | 可选的 `Idempotency-Key` 请求头。 |
+| `POST /api/support/tickets` | 可选的 `Idempotency-Key` 请求头。 |
+| `POST /api/support/tickets/{ticket_id}/context` | 必需的 `Idempotency-Key` 请求头。 |
+| `PUT /api/telemetry/deployments/{deployment_id}` | 路径中的 `deployment_id`。 |
+
+`Idempotency-Key` 的值由 1 到 128 个可见 ASCII 字符组成。其他值会返回 `422` 和 `validation_failed`。
+
+`idempotency_conflict` 表示该键属于另一个请求。使用原始键重试时，不要更改请求体。
+
+## 请求格式错误
+
+`invalid_json` 表示服务器无法按该路由的 JSON 结构接受请求体。检查内容类型、请求体大小、JSON 语法、必填字段和字段类型。HTTP 状态说明了哪一部分出错：
+
+| HTTP | 原因 |
+| --- | --- |
+| `400` | 请求体不是有效的 JSON。 |
+| `413` | 请求体过大。 |
+| `415` | `Content-Type` 请求头不是 `application/json`。 |
+| `422` | JSON 有效，但缺少字段或字段类型错误。 |
+
+如果 `validation_failed` 的错误为 `invalid query parameters`，说明服务器无法读取查询字符串。检查参数名和值类型。不要发送未知的查询参数。[查询筛选条件](/zh-Hans/reference/telemetry-api-filters)列出了每个路由的参数。
+
+状态为 `400` 的 `invalid_path` 表示某个路径值（例如项目 ID）格式错误。不要把路径值改放到查询参数中。
+
+带有 `invalid_path` 或 `invalid_multipart` 的 `500` 响应并不能证明请求有误。遵循[重试规则](#retry-rules)。
+
+## 认证和访问错误
+
+- `unauthorized` 表示账号认证缺失、无效或已过期。发送 `Authorization: Bearer <token>`，或重新登录。有些路由会返回 `next_action.code` `authorize_request`，并附带该路由特有的 `next`，例如没有有效票据的实时动态连接。
+- `ingest_key_invalid` 只适用于遥测数据接收。为确切的项目配置当前有效的密钥。
+- `forbidden` 表示账号无法执行该请求。不要换用其他资源 ID 重试。
+- `not_found` 表示该资源对此账号不可用。
+
+不要用接入密钥代替账号 Bearer 令牌。也不要用账号 Bearer 令牌代替接入密钥。
+
+## 保护错误详情
+
+- `account_recovery_available` 响应包含一个短期有效的 `recovery_token`。把它保存在受保护的客户端状态中。不要把它放进日志、URL、截图、支持报告或智能体提示词中。
+- `500` 错误码始终使用消息 `Internal error`。响应不会指明出错的组件。不要猜测原因。
+- 不要在展示的错误中加入凭据、私有诊断信息或客户数据。
+- API 响应并不代表允许购买、删除或其他账号更改。执行这些更改前，先获得用户批准。
+
+## 示例
+
+以下示例展示了错误响应格式。`error` 和 `next` 文本在每个路由上可能不同。
+
+### 校验失败
+
+```json
+{
+  "error": "issue status must be unresolved, resolved, or archived",
+  "code": "validation_failed",
+  "next": "use status=unresolved, status=resolved, or status=archived",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+### <span id="invalid-query-parameters">无效的查询参数</span>
+
+```json
+{
+  "error": "invalid query parameters",
+  "code": "validation_failed",
+  "next": "check query parameter names and value types, then retry",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+### <span id="invalid-json">无效的 JSON</span>
+
+```json
+{
+  "error": "invalid JSON request body",
+  "code": "invalid_json",
+  "next": "send Content-Type: application/json with a body matching this endpoint",
+  "next_action": {
+    "code": "send_valid_json",
+    "target": "request"
+  }
+}
+```
+
+### <span id="invalid-path-value">无效的路径值</span>
+
+```json
+{
+  "error": "invalid URL path parameters",
+  "code": "invalid_path",
+  "next": "check path resource IDs and value types, then retry",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+### 无效的 multipart 上传
+
+```json
+{
+  "error": "invalid multipart form-data request",
+  "code": "invalid_multipart",
+  "next": "send multipart/form-data with a valid boundary and expected parts",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+### 无效的 WebSocket 升级
+
+```json
+{
+  "error": "invalid WebSocket upgrade request",
+  "code": "invalid_websocket_upgrade",
+  "next": "connect with GET /api/feed/live?ticket=<ticket> using WebSocket upgrade headers",
+  "next_action": {
+    "code": "connect_live_feed",
+    "target": "live_feed"
+  }
+}
+```
+
+### <span id="authentication-failure">认证失败</span>
+
+```json
+{
+  "error": "Invalid or expired token",
+  "code": "unauthorized",
+  "next": "send Authorization: Bearer <token>, include the logbrew_session cookie, or sign in again",
+  "next_action": {
+    "code": "sign_in",
+    "target": "auth"
+  }
+}
+```
+
+### 无效的接入密钥
+
+此响应适用于遥测数据接收，不适用于账号读取。密钥必须属于请求中的项目。
+
+```json
+{
+  "error": "Invalid ingest key",
+  "code": "ingest_key_invalid",
+  "next": "create a project-scoped ingest key, then retry ingestion with that key",
+  "next_action": {
+    "code": "configure_ingest_key",
+    "target": "project_ingest_key"
+  }
+}
+```
+
+### <span id="resource-not-found">找不到资源</span>
+
+```json
+{
+  "error": "issue not found",
+  "code": "not_found",
+  "next": "check the resource id or filters and retry",
+  "next_action": {
+    "code": "check_resource",
+    "target": "resource"
+  }
+}
+```
+
+### 拒绝访问
+
+```json
+{
+  "error": "Insufficient permissions",
+  "code": "forbidden",
+  "next": "use an account with access to this resource",
+  "next_action": {
+    "code": "request_access",
+    "target": "auth"
+  }
+}
+```
+
+### <span id="unsupported-method">不支持的方法</span>
+
+```json
+{
+  "error": "Method not allowed",
+  "code": "method_not_allowed",
+  "next": "send GET /api/account/usage with Authorization or the logbrew_session cookie",
+  "next_action": {
+    "code": "use_supported_method",
+    "target": "api_method"
+  }
+}
+```
+
+### 请求超时
+
+```json
+{
+  "error": "Request timed out",
+  "code": "request_timeout",
+  "next": "retry read-only requests later or narrow the request scope. Before repeating a write, check whether it succeeded and follow this endpoint's idempotency guidance",
+  "next_action": {
+    "code": "retry_or_narrow_scope",
+    "target": "request"
+  }
+}
+```
+
+### 幂等冲突
+
+```json
+{
+  "error": "Idempotency key was already used",
+  "code": "idempotency_conflict",
+  "next": "retry the original support request or use a new Idempotency-Key",
+  "next_action": {
+    "code": "use_new_idempotency_key",
+    "target": "request"
+  }
+}
+```
+
+### 速率限制
+
+```json
+{
+  "error": "Rate limit exceeded",
+  "code": "rate_limited",
+  "next": "wait for retry_after_seconds, then retry with exponential backoff and jitter",
+  "next_action": {
+    "code": "retry_with_backoff",
+    "target": "request"
+  },
+  "retry_after_seconds": 1
+}
+```
+
+### 用量限制
+
+`next` 文本和 `next_action` 取决于是否可以更改套餐。如果不能更改，`next_action.code` 为 `wait_or_contact_support`，目标为 `support`。
+
+```json
+{
+  "error": "Usage limit exceeded",
+  "code": "usage_limit_exceeded",
+  "next": "wait until reset_at or upgrade your plan before retrying ingestion",
+  "next_action": {
+    "code": "wait_or_upgrade",
+    "target": "billing"
+  },
+  "limit": "log_bytes",
+  "reset_at": "2026-11-01T00:00:00+00:00"
+}
+```
+
+### 构建产物存储限制
+
+```json
+{
+  "error": "Release artifact storage limit exceeded",
+  "code": "artifact_storage_limit_exceeded",
+  "next": "wait before retrying the upload, or contact LogBrew support if the limit persists",
+  "next_action": {
+    "code": "wait_or_contact_support",
+    "target": "support"
+  },
+  "limit": "artifact_completed_project_bytes"
+}
+```
+
+### 可恢复账号
+
+此响应附加 `deleted_at` 和一个短期有效的 `recovery_token`。把令牌保存在受保护的客户端状态中。
+
+```json
+{
+  "error": "Account recovery available",
+  "code": "account_recovery_available",
+  "next": "restore account with POST /api/auth/restore",
+  "next_action": {
+    "code": "restore_account",
+    "target": "account_recovery"
+  },
+  "deleted_at": "2026-09-04T09:00:00Z",
+  "recovery_token": "<recovery token>"
+}
+```
+
+### 账号恢复期已过
+
+```json
+{
+  "error": "Account recovery window expired",
+  "code": "account_recovery_expired",
+  "next": "create a new account after deletion completes",
+  "next_action": {
+    "code": "create_account",
+    "target": "auth"
+  }
+}
+```
+
+### 组织已暂停
+
+```json
+{
+  "error": "Organization paused",
+  "code": "organization_paused",
+  "next": "resume an active paid subscription before using this organization",
+  "next_action": {
+    "code": "resume_subscription",
+    "target": "billing"
+  }
+}
+```
+
+### 服务器错误
+
+`storage_error`、`json_error` 和 `internal_error` 使用相同的 `error` 消息。它们的 `code`、`next` 和 `next_action` 值不同。
+
+```json
+{
+  "error": "Internal error",
+  "code": "internal_error",
+  "next": "retry read-only requests later. Before repeating a write, check whether it succeeded and follow this endpoint's idempotency guidance. Contact LogBrew support if the problem persists",
+  "next_action": {
+    "code": "retry_or_contact_support",
+    "target": "support"
+  }
+}
+```
+
+| `code` | `next_action.code` | `next_action.target` |
+| --- | --- | --- |
+| `storage_error` | `retry_or_check_storage` | `backend_status` |
+| `json_error` | `send_valid_json` | `request` |
+| `internal_error` | `retry_or_contact_support` | `support` |
+
+端点、认证和筛选条件请参阅[遥测 API](/zh-Hans/reference/telemetry-api)。

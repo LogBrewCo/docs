@@ -1,0 +1,288 @@
+---
+title: "LogBrew CLI 参考：命令与筛选条件"
+sidebarTitle: "CLI 参考"
+description: "查找 LogBrew 命令、筛选条件、游标分页、实时查看、JSON 输出和错误。"
+---
+
+[开源的 LogBrew CLI](https://github.com/LogBrewCo/cli) 可以在终端中读取遥测数据并管理账号数据。安装、登录和常见任务请先阅读[使用 CLI](/zh-Hans/guides/cli)。
+
+## CLI 的工作方式
+
+在终端中使用易读的文本输出。在脚本和编码智能体中使用 `--json`。
+
+读取账号数据需要账号登录。开始登录之前，先运行 `logbrew status --json`。浏览器授权必须由人完成。项目接入密钥用于发送遥测数据，不能代替账号登录。
+
+创建项目、创建密钥、更改问题的状态、优先级和负责人、记录部署以及更新支持工单，都会更改账号数据。运行这类命令之前，确认要执行的命令和目标都正确。
+
+运行 `logbrew --help` 查看所有命令。在命令后添加 `--help`（例如 `logbrew read logs --help`）可查看该命令的选项。运行 `logbrew help json` 查看 JSON 规则。
+
+| 命令组 | 用途 |
+| --- | --- |
+| `login`、`whoami`、`me`、`logout` | 开始登录、读取账号身份或关闭本地会话。 |
+| `status`、`health`、`doctor`、`version`、`examples` | 读取访问状态、项目就绪状态、CLI 版本或首次运行示例。 |
+| `setup` | 读取本地清单文件并打印 SDK 接入计划。它不会修改文件，也不会运行安装命令。 |
+| `projects` | 读取活动项目列表。 |
+| `projects repositories` | 读取已连接的代码仓库，或在一个仓库中发现组件。 |
+| `projects create`、`projects keys create` | 创建项目，或为现有项目创建接入密钥。 |
+| `projects setup` | 为现有项目记录观察到的接入情况。 |
+| `projects archive`、`projects delete` | 归档项目，或在确认后永久删除项目。 |
+| `usage`、`account usage` | 读取用量、限制、配额状态和重置日期。 |
+| `mcp grants`、`mcp revoke` | 按名称列出连接到你账号的 MCP 客户端，或撤销一个连接。 |
+| `read` | 读取日志、问题、操作、版本、指标、链路或单个条目。 |
+| `explain` | 读取某个问题、日志、操作、链路、Span（一次计时操作）、指标或版本的有限证据。 |
+| `investigate issue` | 读取问题排查证据，或验证候选部署。 |
+| `issues archive`、`issues resolve`、`issues reopen` | 设置 1 个问题的状态，或同一项目中最多 100 个问题的状态。 |
+| `issues priority` | 设置 1 个问题的优先级，或同一项目中最多 100 个问题的优先级。 |
+| `issues assign`、`issues unassign` | 设置或移除 1 个问题的负责人，或同一项目中最多 100 个问题的负责人。 |
+| `issues assignees` | 列出一个项目中可以被分配问题的账号。 |
+| `set issue`、`resolve`、`close`、`ignore`、`reopen` | 设置 1 个问题的状态。`close` 表示 `resolved`。`ignore` 和 `ignored` 表示 `archived`。 |
+| `deploy` | 记录一次已完成的部署。 |
+| `debug-artifacts` | 上传 Apple 或 Android 原生调试文件，或查找一个镜像标识。 |
+| `analytics` | 读取概览、属性、比较、路径、漏斗、留存或生命周期。 |
+| `support` | 创建、读取、回复、关闭或重新打开支持工单。 |
+| `watch` | 实时流式输出日志、问题或操作。 |
+
+## <span id="read-a-project-doctor-report">读取项目 doctor 报告</span>
+
+使用 `logbrew projects --json` 返回的项目 ID：
+
+```bash
+logbrew doctor --project "<project_id>" --json
+```
+
+该命令读取项目状态和一条最近的日志。它不会创建项目、更改密钥或记录接入情况。
+
+报告包含 `status`、`checks` 和 `next`。每项检查包含 `check`、`status` 和 `next`。检查项为 `api`、`auth`、`project`、`ingest_key`、`setup`、`telemetry` 和 `logs`。
+
+退出码 `0` 表示 CLI 已写出报告，并不表示项目已就绪。阅读报告的 `status` 和每项检查。状态为 `not_checked` 的检查没有通过。
+
+| 报告 `status` | 含义和下一步 |
+| --- | --- |
+| `auth_invalid` | 账号访问缺失或无效。由人运行 `logbrew login`。 |
+| `project_missing` | 该账号无法访问此项目。使用 `logbrew projects --json` 中的 ID。 |
+| `api_unreachable` | API 请求未能完成。检查网络连接，然后再次运行命令。 |
+| `check_failed` | 某个请求失败，或其响应无效。不做任何修改，再次运行命令。如果再次失败，[报告问题](/zh-Hans/guides/report-a-problem)。 |
+| `needs_ingest_key` | 项目没有有效的接入密钥。只有在有权更改项目时，才创建密钥。 |
+| `needs_setup` | 需要完成 SDK 接入。按照[快速入门](/zh-Hans/quickstart)完成接入。 |
+| `needs_telemetry` | 接入已开始，但 LogBrew 没有该项目的遥测数据。发送一个测试信号。 |
+| `ready` | 项目有有效的密钥和遥测数据。读取与你的任务相关的信号。 |
+
+项目读取成功时，`logs` 检查的结果为 `visible`、`empty`、`unavailable`、`error` 或 `invalid_response`。此检查不会改变报告的 `status`。日志结果为空，并不说明其他信号的情况。读取失败不等于结果为空。
+
+把 `next` 当作恢复指引。它并不授权你更改账号或项目状态。
+
+### 示例：缺少账号访问
+
+没有账号凭据时，该命令不会发出 API 请求。它会把以下报告写到标准输出，并以退出码 `0` 退出：
+
+```json
+{
+  "checks": [
+    { "check": "api", "next": "run the API reachability check first", "status": "not_checked" },
+    { "check": "auth", "next": "run logbrew login", "status": "missing" },
+    { "check": "project", "next": "resolve the prior check first", "status": "not_checked" },
+    { "check": "ingest_key", "next": "resolve the prior check first", "status": "not_checked" },
+    { "check": "setup", "next": "resolve the prior check first", "status": "not_checked" },
+    { "check": "telemetry", "next": "resolve the prior check first", "status": "not_checked" },
+    { "check": "logs", "next": "resolve the prior check first", "status": "not_checked" }
+  ],
+  "next": "run logbrew login",
+  "status": "auth_invalid"
+}
+```
+
+此报告不同于[项目 API 诊断](/zh-Hans/concepts/projects#diagnose-project-setup)。它不包含 API 字段 `state`、`setup_status` 或 `next_action`。
+
+## <span id="filters">筛选条件</span>
+
+| 筛选条件 | 命令 |
+| --- | --- |
+| `--project <project_id>` | logs, issues, actions, releases, metrics, traces, trace |
+| `--release <release>` | logs, issues, actions, releases, metrics, traces, trace |
+| `--environment <environment>` | logs, issues, actions, releases, metrics, traces, trace |
+| `--service <service_name>` | logs, issues, actions, releases, metrics, traces |
+| `--since 24h` | logs, issues, actions, releases, metrics, traces, analytics |
+| `--until <RFC3339>` | logs, issues, actions, releases, metrics, traces, analytics |
+| `--limit 100` | logs, issues, actions, releases, metrics, traces |
+| `--severity error` | logs, watch |
+| `--search checkout` | logs |
+| `--trace <trace_id>` | logs |
+| `--status unresolved` | issues（`unresolved`、`resolved`、`archived`） |
+| `--priority high` | issues（`high`、`medium`、`low`） |
+| `--assignee me` | issues（`me`、`none` 或用户 ID） |
+| `--status error` | traces（`error`、`ok`） |
+| `--min-duration-ms <milliseconds>` | traces |
+| `--name <name>` | actions, metrics |
+| `--user <distinct_id>` | actions |
+
+`--since` 接受 `24h` 或 `7d` 这样的时长，或 RFC 3339 时间戳。`--until` 接受 RFC 3339 时间戳。它表示不包含在内的结束时间，且必须晚于 `--since`。按 ID 读取单个问题时，不接受 `--until`。
+
+日志的严重程度为 `info`（信息）、`warning`（警告）、`error`（错误）或 `critical`（严重）。问题状态是问题的工作流状态，而不是严重程度。`--status ignored` 是 `--status archived` 的旧名称。`--status open` 表示 `unresolved`，`--status closed` 表示 `resolved`。`--assignee none` 选择没有负责人的问题。如果 `--assignee` 的值既不是 `me` 也不是用户 ID，命令会以 `invalid_assignee` 失败。
+
+CLI 还接受以下别名：`--project-id`、`--env`、`--service-name`、`--trace-id`、`--distinct-id`，以及作为 `--severity` 别名的 `--level`。在新脚本中使用表格中的名称。
+
+此命令读取 1 天内的错误：
+
+```bash
+logbrew read logs --severity error \
+  --since 2026-10-01T00:00:00Z --until 2026-10-02T00:00:00Z --json
+```
+
+项目 ID 用于选择项目。服务名用于选择该项目中的组件。值中包含空格时，用引号括起来：
+
+```bash
+logbrew read logs --project "<project_id>" \
+  --service checkout-api --since 24h \
+  --severity error --search "checkout failed" --json
+```
+
+搜索文本以连字符开头时，在文本前加上 `--`：
+
+```bash
+logbrew logs --json -- --timeout
+```
+
+## 选择问题的发生记录
+
+一个问题会把匹配的发生记录归为一组。读取问题可获取它的状态、发生次数，以及首次出现和最近出现的时间：
+
+```bash
+logbrew read issue "<issue_id>" --json
+```
+
+使用 `explain issue` 或 `investigate issue` 获取某一条发生记录的证据。不加 `--occurrence` 时，LogBrew 会选择推荐的发生记录，它不一定是最新的发生记录。要读取最新的发生记录：
+
+```bash
+logbrew explain issue "<issue_id>" --occurrence latest --json
+```
+
+`--occurrence` 还接受 `recommended`、`first` 或 LogBrew 返回的发生记录 ID。这些命令不接受项目、版本、环境和时间筛选条件。比较证据之前，先读取所选发生记录的时间戳。证据字段请参阅[排查问题](/zh-Hans/guides/investigate-an-issue)。
+
+## <span id="change-issue-status-and-priority">更改问题状态和优先级</span>
+
+使用 1 个问题 ID 更改 1 个问题：
+
+```bash
+logbrew issues archive "<issue_id>" --json
+logbrew issues priority high "<issue_id>" --json
+```
+
+`archive` 设置为 `archived`（已归档），`resolve` 设置为 `resolved`（已解决），`reopen` 设置为 `unresolved`（未解决）。优先级为 `high`（高）、`medium`（中）或 `low`（低）。你手动设置的优先级会保持不变。否则，优先级跟随问题的严重程度。
+
+要更改多个问题，添加 `--project`。所有问题都必须属于该项目。一条命令最多更改 100 个问题：
+
+```bash
+logbrew issues resolve "<issue_id_1>" "<issue_id_2>" \
+  --project "<project_id>" --json
+```
+
+结果中每个问题各有 1 个条目。每个条目为 `updated`、`unchanged` 或 `not_found`。`unchanged` 表示该问题已经是所请求的值。网络故障后，可以再次运行同一条命令。
+
+这些命令不会要求确认。先检查问题 ID。问题的读取和更改结果显示 `archived` 而不是 `ignored`，并显示每个问题的 `priority`、`priority_source` 和 `assignee`。请参阅[问题响应](/zh-Hans/reference/telemetry-response-shapes#issue-response)。
+
+## 分配问题
+
+一个问题有 0 或 1 个负责人。列出项目中可以分配的账号：
+
+```bash
+logbrew issues assignees --project "<project_id>" --json
+```
+
+将 1 个问题分配给某个账号，或用 `me` 分配给自己：
+
+```bash
+logbrew issues assign "<user_id>" "<issue_id>" --json
+logbrew issues assign me "<issue_id>" --json
+```
+
+移除负责人：
+
+```bash
+logbrew issues unassign "<issue_id>" --json
+```
+
+与状态和优先级一样，添加 `--project` 可更改该项目中最多 100 个问题。负责人必须能够读取该项目。查找分配给你的问题：
+
+```bash
+logbrew read issues --project "<project_id>" --assignee me \
+  --status unresolved --json
+```
+
+文本输出显示负责人姓名。如果账号没有姓名，显示电子邮件地址；如果也没有电子邮件地址，显示用户 ID。没有负责人的问题显示 `unassigned`（未分配）。使用 CLI 0.1.83 或更高版本。
+
+## <span id="read-the-next-page">读取下一页</span>
+
+日志、问题、操作、指标和链路支持游标分页，版本不支持。第一页使用 `--pagination cursor`：
+
+```bash
+logbrew read logs --project "<project_id>" --since 24h \
+  --pagination cursor --limit 100 --json
+```
+
+响应包含 `logs` 和 `next_cursor`。非 null 的 `next_cursor` 包含 `time` 和 `id`。通过 `--cursor-time` 和 `--cursor-id` 发送它们：
+
+```bash
+logbrew read logs --project "<project_id>" --since 24h \
+  --pagination cursor --limit 100 \
+  --cursor-time "<returned_time>" \
+  --cursor-id "<returned_id>" --json
+```
+
+每一页都保持相同的筛选条件和条数上限。当 `next_cursor` 为 `null` 时停止。根据游标而不是行数判断是否还有更多页。最后一页可能为空：
+
+```json
+{
+  "logs": [],
+  "next_cursor": null
+}
+```
+
+问题、操作和指标使用相同的结构，只是用 `issues`、`actions` 或 `metrics` 代替 `logs`。
+
+## <span id="live-watch">实时查看</span>
+
+`logbrew watch --json` 实时流式输出日志、问题和操作。添加 `logs`、`issues` 或 `actions` 可只输出一种类型。`tail`、`follow` 和 `stream` 是 `watch` 的别名。watch 不支持链路或 Span。
+
+watch 需要 `--json`。不加时，命令会以退出码 `1` 退出，并输出 `watch streams JSON for agents`。
+
+watch 中的问题事件会把已归档的问题显示为 `ignored`，且不包含优先级。读取该问题可获取它当前的状态和优先级。
+
+watch 只接受 `--severity`，例如 `--severity error,critical`。`logbrew watch actions` 不接受 `--severity`。CLI 在收到事件之后才应用此筛选条件，不会减少服务器发送的数据。watch 没有项目、版本、环境或时间筛选条件。需要这些筛选条件时，使用 `read` 命令。临时断开连接后，CLI 会等待一段时间，然后重新连接。
+
+## <span id="read-results-and-errors">读取结果和错误</span>
+
+把 `--json` 放在命令之前或之后都可以。使用输出之前，先读取退出码。不要解析供人阅读的输出，它可能在不同版本之间变化。
+
+| 退出码 | 含义 |
+| --- | --- |
+| `0` | 成功。JSON 输出到标准输出。 |
+| `1` | 命令在运行过程中失败，例如 API 错误或网络错误。 |
+| `2` | CLI 在命令运行之前就拒绝了它。 |
+
+成功输出保持 API 响应的结构，可能是数组或对象。不使用游标分页时，读取日志会返回一个数组。空数组表示没有匹配的日志，不是错误。
+
+错误输出到标准错误。例外是 `debug-artifacts --json`，它会把错误写到标准输出。JSON 错误包含 `ok`、`error`、`message` 和 `next`。把 `error` 当作稳定的失败代码。运行 `next` 建议的命令之前，先检查它。
+
+例如，`logbrew watch traces --json` 会以退出码 `2` 退出，并输出：
+
+```json
+{
+  "ok": false,
+  "error": "unknown_resource",
+  "message": "unknown resource: traces",
+  "next": "use logbrew traces for recent traces, or logbrew trace <trace_id> for one trace"
+}
+```
+
+`logbrew read logs --limit 0 --json` 会以退出码 `2` 退出，并输出：
+
+```json
+{
+  "ok": false,
+  "error": "invalid_limit",
+  "message": "invalid limit: 0",
+  "next": "use --limit with a positive whole number"
+}
+```
+
+修正该值，然后再次运行命令。被拒绝的命令不等于空结果。HTTP 错误请参阅 [API 错误](/zh-Hans/reference/api-errors)，直接调用 API 请参阅[遥测 API](/zh-Hans/reference/telemetry-api)。

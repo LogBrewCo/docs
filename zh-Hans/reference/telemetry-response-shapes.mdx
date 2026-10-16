@@ -1,0 +1,4464 @@
+---
+title: "API 响应格式与 JSON 响应示例"
+sidebarTitle: "响应格式"
+description: "了解 LogBrew API 的各类响应：遥测列表、游标分页、实时事件、更改请求，以及成功和错误状态。"
+---
+
+本页为[遥测 API](/zh-Hans/reference/telemetry-api) 的每类响应各给出 1 个示例。所有值均为模拟值。错误码和恢复方法请参阅 [API 错误](/zh-Hans/reference/api-errors)。
+
+## 读取响应
+
+按以下顺序读取每个响应：
+
+1. 读取 HTTP 状态。
+2. 确认响应体符合该路由规定的结构。
+3. 确认每个 `project_id` 都在请求的项目范围内。
+4. 保持规范枚举值和标识符不变。
+5. 只有客户端支持 `next_action` 的 `code` 和 `target` 时，才执行它。
+6. 把 `null`、省略的字段和空列表当作 3 种不同的状态。
+
+`200 OK` 可以包含空列表。空的日志列表表示没有日志匹配该请求，不表示问题、链路或操作也为空。不要因为时间戳相近就关联信号。只有响应包含准确的 `trace_id` 时，才沿该链路继续读取。
+
+`404` 和空列表是不同的结果。没有记录匹配时，列表路由返回 `[]`。找不到可读取的记录时，详情路由返回 `404` 和 `code: not_found`。这两种结果都不能证明数据接收失败。
+
+## 应发送的数据
+
+你发送的遥测数据决定了响应的价值。在每个封装或每次 SDK 配置中发送以下值：
+
+- `release` 和 `environment`。
+- 服务、操作和指标的稳定名称。
+- 日志、Span（一次计时操作）、操作和问题属于同一请求时，发送链路上下文。
+- 规范的严重程度值：`info`、`warning`、`error` 和 `critical`。
+- 有助于调试的属性，但不要包含机密信息或不必要的个人信息。
+
+请参阅 [SDK 接入](/zh-Hans/guides/sdk-ingestion)和[控制采集的数据](/zh-Hans/guides/safe-capture)。
+
+## 数据接收响应
+
+公开 SDK 会替你读取 `POST /v1/events` 的响应。应用代码无需处理它。
+
+### SDK 批次响应
+
+SDK 批次成功时返回 `200 OK`，并给出每个数据流已接收的数量：
+
+```json
+{
+  "issues": 1,
+  "logs": 2,
+  "trace_spans": 3,
+  "actions": 1,
+  "metrics": 1,
+  "already_accepted": 0,
+  "context_updated": true,
+  "next": "review accepted telemetry in logs, issues, traces, actions, metrics, or live feed",
+  "next_action": {
+    "code": "review_ingested_telemetry",
+    "target": "telemetry_reads"
+  }
+}
+```
+
+| 字段 | 含义 |
+| --- | --- |
+| `issues`、`logs`、`trace_spans`、`actions`、`metrics` | LogBrew 从该批次接收的信号数。 |
+| `already_accepted` | ID 已被 LogBrew 接收过的信号数。LogBrew 不会再次存储这些信号。 |
+| `context_updated` | 该批次更新了版本或环境上下文时为 `true`。 |
+
+这些数量只涵盖该批次。重试一个 LogBrew 已接收的批次时，每个数据流都返回 `0`，信号数会计入 `already_accepted`。重试时保留原始事件 ID。
+
+### 原生封装响应
+
+`POST /api/telemetry/ingest` 返回 `200 OK`，并给出每个数据流已接收的条目数：
+
+```json
+{
+  "issues": 0,
+  "logs": 1,
+  "trace_spans": 0,
+  "actions": 1,
+  "already_accepted": 0,
+  "next": "review accepted telemetry in logs, issues, traces, actions, or live feed",
+  "next_action": {
+    "code": "review_ingested_telemetry",
+    "target": "telemetry_reads"
+  }
+}
+```
+
+原生响应没有 `metrics` 或 `context_updated` 字段。不要添加它们。`already_accepted` 统计 `id` 已被 LogBrew 为该项目接收过的条目。请参阅[直接发送原生封装](/zh-Hans/guides/sdk-ingestion#required-envelope-fields)。
+
+### 数据接收错误
+
+`401` 和 `code: ingest_key_invalid` 表示接入 Bearer 令牌已撤销、已过期，或对该项目无效。在 `POST /v1/events` 上，缺少 Bearer 令牌或令牌不是接入密钥时，返回 `401` 和 `code: unauthorized`。使用当前的项目级接入 Bearer 令牌。不要改用账号 Bearer 令牌重试。
+
+被拒绝的 SDK 批次返回 `422` 和 `code: validation_failed`：
+
+```json
+{
+  "error": "SDK event ids must be unique within a batch",
+  "code": "validation_failed",
+  "next": "send release/environment context plus issue, log, span, action, or metric events from a current LogBrew SDK",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+其他 `error` 值包括 `SDK event batch requires at least one event` 和 `SDK event type is not supported by this ingest route`。检查 SDK 版本和传输配置。不要发送空批次。不要只为了通过验证而更改信号类型或 ID。
+
+使用 `POST` 以外的方法时，请求返回 `405` 和 `code: method_not_allowed`。无法读取的 JSON 请求体返回 `code: invalid_json`。
+
+## 遥测列表响应格式
+
+列表路由默认返回不带外层对象的 JSON 数组。成功但为空的列表是 `[]`。
+
+使用 `pagination=cursor` 时，路由返回一个封装。集合键与信号对应：
+
+| 路由 | 集合键 |
+| --- | --- |
+| `/api/logs` | `logs` |
+| `/api/telemetry/issues` | `issues` |
+| `/api/telemetry/issues/{issue_id}/events` | `events`，外加顶层 `issue_id` |
+| `/api/telemetry/actions` | `actions` |
+| `/api/telemetry/metrics` | `metrics` |
+| `/api/telemetry/releases` | `releases` |
+| `/api/telemetry/traces` | `traces`，外加顶层 `naming_quality` |
+
+`next_cursor` 是包含续读字段的对象，在最后一页为 `null`。各行按从新到旧排列。请参阅[游标分页](/zh-Hans/reference/telemetry-api-filters#cursor-pagination)。
+
+### <span id="log-response">日志响应</span>
+
+使用 `limit=1` 的日志游标分页：
+
+```json
+{
+  "logs": [
+    {
+      "id": "150d1288-bec2-49ec-a036-3f7ac55f1b2d",
+      "project_id": "123e4567-e89b-12d3-a456-426614174000",
+      "level": "warning",
+      "severity": "warning",
+      "triage": {
+        "effective_severity": "warning",
+        "ignored": false,
+        "rule_applied": false
+      },
+      "source": "runtime",
+      "message": "checkout retry scheduled",
+      "attributes": { "route": "/checkout" },
+      "occurred_at": "2026-06-01T12:00:00Z",
+      "environment": "production",
+      "release": "api@1.2.3",
+      "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+      "span_id": "00f067aa0ba902b7",
+      "service_name": "checkout-api",
+      "sdk_name": "@logbrew/node",
+      "sdk_version": "0.1.8",
+      "next_action": {
+        "code": "inspect_trace",
+        "target": "trace_summary"
+      }
+    }
+  ],
+  "next_cursor": {
+    "time": "2026-06-01T12:00:00Z",
+    "id": "150d1288-bec2-49ec-a036-3f7ac55f1b2d"
+  }
+}
+```
+
+日志包含用于兼容的 `level` 和用于显示的 `severity`。两者都是规范值。`triage` 保存严重程度规则的结果。请参阅[严重程度规则响应](#severity-rule-responses)。
+
+日志没有关联链路时，`trace_id` 和 `span_id` 为 `null`。此时 `next_action` 为 `inspect_related_logs`，目标为 `telemetry_logs`。日志、问题和操作使用同样的 2 组 `next_action` 值。
+
+`GET /api/logs/{log_id}` 以相同结构返回 1 条日志。
+
+### <span id="issue-response">问题响应</span>
+
+`GET /api/telemetry/issues/{issue_id}` 返回 1 个分组问题。列表返回同样的对象。本示例使用默认的响应版本 1：
+
+```json
+{
+  "id": "9b2b4b3a-bd4e-4f85-a0f6-48118f037c17",
+  "project_id": "123e4567-e89b-12d3-a456-426614174000",
+  "fingerprint": "payment-error",
+  "severity": "error",
+  "triage": {
+    "effective_severity": "error",
+    "ignored": false,
+    "rule_applied": false
+  },
+  "title": "PaymentError",
+  "message": "payment provider timed out",
+  "stack_trace": null,
+  "attributes": {},
+  "environment": "production",
+  "release": "checkout@1.2.3",
+  "service_name": "checkout-api",
+  "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+  "span_id": "00f067aa0ba902b7",
+  "next_action": {
+    "code": "inspect_trace",
+    "target": "trace_summary"
+  },
+  "status": "unresolved",
+  "occurrence_count": 2,
+  "first_seen_at": "2026-07-13T07:00:00Z",
+  "last_seen_at": "2026-07-13T08:00:00Z"
+}
+```
+
+在版本 1 中，`status` 为 `unresolved`、`resolved` 或 `ignored`。已归档的问题的 `triage.ignored` 为 `true`。`next_action` 的各组值及其后续读取，请参阅[排查问题](/zh-Hans/guides/investigate-an-issue)。
+
+`first_seen_at` 和 `last_seen_at` 分别是首次和最近一次发生记录的时间。状态变化时，它们不会改变。
+
+有些字段只在 LogBrew 有相应数据时出现：
+
+| 字段 | 出现条件 |
+| --- | --- |
+| `span_id` | 问题关联了 Span。否则省略该字段。 |
+| `diagnostics` | 最近一次发生记录包含异常类型或操作记录（Breadcrumbs）。请参阅[问题发生记录历史](#issue-occurrence-history)。 |
+| `symbolication` | 仅在 `GET /api/telemetry/issues/{issue_id}` 中出现，且问题需要有版本构建产物标识。请参阅 [JavaScript Source Map](/zh-Hans/guides/source-maps)。 |
+
+`symbolication.status` 为 `resolved`、`invalid_metadata`、`artifact_not_found`、`source_not_resolved` 或 `unavailable`。列表、状态更改和规则更改都不返回 `symbolication`。
+
+使用 `response_version=2` 时，问题包含相同的字段，并有以下变化：
+
+| 字段 | 版本 2 的值 |
+| --- | --- |
+| `status` | `unresolved`、`resolved` 或 `archived`。版本 1 把 `archived` 显示为 `ignored`。 |
+| `priority` | `high`、`medium` 或 `low`。 |
+| `priority_source` | 有人手动设置优先级时为 `manual`。优先级跟随有效严重程度时为 `derived`。 |
+
+```json
+{
+  "id": "9b2b4b3a-bd4e-4f85-a0f6-48118f037c17",
+  "status": "archived",
+  "severity": "error",
+  "priority": "low",
+  "priority_source": "manual"
+}
+```
+
+本示例只显示部分字段。自动推导的优先级规则如下：`error` 和 `critical` 为 `high`，`warning` 为 `medium`，`info` 为 `low`。推导基于 `triage.effective_severity`，所以问题的严重程度规则可以改变它。
+
+使用 `response_version=3` 时，问题包含版本 2 的全部字段，外加 `assignee`。问题没有负责人时，`assignee` 为 `null`：
+
+```json
+{
+  "id": "9b2b4b3a-bd4e-4f85-a0f6-48118f037c17",
+  "status": "unresolved",
+  "priority": "high",
+  "priority_source": "derived",
+  "assignee": {
+    "user_id": "5d6e7f80-1a2b-4c3d-8e4f-5a6b7c8d9e0f",
+    "name": "Ada Example",
+    "email": "ada@example.com"
+  }
+}
+```
+
+| 字段 | 含义 |
+| --- | --- |
+| `assignee.user_id` | 负责人的用户 ID。在筛选条件或更改请求中把它作为 `assignee` 发送。 |
+| `assignee.name` | 负责人的名称；账号没有名称时为 `null`。 |
+| `assignee.email` | 负责人的电子邮件地址。 |
+
+被分配的成员无法再读取该项目时，问题不显示负责人。CLI 请求的是版本 3。
+
+其他任何 `response_version` 都返回 `422` 和 `code: validation_failed`。在一页游标结果中，`issues` 里的每个问题都使用同一版本。
+
+### <span id="assignee-list-response">负责人列表响应</span>
+
+`GET /api/telemetry/issues/assignees?project_id=<project_id>` 返回该项目中所有可被分配问题的账号：
+
+```json
+{
+  "project_id": "123e4567-e89b-12d3-a456-426614174000",
+  "assignees": [
+    {
+      "user_id": "5d6e7f80-1a2b-4c3d-8e4f-5a6b7c8d9e0f",
+      "name": "Ada Example",
+      "email": "ada@example.com"
+    },
+    {
+      "user_id": "0f1e2d3c-4b5a-4968-8776-655443322110",
+      "name": null,
+      "email": "sam@example.com"
+    }
+  ]
+}
+```
+
+如果账号无法读取该项目，路由返回 `404` 和 `code: not_found`。
+
+### <span id="action-response">操作响应</span>
+
+```json
+{
+  "id": "d8ee3a6f-3918-440b-96cb-14166419399a",
+  "project_id": "123e4567-e89b-12d3-a456-426614174000",
+  "name": "checkout_failed",
+  "distinct_id": "user_123",
+  "session_id": "session_456",
+  "occurred_at": "2026-06-01T12:00:00Z",
+  "properties": { "surface": "checkout" },
+  "environment": "production",
+  "release": "checkout@1.2.3",
+  "service_name": "checkout-api",
+  "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+  "span_id": "00f067aa0ba902b7",
+  "next_action": {
+    "code": "inspect_trace",
+    "target": "trace_summary"
+  }
+}
+```
+
+`distinct_id` 跟随 1 个操作者或会话。把 `distinct_id` 和 `session_id` 当作不透明标识符。`session_id` 和 `trace_id` 缺失时为 `null`。`span_id` 缺失时会被省略。操作没有严重程度。请参阅[产品事件采集](/zh-Hans/guides/product-events)。
+
+### 指标响应
+
+```json
+{
+  "id": "6f1c2d3e-4a5b-4c6d-8e7f-901234567890",
+  "event_id": "metric-1",
+  "project_id": "123e4567-e89b-12d3-a456-426614174000",
+  "name": "http.server.duration",
+  "kind": "histogram",
+  "value": 12.5,
+  "unit": "ms",
+  "temporality": "delta",
+  "attributes": {},
+  "occurred_at": "2026-07-13T08:00:00Z",
+  "environment": "production",
+  "release": "checkout@1.2.3",
+  "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+  "span_id": "00f067aa0ba902b7",
+  "service_name": "checkout-api",
+  "sdk_name": "@logbrew/node",
+  "sdk_version": "0.1.8"
+}
+```
+
+每个条目是 1 个样本。不要把样本数当作事件数或用户数。`unit`、`temporality`、`trace_id` 和 `span_id` 缺失时为 `null`。`null` 值不等于零。
+
+### 版本响应
+
+```json
+{
+  "project_id": "123e4567-e89b-12d3-a456-426614174000",
+  "release": "api@1.2.3",
+  "environment": "production",
+  "service_name": "checkout-api",
+  "issue_count": 3,
+  "log_count": 824,
+  "trace_span_count": 421,
+  "action_count": 19,
+  "metric_count": 87,
+  "first_seen_at": "2026-06-01T12:00:00Z",
+  "last_seen_at": "2026-06-01T12:15:00Z",
+  "trace_health": {
+    "status": "errors_observed",
+    "trace_count": 42,
+    "error_trace_count": 3,
+    "error_rate_basis_points": 714
+  },
+  "next_action": {
+    "code": "inspect_release_issues",
+    "target": "telemetry_issues"
+  }
+}
+```
+
+1 行对应 1 个项目、版本、环境和服务的组合。行内的数量只描述该行。
+
+`trace_health.status` 的值为 `unknown`（该行没有链路）、`no_errors_observed` 或 `errors_observed`。`error_rate_basis_points` 是含有错误 Span 的链路所占的比例，取值从 `0` 到 `10000`。它不是所有请求的错误率。
+
+`next_action` 按以下顺序指向第一个有数据的信号类型：
+
+| `code` | `target` |
+| --- | --- |
+| `inspect_release_issues` | `telemetry_issues` |
+| `inspect_release_traces` | `trace_explorer` |
+| `inspect_release_logs` | `telemetry_logs` |
+| `inspect_release_actions` | `telemetry_actions` |
+| `inspect_release_metrics` | `telemetry_metrics` |
+| `review_release_telemetry` | `telemetry_reads` |
+
+请参阅[版本](/zh-Hans/concepts/releases)。
+
+### 链路发现响应
+
+`GET /api/telemetry/traces?pagination=cursor` 为每条链路返回 1 行，并为返回的这一页附上 `naming_quality` 回执：
+
+```json
+{
+  "traces": [
+    {
+      "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+      "project_ids": ["123e4567-e89b-12d3-a456-426614174000"],
+      "root_span_name": "POST /checkout",
+      "root_service_name": "checkout-api",
+      "root_operation": "http.server",
+      "span_count": 3,
+      "error_span_count": 1,
+      "service_count": 1,
+      "started_at": "2026-06-01T12:00:00Z",
+      "duration_ms": 45,
+      "services": ["checkout-api"],
+      "releases": ["checkout@1.2.3"],
+      "environments": ["production"],
+      "next_action": {
+        "code": "inspect_trace",
+        "target": "trace_summary"
+      }
+    }
+  ],
+  "next_cursor": null,
+  "naming_quality": {
+    "evaluated_traces": 1,
+    "meaningful_name_traces": 1,
+    "generic_name_traces": 0,
+    "unmatched_route_traces": 0,
+    "generic_operation_traces": 0,
+    "truncated": false,
+    "next_action": null
+  }
+}
+```
+
+`naming_quality` 只涵盖返回的这一页，不是整个账号的评分。`truncated: true` 表示还有下一页。当这一页里有通用名称、未匹配的路由或通用操作名时，`next_action` 为 `improve_trace_naming`，目标为 `sdk_configuration`。不使用 `pagination=cursor` 时，路由返回不带外层对象的链路数组，且没有 `naming_quality`。
+
+`next_cursor` 包含 `time` 和 `trace_id`。把它们作为 `cursor_time` 和 `cursor_trace_id` 发送。
+
+`GET /api/telemetry/traces/{trace_id}` 返回 1 条链路的所有 Span。`GET /api/telemetry/traces/{trace_id}/summary` 返回根 Span、错误 Span、服务、耗时和最慢路径，不含原始 Span 属性。摘要返回 `404` 表示没有链路匹配完整的范围。不要去掉筛选条件后重试。请参阅[链路 Span 与摘要响应](#trace-spans-and-summary-responses)。
+
+### 空列表与缺失的记录
+
+列表读取可能没有匹配结果。详情读取遵循不同的约定：
+
+| 请求 | 成功 | 没有可读取的记录 |
+| --- | --- | --- |
+| `GET /api/logs/{log_id}` | `200`，含 1 条[日志](#log-response) | `404` 和 `code: not_found` |
+| `GET /api/telemetry/issues/{issue_id}` | `200`，含 1 个[问题](#issue-response) | `404` 和 `code: not_found` |
+| `GET /api/telemetry/issues/{issue_id}/events` | `200`，含发生记录 | 第一页返回 `404` 和 `code: not_found` |
+| `GET /api/telemetry/traces/{trace_id}` | `200`，含 Span | `200` 和 `[]` |
+| `GET /api/telemetry/traces/{trace_id}/summary` | `200`，含 1 份摘要 | `404` 和 `code: not_found` |
+
+缺失的日志返回以下 `404`：
+
+```json
+{
+  "error": "log not found",
+  "code": "not_found",
+  "next": "check the resource id or filters and retry",
+  "next_action": {
+    "code": "check_resource",
+    "target": "resource"
+  }
+}
+```
+
+缺失的问题使用 `"error": "issue not found"`。缺失的链路摘要使用 `"error": "trace not found"`。未知的 ID 和账号无法读取的 ID 返回相同的响应。
+
+如果列表只指定了 1 个 `project_id`，而账号无法读取该项目，会返回 `200` 和空列表。报告“没有数据”之前，先检查项目 ID。
+
+### 被拒绝的项目选择
+
+日志、问题、操作、指标、版本和链路列表接受用 `project_id` 指定 1 个项目，或用 `project_ids` 指定 2 到 50 个项目。日志属性目录接受同样的选择参数。问题发生记录历史不接受这些参数。
+
+同时包含 `project_id` 和 `project_ids` 的请求返回 `422`：
+
+```json
+{
+  "error": "project_id and project_ids are mutually exclusive",
+  "code": "validation_failed",
+  "next": "use project_id for one project, project_ids=uuid,uuid for two to fifty projects, or omit both for all readable projects",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+如果 `project_ids` 包含无效的 UUID、重复的 ID，或 ID 少于 2 个、多于 50 个，也会返回 `422` 和 `code: validation_failed`。
+
+如果账号无法读取 `project_ids` 中的某个项目，整个请求都返回 `404`，不会把其他项目作为部分结果返回：
+
+```json
+{
+  "error": "project selection not found",
+  "code": "not_found",
+  "next": "refresh readable projects and retry with only project IDs you can read",
+  "next_action": {
+    "code": "check_resource",
+    "target": "resource"
+  }
+}
+```
+
+显示这个错误，不要显示空列表或零计数。重新读取项目列表。不要悄悄移除某个项目，也不要改为在所有项目中重试。委托凭据（例如 MCP 授权）访问其授权范围之外的项目时，返回 `403` 和 `code: forbidden`。请参阅[项目范围](/zh-Hans/reference/telemetry-api-filters#project-scope)。
+
+### <span id="cursor-errors">游标错误</span>
+
+日志、问题、操作、指标和问题发生记录使用 `cursor_time` 和 `cursor_id`。被拒绝的游标返回 `422` 和 `code: validation_failed`。这些错误不表示列表为空。
+
+| 请求 | `error` |
+| --- | --- |
+| `pagination=cursor`，但只有 2 个游标字段中的 1 个 | `cursor_time and cursor_id must be sent together` |
+| `cursor_time` 不是 RFC3339 时间戳 | `cursor_time must be an RFC3339 timestamp` |
+| 有游标字段但没有 `pagination=cursor`，或 `pagination` 为其他值 | `pagination must be cursor when cursor pagination is requested` |
+
+例如：
+
+```json
+{
+  "error": "cursor_time and cursor_id must be sent together",
+  "code": "validation_failed",
+  "next": "send pagination=cursor alone for the first page, then send cursor_time and cursor_id together from next_cursor",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+从上一页完整复制 `next_cursor`。不要用当前时间替换 `cursor_time`。如果丢失了游标，用 `pagination=cursor` 和原始筛选条件从头开始。未知的查询键或类型错误的值返回 `422` 和 `"error": "invalid query parameters"`。
+
+### 版本游标响应
+
+版本游标有 5 个字段。请求成功但没有匹配结果时返回 `200`：
+
+```json
+{
+  "releases": [],
+  "next_cursor": null
+}
+```
+
+`next_cursor` 不为 `null` 时，在下一个请求中发送全部 5 个值：
+
+| `next_cursor` 字段 | 查询参数 |
+| --- | --- |
+| `time` | `cursor_time` |
+| `project_id` | `cursor_project_id` |
+| `release` | `cursor_release` |
+| `environment` | `cursor_environment` |
+| `service_name` | `cursor_service_name` |
+
+`cursor_project_id` 只标记位置，不能代替 `project_id` 或 `project_ids`。保留原始的项目和筛选参数。对每个值进行 URL 编码。
+
+使用 `pagination=cursor` 时，游标不完整，或版本、环境、服务的值为空，都会返回 `422` 和 `"error": "all release cursor fields must be sent together"`。无效的 `cursor_time` 和缺少 `pagination=cursor` 返回的错误与[其他游标](#cursor-errors)相同。
+
+### 链路发现错误
+
+以下错误适用于 `GET /api/telemetry/traces`。每种错误都返回 `422` 和 `code: validation_failed`。被拒绝的请求不等于空结果。
+
+| 请求 | `error` |
+| --- | --- |
+| `status` 不是 `error` 或 `ok` | `trace status must be error or ok` |
+| `min_duration_ms` 小于 `0` | `minimum trace duration must not be negative` |
+| 只有 1 个游标字段，或 `cursor_trace_id` 为空 | `cursor_time and cursor_trace_id must be sent together` |
+| `cursor_time` 不是 RFC3339 时间戳 | `cursor_time must be an RFC3339 timestamp` |
+| 有游标字段但没有 `pagination=cursor` | `pagination must be cursor when cursor pagination is requested` |
+
+要同时包含两种链路状态，省略 `status`。读取下一页时，把 `next_cursor.time` 复制到 `cursor_time`，把 `next_cursor.trace_id` 复制到 `cursor_trace_id`。读取链路分页时不要发送 `cursor_id`。请参阅[链路筛选条件](/zh-Hans/reference/telemetry-api-filters#trace-filters)。
+
+### <span id="issue-occurrence-history">问题发生记录历史</span>
+
+`GET /api/telemetry/issues/{issue_id}/events` 读取 1 个分组问题的发生记录。使用账号 Bearer 令牌和分组问题 ID。该路由只接受 `pagination`、`cursor_time`、`cursor_id` 和 `limit`，不接受项目、时间、版本、环境或严重程度筛选条件。
+
+```bash
+curl --get "https://api.logbrew.co/api/telemetry/issues/$ISSUE_ID/events" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "pagination=cursor" \
+  --data-urlencode "limit=1"
+```
+
+包含 1 条发生记录和续读游标的第一页：
+
+```json
+{
+  "issue_id": "d1776d70-763c-47b5-a8f1-76f593221e2b",
+  "events": [
+    {
+      "id": "db619770-1f7c-4bd5-8310-9f171df8af47",
+      "issue_id": "d1776d70-763c-47b5-a8f1-76f593221e2b",
+      "project_id": "123e4567-e89b-12d3-a456-426614174000",
+      "severity": "error",
+      "title": "Checkout failed",
+      "message": "Checkout could not complete",
+      "stack_trace": null,
+      "attributes": {
+        "exception": {
+          "type": "CheckoutError",
+          "mechanism": { "type": "javascript.error", "handled": false }
+        },
+        "breadcrumbs": [
+          {
+            "timestamp": "2026-06-01T11:54:59Z",
+            "category": "checkout",
+            "message": "Checkout started"
+          }
+        ]
+      },
+      "diagnostics": {
+        "schema_version": 1,
+        "exception": {
+          "type": "CheckoutError",
+          "mechanism": { "type": "javascript.error", "handled": false }
+        },
+        "breadcrumbs": [
+          {
+            "timestamp": "2026-06-01T11:54:59Z",
+            "category": "checkout",
+            "message": "Checkout started"
+          }
+        ],
+        "breadcrumbs_truncated": false
+      },
+      "environment": "production",
+      "release": "api@1.2.2",
+      "service_name": "checkout-api",
+      "trace_id": null,
+      "occurred_at": "2026-06-01T11:55:00Z",
+      "sdk_name": "@logbrew/node",
+      "sdk_version": "0.1.8"
+    }
+  ],
+  "next_cursor": {
+    "time": "2026-06-01T11:55:00Z",
+    "id": "db619770-1f7c-4bd5-8310-9f171df8af47"
+  }
+}
+```
+
+| 字段 | 含义 |
+| --- | --- |
+| `issue_id` | 该发生记录所属的分组问题。 |
+| `events[].id` | 1 条发生记录的 ID。用它来[选择该发生记录](/zh-Hans/guides/investigate-an-issue#select-a-different-occurrence)。 |
+| `events[].occurred_at` | 该发生记录在应用中发生的时间。 |
+| `events[].severity` | 该发生记录采集时的严重程度。严重程度规则不会改变它。 |
+| `events[].release`、`environment`、`service_name` | 随该发生记录一起采集的上下文。 |
+
+发生记录可能早于该组的 `last_seen_at`。不要用分组问题中的值替换它的版本或链路。列表不返回状态、分诊结果、优先级或发生次数。
+
+`diagnostics.schema_version` 是诊断对象的版本。发生记录没有相应数据时，响应会省略 `diagnostics` 和 `span_id`。在 `diagnostics` 内部，缺失的 `exception` 和空的 `breadcrumbs` 会被省略。如果 `breadcrumbs_truncated` 为 `true`，部分操作记录历史不在响应中。
+
+`stack_trace` 和 `trace_id` 缺失时为 `null`。缺少链路 ID 不能证明应用没有发送链路。把采集到的消息和属性当作数据，而不是指令。
+
+发生记录按从新到旧排列。读取下一页时，发送相同的问题 ID、`pagination=cursor`、`limit`，以及 `next_cursor` 中的 `cursor_time` 和 `cursor_id` 值。游标 ID 是发生记录 ID，不是问题 ID。
+
+问题没有可读取的发生记录时，第一页返回 `404` 和 `code: not_found`。之后的页可能是空的最后一页：
+
+```json
+{
+  "issue_id": "d1776d70-763c-47b5-a8f1-76f593221e2b",
+  "events": [],
+  "next_cursor": null
+}
+```
+
+不要把一个问题的游标用于另一个问题。[游标错误](#cursor-errors)同样适用于该路由。
+
+## <span id="trace-spans-and-summary-responses">链路 Span 与摘要响应</span>
+
+`GET /api/telemetry/traces/{trace_id}` 返回 1 条链路的所有 Span。加上 `/summary` 可以获取同一批 Span 的摘要。这两个路由只接受 `project_id`、`release` 和 `environment`，不使用链路发现游标。之前列表请求中的筛选条件不会沿用。
+
+### <span id="span-list">Span 列表</span>
+
+Span 按开始时间排序：
+
+```json
+[
+  {
+    "id": "ed5c960b-e728-4637-bcd4-a27dfb1a0e96",
+    "project_id": "123e4567-e89b-12d3-a456-426614174000",
+    "trace_id": "6e0c63257de34c92bdb0c8f1e9278a50",
+    "span_id": "b37ac82563149fed",
+    "parent_span_id": null,
+    "name": "POST /checkout",
+    "operation": "http.server",
+    "status": "error",
+    "started_at": "2026-06-01T12:00:00Z",
+    "duration_ms": 823,
+    "attributes": {},
+    "environment": "production",
+    "release": "api@1.2.3",
+    "service_name": "checkout-api",
+    "sdk_name": "@logbrew/node",
+    "sdk_version": "0.1.8"
+  },
+  {
+    "id": "0c2f7a51-4e8d-4b6a-9f13-2d7e5c8b1a90",
+    "project_id": "123e4567-e89b-12d3-a456-426614174000",
+    "trace_id": "6e0c63257de34c92bdb0c8f1e9278a50",
+    "span_id": "7a085853722dc6d2",
+    "parent_span_id": "b37ac82563149fed",
+    "name": "POST /v1/charges",
+    "operation": "http.client",
+    "status": "error",
+    "started_at": "2026-06-01T12:00:00.100Z",
+    "duration_ms": 640,
+    "attributes": {},
+    "environment": "production",
+    "release": "api@1.2.3",
+    "service_name": "checkout-api",
+    "sdk_name": "@logbrew/node",
+    "sdk_version": "0.1.8"
+  }
+]
+```
+
+`status: "error"` 描述的是被采集的那次计时操作，而不是这次 API 读取。`parent_span_id: null` 表示该 Span 没有父 ID。`status: null` 表示该 Span 没有报告状态。
+
+### 链路摘要
+
+同样 2 个 Span 的摘要：
+
+```json
+{
+  "trace_id": "6e0c63257de34c92bdb0c8f1e9278a50",
+  "span_count": 2,
+  "error_span_count": 2,
+  "service_count": 1,
+  "project_count": 1,
+  "started_at": "2026-06-01T12:00:00Z",
+  "duration_ms": 823,
+  "root_span": {
+    "span_id": "b37ac82563149fed",
+    "parent_span_id": null,
+    "name": "POST /checkout",
+    "operation": "http.server",
+    "status": "error",
+    "started_at": "2026-06-01T12:00:00Z",
+    "duration_ms": 823,
+    "service_name": "checkout-api"
+  },
+  "slowest_child_span": {
+    "span_id": "7a085853722dc6d2",
+    "parent_span_id": "b37ac82563149fed",
+    "name": "POST /v1/charges",
+    "operation": "http.client",
+    "status": "error",
+    "started_at": "2026-06-01T12:00:00.100Z",
+    "duration_ms": 640,
+    "service_name": "checkout-api"
+  },
+  "slowest_path": [
+    {
+      "span_id": "b37ac82563149fed",
+      "parent_span_id": null,
+      "name": "POST /checkout",
+      "operation": "http.server",
+      "status": "error",
+      "started_at": "2026-06-01T12:00:00Z",
+      "duration_ms": 823,
+      "service_name": "checkout-api"
+    },
+    {
+      "span_id": "7a085853722dc6d2",
+      "parent_span_id": "b37ac82563149fed",
+      "name": "POST /v1/charges",
+      "operation": "http.client",
+      "status": "error",
+      "started_at": "2026-06-01T12:00:00.100Z",
+      "duration_ms": 640,
+      "service_name": "checkout-api"
+    }
+  ],
+  "error_spans": [
+    {
+      "span_id": "b37ac82563149fed",
+      "parent_span_id": null,
+      "name": "POST /checkout",
+      "operation": "http.server",
+      "status": "error",
+      "started_at": "2026-06-01T12:00:00Z",
+      "duration_ms": 823,
+      "service_name": "checkout-api"
+    },
+    {
+      "span_id": "7a085853722dc6d2",
+      "parent_span_id": "b37ac82563149fed",
+      "name": "POST /v1/charges",
+      "operation": "http.client",
+      "status": "error",
+      "started_at": "2026-06-01T12:00:00.100Z",
+      "duration_ms": 640,
+      "service_name": "checkout-api"
+    }
+  ],
+  "services": [
+    {
+      "service_name": "checkout-api",
+      "span_count": 2,
+      "error_span_count": 2,
+      "max_duration_ms": 823
+    }
+  ],
+  "releases": ["api@1.2.3"],
+  "environments": ["production"]
+}
+```
+
+| 字段 | 含义 |
+| --- | --- |
+| `duration_ms` | 从最早的 Span 开始到最晚的 Span 结束的时间。它不是各 Span 耗时之和。 |
+| `root_span` | 父 Span 不在该链路中的最早 Span。它是排查的起点，不是已证实的原因。 |
+| `slowest_child_span` | 有父 ID 的 Span 中耗时最长的一个，或 `null`。 |
+| `slowest_path` | 从根 Span 到 `slowest_child_span` 的已知父级链。`slowest_child_span` 为 `null` 时，它为 `[]`。 |
+| `error_spans` | 耗时最长的错误 Span，最多 5 个。`error_span_count` 可能更大。 |
+
+这两个路由都不返回游标或截断字段。不要添加响应中没有的 `truncated` 值。
+
+### 没有匹配的 Span
+
+没有 Span 匹配该链路 ID 和范围时，Span 列表返回 `200` 和 `[]`。摘要返回 `404`、`"error": "trace not found"` 和 `code: not_found`。检查链路 ID 和范围。不要为了得到结果而去掉筛选条件。这两种结果都不能证明应用没有发送遥测数据。
+
+## <span id="live-event-response-format">实时事件响应格式</span>
+
+实时动态只发送新事件，不会重放客户端断开连接期间错过的事件。读取已有记录请使用列表路由。
+
+### 创建票据
+
+使用账号 Bearer 令牌发送 `POST /api/feed/ticket`。该请求没有请求体。
+
+```bash
+curl --request POST "https://api.logbrew.co/api/feed/ticket" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER"
+```
+
+`200 OK` 响应在 `ticket` 字段中包含票据：
+
+```json
+{
+  "ticket": "<feed-ticket>",
+  "expires_in_seconds": 60,
+  "next": "connect with GET /api/feed/live?ticket=<ticket> before the ticket expires",
+  "next_action": {
+    "code": "connect_live_feed",
+    "target": "live_feed"
+  }
+}
+```
+
+票据是短期有效的凭据。不要把它写入日志，也不要放进智能体提示词。在 `expires_in_seconds` 到期前建立连接。到期时间限制的是连接何时可以开始，而不是连接能保持多久。
+
+`401` 表示账号登录状态无效。请先重新登录，再请求票据。使用 `POST` 以外的方法时，返回 `405` 和 `code: method_not_allowed`。
+
+### 建立连接
+
+用 WebSocket 客户端连接到 `wss://api.logbrew.co/api/feed/live?ticket=<feed-ticket>`。对票据进行 URL 编码。不要把账号 Bearer 令牌或接入 Bearer 令牌放进 URL。`401` 表示票据或账号登录状态无效。重新登录后，创建新的票据。
+
+| 响应 | 原因 | 下一步 |
+| --- | --- | --- |
+| `422` 和 `"error": "feed ticket is required"` | `ticket` 查询值缺失或为空。 | 创建票据，并用它连接。 |
+| `401` 和 `code: unauthorized` | 票据已过期或无效。 | 创建新的票据。不要用同一张票据重试。 |
+| `code: invalid_websocket_upgrade` | 该请求不是有效的 WebSocket 升级请求。 | 使用 WebSocket 客户端。 |
+| `405` 和 `code: method_not_allowed` | 该请求没有使用 `GET`。 | 使用 `GET` 建立连接。 |
+
+出错后先等待，再重新连接。不要在紧凑的循环中反复重连。
+
+### 读取消息
+
+每条消息都是 `{ "type": "...", "data": ... }` 封装。先读取 `type`，再解析 `data`。跳过客户端不支持的类型。
+
+| 事件类型 | 数据负载 |
+| --- | --- |
+| `native_log` | 日志数据，结构与[日志响应](#log-response)相同。 |
+| `native_issue` | 分组问题数据，结构与版本 1 的[问题响应](#issue-response)相同。 |
+| `native_trace_span` | 1 个 Span，结构与 [Span 列表](#span-list)中的条目相同。 |
+| `native_action` | 产品操作数据，结构与[操作响应](#action-response)相同。 |
+| `project_created`、`project_updated`、`project_catalog_changed` | 项目数据。项目发生变化时，重新读取项目列表。 |
+| `usage_updated`、`usage_limit_warning`、`usage_limit_blocked` | 账号用量，结构与[账号用量](/zh-Hans/reference/account-api#account-usage)相同。 |
+
+```json
+{
+  "type": "native_log",
+  "data": {
+    "id": "150d1288-bec2-49ec-a036-3f7ac55f1b2d",
+    "project_id": "123e4567-e89b-12d3-a456-426614174000",
+    "level": "warning",
+    "severity": "warning",
+    "triage": {
+      "effective_severity": "warning",
+      "ignored": false,
+      "rule_applied": false
+    },
+    "source": "runtime",
+    "message": "checkout retry scheduled",
+    "attributes": { "route": "/checkout" },
+    "occurred_at": "2026-06-01T12:00:00Z",
+    "environment": "production",
+    "release": "api@1.2.3",
+    "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+    "span_id": "00f067aa0ba902b7",
+    "service_name": "checkout-api",
+    "sdk_name": "@logbrew/node",
+    "sdk_version": "0.1.8",
+    "next_action": {
+      "code": "inspect_trace",
+      "target": "trace_summary"
+    }
+  }
+}
+```
+
+`native_issue` 事件使用问题响应版本 1：已归档的问题显示为 `ignored`，事件中没有优先级。指标和版本不是实时事件类型，请用各自的列表路由读取。票据不选择项目。在项目视图中显示每个事件之前，先检查它的 `project_id`。`logbrew watch --json` 使用的就是这个实时动态。请参阅 [CLI 参考](/zh-Hans/reference/cli)。
+
+### 处理已关闭的连接
+
+| 关闭代码 | 原因 | 下一步 |
+| --- | --- | --- |
+| `1013` | `live feed fell behind; reconnect to resync` | 等待片刻，然后用新票据重新连接。重新读取列表路由，获取错过的记录。 |
+| `1008` | `live feed access changed; sign in again` | 停止重连。重新登录后再创建新票据。 |
+
+其他断开连接的情况可能没有 LogBrew 给出的原因。重新连接后，再次读取列表路由，并按 ID 匹配记录。
+
+## <span id="issue-status-response-examples">问题状态响应示例</span>
+
+使用 `{ "status": "resolved" }` 调用 `PATCH /api/telemetry/issues/{issue_id}` 会返回 `200 OK` 和更新后的分组问题，结构与[问题响应](#issue-response)相同。查询键 `response_version` 用于选择版本。该请求不返回表示成功的标志。
+
+请求体设置 `status`、`priority` 和 `assignee` 中的 1 个或多个。`status` 接受 `unresolved`、`resolved` 或 `archived`。`ignored` 是 `archived` 的旧名称。请参阅[更新单个问题](/zh-Hans/reference/telemetry-api#update-one-issue)。
+
+显示成功之前，先检查返回的 `id`、`status` 和 `priority`。不要根据提交的值拼出结果。状态更改不会删除发生记录，也不会改变 `first_seen_at` 和 `last_seen_at`。它不会改变 `severity` 或严重程度规则。
+
+被拒绝的更改返回 `422` 和 `code: validation_failed`：
+
+```json
+{
+  "error": "issue status must be unresolved, resolved, or archived",
+  "code": "validation_failed",
+  "next": "use status=unresolved, status=resolved, or status=archived",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+| 结果 | 原因 |
+| --- | --- |
+| `422`，`issue update requires status, priority, or assignee` | 请求体不含这 3 个字段中的任何一个。 |
+| `422`，`issue priority must be high, medium, or low` | 不支持该优先级值。 |
+| `422`，`issue assignee must be me, none, or a user ID` | 不支持该负责人值。 |
+| `422`，`issue assignee cannot read this project` | 该负责人无权访问该项目。LogBrew 不做任何更改。 |
+| `403` 和 `code: forbidden` | 该账号无法管理该项目中的问题。 |
+| `404` 和 `code: not_found` | 该账号无法读取该问题，或该问题不存在。 |
+
+已经是所请求值的字段不会变化。超时或响应丢失后，重新发送同一个请求，或先读取该问题。读取当前状态之前，不要发送不同的更改。请参阅[写入请求](/zh-Hans/reference/api-errors#writes)。
+
+`POST /api/telemetry/issues/bulk` 返回 `200 OK`，按请求顺序为每个请求的问题 ID 给出 1 个结果。找到的每个问题都使用版本 3 的结构。`not_found` 结果包含 `issue: null`：
+
+```json
+{
+  "project_id": "123e4567-e89b-12d3-a456-426614174000",
+  "results": [
+    {
+      "issue_id": "9b2b4b3a-bd4e-4f85-a0f6-48118f037c17",
+      "outcome": "updated",
+      "issue": {
+        "id": "9b2b4b3a-bd4e-4f85-a0f6-48118f037c17",
+        "status": "archived",
+        "priority": "high",
+        "priority_source": "derived",
+        "assignee": null
+      }
+    },
+    {
+      "issue_id": "3f1c2d4e-5a6b-4c7d-8e9f-0a1b2c3d4e5f",
+      "outcome": "not_found",
+      "issue": null
+    }
+  ]
+}
+```
+
+本示例只显示部分问题字段。`outcome` 为 `updated`、`unchanged` 或 `not_found`。重复的请求返回 `unchanged`，不做任何更改。请参阅[批量更新问题](/zh-Hans/reference/telemetry-api#update-issues-in-bulk)。
+
+在以下情况下，整个批量请求都会失败：
+
+| 结果 | 原因 |
+| --- | --- |
+| `422`，`issue_ids must name 1 to 100 issues` | 列表为空，或包含超过 100 个 ID。 |
+| `422`，`issue_ids must not contain duplicates` | 某个 ID 出现了不止 1 次。 |
+| `422` 和 `code: invalid_json` | 请求体包含未知字段。 |
+| `403` 和 `code: forbidden` | 该账号无法管理该项目中的问题。 |
+| `404`，`project not found` | 该账号无法读取该项目。 |
+
+## 分析请求范围
+
+分析路由、指标序列路由和信号数量路由读取 1 个项目和 1 个时间范围。每个请求都需要 `project_id` 和 `since`。`since` 接受 `24h` 或 `7d` 这样的简写时长，或 RFC3339 时间戳。`until` 接受 RFC3339 时间戳，默认为请求时间。时间范围包含 `since`，不包含 `until`，且不能超过 31 天。
+
+`service_name`、`release` 和 `environment` 是可选的精确筛选条件。LogBrew 去掉首尾空格后，每个值必须为 1 到 256 个字符。分群对比路由把这些筛选条件放在每个分群内部，而不是顶层。
+
+如果账号无法读取该项目，这些路由返回 `200 OK` 和零计数，不会返回 `404`。空结果不能确认项目访问权限。把 `project_id` 与该账号可读取的项目进行比较。通过不包含该项目的 MCP 授权发出的请求返回 `403` 和 `forbidden`。
+
+| 路由 | `response_version` 值 | 默认值 |
+| --- | --- | --- |
+| `GET /api/telemetry/analytics/overview` | `1`、`2` 或 `3` | `1` |
+| `GET /api/telemetry/analytics/properties` | `1` 或 `2` | `1` |
+| `POST /api/telemetry/analytics/segments/compare` | `1` 或 `2` | `1` |
+| `POST /api/telemetry/analytics/retention` | `1` 或 `2` | `1` |
+| `POST /api/telemetry/analytics/lifecycle` | `1` 或 `2` | `1` |
+| `POST /api/telemetry/analytics/funnel` | 不接受 | 结构版本 `1` |
+| `POST /api/telemetry/analytics/paths` | 不接受 | 结构版本 `1` |
+| `GET /api/telemetry/metrics/series` | 不接受 | 结构版本 `1` |
+| `GET /api/telemetry/summary/volume` | `1` | `1` |
+
+每个响应都以 `schema_version`、`query` 和 `purpose` 开头。`query` 回显实际生效的范围，省略你没有发送的筛选条件。`purpose` 是纯文本，说明该路由回答什么问题。
+
+分母为零时，比率会被省略。省略的比率既不是 `0`，也不是 `null`。信任某个比率之前，先读取 `coverage`。
+
+### <span id="shared-scope-errors">通用范围错误</span>
+
+以下错误使用 HTTP `422` 和 `validation_failed`：
+
+| 原因 | `error` |
+| --- | --- |
+| 没有 `project_id` | `product analytics project_id is required` |
+| 没有 `since` | `product analytics since is required` |
+| `since` 既不是时长，也不是 RFC3339 时间戳 | `invalid since value` |
+| `until` 不是 RFC3339 时间戳 | `product analytics until must be an RFC3339 timestamp` |
+| `since` 不早于 `until` | `product analytics since must be earlier than until` |
+| 时间范围超过 31 天 | `product analytics range must not exceed 31 days` |
+| 筛选条件为空，或超过 256 个字符 | `product analytics context filters must be non-empty and at most 256 characters` |
+
+例如，不带 `project_id` 的请求返回：
+
+```json
+{
+  "error": "product analytics project_id is required",
+  "code": "validation_failed",
+  "next": "choose one owned project and send its project_id",
+  "next_action": { "code": "fix_request", "target": "request" }
+}
+```
+
+指标序列路由和信号数量路由使用同样的范围规则，但有各自的 `error` 文本。下文对应的小节列出了这些错误。
+
+未知的查询键返回 `422` 和[无效的查询参数](/zh-Hans/reference/api-errors#invalid-query-parameters)响应。未知的 JSON 字段、缺少必填的 JSON 字段或不支持的枚举值返回 `invalid_json`。请参阅[无效的 JSON](/zh-Hans/reference/api-errors#invalid-json)。使用错误 HTTP 方法的请求返回 `405` 和 `method_not_allowed`，其 `next` 文本会指出受支持的方法和字段。请参阅[不支持的方法](/zh-Hans/reference/api-errors#unsupported-method)。
+
+## 产品分析概览响应
+
+`GET /api/telemetry/analytics/overview` 显示 1 个项目中的活动：操作量、用户、会话、时间序列、热门操作，以及已分类的页面浏览、屏幕浏览和互动。用它查找其他分析路由所需的准确事件名称。
+
+发送 `response_version=3`。版本 1 和 2 返回相同的计数，但 `estimation.method` 使用旧的标记值。版本 1 统计已识别用户时不检查主体类型。版本 2 和 3 只统计类型为 `user` 的主体，并增加了匿名主体计数和 `subject_coverage`。
+
+以下请求以 5 分钟为时间桶读取 1 小时的数据，每个热门列表返回 2 行：
+
+```bash
+curl --get "https://api.logbrew.co/api/telemetry/analytics/overview" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project_id>" \
+  --data-urlencode "since=2026-06-01T11:00:00Z" \
+  --data-urlencode "until=2026-06-01T12:00:00Z" \
+  --data-urlencode "interval=5m" \
+  --data-urlencode "top_limit=2" \
+  --data-urlencode "response_version=3"
+```
+
+### 概览成功响应
+
+在这个模拟结果中，项目的 120 个操作分布在 12 个时间桶中的 2 个里。其中 20 个操作来自匿名主体。每个操作都有会话 ID。一半的操作有链路 ID。
+
+```json
+{
+  "schema_version": 3,
+  "query": {
+    "project_id": "11111111-1111-4111-8111-111111111111",
+    "since": "2026-06-01T11:00:00Z",
+    "until": "2026-06-01T12:00:00Z",
+    "interval": "5m",
+    "interval_seconds": 300,
+    "top_limit": 2
+  },
+  "purpose": "Shows what people do in one project through action volume, active identified users, separately labeled anonymous subjects, explicit sessions, activity over time, top actions, and versioned page-view, screen-view, interaction, surface, and exact event-name breakdowns. Exact classified event names can be used as ordered funnel steps. It never infers people from anonymous events or relabels arbitrary unclassified telemetry as product behavior.",
+  "analysis_level": "user_and_session",
+  "summary": {
+    "actions": 120,
+    "active_identified_users": 18,
+    "active_anonymous_subjects": 7,
+    "sessions": 24,
+    "distinct_action_names": 3,
+    "actions_per_identified_user": 5.555555555555555,
+    "actions_per_session": 5.0
+  },
+  "coverage": {
+    "identified_actions": 100,
+    "anonymous_actions": 20,
+    "subject_coverage": {
+      "index_version": 1,
+      "identified_user_events": 100,
+      "anonymous_subject_events": 20,
+      "legacy_unknown_kind_events": 0,
+      "missing_subject_events": 0,
+      "historical_unindexed_events": 0
+    },
+    "sessionized_actions": 120,
+    "traced_actions": 60,
+    "identification_rate": 0.8333333333333334,
+    "sessionization_rate": 1.0,
+    "trace_link_rate": 0.5,
+    "expected_buckets": 12,
+    "returned_points": 2,
+    "returned_top_actions": 2,
+    "top_actions_truncated": true,
+    "first_seen_at": "2026-06-01T11:00:10Z",
+    "last_seen_at": "2026-06-01T11:09:50Z",
+    "limitations": [
+      "Typed anonymous subjects are counted separately and never contribute to active identified-user counts.",
+      "Actions without a trace ID cannot link product behavior directly to trace investigation."
+    ]
+  },
+  "estimation": {
+    "unique_counts_are_approximate": true,
+    "method": "approximate_distinct",
+    "description": "Active identified-user, anonymous-subject, session, distinct action-name, distinct surface, and distinct exact event-name counts are approximate distinct counts. Event totals and capture-coverage counts are exact within the selected, fully evaluated query window."
+  },
+  "series": [
+    {
+      "bucket_start": "2026-06-01T11:00:00Z",
+      "bucket_end": "2026-06-01T11:05:00Z",
+      "actions": 50,
+      "active_identified_users": 8,
+      "sessions": 10,
+      "identified_actions": 40,
+      "sessionized_actions": 50,
+      "traced_actions": 25
+    },
+    {
+      "bucket_start": "2026-06-01T11:05:00Z",
+      "bucket_end": "2026-06-01T11:10:00Z",
+      "actions": 70,
+      "active_identified_users": 12,
+      "sessions": 14,
+      "identified_actions": 60,
+      "sessionized_actions": 70,
+      "traced_actions": 35
+    }
+  ],
+  "top_actions": [
+    {
+      "name": "checkout_started",
+      "actions": 50,
+      "active_identified_users": 12,
+      "sessions": 14,
+      "share_of_actions": 0.4166666666666667
+    },
+    {
+      "name": "purchase_completed",
+      "actions": 40,
+      "active_identified_users": 9,
+      "sessions": 10,
+      "share_of_actions": 0.3333333333333333
+    }
+  ],
+  "classified_activity": {
+    "summary": {
+      "events": 110,
+      "page_views": 50,
+      "screen_views": 20,
+      "interactions": 40,
+      "distinct_surfaces": 4,
+      "distinct_event_names": 5,
+      "active_identified_users": 17,
+      "active_anonymous_subjects": 6,
+      "sessions": 23
+    },
+    "coverage": {
+      "classified_actions": 60,
+      "unclassified_actions": 60,
+      "action_classification_rate": 0.5,
+      "surfaced_events": 110,
+      "named_events": 110,
+      "identified_events": 90,
+      "subject_coverage": {
+        "index_version": 1,
+        "identified_user_events": 90,
+        "anonymous_subject_events": 20,
+        "legacy_unknown_kind_events": 0,
+        "missing_subject_events": 0,
+        "historical_unindexed_events": 0
+      },
+      "sessionized_events": 110,
+      "traced_events": 55,
+      "surface_rate": 1.0,
+      "event_name_rate": 1.0,
+      "identification_rate": 0.8181818181818182,
+      "sessionization_rate": 1.0,
+      "trace_link_rate": 0.5,
+      "expected_buckets": 12,
+      "returned_points": 2,
+      "returned_top_surfaces": 2,
+      "returned_top_events": 2,
+      "top_surfaces_truncated": true,
+      "top_events_truncated": true,
+      "first_seen_at": "2026-06-01T11:00:20Z",
+      "last_seen_at": "2026-06-01T11:09:40Z",
+      "limitations": [
+        "Only events carrying supported version-1 analytics annotations appear in classified activity; arbitrary actions and technical spans are not relabeled.",
+        "Historical or unannotated actions contribute to the action summary but not to classified screen-view or interaction breakdowns.",
+        "Classified events with typed anonymous subjects are counted separately and never contribute to identified-user counts.",
+        "Classified events without a trace ID cannot link product behavior directly to trace investigation."
+      ]
+    },
+    "series": [
+      {
+        "bucket_start": "2026-06-01T11:00:00Z",
+        "bucket_end": "2026-06-01T11:05:00Z",
+        "events": 45,
+        "page_views": 20,
+        "screen_views": 10,
+        "interactions": 15
+      },
+      {
+        "bucket_start": "2026-06-01T11:05:00Z",
+        "bucket_end": "2026-06-01T11:10:00Z",
+        "events": 65,
+        "page_views": 30,
+        "screen_views": 10,
+        "interactions": 25
+      }
+    ],
+    "top_surfaces": [
+      {
+        "kind": "page_view",
+        "surface": "/checkout/:step",
+        "events": 40,
+        "active_identified_users": 12,
+        "sessions": 14,
+        "share_of_classified_events": 0.36363636363636365
+      },
+      {
+        "kind": "screen_view",
+        "surface": "Checkout",
+        "events": 20,
+        "active_identified_users": 9,
+        "sessions": 10,
+        "share_of_classified_events": 0.18181818181818182
+      }
+    ],
+    "top_events": [
+      {
+        "kind": "page_view",
+        "event_name": "/checkout/:step",
+        "events": 40,
+        "active_identified_users": 12,
+        "sessions": 14,
+        "share_of_classified_events": 0.36363636363636365
+      },
+      {
+        "kind": "interaction",
+        "event_name": "checkout_started",
+        "events": 30,
+        "active_identified_users": 10,
+        "sessions": 12,
+        "share_of_classified_events": 0.2727272727272727
+      }
+    ]
+  },
+  "next_action": {
+    "code": "build_product_funnel",
+    "target": "/api/telemetry/analytics/funnel",
+    "reason": "Use two through eight exact keys from classified_activity.top_events to measure ordered conversion and drop-off for explicit sessions or opaque identified users."
+  }
+}
+```
+
+### 解读概览
+
+5 个 `subject_coverage` 计数相加等于所在部分的事件总数。只有 `identified_user_events` 计入用户。`anonymous_actions` 等于 `summary.actions` 减去 `identified_actions`。
+
+`series` 只包含有活动的时间桶。`expected_buckets` 是该时间范围内可能的时间桶数。除非图表注明了这条规则，否则不要把缺失的时间桶画成实测的零。时间桶按 UTC 时间间隔边界对齐。如果时间范围从某个时间桶中间开始，结果会包含这个不完整的时间桶。
+
+`classified_activity` 统计页面浏览、屏幕浏览和互动。屏幕浏览和互动同时也是操作，页面浏览不是。不要把 `summary.actions` 加到 `classified_activity.summary.events` 上。
+
+把 `classified_activity.top_events` 中的 `kind` 和 `event_name` 复制到漏斗步骤、留存选择器、生命周期选择器、路径锚点和分群目标中。`top_events_truncated` 为 `true` 表示还有出现次数更少的名称未列出。把 `top_limit` 调高（最多 20）可以看到更多。
+
+`analysis_level` 为 `no_data`、`event_only`、`user_level` 或 `user_and_session`。如果项目没有操作，也没有已分类的事件，`next_action.code` 为 `capture_product_activity`。请参阅[产品分析](/zh-Hans/concepts/product-analytics#use-the-analytics-api)。
+
+### <span id="overview-errors">概览错误</span>
+
+除[通用范围错误](#shared-scope-errors)外，概览在遇到以下值时返回 `422` 和 `validation_failed`：
+
+| 值 | `error` |
+| --- | --- |
+| `response_version` 不是 `1`、`2` 或 `3` | `product analytics response_version must be 1, 2, or 3` |
+| `top_limit` 不在 `1` 到 `20` 之间 | `product analytics top_limit must be between 1 and 20` |
+| `interval` 不是 `auto`、`1m`、`5m`、`15m`、`1h`、`6h` 或 `1d` | `product analytics interval is not supported` |
+| 显式指定的 `interval` 需要超过 500 个时间桶 | `product analytics interval would exceed 500 buckets` |
+
+`interval` 默认为 `auto`，会选择所需时间桶不超过 300 个的最小间隔。`top_limit` 默认为 `10`。
+
+## <span id="ordered-funnel-response">有序漏斗响应</span>
+
+`POST /api/telemetry/analytics/funnel` 衡量 2 到 8 个步骤的按顺序完成情况。从概览的 `classified_activity.top_events` 中复制每个准确的 `kind` 和 `event_name`。名称相似的操作不算匹配。以下请求体统计先浏览 `/pricing`、然后在 1 小时内完成注册的会话：
+
+```json
+{
+  "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  "since": "2026-08-01T00:00:00Z",
+  "until": "2026-08-02T00:00:00Z",
+  "environment": "production",
+  "analysis_unit": "session",
+  "conversion_window_seconds": 3600,
+  "steps": [
+    { "kind": "page_view", "event_name": "/pricing" },
+    { "kind": "interaction", "event_name": "signup_completed" }
+  ]
+}
+```
+
+`analysis_unit` 为 `session` 或 `identified_user`，默认为 `session`。步骤的 `kind` 为 `page_view`、`screen_view` 或 `interaction`。漏斗路由不接受 `response_version`。
+
+### 漏斗成功响应
+
+`200 OK` 响应：
+
+```json
+{
+  "schema_version": 1,
+  "query": {
+    "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    "since": "2026-08-01T00:00:00Z",
+    "until": "2026-08-02T00:00:00Z",
+    "environment": "production",
+    "analysis_unit": "session",
+    "conversion_window_seconds": 3600
+  },
+  "purpose": "Shows where explicit sessions or typed opaque user subjects enter, progress, and drop off across two through eight versioned page-view, screen-view, or interaction events. Steps must occur in order with strictly increasing timestamps inside the selected conversion window; raw session and subject identifiers are never returned.",
+  "summary": {
+    "candidate_units": 60,
+    "entered_units": 50,
+    "completed_units": 15,
+    "entry_rate": 0.8333333333333334,
+    "overall_conversion_rate": 0.3
+  },
+  "coverage": {
+    "classified_events": 200,
+    "named_events": 180,
+    "unnamed_events": 20,
+    "unit_identified_events": 160,
+    "selected_step_events": 120,
+    "usable_selected_step_events": 100,
+    "excluded_selected_step_events": 20,
+    "event_name_rate": 0.9,
+    "selected_unit_coverage_rate": 0.8333333333333334,
+    "limitations": [
+      "Only supported version-1 classified events with exact derived names participate; arbitrary actions and technical spans are never relabeled.",
+      "A unit reaches later steps only when timestamps strictly increase and the final match remains inside conversion_window_seconds from its first match.",
+      "Historical or surface-less classified events without a derived event name cannot match exact funnel steps.",
+      "Requested-step events without an explicit session ID are excluded from ordered unit counts.",
+      "Session funnels count visits or app sessions, not unique people; use analysis_unit=identified_user only when typed user-subject coverage is sufficient."
+    ]
+  },
+  "steps": [
+    {
+      "position": 1,
+      "kind": "page_view",
+      "event_name": "/pricing",
+      "units": 50,
+      "conversion_from_first": 1.0,
+      "drop_off_to_next_units": 35,
+      "drop_off_to_next_rate": 0.7
+    },
+    {
+      "position": 2,
+      "kind": "interaction",
+      "event_name": "signup_completed",
+      "units": 15,
+      "conversion_from_previous": 0.3,
+      "conversion_from_first": 0.3
+    }
+  ],
+  "next_action": {
+    "code": "compare_funnel_contexts",
+    "target": "/api/telemetry/analytics/funnel",
+    "reason": "Compare the same exact steps across bounded releases, environments, or services to locate material conversion changes."
+  }
+}
+```
+
+比率是 0 到 1 之间的小数。信任某个比率之前，先读取 `coverage`。`selected_unit_coverage_rate` 是 LogBrew 能够使用的所选步骤事件所占的比例。响应不返回原始身份信息。请参阅[产品分析](/zh-Hans/concepts/product-analytics#measure-a-funnel)。
+
+### 解读转化率和覆盖率
+
+`entry_rate` 等于 `entered_units` 除以 `candidate_units`：60 个中有 50 个。`overall_conversion_rate` 等于 `completed_units` 除以 `entered_units`：50 个中有 15 个，即 30%。它不是 15 除以所有候选单位。这些计数无法说明单位为什么中途流失。
+
+覆盖率统计的是事件，不是会话。这里有 120 个事件匹配某个步骤，其中 20 个没有会话 ID。结果在会话计数中排除了这 20 个事件。不要把它们当作 20 个失败的会话。
+
+第一个步骤没有 `conversion_from_previous`。最后一个步骤没有 `drop_off_to_next_units`，也没有 `drop_off_to_next_rate`。
+
+只有各步骤的时间严格递增时，单位才会到达后面的步骤。时间戳相同的事件不能同时满足两个相邻步骤。最后一个步骤必须在第一个步骤之后的 `conversion_window_seconds` 内发生。
+
+会话模式统计的是会话，不是人。只有事件带有类型为 `user` 的不透明主体 ID 时，才使用 `identified_user`。该模式可以把转化窗口内不同会话中的事件关联起来。比较结果时，保持相同的单位和相同的步骤。
+
+`conversion_window_seconds` 默认取 24 小时和时间范围长度中较短的一个。最大值是时间范围的长度，以整秒计，向上取整。
+
+### 空漏斗结果
+
+成功但为空的响应仍会列出所请求的步骤，其 `units` 为零。如果没有候选单位，`summary` 会省略 `entry_rate` 和 `overall_conversion_rate`。路由不会因为没有事件匹配而返回 `404`。
+
+读取 `coverage` 和 `next_action` 找出原因：
+
+| `next_action.code` | 原因 |
+| --- | --- |
+| `capture_product_activity` | 该范围内没有已分类的事件。 |
+| `choose_captured_funnel_steps` | 没有事件匹配所请求的步骤。 |
+| `sessionize_product_activity` | 有步骤事件，但都没有会话 ID。 |
+| `identify_product_users` | 有步骤事件，但都没有类型为 `user` 的主体。 |
+| `verify_funnel_entry` | 没有单位进入步骤 1。 |
+| `investigate_funnel_drop_off` | 有单位进入，但没有单位完成所有步骤。 |
+| `compare_funnel_contexts` | 至少有 1 个单位完成了漏斗。 |
+
+### 被拒绝的漏斗请求
+
+除[通用范围错误](#shared-scope-errors)外，以下请求返回 `422` 和 `validation_failed`。步骤少于 2 个或多于 8 个：
+
+```json
+{
+  "error": "product analytics funnel requires two through eight ordered steps",
+  "code": "validation_failed",
+  "next": "send a steps array containing 2 through 8 exact classified event selectors",
+  "next_action": { "code": "fix_request", "target": "request" }
+}
+```
+
+`conversion_window_seconds` 为 `0`，或大于时间范围的长度：
+
+```json
+{
+  "error": "product analytics funnel conversion window must fit inside the query range",
+  "code": "validation_failed",
+  "next": "use conversion_window_seconds from 1 through the selected range length",
+  "next_action": { "code": "fix_request", "target": "request" }
+}
+```
+
+`event_name` 为空、超过 256 个字符或包含控制字符时，返回 `product analytics funnel event_name must be non-empty, control-free, and at most 256 characters`。`interaction` 步骤还必须是有效的操作名称，否则错误为 `product analytics interaction event_name must be a bounded stable action name`。
+
+先修正请求，再重新发送。不要只为了得到非空结果而删除步骤或更改分析单位。
+
+## 精确事件分析与自动分析
+
+留存和生命周期接受两种请求结构。用 `response_version` 选择能回答你问题的结构：
+
+| 分析 | `response_version` | 事件选择器 |
+| --- | --- | --- |
+| 精确事件的留存 | `1`，或省略 | 同时发送 `start_event` 和 `return_event`。 |
+| 单个精确事件的生命周期 | `1`，或省略 | 发送 `event`。 |
+| 自动留存或自动生命周期 | `2` | 不发送事件选择器。 |
+
+精确选择器包含 `kind` 和 `event_name`。`kind` 为 `page_view`、`screen_view` 或 `interaction`。从 `classified_activity.top_events` 复制 `event_name`。不要根据按钮文字猜测事件名称。
+
+两种结构都只统计用户，即类型为 `user` 的不透明主体 ID。匿名主体和没有可用主体 ID 的事件不计为用户。响应从不返回主体 ID。
+
+固定间隔为 `hour`、`day`、`week` 和 `thirty_day`，都是固定时长。`thirty_day` 是 30 天，不是日历月。如果省略 `interval`，时间范围不超过 48 小时时 API 使用 `hour`，更长时使用 `day`。
+
+### 精确事件留存请求
+
+把以下请求体发送到 `POST /api/telemetry/analytics/retention`。它查询用户在时间范围内首次结账后是否会再次结账：
+
+```json
+{
+  "project_id": "11111111-1111-4111-8111-111111111111",
+  "since": "2026-06-01T00:00:00Z",
+  "until": "2026-06-03T00:00:00Z",
+  "response_version": 1,
+  "interval": "day",
+  "interval_count": 1,
+  "mode": "return_on",
+  "cohort_mode": "first_in_range",
+  "start_event": { "kind": "interaction", "event_name": "checkout_completed" },
+  "return_event": { "kind": "interaction", "event_name": "checkout_completed" }
+}
+```
+
+时间范围内第一个匹配的起始事件是每个用户的锚点。回访必须严格晚于该锚点，并早于 `until`。两个选择器可以是同一个事件。
+
+| 字段 | 值 | 默认值 |
+| --- | --- | --- |
+| `interval_count` | `1` 到 `31` 个周期 | `10` |
+| `mode` | `return_on` 统计恰好落在每个周期内的回访。`return_on_or_after` 统计在每个周期开始时或之后的回访。 | `return_on` |
+| `cohort_mode` | `first_in_range` | `first_in_range` |
+
+### 精确事件留存成功响应
+
+在这个模拟示例中，2 个用户完成了结账。第一个用户在 6 月 1 日 12:00 完成结账，13:00 再次结账。第二个用户在 6 月 2 日 12:00 完成结账。6 月 2 日 13:00，第二个用户浏览了一个页面，但没有再次结账。
+
+```json
+{
+  "schema_version": 1,
+  "query": {
+    "project_id": "11111111-1111-4111-8111-111111111111",
+    "since": "2026-06-01T00:00:00Z",
+    "until": "2026-06-03T00:00:00Z",
+    "start_event": { "kind": "interaction", "event_name": "checkout_completed" },
+    "return_event": { "kind": "interaction", "event_name": "checkout_completed" },
+    "interval": "day",
+    "interval_seconds": 86400,
+    "interval_count": 1,
+    "mode": "return_on",
+    "cohort_mode": "first_in_range"
+  },
+  "purpose": "Measures whether typed opaque user subjects return after their first matching start event inside the selected half-open query range. Returns must occur strictly after each subject's anchor. return_on measures one fixed subject-relative period; return_on_or_after measures from that period's threshold through the exclusive query upper bound. Eligibility-aware denominators prevent immature subjects from being reported as churned, cohorts are fixed buckets aligned to since, and raw subject identifiers are never returned.",
+  "summary": {
+    "cohort_subjects": 2,
+    "subjects_returned_after_start": 1,
+    "return_rate_after_start": 0.5,
+    "non_empty_cohorts": 2,
+    "periods_with_eligible_subjects": 1,
+    "fully_observed_periods": 0
+  },
+  "coverage": {
+    "classified_events": 4,
+    "named_events": 4,
+    "unnamed_events": 0,
+    "identified_events": 4,
+    "start_events": 3,
+    "usable_start_events": 3,
+    "excluded_start_events": 0,
+    "return_events": 3,
+    "usable_return_events": 3,
+    "excluded_return_events": 0,
+    "event_name_rate": 1.0,
+    "start_identity_coverage_rate": 1.0,
+    "return_identity_coverage_rate": 1.0,
+    "limitations": [
+      "Only application-supplied opaque subject IDs explicitly typed as users are counted. Anonymous, legacy-untyped, historical-unindexed, invalid, or absent subjects are excluded rather than inferred as people.",
+      "first_in_range anchors each subject at its first matching start inside the selected range; it does not prove that event was the subject's first-ever historical start.",
+      "Cohort buckets are fixed-width and aligned to the query's since value. hour, day, week, and thirty_day mean fixed elapsed durations; thirty_day is not a calendar month.",
+      "Returns must match the exact selected kind and derived event name, occur strictly after the subject anchor, and remain before the exclusive query upper bound.",
+      "This resource does not provide recurring-start cohorts, group retention, arbitrary property breakdowns, custom return ranges, or lifetime first-event lookup.",
+      "return_on includes only subjects whose complete exact period ends by until; later subjects are excluded from that period's denominator."
+    ]
+  },
+  "curve": [
+    {
+      "period": 0,
+      "threshold_seconds": 0,
+      "window_end_seconds": 86400,
+      "eligible_subjects": 1,
+      "retained_subjects": 1,
+      "weighted_retention_rate": 1.0,
+      "fully_observed_cohorts": 1,
+      "fully_observed_cohort_average_rate": 1.0,
+      "all_subjects_eligible": false
+    }
+  ],
+  "cohorts": [
+    {
+      "cohort": 0,
+      "started_at": "2026-06-01T00:00:00Z",
+      "ended_at": "2026-06-02T00:00:00Z",
+      "subjects": 1,
+      "subjects_returned_after_start": 1,
+      "periods": [
+        {
+          "period": 0,
+          "eligible_subjects": 1,
+          "retained_subjects": 1,
+          "retention_rate": 1.0,
+          "all_subjects_eligible": true
+        }
+      ]
+    },
+    {
+      "cohort": 1,
+      "started_at": "2026-06-02T00:00:00Z",
+      "ended_at": "2026-06-03T00:00:00Z",
+      "subjects": 1,
+      "subjects_returned_after_start": 0,
+      "periods": [
+        {
+          "period": 0,
+          "eligible_subjects": 0,
+          "retained_subjects": 0,
+          "all_subjects_eligible": false
+        }
+      ]
+    }
+  ],
+  "next_action": {
+    "code": "extend_retention_observation_window",
+    "target": "/api/telemetry/analytics/retention",
+    "reason": "Move since earlier, until later, or request fewer periods when a fully observed long-term comparison is required."
+  }
+}
+```
+
+### 解读留存
+
+覆盖率统计了全部 4 个已分类事件，但每个结账选择器只匹配其中 3 个。页面浏览不算回访。2 个用户中有 1 个再次结账，所以 `return_rate_after_start` 为 `0.5`。
+
+只有第一个用户在锚点之后有完整 1 天的观测时间。该用户在当天回访，所以曲线比率为 `1.0`。第二个用户只有 12 小时的观测时间，不符合周期 0 的条件，所以第二个群组的单元格省略了 `retention_rate`。不要把该用户算作流失。
+
+`weighted_retention_rate` 用所有留存用户数除以所有符合条件的用户数。`fully_observed_cohort_average_rate` 是所有用户都符合条件的群组的比率的简单平均值。群组是从 `since` 开始的固定时间桶。`cohorts` 只包含有用户的群组。
+
+使用 `mode: "return_on_or_after"` 时，曲线省略 `window_end_seconds`。
+
+### 自动留存
+
+发送 `response_version: 2`，且不发送 `start_event` 或 `return_event`。每个受支持的页面浏览、屏幕浏览和互动都同时算作起始和回访。这个版本选择的是一组事件，而不是 SDK 的采集格式。
+
+```json
+{
+  "project_id": "11111111-1111-4111-8111-111111111111",
+  "since": "2026-06-01T00:00:00Z",
+  "until": "2026-06-03T00:00:00Z",
+  "response_version": 2,
+  "interval": "day",
+  "interval_count": 1,
+  "mode": "return_on",
+  "cohort_mode": "first_in_range"
+}
+```
+
+该响应的 `summary`、`curve`、`cohorts` 和 `next_action` 结构与精确事件响应相同。以下摘录显示有变化的字段。在这个示例中，同样的 2 个用户有 3 个事件，没有页面浏览：
+
+```json
+{
+  "schema_version": 2,
+  "query": {
+    "project_id": "11111111-1111-4111-8111-111111111111",
+    "since": "2026-06-01T00:00:00Z",
+    "until": "2026-06-03T00:00:00Z",
+    "activity_scope": "all_classified_activity",
+    "interval": "day",
+    "interval_seconds": 86400,
+    "interval_count": 1,
+    "mode": "return_on",
+    "cohort_mode": "first_in_range"
+  },
+  "purpose": "Measures whether typed opaque user subjects perform any later supported classified product activity after their first such activity inside the selected half-open range. It does not choose or infer a top event. Returns must occur strictly after the anchor, anonymous and unidentified subjects remain excluded from user counts, eligibility-aware denominators prevent immature subjects from being reported as churned, and raw identifiers are never returned.",
+  "coverage": {
+    "classified_events": 3,
+    "named_events": 3,
+    "unnamed_events": 0,
+    "identified_events": 3,
+    "start_events": 3,
+    "usable_start_events": 3,
+    "excluded_start_events": 0,
+    "return_events": 3,
+    "usable_return_events": 3,
+    "excluded_return_events": 0,
+    "event_name_rate": 1.0,
+    "start_identity_coverage_rate": 1.0,
+    "return_identity_coverage_rate": 1.0,
+    "limitations": [
+      "Only application-supplied opaque subject IDs explicitly typed as users are counted. Anonymous, legacy-untyped, historical-unindexed, invalid, or absent subjects are excluded rather than inferred as people.",
+      "first_in_range anchors each subject at its first supported classified activity in the range; it does not prove that activity was the subject's first-ever product activity.",
+      "Cohort buckets are fixed-width and aligned to the query's since value. hour, day, week, and thirty_day mean fixed elapsed durations; thirty_day is not a calendar month.",
+      "Returns are any supported classified activity strictly after the subject anchor and before the exclusive query upper bound; no event is ranked, selected, or inferred.",
+      "This resource does not provide recurring-start cohorts, group retention, arbitrary property breakdowns, custom return ranges, or lifetime first-event lookup.",
+      "return_on includes only subjects whose complete exact period ends by until; later subjects are excluded from that period's denominator."
+    ]
+  }
+}
+```
+
+在自动模式下，`start_events` 和 `return_events` 都等于 `classified_events`。这些计数是事件数，不是用户数。
+
+### 没有符合条件用户的留存
+
+成功的结果中可能没有群组用户。以下摘录显示 1 个没有群组的请求周期：
+
+```json
+{
+  "schema_version": 2,
+  "summary": {
+    "cohort_subjects": 0,
+    "subjects_returned_after_start": 0,
+    "non_empty_cohorts": 0,
+    "periods_with_eligible_subjects": 0,
+    "fully_observed_periods": 0
+  },
+  "curve": [
+    {
+      "period": 0,
+      "threshold_seconds": 0,
+      "window_end_seconds": 86400,
+      "eligible_subjects": 0,
+      "retained_subjects": 0,
+      "fully_observed_cohorts": 0,
+      "all_subjects_eligible": false
+    }
+  ],
+  "cohorts": []
+}
+```
+
+读取 `coverage` 和 `next_action`。它们能区分范围内没有已分类事件（`capture_product_activity`）和事件没有用户（`identify_product_users` 或 `identify_returning_users`）这两种情况。缺失的比率不是实测的零。
+
+### 留存错误
+
+除[通用范围错误](#shared-scope-errors)外，以下请求返回 `422` 和 `validation_failed`：
+
+| 原因 | `error` |
+| --- | --- |
+| 版本 1 没有同时发送两个选择器，版本 2 发送了选择器，或使用了其他版本 | `product analytics retention activity selection is contradictory` |
+| `interval_count` 不在 `1` 到 `31` 之间 | `product analytics retention interval_count must be between 1 and 31` |
+| 群组时间桶数乘以 `interval_count` 超过 500 | `product analytics retention interval and interval_count would exceed 500 cohort matrix cells` |
+
+单元格上限取决于时间范围和周期数，而不是用户数。30 天的时间范围配合 `interval: "hour"` 有 720 个群组时间桶。在 `interval_count: 1` 下就是 720 个单元格，超过 500：
+
+```json
+{
+  "error": "product analytics retention interval and interval_count would exceed 500 cohort matrix cells",
+  "code": "validation_failed",
+  "next": "choose a wider interval, a shorter time range, or fewer retention periods",
+  "next_action": { "code": "fix_request", "target": "request" }
+}
+```
+
+要使用自动留存，删除两个选择器。不要为了修正这个读取请求而更改 SDK。
+
+### 精确事件生命周期请求
+
+把以下请求体发送到 `POST /api/telemetry/analytics/lifecycle`。它按 1 个事件对用户分类，而不是按项目中的所有活动：
+
+```json
+{
+  "project_id": "11111111-1111-4111-8111-111111111111",
+  "since": "2026-06-01T00:00:00Z",
+  "until": "2026-06-03T00:00:00Z",
+  "response_version": 1,
+  "interval": "day",
+  "history_period_count": 2,
+  "event": { "kind": "interaction", "event_name": "checkout_completed" }
+}
+```
+
+`history_period_count` 设置 LogBrew 把 `since` 之前的多少个完整周期作为历史读取。它接受 `2` 到 `31`，默认为 `2`。用户可能在进行其他活动，但对这个事件而言仍处于休眠状态。
+
+### 精确事件生命周期成功响应
+
+这个模拟示例使用 2 天历史和 2 个分析日。字母只用来标识示例用户。响应不返回用户 ID。
+
+| 日期（UTC） | 完成结账的用户 |
+| --- | --- |
+| 5 月 30 日，历史 | B |
+| 5 月 31 日，历史 | A 和 D |
+| 6 月 1 日，分析 | A、B 和 C |
+| 6 月 2 日，分析 | A 和 B |
+
+C 在 6 月 2 日还浏览了一个页面。该事件不匹配结账选择器。
+
+```json
+{
+  "schema_version": 1,
+  "query": {
+    "project_id": "11111111-1111-4111-8111-111111111111",
+    "since": "2026-06-01T00:00:00Z",
+    "until": "2026-06-03T00:00:00Z",
+    "history_since": "2026-05-30T00:00:00Z",
+    "event": { "kind": "interaction", "event_name": "checkout_completed" },
+    "interval": "day",
+    "interval_seconds": 86400,
+    "history_period_count": 2,
+    "expected_buckets": 2
+  },
+  "purpose": "Classifies typed opaque user subjects for one exact product event in each fixed analysis period. new_within_observed_history means active now with no earlier matching event inside the bounded history window; returning means active now and in the immediately previous period; resurrected means active now, inactive in the previous period, and active earlier in observed history; dormant means active in the previous period but not now. These states are disjoint, incomplete buckets are marked, and raw subject identifiers are never returned.",
+  "summary": {
+    "observed_subjects": 4,
+    "analysis_active_subjects": 3,
+    "history_only_subjects": 1,
+    "returned_buckets": 2,
+    "fully_observed_buckets": 2,
+    "latest_fully_observed_period": 1,
+    "buckets_with_resurrection": 1,
+    "buckets_with_dormancy": 2
+  },
+  "coverage": {
+    "analysis_classified_events": 6,
+    "analysis_named_events": 6,
+    "analysis_unnamed_events": 0,
+    "analysis_identified_events": 6,
+    "selected_events": 5,
+    "usable_selected_events": 5,
+    "usable_selected_sessionized_events": 5,
+    "usable_selected_trace_linked_events": 5,
+    "excluded_selected_events": 0,
+    "history_selected_events": 3,
+    "usable_history_selected_events": 3,
+    "excluded_history_selected_events": 0,
+    "event_name_rate": 1.0,
+    "selected_identity_coverage_rate": 1.0,
+    "selected_sessionization_rate": 1.0,
+    "selected_trace_link_rate": 1.0,
+    "history_identity_coverage_rate": 1.0,
+    "limitations": [
+      "Only application-supplied opaque subject IDs explicitly typed as users are counted. Anonymous, legacy-untyped, historical-unindexed, invalid, or absent subjects are excluded rather than inferred as people.",
+      "new_within_observed_history means no earlier selected event between history_since and the current bucket. It does not prove that a subject is a lifetime-new user.",
+      "Observed history contains exactly 2 complete fixed periods before since; activity before history_since is intentionally unknown.",
+      "Buckets are fixed-width and aligned to since. hour, day, week, and thirty_day mean fixed elapsed durations; thirty_day is not a calendar month.",
+      "Returning, resurrected, and dormant compare only the selected exact kind and derived event name. They do not infer intent, identity merges, or causality.",
+      "This resource does not provide arbitrary property breakdowns, reusable cohorts, group lifecycle, lifetime first-event lookup, or per-subject lists."
+    ]
+  },
+  "buckets": [
+    {
+      "period": 0,
+      "started_at": "2026-06-01T00:00:00Z",
+      "ended_at": "2026-06-02T00:00:00Z",
+      "fully_observed": true,
+      "active_subjects": 3,
+      "new_within_observed_history_subjects": 1,
+      "returning_subjects": 1,
+      "resurrected_subjects": 1,
+      "dormant_subjects": 1,
+      "previous_active_subjects": 2,
+      "new_share_of_active": 0.3333333333333333,
+      "returning_share_of_active": 0.3333333333333333,
+      "resurrected_share_of_active": 0.3333333333333333,
+      "dormant_share_of_previous_active": 0.5,
+      "net_active_change": 1
+    },
+    {
+      "period": 1,
+      "started_at": "2026-06-02T00:00:00Z",
+      "ended_at": "2026-06-03T00:00:00Z",
+      "fully_observed": true,
+      "active_subjects": 2,
+      "new_within_observed_history_subjects": 0,
+      "returning_subjects": 2,
+      "resurrected_subjects": 0,
+      "dormant_subjects": 1,
+      "previous_active_subjects": 3,
+      "new_share_of_active": 0.0,
+      "returning_share_of_active": 1.0,
+      "resurrected_share_of_active": 0.0,
+      "dormant_share_of_previous_active": 0.3333333333333333,
+      "net_active_change": -1
+    }
+  ],
+  "next_action": {
+    "code": "investigate_lifecycle_loss",
+    "target": "/api/telemetry/analytics/paths",
+    "reason": "The latest complete bucket lost more prior active subjects than it added through new-within-observed-history and resurrected activity; compare bounded journeys around the selected event."
+  }
+}
+```
+
+### 解读生命周期
+
+6 月 1 日，A 为持续活跃，B 为重新活跃，C 为新增，D 为休眠。6 月 2 日，A 和 B 为持续活跃；C 虽然浏览了页面，但对结账而言处于休眠状态。6 月 2 日的净变化为 `2 - 3 = -1`。
+
+在每个时间桶中，新增、持续活跃和重新活跃的用户数相加等于 `active_subjects`。`returning_subjects` 加 `dormant_subjects` 等于 `previous_active_subjects`。`net_active_change` 等于 `active_subjects` 减去 `previous_active_subjects`。
+
+不要把每日活跃数相加来得到去重用户数。这里每日计数相加为 5，但 `analysis_active_subjects` 为 3。历史和分析期间一共出现了 4 个不同的用户。
+
+如果最后一个时间桶在 `until` 之后才结束，它的 `fully_observed` 为 `false`。等整个周期都可观测时，它的计数可能会变化。`next_action` 建议的是一个排查方向，并不表明原因。
+
+### 自动生命周期
+
+发送 `response_version: 2`，且不发送 `event` 选择器。每个受支持的页面浏览、屏幕浏览和互动都算作活动：
+
+```json
+{
+  "project_id": "11111111-1111-4111-8111-111111111111",
+  "since": "2026-06-01T00:00:00Z",
+  "until": "2026-06-03T00:00:00Z",
+  "response_version": 2,
+  "interval": "day",
+  "history_period_count": 2
+}
+```
+
+该响应的 `summary`、`buckets` 和 `next_action` 结构与精确事件响应相同。以下摘录显示有变化的字段：
+
+```json
+{
+  "schema_version": 2,
+  "query": {
+    "project_id": "11111111-1111-4111-8111-111111111111",
+    "since": "2026-06-01T00:00:00Z",
+    "until": "2026-06-03T00:00:00Z",
+    "history_since": "2026-05-30T00:00:00Z",
+    "activity_scope": "all_classified_activity",
+    "interval": "day",
+    "interval_seconds": 86400,
+    "history_period_count": 2,
+    "expected_buckets": 2
+  },
+  "purpose": "Classifies typed opaque user subjects by any supported classified product activity in each fixed period. It does not choose or infer a top event. new_within_observed_history, returning, resurrected, and dormant remain disjoint; anonymous and unidentified subjects are excluded from user counts, incomplete buckets are marked, and raw identifiers are never returned."
+}
+```
+
+在自动模式下，`coverage.selected_events` 等于 `coverage.analysis_classified_events`。`limitations` 的第 5 项是 `Returning, resurrected, and dormant compare any supported classified product activity; no event is ranked, selected, or inferred.`
+
+### 没有用户的生命周期
+
+如果分析时间范围和历史中都没有可用的用户，`buckets` 为空，`summary` 省略 `latest_fully_observed_period`：
+
+```json
+{
+  "schema_version": 2,
+  "summary": {
+    "observed_subjects": 0,
+    "analysis_active_subjects": 0,
+    "history_only_subjects": 0,
+    "returned_buckets": 0,
+    "fully_observed_buckets": 0,
+    "buckets_with_resurrection": 0,
+    "buckets_with_dormancy": 0
+  },
+  "buckets": []
+}
+```
+
+分析时间范围内没有活动时，只在历史中出现的用户仍可能产生含有休眠用户的时间桶。
+
+### 生命周期错误
+
+除[通用范围错误](#shared-scope-errors)外，以下请求返回 `422` 和 `validation_failed`：
+
+| 原因 | `error` |
+| --- | --- |
+| 版本 1 没有 `event`，版本 2 带有 `event`，或使用了其他版本 | `product analytics lifecycle activity selection is contradictory` |
+| `history_period_count` 不在 `2` 到 `31` 之间 | `product analytics lifecycle history_period_count must be between 2 and 31` |
+| 历史周期总长超过 62 天 | `product analytics lifecycle history must not exceed 62 days` |
+| 分析时间桶超过 100 个 | `product analytics lifecycle interval would exceed 100 analysis buckets` |
+
+例如，10 个 `week` 历史周期需要 70 天：
+
+```json
+{
+  "error": "product analytics lifecycle history must not exceed 62 days",
+  "code": "validation_failed",
+  "next": "use fewer history periods or a narrower fixed interval",
+  "next_action": { "code": "fix_request", "target": "request" }
+}
+```
+
+### 读取所选的分析范围
+
+精确事件响应带有 `schema_version: 1`。其 `query` 回显选择器，并省略 `activity_scope`。自动响应带有 `schema_version: 2` 和 `query.activity_scope: "all_classified_activity"`，并省略选择器。即使采集的活动没有任何变化，换一个选择器也可能改变结果。
+
+## 指标序列响应
+
+`GET /api/telemetry/metrics/series` 读取 1 个项目中 1 个准确的指标名称。从 `GET /api/telemetry/metrics` 复制该名称。以下请求按服务对一个 delta 计数器分组：
+
+```bash
+curl --get "https://api.logbrew.co/api/telemetry/metrics/series" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project_id>" \
+  --data-urlencode "name=jobs.completed" \
+  --data-urlencode "since=2026-06-01T12:00:00Z" \
+  --data-urlencode "until=2026-06-01T12:15:00Z" \
+  --data-urlencode "interval=5m" \
+  --data-urlencode "group_by=service_name"
+```
+
+### 指标序列成功响应
+
+这个模拟响应包含 1 个 delta 计数器序列。第一个时间桶中有 3 个样本，值为 `2`、`3` 和 `5`。最后一个时间桶中有 2 个样本，值为 `1` 和 `4`。中间的时间桶没有样本，所以响应中没有它的数据点。
+
+```json
+{
+  "schema_version": 1,
+  "query": {
+    "project_id": "11111111-1111-4111-8111-111111111111",
+    "name": "jobs.completed",
+    "since": "2026-06-01T12:00:00Z",
+    "until": "2026-06-01T12:15:00Z",
+    "interval": "5m",
+    "interval_seconds": 300,
+    "group_by": "service_name",
+    "series_limit": 10
+  },
+  "purpose": "Shows how one metric changes over time without changing its meaning: gauges use sampled state, delta counters use change volume and rate, histograms use distributions, and cumulative streams stay raw when reset-safe change is ambiguous.",
+  "coverage": {
+    "samples": 5,
+    "series": 1,
+    "returned_series": 1,
+    "points": 2,
+    "expected_buckets_per_series": 3,
+    "first_seen_at": "2026-06-01T12:00:10Z",
+    "last_seen_at": "2026-06-01T12:14:50Z",
+    "truncated": false
+  },
+  "series": [
+    {
+      "identity": {
+        "kind": "counter",
+        "unit": "{job}",
+        "temporality": "delta",
+        "group_by": "service_name",
+        "group_value": "checkout-worker"
+      },
+      "status": "ready",
+      "aggregation": {
+        "code": "delta_sum",
+        "description": "Primary value is the sum of recorded changes in each bucket; rate_per_second normalizes that change by bucket width."
+      },
+      "sample_count": 5,
+      "points": [
+        {
+          "bucket_start": "2026-06-01T12:00:00Z",
+          "bucket_end": "2026-06-01T12:05:00Z",
+          "sample_count": 3,
+          "value": 10.0,
+          "last": 5.0,
+          "min": 2.0,
+          "max": 5.0,
+          "average": 3.3333333333333335,
+          "sum": 10.0,
+          "rate_per_second": 0.03333333333333333,
+          "trace_exemplars": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
+        },
+        {
+          "bucket_start": "2026-06-01T12:10:00Z",
+          "bucket_end": "2026-06-01T12:15:00Z",
+          "sample_count": 2,
+          "value": 5.0,
+          "last": 4.0,
+          "min": 1.0,
+          "max": 4.0,
+          "average": 2.5,
+          "sum": 5.0,
+          "rate_per_second": 0.016666666666666666,
+          "trace_exemplars": []
+        }
+      ]
+    }
+  ],
+  "next_action": {
+    "code": "inspect_metric_change",
+    "target": "trace_summary",
+    "reason": "Open a trace exemplar from an unusual bucket to connect the metric change to spans, errors, logs, and release context."
+  }
+}
+```
+
+### 解读指标序列
+
+第一个数据点记录的是 10 个已完成的任务，不是 10 个样本。`rate_per_second` 用这个变化量除以 300 秒的时间桶。`last` 是最后记录的变化量，不是总和。请参阅[指标聚合的含义](/zh-Hans/concepts/telemetry#read-the-metric-value)。
+
+序列的类型和时间性决定了它的 `aggregation.code` 以及每个数据点中的统计值。数据点会省略不适用的统计值。缺失的统计值不是零。
+
+| 类型和时间性 | `status` | `aggregation.code` | `value` | 其他统计值 |
+| --- | --- | --- | --- | --- |
+| `gauge`、`instant` | `ready` | `gauge_last` | 最后一个样本 | `last`、`min`、`max`、`average` |
+| `counter`、`delta` | `ready` | `delta_sum` | 变化量之和 | `last`、`min`、`max`、`average`、`sum`、`rate_per_second` |
+| `histogram`、`delta` | `ready` | `distribution_p95` | p95 近似值 | `min`、`max`、`average`、`sum`、`p50`、`p95`、`p99` |
+| 任意类型、`cumulative` | `limited` | `raw_cumulative_last` | 最后一个原始样本 | `last`、`min`、`max` |
+| 其他任意组合 | `limited` | `raw_last` | 最后一个原始样本 | `last`、`min`、`max` |
+
+`limited` 是成功响应，不是错误。它会增加 `aggregation.limitation`，说明 LogBrew 为什么只显示原始值。`ready` 不能证明采集完整。
+
+绘制图表之前，先读取 `coverage`：
+
+- `samples` 统计所有匹配序列的样本，包括响应没有返回的序列。
+- `series` 统计匹配的序列数。`returned_series` 和 `points` 统计返回的数据。
+- `series_limit` 去掉了数量较少的序列时，`truncated` 为 `true`。
+- `expected_buckets_per_series` 是该时间范围内可能的时间桶数。
+
+不要为没有样本的时间桶添加数据点。不要插入零值，也不要复制前一个值。每个数据点最多返回 3 个 `trace_exemplars`。链路示例把 1 个样本关联到 1 条链路，不能解释该时间桶中的每个样本。如果没有数据点带有链路示例，`next_action.target` 为 `metric_samples`。
+
+### 指标序列的范围与错误
+
+`project_id`、`name` 和 `since` 为必填项。`name` 最多 200 个字符。`interval` 为 `auto`、`1m`、`5m`、`15m`、`1h`、`6h` 或 `1d`。默认为 `auto`，会选择所需时间桶不超过 300 个的最小间隔。显式指定的间隔所需的时间桶不能超过 500 个。
+
+`group_by` 为 `none`、`service_name`、`release` 或 `environment`，默认为 `none`。不分组时，不同的类型、单位和时间性仍保留在各自的序列中。`series_limit` 接受 `1` 到 `20`，默认为 `10`。
+
+空结果返回 `200`、`series: []` 和为零的 `samples`。`coverage` 对象省略 `first_seen_at` 和 `last_seen_at`。这不能证明应用从未发送过该指标。检查项目、指标名称和时间范围。
+
+省略 `name` 时返回 `422`：
+
+```json
+{
+  "error": "metric series name is required",
+  "code": "validation_failed",
+  "next": "send the exact metric name returned by /api/telemetry/metrics",
+  "next_action": { "code": "fix_request", "target": "request" }
+}
+```
+
+在 7 天范围内使用 1 分钟的时间桶时返回 `422`：
+
+```json
+{
+  "error": "metric series interval would exceed 500 buckets",
+  "code": "validation_failed",
+  "next": "use interval=auto or select a wider interval",
+  "next_action": { "code": "fix_request", "target": "request" }
+}
+```
+
+其他 `422` 错误包括 `metric series group_by is not supported`、`metric series interval is not supported` 和 `metric series_limit must be between 1 and 20`。
+
+## 路径分析响应
+
+`POST /api/telemetry/analytics/paths` 查找同一会话中某个选定事件之前或之后的命名事件。这个选定事件就是锚点。从 `classified_activity.top_events` 复制它的 `kind` 和 `event_name`。该路由返回 `schema_version: 1`，不接受 `response_version` 或 `analysis_unit`。
+
+```json
+{
+  "project_id": "11111111-1111-4111-8111-111111111111",
+  "since": "2026-06-01T11:00:00Z",
+  "until": "2026-06-01T12:00:00Z",
+  "direction": "following",
+  "anchor": { "kind": "page_view", "event_name": "/checkout" },
+  "depth": 2,
+  "collapse_repeated": true,
+  "path_limit": 2
+}
+```
+
+`direction` 和 `anchor` 为必填项。
+
+### 路径成功响应
+
+在这个模拟结果中，有 4 个会话包含锚点。返回的 2 条路径代表其中 3 个会话。还有 1 条排名较低的路径没有返回。
+
+```json
+{
+  "schema_version": 1,
+  "query": {
+    "project_id": "11111111-1111-4111-8111-111111111111",
+    "since": "2026-06-01T11:00:00Z",
+    "until": "2026-06-01T12:00:00Z",
+    "direction": "following",
+    "anchor": { "kind": "page_view", "event_name": "/checkout" },
+    "depth": 2,
+    "collapse_repeated": true,
+    "path_limit": 2
+  },
+  "purpose": "Shows the highest-volume named product-event sequences immediately before or after one exact version-1 page view, screen view, or interaction inside explicit sessions. Following paths use the earliest matching anchor in each session; preceding paths use the latest. Optional exact property predicates classify only the anchor, while surrounding events preserve the real session journey. Results aggregate exact bounded sequences and never return raw session or subject identifiers.",
+  "summary": {
+    "anchored_sessions": 4,
+    "represented_sessions": 3,
+    "unrepresented_sessions": 1,
+    "returned_paths": 2,
+    "paths_truncated": true
+  },
+  "coverage": {
+    "classified_events": 12,
+    "named_events": 12,
+    "unnamed_events": 0,
+    "sessionized_events": 10,
+    "unsessionized_events": 2,
+    "anchor_events": 5,
+    "usable_anchor_events": 4,
+    "excluded_anchor_events": 1,
+    "traced_anchor_events": 1,
+    "event_name_rate": 1.0,
+    "sessionization_rate": 0.8333333333333334,
+    "anchor_session_coverage_rate": 0.8,
+    "anchor_trace_link_rate": 0.2,
+    "ordered_event_cap_per_session": 1024,
+    "limitations": [
+      "Paths include only supported version-1 classified events with exact derived names; arbitrary actions, technical spans, and raw identity values are excluded.",
+      "Paths stay inside application-supplied session boundaries and the selected half-open time range; activity beyond either boundary is not inferred.",
+      "Each session retains at most 1024 direction-nearest named events before anchoring, so exceptionally noisy sessions can be omitted or truncated.",
+      "Classified events without an explicit opaque session ID cannot participate in session paths.",
+      "Trace exemplars prove only that a matching anchor carried the same trace ID. They do not prove root cause, and deeper investigation depends on retained spans for that trace.",
+      "Some matching anchors lack trace IDs, so trace-linked path evidence covers only the reported traced_anchor_events population."
+    ]
+  },
+  "paths": [
+    {
+      "rank": 1,
+      "sessions": 2,
+      "share_of_anchored_sessions": 0.5,
+      "traced_sessions": 1,
+      "trace_link_rate": 0.5,
+      "trace_exemplars": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+      "nodes": [
+        { "relative_position": 0, "kind": "page_view", "event_name": "/checkout" },
+        { "relative_position": 1, "kind": "interaction", "event_name": "checkout.submitted" },
+        { "relative_position": 2, "kind": "interaction", "event_name": "checkout.completed" }
+      ]
+    },
+    {
+      "rank": 2,
+      "sessions": 1,
+      "share_of_anchored_sessions": 0.25,
+      "traced_sessions": 0,
+      "trace_link_rate": 0.0,
+      "trace_exemplars": [],
+      "nodes": [
+        { "relative_position": 0, "kind": "page_view", "event_name": "/checkout" },
+        { "relative_position": 1, "kind": "interaction", "event_name": "checkout.failed" }
+      ]
+    }
+  ],
+  "next_action": {
+    "code": "inspect_path_trace",
+    "target": "/api/telemetry/traces/{trace_id}/investigation",
+    "reason": "Open an exemplar from the material path to connect the product journey to retained spans, issues, logs, actions, metrics, and release context as evidence rather than a root-cause claim."
+  }
+}
+```
+
+### 解读路径
+
+`share_of_anchored_sessions` 用某条路径的会话数除以全部 4 个含锚点的会话。占比为 50% 和 25%，而不是 67% 和 33%。`unrepresented_sessions` 统计没有被任何返回路径代表的含锚点会话。`paths_truncated: true` 表示结果不完整。
+
+覆盖率统计的是事件，不是会话。这里有 5 个事件匹配锚点，但其中 1 个没有会话 ID，所以无法进入路径。每条路径最多返回 3 个链路示例。使用你自己响应中的链路 ID。链路关联不能说明是什么导致了用户操作或故障。
+
+| 字段 | 含义 |
+| --- | --- |
+| `following` | 从每个会话中最早匹配的锚点开始。锚点的位置为 `0`。之后的节点位置为正数。 |
+| `preceding` | 到每个会话中最晚匹配的锚点结束。之前的节点位置为负数。锚点的位置为 `0`。 |
+| `depth` | 锚点旁边的节点数，不含锚点本身。取值 `1` 到 `8`，默认为 `4`。路径的节点可能更少。 |
+| `collapse_repeated` | 合并类型和名称都相同的连续节点。默认为 `true`。 |
+| `path_limit` | 返回路径的最大数量，按会话数排名。取值 `1` 到 `20`，默认为 `10`。 |
+
+两个方向的节点都按时间顺序排列。路径不是完整的会话回放。LogBrew 在选择锚点之前，每个会话最多读取 1024 个命名事件：`following` 读取最早的事件，`preceding` 读取最晚的事件。超出这个上限的锚点可能会被省略。
+
+### <span id="filter-the-anchor-by-property">按属性筛选锚点</span>
+
+最多发送 4 个 `property_filters`，每个包含 1 个准确的 `key` 和 `value`。从[属性目录](#analytics-property-catalog)复制键。筛选条件只作用于锚点，不作用于锚点周围的事件。值区分大小写。有筛选条件时，`query` 会回显它们，`coverage.anchor_property_filters` 会报告：
+
+| 字段 | 含义 |
+| --- | --- |
+| `context_events` | 应用属性筛选条件之前，范围内的锚点事件。 |
+| `property_ready_events` | 具备所有请求键的锚点事件。 |
+| `missing_property_events` | 缺少 1 个或多个请求键的锚点事件。 |
+| `matching_events` | 值与所有筛选条件都匹配的锚点事件。 |
+| `nonmatching_value_events` | 具备所有键但值不同的锚点事件。 |
+| `property_ready_rate` | `property_ready_events` 除以 `context_events`。 |
+| `match_rate` | `matching_events` 除以 `property_ready_events`。 |
+
+缺少键和值不同需要不同的修复方法。不要把它们加在一起。请求没有属性筛选条件时，会省略该对象。
+
+### 空路径与被拒绝的请求
+
+空的 `paths` 数组可能是成功的 `200` 响应。读取 `summary`、`coverage` 和 `next_action`。以下代码可区分各种原因：`capture_product_activity`、`choose_captured_path_anchor`、`capture_anchor_properties`、`improve_anchor_property_coverage`、`verify_anchor_property_values`、`sessionize_product_activity` 和 `narrow_or_move_path_anchor`。
+
+除[通用范围错误](#shared-scope-errors)外，以下请求返回 `422` 和 `validation_failed`：
+
+| 原因 | `error` |
+| --- | --- |
+| `depth` 不在 `1` 到 `8` 之间 | `product analytics path depth must be between 1 and 8` |
+| `path_limit` 不在 `1` 到 `20` 之间 | `product analytics path_limit must be between 1 and 20` |
+| 属性筛选条件超过 4 个 | `product analytics paths accept at most four exact anchor property filters` |
+| 键不在属性目录中 | `product analytics path property keys must be supported privacy-safe keys` |
+| 同一个键出现 2 次 | `product analytics path property keys must be unique` |
+| 值为空、超过 256 个字符，或包含控制字符 | `product analytics path property values must be non-empty, control-free, and at most 256 characters` |
+
+例如，`depth: 0` 返回：
+
+```json
+{
+  "error": "product analytics path depth must be between 1 and 8",
+  "code": "validation_failed",
+  "next": "use depth from 1 through 8 adjacent named events",
+  "next_action": { "code": "fix_request", "target": "request" }
+}
+```
+
+## <span id="analytics-property-catalog">分析属性目录</span>
+
+`GET /api/telemetry/analytics/properties` 列出 1 个项目中已分类产品事件上的属性键。在[分群对比](#analytics-segment-comparison)和路径锚点筛选条件中使用这些键。目录返回键和计数，从不返回属性值或身份信息。
+
+### 读取可用的属性键
+
+发送 `project_id` 和 `since`。也可以发送 `until`、`service_name`、`release`、`environment`、`limit` 和 `response_version`。`limit` 接受 `1` 到 `50` 个键，默认为 `20`。发送 `response_version=2` 可以获取公开的 `estimation.method` 值。
+
+```bash
+curl --get "https://api.logbrew.co/api/telemetry/analytics/properties" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project_id>" \
+  --data-urlencode "since=2026-06-01T00:00:00Z" \
+  --data-urlencode "until=2026-06-02T00:00:00Z" \
+  --data-urlencode "limit=20" \
+  --data-urlencode "response_version=2"
+```
+
+### 属性目录成功响应
+
+在这个模拟结果中，共有 100 个已分类事件。其中 5 个是在当前属性索引建立之前采集的。
+
+```json
+{
+  "schema_version": 2,
+  "query": {
+    "project_id": "11111111-1111-4111-8111-111111111111",
+    "since": "2026-06-01T00:00:00Z",
+    "until": "2026-06-02T00:00:00Z",
+    "limit": 20
+  },
+  "purpose": "Discovers bounded privacy-safe runtime, framework, operating-system, device, application, and custom-tag keys captured on classified product events. It reports migration, capture, privacy-filtering, and per-key coverage without returning property values or identities, so humans and agents can build exact segment comparisons without guessing which dimensions exist.",
+  "summary": {
+    "classified_events": 100,
+    "available_property_keys": 3,
+    "returned_properties": 3
+  },
+  "coverage": {
+    "indexed_events": 95,
+    "unindexed_events": 5,
+    "complete_index_events": 95,
+    "incomplete_index_events": 0,
+    "privacy_filtered_events": 4,
+    "events_with_properties": 90,
+    "index_coverage_rate": 0.95,
+    "property_capture_rate": 0.9,
+    "properties_truncated": false,
+    "values_returned": false,
+    "limitations": [
+      "Property discovery returns keys and aggregate counts only; property values and identity columns are never returned.",
+      "Property filters use exact case-sensitive bounded string equality and combine with logical AND inside each segment.",
+      "Historical events written before the current property index are excluded from property descriptors and exact property filters.",
+      "Direct-identity, credential-like, and network-address custom tag keys were intentionally excluded from the analytics property index."
+    ]
+  },
+  "estimation": {
+    "count_accuracy": "approximate",
+    "method": "approximate_distinct",
+    "description": "Available property-key and per-key distinct-value counts are approximate distinct counts. Classified-event, index-coverage, privacy-filtering, and per-key event counts are exact within the selected fully evaluated window."
+  },
+  "properties": [
+    {
+      "key": "resource.runtime.name",
+      "source": "standard_context",
+      "value_type": "string",
+      "events": 90,
+      "coverage_rate": 0.9,
+      "distinct_values": 2
+    },
+    {
+      "key": "resource.application.version",
+      "source": "standard_context",
+      "value_type": "string",
+      "events": 70,
+      "coverage_rate": 0.7,
+      "distinct_values": 4
+    },
+    {
+      "key": "tag.plan",
+      "source": "custom_tag",
+      "value_type": "string",
+      "events": 60,
+      "coverage_rate": 0.6,
+      "distinct_values": 3
+    }
+  ],
+  "next_action": {
+    "code": "compare_property_segments",
+    "target": "/api/telemetry/analytics/segments/compare",
+    "reason": "Use exact returned keys with locally known values to compare behavior while preserving identity and property-value privacy."
+  }
+}
+```
+
+### 解读目录
+
+标准上下文键（例如 `resource.runtime.name`）的 `source` 为 `standard_context`，以 `tag.` 开头的键的 `source` 为 `custom_tag`。`value_type` 始终为 `string`。`properties` 按 `events` 从高到低排序。
+
+100 个已分类事件中有 60 个带有 `tag.plan`。它大约有 3 个不同的值。描述信息不显示这些值。使用你在自己的应用中已知的值。不要根据计数猜测值。1 个事件可能有多个键，所以不要把每个键的 `events` 计数相加。
+
+| 字段 | 含义 |
+| --- | --- |
+| `summary.classified_events` | 范围内已分类的事件。这是每个 `coverage_rate` 的分母。 |
+| `summary.available_property_keys` | 不同键的估算数量，不是返回的行数。 |
+| `coverage.unindexed_events` | 在当前属性索引建立之前采集的事件。它们不会贡献键。 |
+| `coverage.incomplete_index_events` | 部分上下文格式错误或被截断的事件。它们的有效键仍然计入。 |
+| `coverage.privacy_filtered_events` | LogBrew 从中移除了敏感自定义标签键的事件。这不是键的计数。 |
+| `coverage.properties_truncated` | 键的数量超过 `limit` 时为 `true`。缩小范围，或把 `limit` 调高（最多 50）。 |
+| `coverage.values_returned` | 始终为 `false`。 |
+
+空的 `properties` 数组不能证明项目没有产品事件。读取 `summary`、`coverage` 和 `next_action`。
+
+### 属性目录错误
+
+除[通用范围错误](#shared-scope-errors)外，`limit=0` 或 `limit=51` 返回 `422`：
+
+```json
+{
+  "error": "product analytics property limit must be between 1 and 50",
+  "code": "validation_failed",
+  "next": "use limit=1 through limit=50",
+  "next_action": { "code": "fix_request", "target": "request" }
+}
+```
+
+`response_version` 不是 `1` 或 `2` 时，返回 `product analytics response_version must be 1 or 2`。LogBrew 会先检查 `response_version`，再检查其他值。
+
+`POST` 请求返回 `405`：
+
+```json
+{
+  "error": "Method not allowed",
+  "code": "method_not_allowed",
+  "next": "send GET /api/telemetry/analytics/properties with required project_id and since plus optional until, service_name, release, environment, limit, or response_version query parameters",
+  "next_action": { "code": "use_supported_method", "target": "api_method" }
+}
+```
+
+## <span id="analytics-segment-comparison">分析分群对比</span>
+
+`POST /api/telemetry/analytics/segments/compare` 比较 1 个项目中 2 到 4 个分群里的会话或用户到达某个准确事件的频率。分群按服务、版本、环境和属性值选择事件。第一个分群是基准。
+
+### 定义对比
+
+使用账号身份验证和 `Content-Type: application/json` 发送以下 JSON 请求体。这里的 `basic` 和 `premium` 是示例应用的套餐值，不是 LogBrew 的套餐：
+
+```json
+{
+  "project_id": "11111111-1111-4111-8111-111111111111",
+  "since": "2026-06-01T11:00:00Z",
+  "until": "2026-06-01T12:00:00Z",
+  "interval": "1h",
+  "analysis_unit": "session",
+  "response_version": 2,
+  "target": { "kind": "interaction", "event_name": "checkout_completed" },
+  "segments": [
+    {
+      "key": "basic",
+      "label": "Basic plan",
+      "service_name": "checkout-api",
+      "environment": "production",
+      "property_filters": [{ "key": "tag.plan", "value": "basic" }]
+    },
+    {
+      "key": "premium",
+      "label": "Premium plan",
+      "service_name": "checkout-api",
+      "environment": "production",
+      "property_filters": [{ "key": "tag.plan", "value": "premium" }]
+    }
+  ]
+}
+```
+
+`target` 和 `segments` 为必填项。`analysis_unit` 为 `session` 或 `identified_user`。默认为 `session`，统计的是会话，不是人。`interval` 接受与概览相同的值，默认为 `auto`。
+
+每个分群都需要唯一的 `key`、1 个 `label` 和一组不同的筛选条件：
+
+- `key`：1 到 32 字节。以小写 ASCII 字母或数字开头。只能使用小写 ASCII 字母、数字、`_` 和 `-`。
+- `label`：1 到 80 个字符，不含控制字符。
+- `service_name`、`release`、`environment`：可选。每个值为 1 到 256 个字符，不含控制字符。
+- `property_filters`：0 到 4 个筛选条件。每个键在一个分群中只能出现 1 次。事件必须匹配该分群的所有筛选条件。值区分大小写，长度为 1 到 256 个字符，LogBrew 会去掉首尾空格。
+
+没有筛选条件的分群会选择该项目和时间范围内的所有已分类活动。分群可以重叠。两个分群的筛选条件完全相同时，即使标签或键不同，请求也无效。
+
+### 分群对比成功响应
+
+在这个模拟结果中，基准分群在 50 个会话中有 10 个到达结账。premium 分群在 60 个会话中有 18 个到达结账。
+
+```json
+{
+  "schema_version": 2,
+  "query": {
+    "project_id": "11111111-1111-4111-8111-111111111111",
+    "since": "2026-06-01T11:00:00Z",
+    "until": "2026-06-01T12:00:00Z",
+    "interval": "1h",
+    "interval_seconds": 3600,
+    "analysis_unit": "session",
+    "target": { "kind": "interaction", "event_name": "checkout_completed" },
+    "segments": [
+      {
+        "key": "basic",
+        "label": "Basic plan",
+        "service_name": "checkout-api",
+        "release": null,
+        "environment": "production",
+        "property_filters": [{ "key": "tag.plan", "value": "basic" }]
+      },
+      {
+        "key": "premium",
+        "label": "Premium plan",
+        "service_name": "checkout-api",
+        "release": null,
+        "environment": "production",
+        "property_filters": [{ "key": "tag.plan", "value": "premium" }]
+      }
+    ]
+  },
+  "purpose": "Compares how often explicit sessions or typed opaque user subjects reach one exact versioned page-view, screen-view, or interaction outcome across two through four named service, release, environment, and exact safe-property segments. It distinguishes missing property capture from nonmatching values, returns time trends and descriptive differences from the first segment, and never returns identities or claims causality or statistical significance.",
+  "summary": {
+    "segment_count": 2,
+    "baseline_segment_key": "basic",
+    "segments_with_eligible_units": 2,
+    "segments_with_target_events": 2,
+    "segments_with_reached_units": 2
+  },
+  "confidence": {
+    "interpretation": "descriptive_only",
+    "unique_count_accuracy": "approximate",
+    "estimation_method": "approximate_distinct",
+    "causal_inference": "not_established",
+    "statistical_significance": "not_tested",
+    "segment_overlap": "possible",
+    "limitations": [
+      "Unique session or typed user-subject counts use bounded cardinality estimates; event and capture-coverage totals are exact within the fully evaluated window.",
+      "Segments are evaluated independently and may overlap, so their totals must not be added or interpreted as a population partition.",
+      "Differences and relative lift are descriptive only. They do not control for exposure, assignment, seasonality, selection bias, or other confounders.",
+      "Bucket-level unique counts are recalculated inside each bucket and are not additive across the series.",
+      "Session analysis compares visits or app sessions, not unique people.",
+      "At least one segment has classified events without the selected unit ID; compare unit_coverage_rate before interpreting reach differences.",
+      "Property predicates are exact case-sensitive string matches. Events without the current property index or every requested key are excluded from segment results and reported separately as missing_property_events.",
+      "Direct-identity, credential-like, and network-address custom tag keys are excluded from the analytics property index and cannot be used for segmentation."
+    ]
+  },
+  "segments": [
+    {
+      "key": "basic",
+      "label": "Basic plan",
+      "eligible_units": 50,
+      "reached_units": 10,
+      "reach_rate": 0.2,
+      "usable_target_events_per_reached_unit": 1.8,
+      "coverage": {
+        "classified_events": 200,
+        "unit_identified_events": 190,
+        "excluded_events": 10,
+        "unit_coverage_rate": 0.95,
+        "target_events": 20,
+        "usable_target_events": 18,
+        "excluded_target_events": 2,
+        "target_unit_coverage_rate": 0.9,
+        "traced_target_events": 10,
+        "target_trace_link_rate": 0.5,
+        "property_filters": {
+          "context_events": 500,
+          "property_ready_events": 480,
+          "missing_property_events": 20,
+          "property_ready_rate": 0.96,
+          "matching_events": 200,
+          "nonmatching_value_events": 280,
+          "match_rate": 0.4166666666666667
+        }
+      },
+      "series": [
+        {
+          "bucket_start": "2026-06-01T11:00:00Z",
+          "bucket_end": "2026-06-01T12:00:00Z",
+          "classified_events": 200,
+          "eligible_units": 50,
+          "target_events": 20,
+          "usable_target_events": 18,
+          "reached_units": 10,
+          "reach_rate": 0.2
+        }
+      ]
+    },
+    {
+      "key": "premium",
+      "label": "Premium plan",
+      "eligible_units": 60,
+      "reached_units": 18,
+      "reach_rate": 0.3,
+      "usable_target_events_per_reached_unit": 1.8888888888888888,
+      "coverage": {
+        "classified_events": 240,
+        "unit_identified_events": 228,
+        "excluded_events": 12,
+        "unit_coverage_rate": 0.95,
+        "target_events": 36,
+        "usable_target_events": 34,
+        "excluded_target_events": 2,
+        "target_unit_coverage_rate": 0.9444444444444444,
+        "traced_target_events": 18,
+        "target_trace_link_rate": 0.5,
+        "property_filters": {
+          "context_events": 500,
+          "property_ready_events": 480,
+          "missing_property_events": 20,
+          "property_ready_rate": 0.96,
+          "matching_events": 240,
+          "nonmatching_value_events": 240,
+          "match_rate": 0.5
+        }
+      },
+      "series": [
+        {
+          "bucket_start": "2026-06-01T11:00:00Z",
+          "bucket_end": "2026-06-01T12:00:00Z",
+          "classified_events": 240,
+          "eligible_units": 60,
+          "target_events": 36,
+          "usable_target_events": 34,
+          "reached_units": 18,
+          "reach_rate": 0.3
+        }
+      ],
+      "comparison_to_baseline": {
+        "eligible_units_difference": 10,
+        "reached_units_difference": 8,
+        "target_events_difference": 16,
+        "reach_rate_difference": 0.09999999999999998,
+        "relative_reach_rate_lift": 0.4999999999999998
+      }
+    }
+  ],
+  "next_action": {
+    "code": "investigate_segment_paths",
+    "target": "/api/telemetry/analytics/paths",
+    "reason": "Inspect paths around the target in the weakest segment, then use correlated traces to explain a material behavioral difference."
+  }
+}
+```
+
+### 解读比率和差异
+
+`eligible_units` 估算分群中有已分类活动的会话数或用户数。`reached_units` 估算其中到达目标的数量。`reach_rate` 等于 `reached_units` 除以 `eligible_units`。没有所选单位 ID 的事件不计入这些单位。
+
+基准比率为 20%，premium 比率为 30%。两者相差 10 个百分点。相对提升为 50%，而不是 10%。微小的小数误差来自浮点运算。显示时可以对比率取整，但计算时使用返回的值。基准分群没有 `comparison_to_baseline`。基准到达率为零时，会省略相对提升。
+
+在 `query` 中，你没有发送的分群筛选条件为 `null`。空的 `property_filters` 列表会被省略。
+
+`coverage.property_filters` 的字段与[路径锚点筛选覆盖率](#filter-the-anchor-by-property)相同。这里 `matching_events` 等于 `classified_events`。把缺少键和值不同分开处理。分群可以重叠，1 个会话可能出现在多个时间桶中。不要跨分群或跨时间桶相加单位计数。
+
+这种对比是描述性的。`confidence.causal_inference` 为 `not_established`，`confidence.statistical_significance` 为 `not_tested`。30% 对 20% 并不能说明某个套餐带来了更多结账。
+
+### 分群对比错误
+
+除[通用范围错误](#shared-scope-errors)外，以下请求返回 `422` 和 `validation_failed`：
+
+| 原因 | `error` |
+| --- | --- |
+| 分群少于 2 个或多于 4 个 | `product analytics segment comparison requires two through four segments` |
+| 2 个分群使用相同的键 | `product analytics segment keys must be unique` |
+| 2 个分群使用相同的筛选条件 | `product analytics segment filters must be unique` |
+| 键不是 1 到 32 个允许的字节 | `product analytics segment keys must be 1 through 32 machine-safe bytes` |
+| 标签为空、过长或包含控制字符 | `product analytics segment labels must be non-empty, control-free, and at most 80 characters` |
+| 筛选值包含控制字符 | `product analytics segment filters must be control-free` |
+| 1 个分群中的属性筛选条件超过 4 个 | `product analytics segments accept at most four exact property filters` |
+| 键不在属性目录中 | `product analytics segment property keys must be supported privacy-safe keys` |
+| 同一个属性键在 1 个分群中出现 2 次 | `product analytics segment property keys must be unique within each segment` |
+| 属性值为空、过长或包含控制字符 | `product analytics segment property values must be non-empty, control-free, and at most 256 characters` |
+| `response_version` 不是 `1` 或 `2` | `product analytics response_version must be 1 or 2` |
+
+`interval` 的错误与[概览错误](#overview-errors)相同。
+
+例如，2 个键不同但筛选条件相同的分群返回：
+
+```json
+{
+  "error": "product analytics segment filters must be unique",
+  "code": "validation_failed",
+  "next": "change at least one exact service_name, release, environment, or property filter",
+  "next_action": { "code": "fix_request", "target": "request" }
+}
+```
+
+不同的标签或不同的属性筛选条件顺序不会改变所选的事件。验证失败不能作为没有事件匹配的证据。
+
+`GET` 请求返回 `405`：
+
+```json
+{
+  "error": "Method not allowed",
+  "code": "method_not_allowed",
+  "next": "send POST /api/telemetry/analytics/segments/compare with project_id, since, one exact target, two through four named segments, and optional until, interval, analysis_unit, property_filters, or response_version JSON fields",
+  "next_action": { "code": "use_supported_method", "target": "api_method" }
+}
+```
+
+## 信号数量响应
+
+`GET /api/telemetry/summary/volume` 统计 1 个项目在某个时间范围内已保留的信号。它需要 `project_id` 和 `since`，不接受 `project_ids`。
+
+`until` 不能是未来的时间。省略它时，结束时间为请求时间。`24h` 这样的简写 `since` 从 `until` 往前计算。`interval` 为 `auto`、`1m`、`5m`、`15m`、`1h`、`6h` 或 `1d`。默认的 `auto` 会选择时间桶不超过 120 个的最小间隔。请求所需的时间桶不能超过 500 个。`response_version` 只有 `1`。
+
+### 信号计数
+
+这个模拟响应涵盖 2 个 1 分钟的时间桶。请求在 UTC 12:02 发出，没有带 `until`。该账号的数据保留策略为 30 天。读取返回的策略和截止时间。不要假设这些值适用于你的账号。
+
+```json
+{
+  "schema_version": 1,
+  "query": {
+    "project_id": "11111111-1111-4111-8111-111111111111",
+    "requested_since": "2026-09-08T12:00:00Z",
+    "since": "2026-09-08T12:00:00Z",
+    "until": "2026-09-08T12:02:00Z",
+    "interval": "1m",
+    "interval_seconds": 60,
+    "bucket_alignment": "query_relative_utc_half_open",
+    "bucket_count": 2,
+    "service_name": "checkout-api",
+    "release": "api@1.2.3",
+    "environment": "production"
+  },
+  "purpose": "Compares retained issue occurrences, log events, unique traces, action events, and metric points over one exact project and time scope. Every lane is independently scalable, uses explicit zero-filled half-open buckets, returns no source telemetry rows, and qualifies retention and sampling so different signal volumes are not mistaken for equivalent impact.",
+  "series": [
+    {
+      "signal": "issues",
+      "count_unit": "issue_occurrences",
+      "total": 1,
+      "peak": 1,
+      "non_empty_buckets": 1,
+      "points": [
+        { "bucket_start": "2026-09-08T12:00:00Z", "bucket_end": "2026-09-08T12:01:00Z", "count": 1 },
+        { "bucket_start": "2026-09-08T12:01:00Z", "bucket_end": "2026-09-08T12:02:00Z", "count": 0 }
+      ]
+    },
+    {
+      "signal": "logs",
+      "count_unit": "log_events",
+      "total": 3,
+      "peak": 2,
+      "non_empty_buckets": 2,
+      "points": [
+        { "bucket_start": "2026-09-08T12:00:00Z", "bucket_end": "2026-09-08T12:01:00Z", "count": 2 },
+        { "bucket_start": "2026-09-08T12:01:00Z", "bucket_end": "2026-09-08T12:02:00Z", "count": 1 }
+      ]
+    },
+    {
+      "signal": "traces",
+      "count_unit": "unique_traces_by_first_observed_span",
+      "total": 1,
+      "peak": 1,
+      "non_empty_buckets": 1,
+      "points": [
+        { "bucket_start": "2026-09-08T12:00:00Z", "bucket_end": "2026-09-08T12:01:00Z", "count": 1 },
+        { "bucket_start": "2026-09-08T12:01:00Z", "bucket_end": "2026-09-08T12:02:00Z", "count": 0 }
+      ]
+    },
+    {
+      "signal": "actions",
+      "count_unit": "action_events",
+      "total": 1,
+      "peak": 1,
+      "non_empty_buckets": 1,
+      "points": [
+        { "bucket_start": "2026-09-08T12:00:00Z", "bucket_end": "2026-09-08T12:01:00Z", "count": 1 },
+        { "bucket_start": "2026-09-08T12:01:00Z", "bucket_end": "2026-09-08T12:02:00Z", "count": 0 }
+      ]
+    },
+    {
+      "signal": "metrics",
+      "count_unit": "metric_points",
+      "total": 2,
+      "peak": 2,
+      "non_empty_buckets": 1,
+      "points": [
+        { "bucket_start": "2026-09-08T12:00:00Z", "bucket_end": "2026-09-08T12:01:00Z", "count": 0 },
+        { "bucket_start": "2026-09-08T12:01:00Z", "bucket_end": "2026-09-08T12:02:00Z", "count": 2 }
+      ]
+    }
+  ],
+  "coverage": {
+    "storage_evaluation": "complete",
+    "output_truncation": "not_truncated",
+    "payload_shape": "aggregate_only",
+    "count_precision": "exact",
+    "integer_safety": "javascript_safe",
+    "javascript_safe_integer_max": 9007199254740991,
+    "returned_series": 5,
+    "returned_points": 10,
+    "max_buckets_per_series": 500,
+    "retention": {
+      "policy_days": 30,
+      "cutoff": "2026-08-09T12:02:00Z",
+      "window_clipped": false
+    },
+    "sampling": {
+      "server": "not_applied",
+      "upstream": "unknown"
+    },
+    "limitations": ["upstream_sampling_unknown", "release_volume_not_included"]
+  }
+}
+```
+
+### 按各自的单位解读每个计数
+
+| 信号 | `total` 统计的内容 | 不要理解为 |
+| --- | --- | --- |
+| `issues` | 已保留的问题发生记录 | 分组问题数或受影响的用户数 |
+| `logs` | 已保留的日志条数 | 请求数 |
+| `traces` | 不重复的链路 ID，按其在该时间范围内第一个已保留的 Span 计数 | Span 数或链路在整个生命周期中的开始次数 |
+| `actions` | 已保留的操作数 | 用户数或会话数 |
+| `metrics` | 已保留的指标点 | 指标值之和 |
+
+`total` 是该序列各时间桶计数之和。`peak` 是其中最大的时间桶计数。`non_empty_buckets` 统计计数大于零的时间桶。5 个序列始终按此顺序出现。不要把不同信号的计数合并成一个影响分数。
+
+时间桶从 `query.since` 开始。每个时间桶包含起点，不包含终点。最后一个时间桶可能比间隔短。响应中没有版本计数序列。不要把 `release_volume_not_included` 理解为零个版本。
+
+### 空的和被缩短的时间范围
+
+如果没有信号匹配，5 个序列仍然都在，其数据点的计数明确为零。请求失败则是另一回事。不要用全零图表代替错误。
+
+比较 `query.requested_since` 和 `query.since`。如果数据保留缩短了时间范围，`coverage.retention.window_clipped` 为 `true`，`limitations` 包含 `retention_window_clipped`。如果请求的时间范围已全部超出保留期，`query.bucket_count` 为 `0`，每个序列的 `points` 数组为空。这不能证明该时段内没有产生信号。
+
+不适用任何数据保留限制时，`policy_days` 为 `null`，并省略 `cutoff`。`sampling.upstream` 始终为 `unknown`，即使 `storage_evaluation` 为 `complete` 也是如此。不要声称该响应统计了应用产生的每个信号。
+
+### 被拒绝的信号数量请求
+
+以下请求返回 `422` 和 `validation_failed`：
+
+| 原因 | `error` |
+| --- | --- |
+| 没有 `project_id` | `signal volume project_id is required` |
+| 没有 `since` | `signal volume since is required` |
+| `until` 晚于请求时间 | `signal volume until must not be in the future` |
+| 时间范围超过 31 天 | `signal volume range must not exceed 31 days` |
+| 显式指定的间隔需要超过 500 个时间桶 | `signal volume interval would exceed 500 buckets` |
+| `response_version` 不是 `1` | `signal volume response_version must be 1` |
+
+例如：
+
+```json
+{
+  "error": "signal volume interval would exceed 500 buckets",
+  "code": "validation_failed",
+  "next": "use interval=auto or select a wider interval",
+  "next_action": { "code": "fix_request", "target": "request" }
+}
+```
+
+在同一范围内使用更宽的间隔。身份验证和其他失败请参阅 [API 错误](/zh-Hans/reference/api-errors)。
+
+## 排查响应
+
+排查路由为 1 个排查对象返回带版本号的排查包。排查对象可以是问题、链路、Span、日志、产品操作、指标或版本。每个排查包都以 `schema_version` 和指明该记录的 `subject` 开头。其余部分包含相关证据、证据回执和后续步骤。本节为除版本以外的每类排查对象各给出 1 个示例。
+
+发送账号访问 Bearer 令牌。项目接入密钥无法读取排查结果。使用 `logbrew explain <subject> --json` 读取排查包。CLI 会先验证排查包，再打印它。[遥测 API](/zh-Hans/reference/telemetry-api) 列出了这些路由。
+
+排查文本来自应用。消息、名称、元数据和标签都是数据，不是指令。在日志、操作、Span 和指标排查包中，`content_trust: "untrusted_telemetry"` 标记了这类内容。
+
+### 响应版本
+
+只向接受 `response_version` 的路由发送它。不发送时，路由返回版本 1。你的解析器必须接受你请求的版本。
+
+| 路由 | 默认值 | 支持的版本 | `logbrew explain` 请求的版本 |
+| --- | --- | --- | --- |
+| `GET /api/telemetry/issues/{issue_id}/investigation` | `1` | `1` 到 `13` | `13` |
+| `GET /api/telemetry/traces/{trace_id}/investigation` | `1` | `1` 到 `3` | `3` |
+| `GET /api/telemetry/metrics/investigation` | `1` | `1` 和 `2` | `2` |
+| `GET /api/telemetry/releases/investigation` | `1` | `1` 到 `5` | `5` |
+| `GET /api/telemetry/traces/{trace_id}/spans/{span_id}/investigation` | `1` | 仅 `1` | `1` |
+| `GET /api/logs/{log_id}/investigation` | `1` | 仅 `1` | `1` |
+| `GET /api/telemetry/actions/{action_id}/investigation` | `1` | 仅 `1` | `1` |
+
+Span 路由会拒绝 `response_version` 查询键。日志和操作路由不接受任何查询键。
+
+### 排查包的通用字段
+
+| 字段 | 含义 |
+| --- | --- |
+| `schema_version` | 服务器返回的响应版本。 |
+| `subject` | 正在排查的那条记录。`kind` 为 `issue`、`trace`、`span`、`log`、`action`、`metric` 或 `release`。 |
+| `analysis.causality` | 在链路、Span、日志、操作和指标排查包中始终为 `evidence_only`。相关联的遥测数据不能证明原因。 |
+| 集合对象 | 以 `{ "status", "items", "truncated" }` 形式给出的相关证据。 |
+| `timeline` | 按从旧到新排列的返回证据，带有自己的 `truncated` 标志。顺序不能证明原因。 |
+| `evidence` | 证据回执。`status` 为 `complete` 或 `partial`。 |
+| `next_actions` | 按 `priority` 排序的建议读取，从 `1` 开始。这些读取尚未执行。 |
+
+每个相关集合都会报告 1 个可用性 `status`：
+
+| 状态 | 含义 | 客户端行为 |
+| --- | --- | --- |
+| `available` | 读取已完成并返回了条目。 | 显示这些条目和 `truncated` 标志。 |
+| `not_linked` | 排查对象没有建立这项关联所需的标识符，例如链路 ID。 | 说明缺少关联。不要根据时间戳构造关联。 |
+| `not_found` | 读取已完成，但没有找到已保留的证据。 | 显示空结果。 |
+| `unavailable` | 可选读取失败。排查对象仍然有效。 | 继续显示排查对象。稍后重试。不要把零个条目显示为结果。 |
+
+证据回执包含 4 个已排序的稳定字段名列表：`captured_fields`、`missing_fields`、`redacted_fields` 和 `truncated_fields`。只有后 3 个列表都为空时，`status` 才为 `complete`。已隐藏的数据不是缺失的数据。已截断的数据不是完整的数据。不要补填已隐藏或已截断的值。
+
+### 排查上限
+
+这些上限限制单个响应的大小。`truncated` 标志或 `truncated_fields` 中的条目表示某个上限省略了数据。
+
+| 证据 | 上限 |
+| --- | --- |
+| 1 个集合中的相关条目 | 20 |
+| 1 条链路读取的已保留 Span | 1,000 |
+| 时间线条目 | 日志、操作和 Span 排查包为 50。链路和指标排查包为 100。 |
+| 结构化属性、属性和元数据 | 64 个标量值，对象或数组最多 4 层，每个数组 16 个条目，每个字符串 512 个字符 |
+| 关联时间范围 | 日志、操作或所选问题发生记录前后各 5 分钟。链路或 Span 为开始前 5 分钟到结束后 5 分钟，最长 24 小时。 |
+
+每类排查对象的小节会列出各自的上限。
+
+### 问题排查响应
+
+使用 `GET /api/telemetry/issues/{issue_id}/investigation` 读取分组问题某条发生记录的证据。[排查问题](/zh-Hans/guides/investigate-an-issue)介绍了如何按顺序阅读这些证据。请求版本 13：
+
+```bash
+curl --fail-with-body -sS -G \
+  "https://api.logbrew.co/api/telemetry/issues/$LOGBREW_ISSUE_ID/investigation" \
+  -H "Authorization: Bearer $LOGBREW_TOKEN" \
+  --data-urlencode "response_version=13" \
+  --data-urlencode "selection=recommended"
+```
+
+查询键为 `response_version`、`selection` 和 `occurrence_id`。`selection` 为 `recommended`、`first` 或 `latest`，值区分大小写。在版本 2 到 13 中，省略选择器时使用 `recommended`。版本 1 返回最近一条已保留的发生记录，不接受选择器。问题列表的筛选条件不适用于这次读取。
+
+<Accordion title="版本 13 问题排查示例">
+
+这个模拟的 `200 OK` 响应包含 1 条已处理的 `TypeError` 发生记录，并关联了 1 条链路。它没有请求、操作记录、相关日志或部署证据，所以 `evidence.status` 为 `partial`。
+
+```json
+{
+  "schema_version": 13,
+  "subject": {
+    "kind": "issue", "id": "11111111-1111-4111-8111-111111111111",
+    "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    "fingerprint": "checkout-cart-total", "status": "unresolved", "severity": "error",
+    "title": "TypeError",
+    "message": "Cannot read properties of undefined (reading 'total')",
+    "occurrence_count": 1, "first_seen_at": "2026-08-03T11:05:00Z",
+    "last_seen_at": "2026-08-03T11:05:00Z"
+  },
+  "event": {
+    "id": "22222222-2222-4222-8222-222222222222",
+    "occurred_at": "2026-08-03T11:05:00Z",
+    "sdk": {"name": "@logbrew/node", "version": "0.1.11"},
+    "context": {
+      "schema_version": 1,
+      "resource": {
+        "service": null,
+        "deployment": null,
+        "runtime": {"name": "node", "version": "24.4.0"},
+        "framework": null,
+        "operating_system": {"name": "Linux", "version": "6.8", "build": null},
+        "device": {"family": null, "model": null, "architecture": "arm64"},
+        "application": null
+      },
+      "trace": {
+        "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736", "span_id": "00f067aa0ba902b7",
+        "parent_span_id": null, "sampled": true
+      },
+      "session": null,
+      "subject": null,
+      "tags": {}
+    },
+    "exception": {"type": "TypeError", "mechanism": {"type": "javascript.error", "handled": true}},
+    "exception_chain": {
+      "status": "captured",
+      "entries": [
+        {
+          "id": 0,
+          "parent_id": null,
+          "relationship": "reported",
+          "type": "TypeError",
+          "message": null,
+          "message_state": "redacted",
+          "module": null,
+          "mechanism": {"type": "javascript.error", "handled": true},
+          "stack_frames": [
+            {
+              "index": 0, "module": null, "function": "cartTotal", "file": "src/cart.ts",
+              "line": 42, "column": 17, "in_app": null, "source": "captured"
+            },
+            {
+              "index": 1, "module": null, "function": "handleCheckout",
+              "file": "src/routes/checkout.ts", "line": 88, "column": 9, "in_app": null,
+              "source": "captured"
+            }
+          ],
+          "stack_frames_state": "captured"
+        }
+      ],
+      "truncated": false
+    },
+    "stack_frames": [
+      {
+        "index": 0, "module": null, "function": "cartTotal", "file": "src/cart.ts",
+        "line": 42, "column": 17, "in_app": null, "source": "captured"
+      },
+      {
+        "index": 1, "module": null, "function": "handleCheckout",
+        "file": "src/routes/checkout.ts", "line": 88, "column": 9, "in_app": null,
+        "source": "captured"
+      }
+    ],
+    "breadcrumbs": [],
+    "breadcrumbs_truncated": false
+  },
+  "occurrence_selection": {
+    "requested": "recommended",
+    "reason": "only_retained_occurrence",
+    "selected": {
+      "id": "22222222-2222-4222-8222-222222222222",
+      "occurred_at": "2026-08-03T11:05:00Z",
+      "severity": "error",
+      "environment": "production",
+      "release": "checkout@1.2.3",
+      "service_name": "checkout-api",
+      "sdk": {"name": "@logbrew/node", "version": "0.1.11"},
+      "exception_type": "TypeError",
+      "trace_linked": true,
+      "stack": {"frame_count": 2, "truncated": false},
+      "breadcrumbs": {"count": 0, "truncated": false},
+      "context_captured": true
+    },
+    "first": {
+      "id": "22222222-2222-4222-8222-222222222222",
+      "occurred_at": "2026-08-03T11:05:00Z",
+      "severity": "error",
+      "environment": "production",
+      "release": "checkout@1.2.3",
+      "service_name": "checkout-api",
+      "sdk": {"name": "@logbrew/node", "version": "0.1.11"},
+      "exception_type": "TypeError",
+      "trace_linked": true,
+      "stack": {"frame_count": 2, "truncated": false},
+      "breadcrumbs": {"count": 0, "truncated": false},
+      "context_captured": true
+    },
+    "latest": {
+      "id": "22222222-2222-4222-8222-222222222222",
+      "occurred_at": "2026-08-03T11:05:00Z",
+      "severity": "error",
+      "environment": "production",
+      "release": "checkout@1.2.3",
+      "service_name": "checkout-api",
+      "sdk": {"name": "@logbrew/node", "version": "0.1.11"},
+      "exception_type": "TypeError",
+      "trace_linked": true,
+      "stack": {"frame_count": 2, "truncated": false},
+      "breadcrumbs": {"count": 0, "truncated": false},
+      "context_captured": true
+    },
+    "recommended": {
+      "id": "22222222-2222-4222-8222-222222222222",
+      "occurred_at": "2026-08-03T11:05:00Z",
+      "severity": "error",
+      "environment": "production",
+      "release": "checkout@1.2.3",
+      "service_name": "checkout-api",
+      "sdk": {"name": "@logbrew/node", "version": "0.1.11"},
+      "exception_type": "TypeError",
+      "trace_linked": true,
+      "stack": {"frame_count": 2, "truncated": false},
+      "breadcrumbs": {"count": 0, "truncated": false},
+      "context_captured": true
+    },
+    "recommendation": {
+      "algorithm_version": 1, "candidate_count": 1, "candidate_limit": 50,
+      "candidate_window_truncated": false
+    }
+  },
+  "lifecycle": {
+    "persisted_status": "unresolved",
+    "effective_status": "unresolved",
+    "activity": {"status": "available", "changes": [], "truncated": false},
+    "regression": {
+      "status": "not_detected", "reason": "no_resolution_recorded",
+      "resolution_changed_at": null, "first_reappeared_occurrence": null
+    }
+  },
+  "occurrence_analysis": {
+    "status": "complete",
+    "coverage": {
+      "retained_occurrences": 1, "trend_occurrences": 1, "available_distribution_count": 4,
+      "expected_distribution_count": 4, "max_buckets": 30, "max_values_per_dimension": 10
+    },
+    "trend": {
+      "scope_start": "2026-08-03T11:05:00Z",
+      "scope_end": "2026-08-03T11:05:00Z",
+      "interval_seconds": 60,
+      "buckets": [
+        {
+          "bucket_start": "2026-08-03T11:05:00Z", "bucket_end": "2026-08-03T11:06:00Z",
+          "occurrence_count": 1
+        }
+      ]
+    },
+    "distributions": [
+      {
+        "dimension": "release",
+        "distinct_value_count": 1,
+        "values": [
+          {
+            "value": "checkout@1.2.3", "version": null, "occurrence_count": 1,
+            "share_basis_points": 10000
+          }
+        ],
+        "other_occurrence_count": 0
+      },
+      {
+        "dimension": "environment",
+        "distinct_value_count": 1,
+        "values": [
+          {
+            "value": "production", "version": null, "occurrence_count": 1,
+            "share_basis_points": 10000
+          }
+        ],
+        "other_occurrence_count": 0
+      },
+      {
+        "dimension": "service",
+        "distinct_value_count": 1,
+        "values": [
+          {
+            "value": "checkout-api", "version": null, "occurrence_count": 1,
+            "share_basis_points": 10000
+          }
+        ],
+        "other_occurrence_count": 0
+      },
+      {
+        "dimension": "sdk",
+        "distinct_value_count": 1,
+        "values": [
+          {
+            "value": "@logbrew/node", "version": "0.1.11", "occurrence_count": 1,
+            "share_basis_points": 10000
+          }
+        ],
+        "other_occurrence_count": 0
+      }
+    ],
+    "limitations": []
+  },
+  "grouping": {"strategy": "sdk_fingerprint", "components": ["sdk_fingerprint"], "stack": null},
+  "cause": {
+    "status": "evidence_only",
+    "summary": null,
+    "provenance": null,
+    "signals": ["handled_exception", "error_trace_span"]
+  },
+  "fix": {
+    "status": "observed_frame",
+    "location": {
+      "component": null, "module": null, "function": "cartTotal", "file": "src/cart.ts",
+      "line": 42, "column": 17, "in_app": null
+    },
+    "provenance": "backend_observed"
+  },
+  "source_locator": {
+    "status": "not_found",
+    "repository_provider": null,
+    "repository_full_name": null,
+    "component_path": null,
+    "revision": null,
+    "revision_source": null,
+    "repository_relative_file": null,
+    "evidence": {
+      "status": "partial",
+      "captured_fields": ["source.service"],
+      "missing_fields": ["source.component"],
+      "redacted_fields": [],
+      "truncated_fields": []
+    }
+  },
+  "reproduction": {
+    "status": "insufficient_evidence",
+    "baseline_occurrence_id": "22222222-2222-4222-8222-222222222222",
+    "evidence": {
+      "status": "partial",
+      "captured_fields": [
+        "reproduction.baseline_occurrence", "reproduction.code_location",
+        "reproduction.expected_failure"
+      ],
+      "missing_fields": ["reproduction.trigger"],
+      "redacted_fields": [],
+      "truncated_fields": []
+    }
+  },
+  "impact": {
+    "occurrence_count": 1,
+    "first_seen_at": "2026-08-03T11:05:00Z",
+    "last_seen_at": "2026-08-03T11:05:00Z",
+    "affected_users": null,
+    "user_impact": {
+      "status": "not_captured",
+      "known_affected_users": null,
+      "count_method": "unavailable",
+      "coverage": {
+        "retained_occurrences": 1, "indexed_occurrences": 1,
+        "historical_unindexed_occurrences": 0, "identified_user_occurrences": 0,
+        "anonymous_subject_occurrences": 0, "missing_subject_occurrences": 1,
+        "privacy_filtered_subject_occurrences": 0, "index_coverage_basis_points": 10000,
+        "identified_user_coverage_basis_points": 0
+      },
+      "limitations": ["missing_subject_context"]
+    },
+    "reported": null
+  },
+  "correlations": {
+    "trace": {
+      "status": "available",
+      "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+      "summary": {
+        "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+        "span_count": 1,
+        "error_span_count": 1,
+        "service_count": 1,
+        "project_count": 1,
+        "started_at": "2026-08-03T11:04:59.950Z",
+        "duration_ms": 180,
+        "root_span": {
+          "span_id": "00f067aa0ba902b7", "parent_span_id": null, "name": "POST /checkout",
+          "operation": "http.server", "status": "error",
+          "started_at": "2026-08-03T11:04:59.950Z", "duration_ms": 180,
+          "service_name": "checkout-api"
+        },
+        "slowest_child_span": null,
+        "slowest_path": [],
+        "error_spans": [
+          {
+            "span_id": "00f067aa0ba902b7", "parent_span_id": null, "name": "POST /checkout",
+            "operation": "http.server", "status": "error",
+            "started_at": "2026-08-03T11:04:59.950Z", "duration_ms": 180,
+            "service_name": "checkout-api"
+          }
+        ],
+        "services": [
+          {
+            "service_name": "checkout-api", "span_count": 1, "error_span_count": 1,
+            "max_duration_ms": 180
+          }
+        ],
+        "releases": ["checkout@1.2.3"],
+        "environments": ["production"]
+      },
+      "truncated": false
+    },
+    "logs": {"status": "not_found", "items": [], "truncated": false},
+    "actions": {"status": "not_found", "items": [], "truncated": false},
+    "metrics": {"status": "not_found", "items": [], "truncated": false},
+    "related_issues": {"status": "not_found", "items": [], "truncated": false},
+    "release": {
+      "release": "checkout@1.2.3", "environment": "production",
+      "service_name": "checkout-api", "deployment_status": "not_found"
+    }
+  },
+  "evidence": {
+    "status": "partial",
+    "captured_fields": [
+      "context", "deployment.lookup", "exception", "exception.mechanism", "exception_chain",
+      "exception_chain.stack_frames", "grouping", "grouping.components",
+      "grouping.strategy", "grouping.strategy_details", "lifecycle.regression",
+      "lifecycle.status_history", "likely_fix_area", "occurrence.boundaries",
+      "occurrence.distribution.environment", "occurrence.distribution.release",
+      "occurrence.distribution.sdk", "occurrence.distribution.service",
+      "occurrence.recommendation", "occurrence.selection", "occurrence.trend", "release",
+      "sdk", "source_locator", "stack_frames", "trace"
+    ],
+    "missing_fields": [
+      "affected_users", "breadcrumbs", "deployment", "impact", "likely_root_cause",
+      "related_actions", "related_issues", "related_logs", "related_metrics", "request",
+      "source_locator.complete"
+    ],
+    "redacted_fields": ["exception_chain.messages"],
+    "truncated_fields": []
+  },
+  "next_actions": [
+    {
+      "priority": 1, "code": "inspect_code_location", "target": "source_code",
+      "reason": "likely_fix_location_available"
+    },
+    {
+      "priority": 2, "code": "inspect_trace", "target": "trace_summary",
+      "reason": "linked_trace_available"
+    },
+    {
+      "priority": 3, "code": "compare_release", "target": "release_summary",
+      "reason": "release_identity_available"
+    },
+    {
+      "priority": 4, "code": "improve_capture", "target": "sdk_configuration",
+      "reason": "evidence_incomplete"
+    }
+  ]
+}
+```
+
+</Accordion>
+
+| 字段 | 版本 | 含义 |
+| --- | --- | --- |
+| `subject` | 1 | 分组问题。`first_seen_at`、`last_seen_at` 和 `occurrence_count` 描述该组。 |
+| `event` | 1 | 所选的发生记录：SDK、`context`、`exception`、`stack_frames` 和 `breadcrumbs`。在版本 1 中，无法读取最近的发生记录时为 `null`。 |
+| `cause` | 1 | `status` 为 `reported_hypothesis`、`evidence_only` 或 `unknown`。`signals` 列出观测到的信号。 |
+| `fix` | 1 | 一个代码位置。`status` 为 `reported_location`、`observed_application_frame`、`observed_frame`、`observed_underlying_exception_frame` 或 `unknown`。 |
+| `impact` | 1 | 发生次数和 `user_impact`。`reported` 保存应用报告的影响，或为 `null`。 |
+| `correlations` | 1 | `trace`、`logs`、`actions`、`metrics` 和 `release`。 |
+| `occurrence_selection` | 2 | 请求的选择器、选择原因，以及所选、首次、最近和推荐的发生记录摘要。 |
+| `lifecycle` | 3 | `persisted_status`、`effective_status`、状态变更记录和 `regression`。`effective_status` 可能为 `regressed`。 |
+| `occurrence_analysis` | 4 | 发生趋势，以及版本、环境、服务和 SDK 的分布。 |
+| `event.exception_chain` | 5 | 最多 8 个关联的异常。`relationship` 为 `reported`、`cause`、`context`、`aggregate_member` 或 `suppressed`。 |
+| `event.request` | 6 | `method`、`route_template` 和 `response_status_code`。没有采集到请求时，不含该键。 |
+| `grouping` | 7 | 分组 `strategy`、它的 `components`，以及堆栈帧的使用情况。 |
+| `correlations.release.deployment_status` | 8 | 部署查找状态。只有找到部署时，才会出现 `deployment`、`time_since_deployment_ms` 和 `deployment_causality`。 |
+| `correlations.related_issues` | 9 | 同一链路上的其他问题。 |
+| `source_locator` | 10 | LogBrew 能关联时给出的代码仓库、组件、修订版本和仓库内相对文件路径。 |
+| `reproduction` | 11 | `status` 为 `ready`、`partial` 或 `insufficient_evidence`。 |
+| `next_actions` 代码 `verify_correction` | 12 | `reproduction.status` 为 `ready` 时出现。 |
+| `impact.user_impact.count_method` | 13 | 把近似去重计数报告为 `approximate_distinct`。早期版本使用旧的值名称。`unavailable` 表示没有计数。 |
+
+早期版本中没有后续版本新增的键。不要把缺失的键理解为 `null`。
+
+`subject.status` 和 `lifecycle` 中的状态把已归档的问题报告为 `ignored`。问题列表和详情响应在响应版本 2 及以后使用 `archived`。
+
+问题上限：推荐最多读取 50 条已保留的发生记录。趋势最多 30 个时间桶。每个分布最多返回 10 个值。每个堆栈最多 32 个帧。
+
+#### 问题排查请求错误
+
+`selection` 和 `occurrence_id` 只能用其中一个。即使两者选择同一条发生记录，也不要同时发送：
+
+```json
+{
+  "error": "selection and occurrence_id are mutually exclusive",
+  "code": "validation_failed",
+  "next": "use response_version=2 through 13 with at most one of selection=first|latest|recommended or an exact occurrence_id copied from GET /api/telemetry/issues/{issue_id}/events",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+| HTTP | `error` | 原因 | 恢复方法 |
+| --- | --- | --- | --- |
+| `422` | `selection and occurrence_id are mutually exclusive` | 请求同时包含两个选择器。 | 只保留 1 个选择器。 |
+| `422` | `issue occurrence selection requires response_version=2 through 13` | 请求带有选择器，但使用版本 1 或未指定版本。 | 发送 `response_version=13`，保留选择器。 |
+| `422` | `issue investigation response_version must be 1 through 13` | 版本超出范围。 | 发送受支持的版本。 |
+| `422` | `invalid query parameters` | 未知的键、无效的 UUID、非整数的版本，或未知的 `selection` 值。 | 修正[查询](/zh-Hans/reference/api-errors#invalid-query-parameters)。 |
+| `404` | `issue occurrence not found` | 该发生记录不在该组已保留的历史中。 | 从该问题的发生记录列表中复制发生记录 ID。未经批准，不要改用 `latest` 或 `recommended`。 |
+| `404` | `issue not found` | 没有可读取的项目包含该问题。 | 检查账号和问题 UUID。不要把发生记录 UUID 当作问题 ID 发送。 |
+
+找不到发生记录不代表问题不存在。`404` 不表明其他账号能否读取该问题。
+
+### 链路排查响应
+
+使用 `GET /api/telemetry/traces/{trace_id}/investigation` 读取 1 条链路及其失败路径、最慢路径和相关信号。查询键为 `response_version`、`project_id`、`release` 和 `environment`，都是可选的。请求版本 3：
+
+```bash
+curl --fail-with-body -sS -G \
+  "https://api.logbrew.co/api/telemetry/traces/$TRACE_ID/investigation" \
+  -H "Authorization: Bearer $LOGBREW_TOKEN" \
+  --data-urlencode "response_version=3"
+```
+
+版本 2 为每个相关问题添加 `cause` 和 `fix`。版本 3 在采集到 `span_id` 时，把它添加到相关问题、操作和指标中。
+
+<Accordion title="版本 3 链路排查示例">
+
+这个模拟响应包含 1 个根服务端 Span 和 1 个失败的客户端 Span。失败的 Span 同时也是最慢的子 Span。这些 Span 没有结构化上下文，所以 `spans.context` 缺失。
+
+```json
+{
+  "schema_version": 3,
+  "subject": {
+    "kind": "trace",
+    "trace_id": "0af7651916cd43dd8448eb211c80319c",
+    "analyzed_span_count": 2,
+    "error_span_count": 1,
+    "service_count": 1,
+    "project_count": 1,
+    "started_at": "2026-08-03T11:05:00Z",
+    "duration_ms": 1200,
+    "releases": ["checkout@1.2.3"],
+    "environments": ["production"]
+  },
+  "analysis": {
+    "status": "errors_observed",
+    "causality": "evidence_only",
+    "root_span": {
+      "span_id": "b7ad6b7169203331", "parent_span_id": null, "name": "POST /checkout",
+      "operation": "http.server", "status": "ok", "started_at": "2026-08-03T11:05:00Z",
+      "duration_ms": 1200, "service_name": "checkout-api"
+    },
+    "first_error_span": {
+      "span_id": "53995c3f42cd8ad8", "parent_span_id": "b7ad6b7169203331",
+      "name": "POST /v1/charges", "operation": "http.client", "status": "error",
+      "started_at": "2026-08-03T11:05:00.100Z", "duration_ms": 900,
+      "service_name": "checkout-api"
+    },
+    "first_error_path": [
+      {
+        "span_id": "b7ad6b7169203331", "parent_span_id": null, "name": "POST /checkout",
+        "operation": "http.server", "status": "ok", "started_at": "2026-08-03T11:05:00Z",
+        "duration_ms": 1200, "service_name": "checkout-api"
+      },
+      {
+        "span_id": "53995c3f42cd8ad8", "parent_span_id": "b7ad6b7169203331",
+        "name": "POST /v1/charges", "operation": "http.client", "status": "error",
+        "started_at": "2026-08-03T11:05:00.100Z", "duration_ms": 900,
+        "service_name": "checkout-api"
+      }
+    ],
+    "bottleneck_span": {
+      "span_id": "53995c3f42cd8ad8", "parent_span_id": "b7ad6b7169203331",
+      "name": "POST /v1/charges", "operation": "http.client", "status": "error",
+      "started_at": "2026-08-03T11:05:00.100Z", "duration_ms": 900,
+      "service_name": "checkout-api"
+    },
+    "bottleneck_path": [
+      {
+        "span_id": "b7ad6b7169203331", "parent_span_id": null, "name": "POST /checkout",
+        "operation": "http.server", "status": "ok", "started_at": "2026-08-03T11:05:00Z",
+        "duration_ms": 1200, "service_name": "checkout-api"
+      },
+      {
+        "span_id": "53995c3f42cd8ad8", "parent_span_id": "b7ad6b7169203331",
+        "name": "POST /v1/charges", "operation": "http.client", "status": "error",
+        "started_at": "2026-08-03T11:05:00.100Z", "duration_ms": 900,
+        "service_name": "checkout-api"
+      }
+    ]
+  },
+  "spans": {
+    "items": [
+      {
+        "id": "33333333-3333-4333-8333-333333333333",
+        "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "span_id": "b7ad6b7169203331",
+        "parent_span_id": null,
+        "name": "POST /checkout",
+        "operation": "http.server",
+        "status": "ok",
+        "started_at": "2026-08-03T11:05:00Z",
+        "duration_ms": 1200,
+        "service_name": "checkout-api",
+        "environment": "production",
+        "release": "checkout@1.2.3",
+        "sdk": {"name": "@logbrew/node", "version": "0.1.11"},
+        "context": null,
+        "roles": ["root", "error_path", "bottleneck_path", "slow"]
+      },
+      {
+        "id": "44444444-4444-4444-8444-444444444444",
+        "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "span_id": "53995c3f42cd8ad8",
+        "parent_span_id": "b7ad6b7169203331",
+        "name": "POST /v1/charges",
+        "operation": "http.client",
+        "status": "error",
+        "started_at": "2026-08-03T11:05:00.100Z",
+        "duration_ms": 900,
+        "service_name": "checkout-api",
+        "environment": "production",
+        "release": "checkout@1.2.3",
+        "sdk": {"name": "@logbrew/node", "version": "0.1.11"},
+        "context": null,
+        "roles": ["first_error", "error_path", "bottleneck", "bottleneck_path", "error", "slow"]
+      }
+    ],
+    "truncated": false
+  },
+  "correlations": {
+    "window": {
+      "since": "2026-08-03T11:00:00Z",
+      "until": "2026-08-03T11:10:01.200Z",
+      "scopes": [
+        {
+          "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "environment": "production",
+          "release": "checkout@1.2.3"
+        }
+      ],
+      "truncated": false
+    },
+    "issues": {"status": "not_found", "items": [], "truncated": false},
+    "logs": {
+      "status": "available",
+      "items": [
+        {
+          "id": "55555555-5555-4555-8555-555555555555",
+          "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "severity": "error",
+          "source": "payments", "message": "Charge request failed",
+          "occurred_at": "2026-08-03T11:05:01Z", "service_name": "checkout-api",
+          "span_id": "53995c3f42cd8ad8", "environment": "production",
+          "release": "checkout@1.2.3"
+        }
+      ],
+      "truncated": false
+    },
+    "actions": {"status": "not_found", "items": [], "truncated": false},
+    "metrics": {"status": "not_found", "items": [], "truncated": false}
+  },
+  "timeline": {
+    "items": [
+      {
+        "id": "b7ad6b7169203331", "kind": "span", "occurred_at": "2026-08-03T11:05:00Z",
+        "name": "POST /checkout", "service_name": "checkout-api",
+        "span_id": "b7ad6b7169203331", "severity": null, "status": "ok",
+        "duration_ms": 1200
+      },
+      {
+        "id": "53995c3f42cd8ad8", "kind": "span", "occurred_at": "2026-08-03T11:05:00.100Z",
+        "name": "POST /v1/charges", "service_name": "checkout-api",
+        "span_id": "53995c3f42cd8ad8", "severity": null, "status": "error",
+        "duration_ms": 900
+      },
+      {
+        "id": "55555555-5555-4555-8555-555555555555", "kind": "log",
+        "occurred_at": "2026-08-03T11:05:01Z", "name": "Charge request failed",
+        "service_name": "checkout-api", "span_id": "53995c3f42cd8ad8", "severity": "error",
+        "status": null, "duration_ms": null
+      }
+    ],
+    "truncated": false
+  },
+  "evidence": {
+    "status": "partial",
+    "captured_fields": [
+      "correlations.window", "related_actions", "related_issues", "related_logs",
+      "related_metrics", "spans.sdk", "timeline", "trace.parentage", "trace.root",
+      "trace.spans"
+    ],
+    "missing_fields": ["spans.context"],
+    "redacted_fields": [],
+    "truncated_fields": []
+  },
+  "next_actions": [
+    {
+      "priority": 1, "code": "inspect_first_error_span", "target": "trace_span",
+      "reason": "error_span_observed", "span_id": "53995c3f42cd8ad8", "issue_id": null
+    },
+    {
+      "priority": 2, "code": "review_related_logs", "target": "telemetry_logs",
+      "reason": "related_logs_available", "span_id": "53995c3f42cd8ad8", "issue_id": null
+    },
+    {
+      "priority": 3, "code": "compare_release", "target": "release_summary",
+      "reason": "release_identity_available", "span_id": null, "issue_id": null
+    },
+    {
+      "priority": 4, "code": "improve_capture", "target": "sdk_configuration",
+      "reason": "evidence_incomplete", "span_id": null, "issue_id": null
+    }
+  ]
+}
+```
+
+</Accordion>
+
+| 字段 | 含义 |
+| --- | --- |
+| `subject` | 根据已分析的 Span 得出的链路汇总值。 |
+| `analysis.status` | `errors_observed`、`latency_focus` 或 `no_error_observed`。 |
+| `analysis.first_error_path` | 从根 Span 到最早错误 Span 的已知父级链。 |
+| `analysis.bottleneck_path` | 到最慢子 Span 的已知父级链。 |
+| `spans.items[].roles` | 该 Span 出现在预览中的原因：`root`、`first_error`、`error_path`、`bottleneck`、`bottleneck_path`、`error` 或 `slow`。 |
+| `correlations.window` | 相关读取使用的时间范围和部署范围。 |
+| `correlations.issues`、`logs`、`actions`、`metrics` | 该时间范围内具有相同链路 ID 的信号。 |
+
+如果某个 Span 指向的父 Span 未被 LogBrew 保留，`trace.parentage` 会缺失。Span 预览最多包含 64 个 Span。每条分析路径最多包含 64 个 Span。相关读取最多使用 8 个部署范围。
+
+目标为 `trace_span` 的下一步建议会指明本排查包中的某个 `span_id`。要读取该 Span，使用该 Span 的 `project_id`、`environment` 和 `release` 调用 Span 路由。
+
+### Span 排查响应
+
+使用 `GET /api/telemetry/traces/{trace_id}/spans/{span_id}/investigation` 读取链路中的 1 个 Span。发送 `project_id`、`environment` 和 `release`，三者都是必填项。从所选的 Span 中复制它们。不要把 Span 行的 `id` 当作 `span_id` 发送。
+
+```bash
+curl --fail-with-body -sS -G \
+  "https://api.logbrew.co/api/telemetry/traces/$TRACE_ID/spans/$SPAN_ID/investigation" \
+  -H "Authorization: Bearer $LOGBREW_TOKEN" \
+  --data-urlencode "project_id=$PROJECT_ID" \
+  --data-urlencode "environment=production" \
+  --data-urlencode "release=checkout@1.2.3"
+```
+
+<Accordion title="Span 排查示例">
+
+这个模拟响应描述链路示例中失败的客户端 Span。有 1 条错误日志具有相同的 Span ID。该 Span 的耗时超过了其已保留同类 Span 的近似第 95 百分位数。
+
+```json
+{
+  "schema_version": 1,
+  "subject": {
+    "kind": "span",
+    "id": "44444444-4444-4444-8444-444444444444",
+    "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    "trace_id": "0af7651916cd43dd8448eb211c80319c",
+    "span_id": "53995c3f42cd8ad8",
+    "parent_span_id": "b7ad6b7169203331",
+    "name": "POST /v1/charges",
+    "operation": "http.client",
+    "status": "error",
+    "started_at": "2026-08-03T11:05:00.100Z",
+    "duration_ms": 900,
+    "service_name": "checkout-api",
+    "environment": "production",
+    "release": "checkout@1.2.3",
+    "sdk": {"name": "@logbrew/node", "version": "0.1.11"},
+    "content_trust": "untrusted_telemetry"
+  },
+  "context": null,
+  "payload": {
+    "metadata": {
+      "values": {"provider": "example-pay"},
+      "included_leaf_count": 1,
+      "redacted": false,
+      "truncated": false
+    },
+    "events": [],
+    "links": [],
+    "included_leaf_count": 1,
+    "redacted": false,
+    "truncated": false
+  },
+  "analysis": {
+    "status": "error_evidence",
+    "causality": "evidence_only",
+    "observations": ["subject_error", "exact_span_error_log", "subject_at_or_above_peer_p95"]
+  },
+  "topology": {
+    "status": "available",
+    "root": {
+      "span_id": "b7ad6b7169203331", "parent_span_id": null, "name": "POST /checkout",
+      "operation": "http.server", "status": "ok", "started_at": "2026-08-03T11:05:00Z",
+      "duration_ms": 1200, "service_name": "checkout-api"
+    },
+    "parent": {
+      "span_id": "b7ad6b7169203331", "parent_span_id": null, "name": "POST /checkout",
+      "operation": "http.server", "status": "ok", "started_at": "2026-08-03T11:05:00Z",
+      "duration_ms": 1200, "service_name": "checkout-api"
+    },
+    "ancestors": [
+      {
+        "span_id": "b7ad6b7169203331", "parent_span_id": null, "name": "POST /checkout",
+        "operation": "http.server", "status": "ok", "started_at": "2026-08-03T11:05:00Z",
+        "duration_ms": 1200, "service_name": "checkout-api"
+      }
+    ],
+    "children": [],
+    "descendant_count": 0,
+    "cross_service_edges": [],
+    "parent_chain_status": "complete",
+    "truncated": false
+  },
+  "baseline": {
+    "status": "available",
+    "since": "2026-08-02T11:05:00.100Z",
+    "until": "2026-08-03T11:05:00.100Z",
+    "dimensions": {
+      "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "environment": "production",
+      "release": "checkout@1.2.3", "service_name": "checkout-api",
+      "operation": "http.client", "name": "POST /v1/charges"
+    },
+    "retained_peer_count": 40,
+    "error_peer_count": 2,
+    "error_rate_basis_points": 500,
+    "p50_duration_ms": 310.0,
+    "p95_duration_ms": 620.0,
+    "p99_duration_ms": 940.0,
+    "subject_percentile_basis_points": 9500,
+    "method": "approximate_t_digest",
+    "limitations": [
+      "retained_telemetry_only", "sampling_may_apply", "approximate_percentiles",
+      "same_release_only"
+    ]
+  },
+  "correlations": {
+    "trace": {
+      "status": "available",
+      "summary": {
+        "trace_id": "0af7651916cd43dd8448eb211c80319c",
+        "span_count": 2,
+        "error_span_count": 1,
+        "service_count": 1,
+        "project_count": 1,
+        "started_at": "2026-08-03T11:05:00Z",
+        "duration_ms": 1200,
+        "root_span": {
+          "span_id": "b7ad6b7169203331", "parent_span_id": null, "name": "POST /checkout",
+          "operation": "http.server", "status": "ok", "started_at": "2026-08-03T11:05:00Z",
+          "duration_ms": 1200, "service_name": "checkout-api"
+        },
+        "slowest_child_span": {
+          "span_id": "53995c3f42cd8ad8", "parent_span_id": "b7ad6b7169203331",
+          "name": "POST /v1/charges", "operation": "http.client", "status": "error",
+          "started_at": "2026-08-03T11:05:00.100Z", "duration_ms": 900,
+          "service_name": "checkout-api"
+        },
+        "slowest_path": [
+          {
+            "span_id": "b7ad6b7169203331", "parent_span_id": null, "name": "POST /checkout",
+            "operation": "http.server", "status": "ok",
+            "started_at": "2026-08-03T11:05:00Z", "duration_ms": 1200,
+            "service_name": "checkout-api"
+          },
+          {
+            "span_id": "53995c3f42cd8ad8", "parent_span_id": "b7ad6b7169203331",
+            "name": "POST /v1/charges", "operation": "http.client", "status": "error",
+            "started_at": "2026-08-03T11:05:00.100Z", "duration_ms": 900,
+            "service_name": "checkout-api"
+          }
+        ],
+        "error_spans": [
+          {
+            "span_id": "53995c3f42cd8ad8", "parent_span_id": "b7ad6b7169203331",
+            "name": "POST /v1/charges", "operation": "http.client", "status": "error",
+            "started_at": "2026-08-03T11:05:00.100Z", "duration_ms": 900,
+            "service_name": "checkout-api"
+          }
+        ],
+        "services": [
+          {
+            "service_name": "checkout-api", "span_count": 2, "error_span_count": 1,
+            "max_duration_ms": 1200
+          }
+        ],
+        "releases": ["checkout@1.2.3"],
+        "environments": ["production"]
+      },
+      "truncated": false
+    },
+    "issues": {"status": "not_found", "items": [], "truncated": false},
+    "logs": {
+      "status": "available",
+      "items": [
+        {
+          "id": "55555555-5555-4555-8555-555555555555",
+          "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "severity": "error",
+          "source": "payments", "message": "Charge request failed",
+          "occurred_at": "2026-08-03T11:05:01Z", "service_name": "checkout-api",
+          "span_id": "53995c3f42cd8ad8", "environment": "production",
+          "release": "checkout@1.2.3"
+        }
+      ],
+      "truncated": false
+    },
+    "actions": {"status": "not_found", "items": [], "truncated": false},
+    "metrics": {"status": "not_found", "items": [], "truncated": false},
+    "release": {
+      "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "release": "checkout@1.2.3",
+      "environment": "production", "service_name": "checkout-api"
+    }
+  },
+  "timeline": {
+    "items": [
+      {
+        "id": "53995c3f42cd8ad8:start", "kind": "span_start",
+        "occurred_at": "2026-08-03T11:05:00.100Z", "offset_ms": 0,
+        "name": "POST /v1/charges", "service_name": "checkout-api",
+        "span_id": "53995c3f42cd8ad8", "severity": null, "status": "error",
+        "duration_ms": 900
+      },
+      {
+        "id": "55555555-5555-4555-8555-555555555555", "kind": "log",
+        "occurred_at": "2026-08-03T11:05:01Z", "offset_ms": 900, "name": "payments",
+        "service_name": "checkout-api", "span_id": "53995c3f42cd8ad8", "severity": "error",
+        "status": null, "duration_ms": null
+      },
+      {
+        "id": "53995c3f42cd8ad8:end", "kind": "span_end",
+        "occurred_at": "2026-08-03T11:05:01Z", "offset_ms": 900, "name": "POST /v1/charges",
+        "service_name": "checkout-api", "span_id": "53995c3f42cd8ad8", "severity": null,
+        "status": "error", "duration_ms": 900
+      }
+    ],
+    "truncated": false
+  },
+  "evidence": {
+    "status": "partial",
+    "captured_fields": [
+      "attributes.metadata.provider", "baseline", "correlations.actions",
+      "correlations.issues", "correlations.logs", "correlations.metrics",
+      "correlations.trace", "subject.content_trust", "subject.deployment",
+      "subject.identity", "subject.sdk", "subject.timing", "topology"
+    ],
+    "missing_fields": ["context"],
+    "redacted_fields": [],
+    "truncated_fields": []
+  },
+  "next_actions": [
+    {
+      "priority": 1, "code": "inspect_parent_span", "target": "span_investigation",
+      "reason": "parent_context_available", "span_id": "b7ad6b7169203331", "issue_id": null
+    },
+    {
+      "priority": 2, "code": "review_exact_span_logs", "target": "telemetry_logs",
+      "reason": "exact_span_logs_available", "span_id": "53995c3f42cd8ad8",
+      "issue_id": null
+    },
+    {
+      "priority": 3, "code": "inspect_trace", "target": "trace_investigation",
+      "reason": "trace_context_available", "span_id": "53995c3f42cd8ad8", "issue_id": null
+    },
+    {
+      "priority": 4, "code": "compare_peer_baseline", "target": "peer_baseline",
+      "reason": "subject_latency_elevated", "span_id": "53995c3f42cd8ad8", "issue_id": null
+    },
+    {
+      "priority": 5, "code": "compare_release", "target": "release_investigation",
+      "reason": "exact_release_available", "span_id": null, "issue_id": null
+    },
+    {
+      "priority": 6, "code": "improve_capture", "target": "sdk_capture",
+      "reason": "capture_incomplete", "span_id": "53995c3f42cd8ad8", "issue_id": null
+    }
+  ]
+}
+```
+
+</Accordion>
+
+| 字段 | 含义 |
+| --- | --- |
+| `payload` | Span 的 `metadata`、最多 8 个 `events` 和最多 8 个 `links`。它们共享 64 个值的额度。 |
+| `analysis.observations` | `subject_error`、`child_error`、`exact_span_error_log`、`related_issue`、`subject_at_or_above_peer_p95` 或 `subject_at_or_above_peer_p99`。 |
+| `topology` | `root`、`parent`、`ancestors`、直接 `children`、`descendant_count` 和 `cross_service_edges`。 |
+| `topology.parent_chain_status` | `root`、`complete`、`missing`、`cycle`、`truncated` 或 `unavailable`。 |
+| `baseline` | 项目、环境、版本、服务、操作名和名称都相同的较早 Span。 |
+| `correlations.logs` | 链路 ID 和 Span ID 都相同的日志。 |
+| `correlations.issues`、`actions`、`metrics` | 在同一项目、环境和版本中具有相同链路 ID 的信号。 |
+| `timeline[].offset_ms` | 距 Span 开始的毫秒数。负值表示早于该 Span。 |
+
+基准读取 Span 开始前的 24 小时。包含 `since`，不包含 `until`。`error_rate_basis_points: 500` 表示 5%。`subject_percentile_basis_points: 9500` 表示 95% 的已保留同类 Span 耗时不超过该 Span。百分位数是近似值。把 `baseline.limitations` 与这些值放在一起保留。`not_found` 基准表示没有已保留的同类 Span。`unavailable` 基准表示读取失败，不是零计数。
+
+`parent_chain_status: "complete"` 表示已保留的父级链能追溯到根 Span。它不能证明 LogBrew 保留了该请求的每个 Span。拓扑最多返回 64 个祖先 Span、50 个直接子 Span 和 50 条跨服务边。
+
+| HTTP | `error` | 恢复方法 |
+| --- | --- | --- |
+| `422` | `trace_id must be a non-zero 32-character hexadecimal value` | 从 LogBrew 链路响应中复制 `trace_id`。 |
+| `422` | `span_id must be a non-zero 16-character hexadecimal value` | 从 LogBrew 链路响应中复制 `span_id`。 |
+| `422` | `environment and release must be non-empty exact span scope values` | 从所选的 Span 中复制范围值。 |
+| `422` | `invalid query parameters` | 只发送 `project_id`、`environment` 和 `release`，不发送其他键。 |
+| `404` | `span not found` | 检查各 ID、项目、环境和版本。 |
+
+### 日志排查响应
+
+使用 `GET /api/logs/{log_id}/investigation` 读取 1 条日志及其相关证据。该路由没有查询键。从日志列表中复制日志 ID。
+
+```bash
+curl --fail-with-body -sS \
+  "https://api.logbrew.co/api/logs/$LOG_ID/investigation" \
+  -H "Authorization: Bearer $LOGBREW_TOKEN"
+```
+
+这次读取可能返回日志列表筛选条件之外的证据。相关读取使用该日志的项目、环境和版本，以及日志前后各 5 分钟。附近日志还要求服务相同，但不需要链路 ID。精确链路读取需要该日志的链路 ID，并且可以包含其他服务。链路摘要使用相同的链路 ID 和范围，但不限制时间范围。
+
+<Accordion title="日志排查示例">
+
+这个模拟响应包含 1 条没有链路上下文的警告日志和 1 条附近日志。响应不会根据时间戳构造链路关联。
+
+```json
+{
+  "schema_version": 1,
+  "subject": {
+    "kind": "log",
+    "id": "66666666-6666-4666-8666-666666666666",
+    "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    "severity": "warning",
+    "content_trust": "untrusted_telemetry",
+    "source": "inventory",
+    "message": "Inventory update delayed",
+    "occurred_at": "2026-08-03T12:00:00Z",
+    "service_name": "checkout-api",
+    "environment": "production",
+    "release": "checkout@1.2.3",
+    "sdk": {"name": "@logbrew/node", "version": "0.1.11"}
+  },
+  "context": null,
+  "attributes": {
+    "values": {"retry_count": 2},
+    "included_leaf_count": 1,
+    "redacted": false,
+    "truncated": false
+  },
+  "analysis": {
+    "status": "warning_evidence",
+    "causality": "evidence_only",
+    "observations": ["subject_warning"]
+  },
+  "correlations": {
+    "trace": {
+      "status": "not_linked", "trace_id": null, "span_id": null, "exact_span": null,
+      "summary": null, "truncated": false
+    },
+    "issues": {"status": "not_linked", "items": [], "truncated": false},
+    "trace_logs": {"status": "not_linked", "items": [], "truncated": false},
+    "nearby_logs": {
+      "status": "available",
+      "items": [
+        {
+          "id": "77777777-7777-4777-8777-777777777777",
+          "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "severity": "info",
+          "source": "inventory", "message": "Inventory retry started",
+          "occurred_at": "2026-08-03T11:59:58Z", "service_name": "checkout-api",
+          "trace_id": null, "span_id": null, "environment": "production",
+          "release": "checkout@1.2.3", "relationship": "nearby_scope"
+        }
+      ],
+      "truncated": false
+    },
+    "actions": {"status": "not_linked", "items": [], "truncated": false},
+    "metrics": {"status": "not_linked", "items": [], "truncated": false},
+    "release": {
+      "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "release": "checkout@1.2.3",
+      "environment": "production", "service_name": "checkout-api"
+    }
+  },
+  "timeline": {
+    "items": [
+      {
+        "id": "77777777-7777-4777-8777-777777777777", "kind": "log",
+        "relationship": "nearby_scope", "occurred_at": "2026-08-03T11:59:58Z",
+        "name": "inventory", "message": "Inventory retry started",
+        "service_name": "checkout-api", "span_id": null, "severity": "info", "status": null,
+        "duration_ms": null
+      },
+      {
+        "id": "66666666-6666-4666-8666-666666666666", "kind": "log",
+        "relationship": "subject", "occurred_at": "2026-08-03T12:00:00Z",
+        "name": "inventory", "message": "Inventory update delayed",
+        "service_name": "checkout-api", "span_id": null, "severity": "warning",
+        "status": null, "duration_ms": null
+      }
+    ],
+    "truncated": false
+  },
+  "evidence": {
+    "status": "partial",
+    "captured_fields": [
+      "attributes", "attributes.retry_count", "correlations.nearby_logs",
+      "correlations.release", "subject.content_trust", "subject.environment", "subject.id",
+      "subject.message", "subject.occurred_at", "subject.project_id", "subject.release",
+      "subject.sdk.name", "subject.sdk.version", "subject.service_name", "subject.severity",
+      "subject.source", "timeline"
+    ],
+    "missing_fields": ["context", "correlations.trace.trace_id"],
+    "redacted_fields": [],
+    "truncated_fields": []
+  },
+  "next_actions": [
+    {
+      "priority": 1, "code": "review_nearby_logs", "target": "telemetry_logs",
+      "reason": "nearby_logs_available", "issue_id": null, "trace_id": null,
+      "span_id": null
+    },
+    {
+      "priority": 2, "code": "improve_capture", "target": "sdk_configuration",
+      "reason": "evidence_incomplete", "issue_id": null, "trace_id": null, "span_id": null
+    },
+    {
+      "priority": 3, "code": "compare_release", "target": "release_investigation",
+      "reason": "release_identity_available", "issue_id": null, "trace_id": null,
+      "span_id": null
+    }
+  ]
+}
+```
+
+</Accordion>
+
+| 字段 | 含义 |
+| --- | --- |
+| `attributes` | 有上限的结构化属性。`values` 不含 `context`，它位于顶层的 `context` 字段中。 |
+| `analysis.status` | `critical_evidence`、`error_evidence`、`warning_evidence` 或 `no_failure_observed`。 |
+| `correlations.trace` | 链路 ID、Span ID、`exact_span` 和链路 `summary`。 |
+| `correlations.trace_logs` | 链路 ID 相同的日志。`relationship` 为 `exact_trace`。 |
+| `correlations.nearby_logs` | 该时间范围内同一服务的日志。`relationship` 为 `nearby_scope`。不含排查对象本身和精确链路日志。 |
+| `correlations.issues`、`actions`、`metrics` | 链路 ID 相同的信号。 |
+| `correlations.release` | 用于版本排查的版本范围。它不包含比较结果。 |
+| `timeline[].relationship` | `subject`、`exact_span`、`exact_trace` 或 `nearby_scope`。 |
+
+链路状态为 `not_found` 或 `unavailable` 时，链路 ID 也可能存在。有可用的链路摘要并不保证有 `exact_span`。
+
+### 操作排查响应
+
+使用 `GET /api/telemetry/actions/{action_id}/investigation` 读取 1 个产品操作、它报告的状态和相关证据。该路由没有查询键。相关读取的时间范围和范围条件与日志排查相同。
+
+```bash
+curl --fail-with-body -sS \
+  "https://api.logbrew.co/api/telemetry/actions/$ACTION_ID/investigation" \
+  -H "Authorization: Bearer $LOGBREW_TOKEN"
+```
+
+`correlations`、`timeline` 和 `next_actions` 使用日志排查的结构。相关操作不含被排查的操作本身。
+
+<Accordion title="操作排查示例">
+
+这个模拟响应描述一位已登录用户的结账操作失败。该操作没有链路 ID。
+
+```json
+{
+  "schema_version": 1,
+  "subject": {
+    "kind": "action",
+    "id": "14141414-1414-4141-8141-141414141414",
+    "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    "name": "checkout.submit",
+    "status": "failure",
+    "content_trust": "untrusted_telemetry",
+    "occurred_at": "2026-08-03T11:05:00Z",
+    "service_name": "checkout-api",
+    "environment": "production",
+    "release": "checkout@1.2.3",
+    "sdk": {"name": "@logbrew/node", "version": "0.1.11"},
+    "subject_classification": "user",
+    "session_captured": true
+  },
+  "context": null,
+  "properties": {
+    "values": {"plan": "team", "step": "payment"},
+    "included_leaf_count": 2,
+    "redacted": false,
+    "truncated": false
+  },
+  "analysis": {
+    "status": "subject_failure",
+    "causality": "evidence_only",
+    "observations": ["subject_failure"]
+  },
+  "correlations": {
+    "trace": {
+      "status": "not_linked", "trace_id": null, "span_id": null, "exact_span": null,
+      "summary": null, "truncated": false
+    },
+    "issues": {"status": "not_linked", "items": [], "truncated": false},
+    "trace_logs": {"status": "not_linked", "items": [], "truncated": false},
+    "nearby_logs": {"status": "not_found", "items": [], "truncated": false},
+    "actions": {"status": "not_linked", "items": [], "truncated": false},
+    "metrics": {"status": "not_linked", "items": [], "truncated": false},
+    "release": {
+      "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "release": "checkout@1.2.3",
+      "environment": "production", "service_name": "checkout-api"
+    }
+  },
+  "timeline": {
+    "items": [
+      {
+        "id": "14141414-1414-4141-8141-141414141414", "kind": "action",
+        "relationship": "subject", "occurred_at": "2026-08-03T11:05:00Z",
+        "name": "checkout.submit", "message": null, "service_name": "checkout-api",
+        "span_id": null, "severity": null, "status": "failure", "duration_ms": null
+      }
+    ],
+    "truncated": false
+  },
+  "evidence": {
+    "status": "partial",
+    "captured_fields": [
+      "correlations.nearby_logs", "correlations.release", "properties.metadata",
+      "properties.metadata.plan", "properties.metadata.step", "subject.content_trust",
+      "subject.environment", "subject.id", "subject.name", "subject.occurred_at",
+      "subject.project_id", "subject.release", "subject.sdk.name", "subject.sdk.version",
+      "subject.service_name", "subject.session_captured", "subject.status",
+      "subject.subject_classification", "timeline"
+    ],
+    "missing_fields": ["context", "correlations.trace.trace_id"],
+    "redacted_fields": ["subject.distinct_id", "subject.session_id"],
+    "truncated_fields": []
+  },
+  "next_actions": [
+    {
+      "priority": 1, "code": "inspect_analytics_paths", "target": "analytics_paths",
+      "reason": "session_captured", "issue_id": null, "trace_id": null, "span_id": null
+    },
+    {
+      "priority": 2, "code": "improve_capture", "target": "sdk_configuration",
+      "reason": "evidence_incomplete", "issue_id": null, "trace_id": null, "span_id": null
+    },
+    {
+      "priority": 3, "code": "compare_release", "target": "release_investigation",
+      "reason": "release_identity_available", "issue_id": null, "trace_id": null,
+      "span_id": null
+    }
+  ]
+}
+```
+
+</Accordion>
+
+| 字段 | 含义 |
+| --- | --- |
+| `subject.status` | `queued`、`running`、`success`、`failure`；没有采集到受支持的状态时为 `null`。 |
+| `subject.subject_classification` | `user`、`anonymous`、`legacy_unknown`、`missing`、`historical_unindexed` 或 `unsupported`。 |
+| `subject.session_captured` | 该操作是否有会话。响应从不返回会话 ID。 |
+| `properties` | 该操作有上限的 `metadata` 对象。 |
+| `analysis.status` | `subject_failure`、`correlated_failure_evidence`、`in_progress`、`success_observed` 或 `status_not_captured`。 |
+
+响应从不返回主体或会话标识符。证据回执始终把 `subject.distinct_id` 列为已隐藏；采集到会话时，还会列出 `subject.session_id`。因此，每个操作排查包都是 `partial`，并包含 `improve_capture`。不要为了满足它而移除隐私控制。
+
+### 指标排查响应
+
+使用 `GET /api/telemetry/metrics/investigation` 读取 1 个项目在某个时间范围内的 1 个指标名称。响应包含当前序列、与前一个等长时间范围的比较、最新样本、链路示例和已完成的部署。版本 2 添加来自最近一个已保留样本的指标描述。版本 1 始终报告 `description_status: "not_captured"`。
+
+```bash
+curl --fail-with-body -sS -G \
+  "https://api.logbrew.co/api/telemetry/metrics/investigation" \
+  -H "Authorization: Bearer $LOGBREW_TOKEN" \
+  --data-urlencode "project_id=$PROJECT_ID" \
+  --data-urlencode "name=http.server.duration" \
+  --data-urlencode "since=2026-08-02T12:00:00Z" \
+  --data-urlencode "until=2026-08-03T12:00:00Z" \
+  --data-urlencode "interval=5m" \
+  --data-urlencode "group_by=service_name" \
+  --data-urlencode "environment=production" \
+  --data-urlencode "series_limit=12" \
+  --data-urlencode "response_version=2"
+```
+
+`project_id`、`name` 和 `since` 为必填项。包含 `since`，不包含 `until`。`until` 默认为当前时间。比较还会读取前一个等长的时间范围。
+
+<Accordion title="版本 2 指标排查示例">
+
+这个模拟直方图在 2 个 5 分钟的时间桶中有 5 个样本。最近的时间桶的 p95 为 48 ms。前一个时间范围中最近的时间桶的 p95 为 24 ms。
+
+```json
+{
+  "schema_version": 2,
+  "subject": {
+    "kind": "metric", "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    "name": "http.server.duration", "description_status": "captured",
+    "description": "Duration of one completed server request."
+  },
+  "query": {
+    "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "name": "http.server.duration",
+    "since": "2026-08-02T12:00:00Z", "until": "2026-08-03T12:00:00Z", "interval": "5m",
+    "interval_seconds": 300, "group_by": "service_name", "environment": "production",
+    "series_limit": 12
+  },
+  "purpose": "Explains one metric's latest application-supplied description and bounded change, compares the immediately preceding equal window, exposes one privacy-bounded latest-sample capture context, exact trace/span exemplars, and nearby completed deployments, and keeps every correlation evidence-only rather than claiming an anomaly or root cause.",
+  "content_trust": "untrusted_telemetry",
+  "analysis": {
+    "status": "change_observed",
+    "causality": "evidence_only",
+    "focus": {
+      "comparison_index": 0, "selection": "largest_absolute_relative_change",
+      "direction": "increased", "absolute_change": 24.0, "relative_change_percent": 100.0
+    }
+  },
+  "coverage": {
+    "samples": 5, "series": 1, "returned_series": 1, "points": 2,
+    "expected_buckets_per_series": 288, "first_seen_at": "2026-08-03T11:00:10Z",
+    "last_seen_at": "2026-08-03T11:09:50Z", "truncated": false
+  },
+  "series": [
+    {
+      "identity": {
+        "kind": "histogram", "unit": "ms", "temporality": "delta",
+        "group_by": "service_name", "group_value": "checkout-api"
+      },
+      "status": "ready",
+      "aggregation": {
+        "code": "distribution_p95",
+        "description": "Primary value is the approximate p95 of raw observations in each bucket; p50, p99, range, average, count, and sum preserve distribution context."
+      },
+      "sample_count": 5,
+      "points": [
+        {
+          "bucket_start": "2026-08-03T11:00:00Z", "bucket_end": "2026-08-03T11:05:00Z",
+          "sample_count": 2, "value": 42.0, "min": 42.0, "max": 42.0, "average": 42.0,
+          "sum": 84.0, "p50": 42.0, "p95": 42.0, "p99": 42.0, "trace_exemplars": []
+        },
+        {
+          "bucket_start": "2026-08-03T11:05:00Z",
+          "bucket_end": "2026-08-03T11:10:00Z",
+          "sample_count": 3,
+          "value": 48.0,
+          "min": 48.0,
+          "max": 48.0,
+          "average": 48.0,
+          "sum": 144.0,
+          "p50": 48.0,
+          "p95": 48.0,
+          "p99": 48.0,
+          "trace_exemplars": ["4bf92f3577b34da6a3ce929d0e0e4736"]
+        }
+      ]
+    }
+  ],
+  "comparison": {
+    "status": "available",
+    "method": "adjacent_equal_window_latest_bucket",
+    "previous_since": "2026-08-01T12:00:00Z",
+    "previous_until": "2026-08-02T12:00:00Z",
+    "items": [
+      {
+        "identity": {
+          "kind": "histogram", "unit": "ms", "temporality": "delta",
+          "group_by": "service_name", "group_value": "checkout-api"
+        },
+        "aggregation": "distribution_p95",
+        "current": {
+          "bucket_start": "2026-08-03T11:05:00Z", "bucket_end": "2026-08-03T11:10:00Z",
+          "sample_count": 3, "value": 48.0
+        },
+        "previous": {
+          "bucket_start": "2026-08-02T11:55:00Z", "bucket_end": "2026-08-02T12:00:00Z",
+          "sample_count": 2, "value": 24.0
+        },
+        "direction": "increased",
+        "absolute_change": 24.0,
+        "relative_change_percent": 100.0
+      }
+    ],
+    "truncated": false,
+    "limitation": "Each item compares the latest non-empty semantic bucket in adjacent equal-length windows. It is an observed value change, not seasonality-aware anomaly detection or evidence that a deployment caused the change."
+  },
+  "latest_sample": {
+    "status": "available",
+    "sample": {
+      "id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "kind": "histogram",
+      "value": 48.0,
+      "unit": "ms",
+      "temporality": "delta",
+      "occurred_at": "2026-08-03T11:09:50Z",
+      "service_name": "checkout-api",
+      "environment": "production",
+      "release": "checkout@1.2.3",
+      "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+      "span_id": "00f067aa0ba902b7",
+      "sdk": {"name": "@logbrew/node", "version": "0.1.11"},
+      "context": null,
+      "metadata": {"values": {}, "included_leaf_count": 0, "redacted": false, "truncated": false}
+    }
+  },
+  "exemplars": {
+    "status": "available",
+    "coverage": {
+      "matching_samples": 5, "trace_linked_samples": 1, "span_linked_samples": 1,
+      "returned_exemplars": 1
+    },
+    "items": [
+      {
+        "id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        "value": 48.0,
+        "occurred_at": "2026-08-03T11:09:50Z",
+        "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+        "span_id": "00f067aa0ba902b7",
+        "service_name": "checkout-api",
+        "environment": "production",
+        "release": "checkout@1.2.3",
+        "sdk": {"name": "@logbrew/node", "version": "0.1.11"}
+      }
+    ],
+    "truncated": false
+  },
+  "deployments": {
+    "status": "available",
+    "items": [
+      {
+        "deployment_id": "deploy-123", "release": "checkout@1.2.3",
+        "environment": "production", "service_name": "checkout-api", "status": "succeeded",
+        "started_at": "2026-08-03T11:02:00Z", "finished_at": "2026-08-03T11:03:00Z",
+        "commit_sha": "0123456789abcdef"
+      }
+    ],
+    "truncated": false
+  },
+  "timeline": {
+    "items": [
+      {
+        "id": "deploy-123", "kind": "deployment_finished",
+        "occurred_at": "2026-08-03T11:03:00Z", "value": null, "trace_id": null,
+        "span_id": null, "release": "checkout@1.2.3", "service_name": "checkout-api"
+      },
+      {
+        "id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd", "kind": "metric_exemplar",
+        "occurred_at": "2026-08-03T11:09:50Z", "value": 48.0,
+        "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736", "span_id": "00f067aa0ba902b7",
+        "release": "checkout@1.2.3", "service_name": "checkout-api"
+      }
+    ],
+    "truncated": false
+  },
+  "evidence": {
+    "status": "partial",
+    "captured_fields": [
+      "metric.current_window_coverage", "metric.deployment_overlays", "metric.description",
+      "metric.identity", "metric.latest_sample", "metric.latest_sample.kind",
+      "metric.latest_sample.occurred_at", "metric.latest_sample.scope",
+      "metric.latest_sample.sdk.name", "metric.latest_sample.sdk.version",
+      "metric.latest_sample.span_id", "metric.latest_sample.trace_id",
+      "metric.latest_sample.value", "metric.prior_window_comparison", "metric.query_scope",
+      "metric.series_semantics", "metric.span_exemplars", "metric.trace_exemplars"
+    ],
+    "missing_fields": ["metric.latest_sample.context", "metric.latest_sample.metadata"],
+    "redacted_fields": [],
+    "truncated_fields": []
+  },
+  "next_actions": [
+    {
+      "priority": 1,
+      "code": "inspect_exact_span",
+      "target": "span_investigation",
+      "reason": "Inspect the exact span that emitted a retained metric exemplar, then review its failure, latency, log, issue, action, and trace evidence.",
+      "context": {
+        "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736", "span_id": "00f067aa0ba902b7",
+        "environment": "production", "release": "checkout@1.2.3",
+        "service_name": "checkout-api"
+      }
+    },
+    {
+      "priority": 2,
+      "code": "review_deployment",
+      "target": "release_investigation",
+      "reason": "Review release-scoped telemetry for a completed deployment inside the compared evidence window without treating temporal proximity as causality.",
+      "context": {
+        "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "trace_id": null,
+        "span_id": null, "environment": "production", "release": "checkout@1.2.3",
+        "service_name": "checkout-api"
+      }
+    }
+  ]
+}
+```
+
+</Accordion>
+
+| 字段 | 含义 |
+| --- | --- |
+| `subject.description_status` | `captured`、`not_captured` 或 `unavailable`。 |
+| `query` | 规范化后的查询。`service_name`、`release` 和 `environment` 只在发送时出现。 |
+| `analysis.status` | `no_samples`、`change_observed`、`no_change_observed`、`baseline_not_found` 或 `comparison_unavailable`。 |
+| `analysis.focus` | 相对变化最大的比较项；不存在相对变化时，为绝对变化最大的比较项。没有可比较的项时为 `null`。 |
+| `series[].aggregation.code` | `gauge_last`、`delta_sum`、`distribution_p95`、`raw_cumulative_last` 或 `raw_last`。 |
+| `comparison.status` | `available`、`partial`、`not_found`、`unavailable` 或 `no_current_samples`。 |
+| `comparison.items[]` | 对同一序列标识，每个时间范围中最近的非空时间桶。 |
+| `latest_sample` | 最新的原始样本，包含 SDK、`context`、`metadata` 和链路关联。 |
+| `exemplars` | 带有链路 ID 的原始样本。`coverage` 统计有链路关联的样本。 |
+| `deployments` | 从前一个时间范围开始到 `until` 之间已完成的部署。 |
+| `next_actions[]` | `code`、`target`、纯文本的 `reason`，以及用于下一次读取的 `context` 范围。 |
+
+`relative_change_percent` 等于 `(current - previous) / abs(previous) * 100`。前一个值为零或缺失时，它为 `null`。`expected_buckets_per_series` 统计的是可能的时间桶，不是有数据的时间桶。不要把空的时间桶画成零。变化附近有部署，不能证明是该部署导致了变化。
+
+账号无法读取的项目会返回 `200 OK` 和 `analysis.status: "no_samples"`，而不是 `404`。空结果不描述其他信号类型。
+
+指标上限：时间范围最长 31 天。每个序列最多 500 个时间桶。`series_limit` 为 1 到 20，默认为 10。响应最多返回 20 个链路示例和 20 个部署。
+
+| HTTP | `error` | 恢复方法 |
+| --- | --- | --- |
+| `422` | `metric investigation response_version must be 1 or 2` | 省略 `response_version` 或发送 `2`。 |
+| `422` | `metric series project_id is required` | 发送 1 个可读取的项目 ID。 |
+| `422` | `metric series name is required` | 从指标列表中复制名称。 |
+| `422` | `metric series since is required` | 发送 `24h` 这样的值或 RFC 3339 时间戳。 |
+| `422` | `metric series range must not exceed 31 days` | 使用更短的时间范围。 |
+| `422` | `metric series interval would exceed 500 buckets` | 使用 `interval=auto` 或更宽的间隔。 |
+| `422` | `metric series_limit must be between 1 and 20` | 发送 1 到 20 之间的值。 |
+
+`interval` 为 `auto`、`1m`、`5m`、`15m`、`1h`、`6h` 或 `1d`。`group_by` 为 `none`、`service_name`、`release` 或 `environment`。其他值返回 `422`。
+
+### 排查错误
+
+| HTTP | 路由 | `error` |
+| --- | --- | --- |
+| `404` | 日志 | `log not found` |
+| `404` | 操作 | `action not found` |
+| `404` | 链路 | `trace not found` |
+| `422` | 链路 | `trace investigation response_version must be 1, 2, or 3` |
+| `400` | 日志、操作、问题 | 路径中的 ID 不是 UUID 时返回 `invalid URL path parameters` |
+| `422` | 问题、链路、Span、指标 | 未知的键或类型错误的值返回 `invalid query parameters` |
+
+`404` 表示没有可读取的项目包含该记录。每个路由在缺少有效身份验证时还会返回 `401`，在使用 `GET` 以外的方法时返回 `405`。[未找到](/zh-Hans/reference/api-errors#resource-not-found)、[路径](/zh-Hans/reference/api-errors#invalid-path-value)、[身份验证](/zh-Hans/reference/api-errors#authentication-failure)和[方法](/zh-Hans/reference/api-errors#unsupported-method)响应请参阅 [API 错误](/zh-Hans/reference/api-errors)。
+
+可选的证据读取可能在 `200 OK` 响应内部失败。此时该集合报告 `unavailable`。不要把它显示为 `not_found` 或零条记录。
+
+## <span id="severity-values">严重程度值</span>
+
+面向用户的严重程度值为 `info`、`warning`、`error` 和 `critical`。SDK 和运行时可以发送常见别名，例如 `trace`、`debug`、`warn` 或 `fatal`。REST 和实时响应始终返回规范值。例如，LogBrew 接受输入的 `warn`，并返回 `warning`。数据接收会拒绝未知的严重程度值。
+
+| 别名 | 规范值 |
+| --- | --- |
+| `trace`、`debug` | `info` |
+| `warn` | `warning` |
+| `fatal` | `critical` |
+
+## <span id="severity-rule-responses">严重程度规则响应</span>
+
+严重程度规则会改变 LogBrew 显示日志或问题的方式，但不会改变应用采集时的严重程度。日志和问题会返回 `triage` 对象：
+
+| 字段 | 含义 |
+| --- | --- |
+| `effective_severity` | 要显示的严重程度。没有规则时，它等于 `severity`。 |
+| `ignored` | 日志规则忽略了该日志，或问题已归档时为 `true`。 |
+| `rule_applied` | 严重程度规则或已忽略状态生效时为 `true`。`false` 是默认值，不表示数据缺失。 |
+
+显示时使用 `triage.effective_severity`。把 `severity` 保留为采集时的值。日志列表默认省略已忽略的日志。要包含它们，在 `GET /api/logs` 上发送 `status=ignored` 或 `status=all`。
+
+账号必须有权管理该项目中的问题，只有读取权限是不够的。没有该权限时，规则更改返回 `403` 和 `code: forbidden`。
+
+### 更改日志规则
+
+`PUT /api/logs/{log_id}/triage-rule` 为该日志以及之后具有相同签名的日志设置规则。请求体需要同时包含 `severity` 和 `ignored`：
+
+```bash
+curl --request PUT "https://api.logbrew.co/api/logs/$LOG_ID/triage-rule" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --header "Content-Type: application/json" \
+  --data '{ "severity": "info", "ignored": true }'
+```
+
+`200 OK` 响应包含完整的[日志](#log-response)。其 `severity` 仍为 `warning`，`triage` 显示该规则：
+
+```json
+{
+  "severity": "warning",
+  "triage": {
+    "effective_severity": "info",
+    "ignored": true,
+    "rule_applied": true
+  }
+}
+```
+
+以下摘录只显示有变化的字段。请求中的 `severity` 为 `source`、`info`、`warning`、`error` 或 `critical`。`source` 会恢复采集时的严重程度，但不会让已忽略的日志重新生效。要再次显示该日志，发送 `"ignored": false`。
+
+### 更改问题规则
+
+`PUT /api/telemetry/issues/{issue_id}/triage-rule` 设置分组问题及其之后发生记录的显示严重程度。请求体只接受 `severity`：
+
+```bash
+curl --request PUT "https://api.logbrew.co/api/telemetry/issues/$ISSUE_ID/triage-rule" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --header "Content-Type: application/json" \
+  --data '{ "severity": "warning" }'
+```
+
+`200 OK` 响应包含版本 1 的完整[问题](#issue-response)。采集时的 `severity` 和 `status` 不会改变：
+
+```json
+{
+  "severity": "error",
+  "status": "unresolved",
+  "triage": {
+    "effective_severity": "warning",
+    "ignored": false,
+    "rule_applied": true
+  }
+}
+```
+
+以下摘录只显示部分字段。规则不会解决、归档或重新打开问题。要执行这些更改，使用[状态更改](#issue-status-response-examples)。自动推导的优先级会跟随新的有效严重程度。用 `response_version=2` 或 `3` 读取问题即可看到它。
+
+不支持的严重程度返回 `422`：
+
+```json
+{
+  "error": "triage severity must be source, info, warning, error, or critical",
+  "code": "validation_failed",
+  "next": "use source to restore captured severity, or choose info, warning, error, or critical",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+请求体中的未知字段（例如问题规则中的 `status`）返回 `422` 和 `code: invalid_json`。不存在或无法读取的日志或问题返回 `404` 和 `code: not_found`。如果响应丢失，先重新读取日志或问题，再重新发送规则。
+
+## 错误响应格式
+
+应用错误返回 JSON 封装。以下示例是一个被拒绝的请求；`error` 和 `next` 文本取决于具体错误：
+
+```json
+{
+  "error": "<what is wrong>",
+  "code": "validation_failed",
+  "next": "<how to fix it>",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+用 `code` 做程序分支，用 `next_action` 做自动化。把 `error` 和 `next` 作为纯文本展示给用户。不要解析它们的措辞。有些错误会添加字段，例如 `limit`、`reset_at` 或 `retry_after_seconds`。没有 JSON 响应体的响应不含 LogBrew `code`。所有错误码请参阅 [API 错误](/zh-Hans/reference/api-errors)。
+
+## 使用 CLI 读取数据
+
+CLI 读取相同的路由，并在使用 `--json` 时返回相同的 JSON。先宽泛查询，再逐步缩小范围：
+
+```bash
+logbrew read releases --environment production --json
+logbrew read issues --release api@1.2.3 --status unresolved --json
+logbrew read logs --release api@1.2.3 --since 24h --json
+logbrew read actions --name checkout_failed --since 24h --json
+logbrew read traces --status error --since 24h --json
+logbrew read trace <trace_id> --json
+```
+
+添加 `--pagination cursor` 可以获取游标封装。CLI 请求的是问题响应版本 3。请参阅[读取下一页](/zh-Hans/reference/cli#read-the-next-page)和[实时查看](/zh-Hans/reference/cli#live-watch)。

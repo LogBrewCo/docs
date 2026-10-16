@@ -1,0 +1,214 @@
+---
+title: "遥测 API：请求、响应与错误码"
+sidebarTitle: "遥测 API"
+description: "使用 LogBrew 可观测性 API 接收遥测数据、按范围读取、进行产品分析、更新问题，并获取机器可读的错误。"
+---
+
+遥测 API 是位于 `https://api.logbrew.co` 的 JSON over HTTP 接口。公开 SDK 会把它们管理的批次发送到 `POST /v1/events`。自定义原生客户端会把原生封装（envelope）发送到 `POST /api/telemetry/ingest`。这两个数据接收路由都需要项目范围的接入 Bearer 令牌。
+
+读取和更改账号所属的资源时，使用账号 Bearer 令牌。切勿把账号 Bearer 令牌或浏览器会话用作 SDK 或数据接收配置。切勿把接入 Bearer 令牌发送到读取路由。
+
+## 发送范围明确的请求
+
+客户端发送请求之前，使用以下检查清单：
+
+1. 从端点表中选择路由和 HTTP 方法。
+2. 使用正确的 Bearer 令牌：数据接收使用接入 Bearer 令牌，其他所有请求使用账号 Bearer 令牌。
+3. 选择路由支持的项目范围。收到空响应后，不要扩大范围。
+4. 只添加路由接受的查询键。请参阅[查询筛选条件](/zh-Hans/reference/telemetry-api-filters)。
+5. 路由有 JSON 请求体时，发送 `Content-Type: application/json`。
+6. 重试之前，先读取 HTTP 状态和响应体。
+7. 不要让 Bearer 令牌、实时动态票据和完整的响应体出现在日志和智能体提示词中。
+
+## 端点
+
+### 数据接收
+
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| `POST` | `/v1/events` | 接收由公开 LogBrew SDK 构建并发送的批次。 |
+| `POST` | `/api/telemetry/ingest` | 接收来自自定义客户端的原生遥测封装。 |
+
+让 SDK 构建 `/v1/events` 批次。不要手动构造。原生封装请参阅 [SDK 接入](/zh-Hans/guides/sdk-ingestion)。
+
+### 遥测数据读取
+
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| `GET` | `/api/logs` | 列出结构化日志。 |
+| `GET` | `/api/logs/{log_id}` | 读取一条日志。 |
+| `GET` | `/api/logs/attributes` | 列出筛选条件可以搜索的日志属性路径和类型。 |
+| `GET` | `/api/telemetry/issues` | 列出分组后的问题。 |
+| `GET` | `/api/telemetry/issues/{issue_id}` | 读取一个分组后的问题。 |
+| `GET` | `/api/telemetry/issues/{issue_id}/events` | 列出一个分组问题的发生记录。 |
+| `PATCH` | `/api/telemetry/issues/{issue_id}` | 更新一个问题的状态、优先级或负责人。 |
+| `POST` | `/api/telemetry/issues/bulk` | 更新同一项目中 1 到 100 个问题的状态、优先级或负责人。 |
+| `GET` | `/api/telemetry/issues/assignees` | 列出一个项目中可以被分配问题的账号。 |
+| `PUT` | `/api/telemetry/issues/{issue_id}/triage-rule` | 设置问题的严重程度规则。 |
+| `PUT` | `/api/logs/{log_id}/triage-rule` | 为与某条日志匹配的日志设置严重程度规则和忽略状态。 |
+| `GET` | `/api/telemetry/traces` | 在项目范围内发现链路。 |
+| `GET` | `/api/telemetry/traces/{trace_id}` | 列出一条链路的 Span（每个 Span 是一次计时操作）。 |
+| `GET` | `/api/telemetry/traces/{trace_id}/summary` | 读取一条链路的有限摘要。 |
+| `GET` | `/api/telemetry/actions` | 列出产品操作。 |
+| `GET` | `/api/telemetry/metrics` | 列出指标样本。 |
+| `GET` | `/api/telemetry/metrics/series` | 按时间桶读取一个指标。 |
+| `GET` | `/api/telemetry/releases` | 列出版本摘要。 |
+| `GET` | `/api/telemetry/summary/volume` | 按时间桶读取一个项目的信号数量。 |
+
+### 部署
+
+| 方法 | 路径 | CLI 命令 |
+| --- | --- | --- |
+| `PUT` | `/api/telemetry/deployments/{deployment_id}` | `logbrew deploy` |
+| `GET` | `/api/telemetry/deployments/{deployment_id}?project_id=<project-uuid>` | 无 |
+| `GET` | `/api/telemetry/deployments?project_id=<project-uuid>` | 无 |
+
+部署成功或失败后，从发布自动化流程中记录这次部署。`PUT` 请求体包含 `project_id`、`release`、`environment`、`service_name`、`status`（`succeeded` 或 `failed`）、`started_at`、`finished_at`，以及可选的 `commit_sha`。`release`、`environment` 和 `service_name` 要使用与 SDK 发送的值相同的值。账号必须拥有该项目。
+
+`deployment_id` 是你为这次部署自定义的 ID。使用相同 ID 和相同请求体重试时，会返回已存储的部署。相同 ID 搭配不同的请求体时，会以 `409` 和 `idempotency_conflict` 失败。不同的部署请使用新的 ID。
+
+### 排查
+
+每个排查路由都会针对一个排查对象返回一个范围有限的证据包。[CLI](/zh-Hans/reference/cli) 的 `logbrew explain` 命令会读取这些路由并验证响应。
+
+| 方法 | 路径 | CLI 命令 |
+| --- | --- | --- |
+| `GET` | `/api/logs/{log_id}/investigation` | `logbrew explain log` |
+| `GET` | `/api/telemetry/issues/{issue_id}/investigation` | `logbrew explain issue` |
+| `GET` | `/api/telemetry/issues/{issue_id}/correction-verification` | `logbrew investigate issue <issue_id> verify` |
+| `GET` | `/api/telemetry/traces/{trace_id}/investigation` | `logbrew explain trace` |
+| `GET` | `/api/telemetry/traces/{trace_id}/spans/{span_id}/investigation` | `logbrew explain span` |
+| `GET` | `/api/telemetry/actions/{action_id}/investigation` | `logbrew explain action` |
+| `GET` | `/api/telemetry/metrics/investigation` | `logbrew explain metric` |
+| `GET` | `/api/telemetry/releases/investigation` | `logbrew explain release` |
+
+### 产品分析
+
+| 方法 | 路径 | CLI 命令 |
+| --- | --- | --- |
+| `GET` | `/api/telemetry/analytics/overview` | `logbrew analytics overview` |
+| `GET` | `/api/telemetry/analytics/properties` | `logbrew analytics properties` |
+| `POST` | `/api/telemetry/analytics/funnel` | `logbrew analytics funnel` |
+| `POST` | `/api/telemetry/analytics/retention` | `logbrew analytics retention` |
+| `POST` | `/api/telemetry/analytics/lifecycle` | `logbrew analytics lifecycle` |
+| `POST` | `/api/telemetry/analytics/paths` | `logbrew analytics paths` |
+| `POST` | `/api/telemetry/analytics/segments/compare` | `logbrew analytics compare` |
+
+`POST` 分析路由接受 JSON 请求体，而不是查询键。请参阅[产品分析](/zh-Hans/concepts/product-analytics)。
+
+### 实时动态
+
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| `POST` | `/api/feed/ticket` | 使用账号 Bearer 令牌创建一个短期有效的实时动态票据。 |
+| `GET` | `/api/feed/live?ticket=<ticket>` | 使用该票据打开 WebSocket 连接。 |
+
+### 账号与登录
+
+用量、配额、订阅和退出登录路由请参阅[账号 API](/zh-Hans/reference/account-api)。
+
+## 成功状态码
+
+| 请求类型 | 成功状态 |
+| --- | --- |
+| 数据接收、读取、问题更新、规则、部署、产品分析和实时动态票据 | `200 OK` |
+| 实时动态连接 | `101 Switching Protocols`，随后是 WebSocket 消息 |
+
+`200` 响应并不能证明证据是完整的。读取响应中的覆盖率、截断和状态字段。
+
+## 查询筛选条件和分页
+
+每个读取路由都接受各自的查询键。`project`、`trace` 和 `user` 等友好别名不是查询键。列表路由默认返回不带外层对象的数组，使用 `pagination=cursor` 时返回游标封装。部署列表始终返回页面对象。请参阅[查询筛选条件](/zh-Hans/reference/telemetry-api-filters)。
+
+## 响应和错误
+
+- [响应格式](/zh-Hans/reference/telemetry-response-shapes)为每类响应提供一个示例。
+- [API 错误](/zh-Hans/reference/api-errors)列出了错误码和恢复方法。
+
+先读取 `code`，再读取供人阅读的消息。程序行为依据 `next_action`，给人的指引使用 `next`。不要解析 `error` 或 `next` 的措辞。
+
+## 更新问题
+
+这些请求使用账号 Bearer 令牌。它特意与 `LOGBREW_INGEST_BEARER` 区分开。账号必须有权管理该问题所在项目中的问题。否则，请求会以 `403` 和 `forbidden` 失败。同一权限涵盖状态、优先级和负责人的更改，以及问题规则和日志规则。
+
+每个请求设置以下字段中的 1 个或多个：
+
+| 字段 | 值 |
+| --- | --- |
+| `status` | `unresolved`（未解决）、`resolved`（已解决）或 `archived`（已归档）。`ignored` 是 `archived` 的旧名称。 |
+| `priority` | `high`（高）、`medium`（中）或 `low`（低）。 |
+| `assignee` | 用户 ID、表示已登录账号的 `me`，或用于移除负责人的 `none`。 |
+
+请求中不包含上述任何字段时，会以 `422` 和 `validation_failed` 失败。
+
+一个问题有 0 或 1 个负责人。负责人必须能够读取该项目。否则，请求会以 `422` 和 `validation_failed` 失败，LogBrew 不会做任何更改。可分配的账号请通过[列出负责人](#list-assignees)获取。其他任何 `assignee` 值也会以 `422` 和 `validation_failed` 失败。
+
+你手动设置的优先级会保持不变。没有手动设置优先级时，优先级跟随问题的严重程度：`error` 和 `critical` 为 `high`，`warning` 为 `medium`，`info` 为 `low`。
+
+已经是所请求值的字段不会改变。超时后，可以再次发送同一个请求。超时并不能证明更改没有发生。发送其他更改之前，先重新读取该问题。
+
+### <span id="update-one-issue">更新单个问题</span>
+
+添加 `response_version=3`，即可在响应中获得 `archived`、优先级和负责人：
+
+```bash
+curl -X PATCH "$LOGBREW_API_URL/api/telemetry/issues/$ISSUE_ID?response_version=3" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  -H "Content-Type: application/json" \
+  --data '{ "status": "archived", "priority": "low", "assignee": "me" }'
+```
+
+响应为更新后的问题。请参阅[问题状态响应示例](/zh-Hans/reference/telemetry-response-shapes#issue-status-response-examples)。
+
+### <span id="update-issues-in-bulk">批量更新问题</span>
+
+发送 `project_id`，以及该项目中 1 到 100 个不同的问题 ID：
+
+```bash
+curl -X POST "$LOGBREW_API_URL/api/telemetry/issues/bulk" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  -H "Content-Type: application/json" \
+  --data '{
+    "project_id": "<project-uuid>",
+    "issue_ids": ["<issue-uuid-1>", "<issue-uuid-2>"],
+    "assignee": "<user-uuid>"
+  }'
+```
+
+该请求会对每个问题应用相同的更改。响应包含 `project_id` 和 `results`，每个问题 ID 对应 1 个结果，顺序与请求相同。每个结果包含 `issue_id`、`outcome` 和 `issue`。在响应版本 3 中，`issue` 是该问题的当前数据；对于 `not_found`，它为 `null`。
+
+| `outcome` | 含义 |
+| --- | --- |
+| `updated` | LogBrew 已应用更改。 |
+| `unchanged` | 该问题已经是所请求的值。 |
+| `not_found` | 该项目中没有这个 ID 的问题。LogBrew 没有对它做任何更改。 |
+
+空列表、超过 100 个 ID 或重复的 ID，都会以 `422` 和 `validation_failed` 失败。把更大的集合拆分成多个请求。如果账号无法读取该项目，请求会以 `404` 和 `not_found` 失败。
+
+### <span id="list-assignees">列出负责人</span>
+
+发送项目 ID，获取该项目中所有可以被分配问题的账号：
+
+```bash
+curl "$LOGBREW_API_URL/api/telemetry/issues/assignees?project_id=$PROJECT_ID" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER"
+```
+
+该列表包含所有能够读取该项目的账号。每个条目包含 `user_id`、`name` 和 `email`。账号没有姓名时，`name` 为 `null`。请参阅[负责人列表响应](/zh-Hans/reference/telemetry-response-shapes#assignee-list-response)。任何能够读取该项目的账号都可以获取此列表。如果账号无法读取该项目，请求会以 `404` 和 `not_found` 失败。
+
+成员失去项目访问权限后，分配给该成员的问题将不显示负责人。如果该成员重新获得访问权限，这些问题会再次显示该成员，除非在此期间有人更改或移除了负责人。
+
+### 设置问题和日志规则
+
+规则会改变 LogBrew 显示匹配信号的方式，不会删除数据。采集到的 `severity` 保持不变，响应会在 `triage` 中显示该规则。
+
+| 请求 | JSON 请求体 |
+| --- | --- |
+| `PUT /api/telemetry/issues/{issue_id}/triage-rule` | `{ "severity": "<value>" }` |
+| `PUT /api/logs/{log_id}/triage-rule` | `{ "severity": "<value>", "ignored": true }` |
+
+`severity` 可取 `info`、`warning`、`error`、`critical` 或 `source`。`source` 会移除覆盖设置，重新显示采集到的严重程度。对于日志规则，`ignored: true` 会在默认日志列表中隐藏匹配的日志。使用 `status=ignored` 或 `status=all` 读取它们。规则适用于已保留的和未来的匹配信号。其他值会以 `422` 和 `validation_failed` 失败。
+
+<Warning>
+  不要发送空的版本值。LogBrew 会拒绝空版本值，以确保版本跟踪可靠。
+</Warning>

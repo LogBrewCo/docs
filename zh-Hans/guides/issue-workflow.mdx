@@ -1,0 +1,247 @@
+---
+title: "在 LogBrew 中分诊和解决问题"
+sidebarTitle: "管理问题"
+description: "在 LogBrew 中管理问题。先读取发生记录的证据，再逐个或批量解决、归档、重新打开问题，设置优先级或分配负责人。"
+---
+
+问题把具有相同指纹的错误发生记录归为一组。更改状态、优先级或负责人之前，先阅读分组摘要和一条发生记录。更改状态、优先级或负责人只是记录团队的决定，不会修复软件，也不会改写已采集的事件。
+
+开始之前，安装 [LogBrew CLI](/zh-Hans/guides/cli) 并运行 `logbrew login`。
+
+## 问题与发生记录
+
+问题列表返回的是分组摘要，而不是完整的事件。打开详情之前，先查看这些字段：
+
+| 字段 | 含义 |
+| --- | --- |
+| `title` | 采集到的故障标题。 |
+| `severity` | 采集到的严重程度。 |
+| `triage.effective_severity` | 应用问题规则后，LogBrew 使用的严重程度。`severity` 保留采集时的值。规则生效时，`triage.rule_applied` 为 `true`。 |
+| `occurrence_count` | 该组中已保留的发生记录数量。 |
+| `first_seen_at` | 最早一条已保留发生记录的时间。 |
+| `last_seen_at` | 最新一条已保留发生记录的时间。 |
+| `project_id` | 包含该问题的项目。 |
+| `service_name` | 最新一条发生记录的服务。 |
+| `release` | 最新一条发生记录的版本。 |
+| `environment` | 最新一条发生记录的环境。 |
+| `status` | 问题的工作流状态。参见[状态值](#status-values)。 |
+| `priority` | 问题的分诊顺序。参见[优先级](#priority)。 |
+| `priority_source` | 由人设置优先级时为 `manual`；优先级跟随严重程度时为 `derived`。 |
+| `assignee` | 负责下一步的账号，或 `null`。参见[分配问题](#assign-issues)。 |
+
+发生次数不是受影响的用户数。计数和时间只针对返回的范围，而不是完整的错误历史。`--since` 或 `--until` 筛选条件会限制 LogBrew 统计的发生记录。报告某个计数时，同时说明得出该计数所用的筛选条件。
+
+## <span id="status-values">状态值</span>
+
+| 状态 | 含义 |
+| --- | --- |
+| `unresolved` | 该问题需要做出决定。 |
+| `resolved` | 团队已将该问题标记为已修复。该状态不能证明修复有效。 |
+| `archived` | 团队已将该问题移出分诊队列。 |
+
+`archived` 以前叫 `ignored`。两个名称选中的是同一批问题，作为输入都可以接受。`logbrew read`、`logbrew issues` 以及 API 第 2 版和第 3 版显示 `archived`。API 第 1 版（默认版本）、实时查看（watch）数据流和问题排查响应显示 `ignored`。控制台中，这些状态显示为“未解决”“已解决”和“已归档”。
+
+状态作用于整个问题，而不是某一条发生记录。严重程度表示紧急程度，状态记录的是决定，两者要分开看待。经过验证的修复之后，`critical` 问题也可以是 `resolved`。`archived` 问题会保留采集时的严重程度。
+
+LogBrew 不会自动重新打开已解决的问题。如果问题解决后又出现新的发生记录，排查结果会把 `lifecycle.effective_status` 报告为 `regressed`。在有人重新打开该问题之前，`status` 仍为 `resolved`。
+
+## <span id="priority">优先级</span>
+
+优先级决定团队分诊问题的先后顺序：
+
+| 优先级 | 含义 |
+| --- | --- |
+| `high` | 首先检查该问题。 |
+| `medium` | 在 `high` 问题之后检查。 |
+| `low` | 该问题可以稍后处理。 |
+
+每个问题都有优先级。如果没有人设置，优先级会跟随问题的严重程度：`error` 和 `critical` 对应 `high`，`warning` 对应 `medium`，`info` 对应 `low`。当问题规则更改了严重程度时，优先级跟随 `triage.effective_severity`，此时 `priority_source` 为 `derived`。由人设置的优先级保持不变，`priority_source` 为 `manual`。
+
+列出需要首先检查的问题：
+
+```bash
+logbrew read issues --project "<project_id>" --status unresolved \
+  --priority high --since 24h --json
+```
+
+## <span id="assign-issues">分配问题</span>
+
+分配问题，以表明由谁负责下一步。一个问题有 0 或 1 个负责人。
+
+<Steps>
+  <Step title="查找可分配的人">
+    ```bash
+    logbrew issues assignees --project "<project_id>" --json
+    ```
+
+    该列表包含所有可以读取该项目的账号。每个条目都有 `user_id`、`name` 和 `email`。复制 `user_id`。不能把问题分配给无法读取该项目的账号。
+  </Step>
+
+  <Step title="分配问题">
+    ```bash
+    logbrew issues assign "<user_id>" "<issue_id>" --json
+    ```
+
+    用 `me` 代替用户 ID，即可把问题分配给自己。使用 `logbrew issues unassign "<issue_id>" --json` 移除负责人。添加 `--project`，可以一次更改同一项目中最多 100 个问题。
+  </Step>
+
+  <Step title="查看分配给你的问题">
+    ```bash
+    logbrew read issues --project "<project_id>" --assignee me \
+      --status unresolved --json
+    ```
+
+    使用 `--assignee none` 查找没有负责人的问题。
+  </Step>
+</Steps>
+
+分配问题需要拥有该项目的问题管理权限。有了这项权限，你还可以更改状态、优先级，以及问题规则和日志规则。任何可以读取该项目的账号都可以成为负责人。
+
+成员失去项目访问权限后，分配给该成员的问题会显示为没有负责人，并出现在 `--assignee none` 的读取结果中。如果该成员重新获得访问权限，这些问题会再次显示该成员为负责人，除非在此期间有人更改或移除了负责人。
+
+## 推荐工作流
+
+<Steps>
+  <Step title="在单一范围内列出未解决的问题">
+    ```bash
+    logbrew read issues --project "<project_id>" --environment production \
+      --release api@1.2.3 --status unresolved --since 24h --json
+    ```
+
+    之后的列表读取保持相同的筛选条件。结果为空表示没有问题符合这一范围，并不能证明项目中没有错误。复制确切的问题 ID，而不是标题。
+  </Step>
+
+  <Step title="读取问题详情">
+    ```bash
+    logbrew read issue "<issue_id>" --json
+    ```
+
+    继续之前，确认返回的项目正确。读取返回的是快照。更改状态之前，重新读取一次该问题。
+  </Step>
+
+  <Step title="排查一条发生记录">
+    ```bash
+    logbrew investigate issue "<issue_id>" --occurrence recommended --json
+    ```
+
+    详情读取和排查读取不使用列表筛选条件。把 `subject.project_id`、`event.occurred_at`、版本和环境与你的范围进行比较。推荐的发生记录可能早于最新的那条。完整的证据审查，按照[排查问题](/zh-Hans/guides/investigate-an-issue)进行。
+  </Step>
+
+  <Step title="仅在链路证据可用时查看链路">
+    只有当 `correlations.trace.status` 为 `available` 时，才读取链路。使用响应中的 Trace ID，绝不要自行编造。
+
+    ```bash
+    logbrew read trace "<trace_id>" --project "<project_id>" --json
+    logbrew read logs --trace "<trace_id>" --project "<project_id>" \
+      --since 24h --json
+    ```
+
+    链路读取没有时间筛选条件。如果状态为 `not_linked`，继续使用问题证据。
+  </Step>
+
+  <Step title="验证候选部署">
+    把已排查的发生记录作为基准。从部署证据或你的发布流程中获取部署 ID。
+
+    ```bash
+    logbrew investigate issue "<issue_id>" verify \
+      --baseline-occurrence "<occurrence_id>" \
+      --candidate-deployment "<deployment_id>" \
+      --json
+    ```
+
+    观察时间范围内没有复发，并不能证明问题已永久修复。如果 `status` 为 `insufficient_traffic` 或 `unavailable`，让问题保持 `unresolved`。按照返回的下一步建议处理。
+  </Step>
+
+  <Step title="更改状态、优先级或负责人">
+    运行其中一条命令。这些命令不会请求确认，所以先核对问题 ID。
+
+    ```bash
+    logbrew issues resolve "<issue_id>" --json
+    logbrew issues archive "<issue_id>" --json
+    logbrew issues reopen "<issue_id>" --json
+    logbrew issues priority low "<issue_id>" --json
+    logbrew issues assign me "<issue_id>" --json
+    ```
+
+    不带 `--project` 时，每条命令只接受 1 个问题 ID。检查退出码，以及返回的 `status`、`priority` 和 `assignee`。如果没有返回结果，进行下一次更改之前，先重新读取该问题。
+
+    旧脚本可以使用 `logbrew set issue "<issue_id>" resolved`，以及 `resolve`、`ignore` 和 `reopen` 快捷命令。`ignore` 会把状态设置为 `archived`。
+  </Step>
+</Steps>
+
+## 一次更改多个问题
+
+添加 `--project`，可以用一条命令更改同一项目中最多 100 个问题：
+
+```bash
+logbrew issues archive "<issue_id_1>" "<issue_id_2>" "<issue_id_3>" \
+  --project "<project_id>" --json
+```
+
+该命令对每个问题应用同一项更改。每个问题 ID 只能出现一次。如果 ID 超过 100 个或有重复，CLI 会在发送请求之前拒绝该命令。结果中每个问题对应 1 个条目，顺序与命令中的顺序一致：
+
+| 结果 | 含义 |
+| --- | --- |
+| `updated` | LogBrew 已应用该更改。 |
+| `unchanged` | 该问题已经是所请求的值。 |
+| `not_found` | 该项目中没有此 ID 的问题。LogBrew 没有对它做任何更改。 |
+
+每个条目都有 `issue_id`、`outcome` 和 `issue`。`issue` 是该问题的当前状态，结果为 `not_found` 时为 `null`。网络故障后，可以再次运行同一条命令，已经更改过的问题会显示 `unchanged`。超过 100 个问题时，分多条命令运行。对于 `not_found` 结果，从该项目的问题列表中重新复制 ID。API 请求的说明见[批量更新问题](/zh-Hans/reference/telemetry-api#update-issues-in-bulk)。
+
+## 选择下一个状态
+
+- **保持 `unresolved`**：故障仍在发生，或修复尚未验证。缺少链路不是归档问题的理由。
+- **设置为 `resolved`**：团队认可修复证据之后。建议的修复不算证据。
+- **设置为 `archived`**：适用于已接受的情况或仅用于测试的信号。该决定作用于该问题的所有发生记录。该命令没有原因字段，所以在团队的工作记录中写明原因。
+- **用 `unresolved` 重新打开**：问题解决后又出现新的发生记录时。`lifecycle.regression.first_reappeared_occurrence` 标识了这条记录。把它与解决问题时依据的发生记录进行比较。不要创建另一个问题。
+
+## 交接排查工作
+
+给下一个人提供引用信息，而不是原始事件的完整转储：
+
+- 问题 ID、状态、优先级、负责人和严重程度。
+- 项目、服务、环境和版本。
+- 首次出现时间、最近出现时间和发生次数。
+- 所选发生记录 ID 和 `occurrence_selection.reason`。
+- `fix.status`、`cause.status` 以及它们的 `provenance`。
+- 链路状态和 Trace ID（如果有）。
+- 复现状态和缺失的证据。
+- 候选部署的验证结果。
+- 响应返回的下一步建议。
+
+把推测的原因和建议的修复都标注为“建议”。
+
+## 从 CLI 错误中恢复
+
+解析输出之前，先检查进程的退出码。成功时，JSON 输出到标准输出。解析错误以退出码 `2` 退出。运行时错误以退出码 `1` 退出。JSON 错误输出到标准错误，包含 `ok: false`、`error`、`message` 和 `next`。把 `next` 当作建议展示，不要自动运行它。
+
+例如，`logbrew issues archive "<issue_id_1>" "<issue_id_2>" --json` 没有 `--project`。它会在发送请求之前以退出码 `2` 退出，并返回错误 `invalid_issue_command`。
+
+API 拒绝请求时，`error` 为 `api_error`。从 `status` 读取 HTTP 状态码，从 `api_code` 读取 API 错误码。
+
+| 结果 | 恢复方法 |
+| --- | --- |
+| `not_logged_in` | 请用户运行 `logbrew login`，然后重试读取。 |
+| `invalid_issue_command` | 修正命令。超过 1 个问题时使用 `--project`，ID 最多 100 个，且每个 ID 只出现一次。 |
+| 问题 ID 无效 | 从问题列表或详情响应中复制确切的 ID。 |
+| 找不到问题 | 确认当前登录的账号和项目。 |
+| 更改失败，`status` 为 `403` | 该账号无权管理此项目中的问题。请有权限的人处理。 |
+| `invalid_assignee` | `--assignee` 筛选条件只接受 `me`、`none` 或用户 ID。 |
+| 分配失败，`status` 为 `422`，`api_code` 为 `validation_failed` | 负责人无法读取该项目。从 `logbrew issues assignees` 中选择一个账号，或者先为该成员授予项目访问权限。 |
+| `investigation_response_invalid` | 响应未通过 CLI 校验。重试一次。如果仍然出现，更新 CLI 或报告问题。不要绕过校验。 |
+| 链路状态为 `not_linked` | 继续使用问题证据。不要读取链路。 |
+| 链路状态为 `unavailable` | 稍后重试排查读取。 |
+| 验证结果为 `insufficient_traffic` | 让问题保持 `unresolved`。等候选版本有流量后，再次验证。 |
+
+响应失败并不能证明状态、优先级或负责人的更改没有生效。重试之前，先读取该问题。
+
+## 怎样的问题才有用
+
+- 清晰的标题和易读的消息。
+- 稳定的指纹。
+- 堆栈帧（如果有）。
+- 版本、环境和服务上下文。
+- 链路上下文（如果随发生记录一起采集）。
+- 少量相关的属性，而不是完整的负载转储。
+
+列表筛选条件和响应约定，参见[遥测 API](/zh-Hans/reference/telemetry-api)。

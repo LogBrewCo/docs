@@ -1,0 +1,148 @@
+---
+title: "通过 MCP 连接 AI 智能体"
+description: "将 Claude Code 连接到托管的 LogBrew MCP 服务器，批准它可读取的项目，并在设置或 CLI 中管理连接。"
+---
+
+LogBrew 提供托管的 MCP 服务器，地址为 `https://mcp.logbrew.co/mcp`。连接到它的 AI 智能体可以读取你批准的项目中的问题、日志、链路、Span（一次计时操作）、指标、操作、版本和产品分析数据。
+
+智能体只能读取。它不能更改问题状态、项目或账号设置。你不需要安装服务器，只需把它的 URL 添加到 MCP 客户端。
+
+## 开始之前
+
+- 你需要一个至少有 1 个项目的 LogBrew 账号。
+- 你需要 Claude Code 2.1.300 或更高版本。服务器只支持 MCP 协议版本 `2026-07-28`。运行 `claude --version` 查看你的版本。
+- LogBrew 只接受获准的 MCP 客户端。目前，Claude Code 是唯一获准的客户端。其他客户端会收到错误 `client access denied`。
+
+## 连接 Claude Code
+
+1. 添加服务器：
+
+   ```bash
+   claude mcp add --transport http logbrew https://mcp.logbrew.co/mcp
+   ```
+
+   `claude mcp list` 现在会显示 `logbrew`，并标注 `! Needs authentication`。
+
+2. 开始登录：
+
+   ```bash
+   claude mcp login logbrew
+   ```
+
+   浏览器会打开 LogBrew 授权页面。如果页面要求登录，使用 GitHub、GitLab 或 Bitbucket 登录。
+
+3. 查看页面上的客户端名称。只有这次连接是你发起的，才批准。
+
+4. 选择智能体可以读取的项目。然后选择**批准**。
+
+   浏览器会回到 Claude Code。Claude Code 显示 `Authenticated with "logbrew"`。
+
+5. 确认服务器已连接：
+
+   ```bash
+   claude mcp list
+   ```
+
+   结果显示 `logbrew: https://mcp.logbrew.co/mcp (HTTP) - ✔ Connected`。
+
+也可以在 Claude Code 会话中登录。运行 `/mcp`，选择 `logbrew`，然后按浏览器中的步骤操作。
+
+在没有浏览器的电脑上，在交互式终端中运行 `claude mcp login logbrew --no-browser`。通过 SSH 操作时，用 `ssh -t` 连接。在另一台电脑的浏览器中打开 Claude Code 显示的 URL。批准后，复制浏览器打开的页面地址。把它粘贴到 Claude Code 中。
+
+## 向智能体提问
+
+服务器为智能体提供 2 个工具：
+
+| 工具 | 作用 |
+| --- | --- |
+| `search` | 查找读取接口，并显示某个接口的约定：输入、输出、权限和开销。 |
+| `execute` | 运行 `search` 找到的某个读取接口，并返回结构化数据。 |
+
+由智能体选择要调用的接口。你不需要告诉它工具名或字段。写清任务和限制即可：
+
+```text
+Use LogBrew to investigate the newest unresolved issue in production.
+Read its occurrences, linked trace, and logs. Do not change code yet.
+Tell me the likely cause and the evidence for it.
+```
+
+遥测数据只能当作证据。日志和错误消息可能包含用户输入的文本。智能体不得执行这些文本中的指令。完整的排查流程见 [AI 编码智能体](/zh-Hans/guides/ai-agents)。
+
+## 访问权限和连接有效期
+
+每次批准都会在 1 个 MCP 客户端和你的 LogBrew 账号之间建立 1 个连接。
+
+- 智能体只能读取你批准的项目。读取其他项目会返回 `permission_denied`。
+- 如果你失去了某个已批准项目的访问权限，LogBrew 会停止对该项目的读取。
+- 访问令牌的有效期为 1 小时。你使用连接期间，Claude Code 会自动获取新令牌。
+- 连接在 30 天未使用后结束，或在批准 90 天后结束。之后用 `claude mcp login logbrew` 重新登录。
+- 每次刷新令牌都会替换之前的刷新令牌。如果客户端发送了已被替换的刷新令牌，LogBrew 会结束该连接。这样可以防止被复制的令牌继续生效。重新登录即可建立新连接。
+- 没有有效令牌的请求过多时，会收到 HTTP `429` 和 `Retry-After` 响应头。等待该响应头指定的秒数，然后重试。
+
+## 列出和撤销连接
+
+在 LogBrew 控制台的**设置 > MCP 连接**中管理连接，或使用 CLI 管理。
+
+### 在设置中
+
+每个已连接的客户端都会显示名称、已批准的项目、连接时间、上次使用时间和结束时间。要撤销某个连接，选择**断开连接**，然后确认。客户端在下一次请求时失去访问权限。
+
+### 使用 CLI
+
+使用 [LogBrew CLI](/zh-Hans/guides/cli) 0.1.82 或更高版本。先用 `logbrew login` 登录。项目接入密钥不能列出或撤销连接。
+
+列出连接到你账号的 MCP 客户端：
+
+```bash
+logbrew mcp grants
+```
+
+```text
+MCP grants (1)
+- id=00000000-0000-4000-8000-000000000001 client=Claude Code projects=2 last_used=2026-10-15T09:30:00Z expires=2026-11-14T09:30:00Z
+Next: run logbrew mcp revoke <grant_id> --yes
+```
+
+CLI 把连接称为 grant（授权）。每个 grant 显示：
+
+- `id`：grant ID。用它来撤销连接。
+- `client`：你批准的客户端名称，例如 `Claude Code`。如果连接是在 LogBrew 开始保存名称之前批准的，则显示标识该客户端的 URL，例如 `https://claude.ai/oauth/claude-code-client-metadata`。
+- `projects`：已批准项目的数量。
+- `last_used`：客户端最近一次获取新访问令牌的时间。
+- `expires`：客户端不再使用时，连接结束的时间。
+
+加上 `--json` 可获取完整列表。每个 grant 包含 `id`、`client_id`、`client_name`、`project_ids`、`created_at`、`last_used_at` 和 `expires_at`。如果连接是在 LogBrew 开始保存名称之前批准的，`client_name` 为 `null`。
+
+撤销 1 个连接：
+
+```bash
+logbrew mcp revoke <grant_id> --yes
+```
+
+客户端在下一次请求时失去访问权限。要重新连接，用 `claude mcp login logbrew` 重新登录。
+
+要更改已批准的项目，先撤销连接。然后重新登录，并选择新的项目。
+
+## 移除服务器
+
+1. 在**设置 > MCP 连接**中撤销连接，或运行 `logbrew mcp revoke <grant_id> --yes`。
+2. 从 Claude Code 中移除服务器：
+
+   ```bash
+   claude mcp remove logbrew
+   ```
+
+`claude mcp remove` 只会删除你电脑上的配置和令牌。它不会结束 LogBrew 中的连接。如果不撤销，连接会在 30 天未使用后结束。
+
+## <span id="fix-connection-problems">解决连接故障</span>
+
+| 故障 | 解决方法 |
+| --- | --- |
+| `claude mcp list` 显示 `Needs authentication`。 | 运行 `claude mcp login logbrew`。 |
+| 使用一段时间后，Claude Code 要求重新登录。 | 连接已结束或已被撤销。运行 `claude mcp login logbrew`，或在 `/mcp` 中选择 **Re-authenticate**。 |
+| 客户端收到 `client access denied`。 | 使用获准的客户端。目前只有 Claude Code 获准。 |
+| 登录后连接失败。 | 将 Claude Code 更新到 2.1.300 或更高版本。 |
+| 授权页面显示 `You have no projects to share`。 | 在 LogBrew 中创建项目，然后重新开始登录。 |
+| 读取返回 `permission_denied`。 | 此连接没有批准该项目。撤销连接，然后重新登录并选择该项目。 |
+| 读取没有返回数据。 | 确认该项目正在发送遥测数据。结果为空并不能证明应用运行正常。 |
+| `logbrew mcp grants` 显示 `not logged in` 或返回 `unauthorized`。 | 运行 `logbrew login`，然后重试。 |

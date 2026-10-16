@@ -1,0 +1,154 @@
+---
+title: "应用遥测：日志、链路与指标"
+sidebarTitle: "遥测"
+description: "比较日志、链路、指标、问题和产品操作。为排查选择合适的 LogBrew 信号。"
+---
+
+遥测是应用发送的、关于自身行为的结构化证据。日志记下应用上报的事件。链路把各项操作连接起来。指标衡量数值。问题把故障分组。操作反映产品活动。
+
+项目、服务、环境、版本和时间字段决定了每个结果的范围。要了解你的 SDK 会采集哪些信号，阅读 [SDK 接入](/zh-Hans/guides/sdk-ingestion)。
+
+## <span id="choose-the-correct-telemetry-data-type">选择信号</span>
+
+| 信号 | 用途 |
+| --- | --- |
+| 问题 | 重复出现的故障，例如发生了 18 次的结账异常。 |
+| 日志 | 应用上报的单个事件，例如一次支付失败。 |
+| 链路 | 一次请求经过各个已插桩服务时的操作和耗时。 |
+| 指标 | 随时间变化的测量值，例如请求耗时或已完成的任务数。 |
+| 操作 | 产品活动，例如页面浏览、屏幕浏览或互动。 |
+
+排查故障时，从问题或日志入手。用可用的链路检查单次执行。用指标趋势检查更长的时间段。关于活动和留存，阅读[产品分析](/zh-Hans/concepts/product-analytics)。
+
+只采集排查需要的字段。使用稳定的服务名、操作名和指标名。不要发送凭据、支付数据或原始请求体。[控制采集的数据](/zh-Hans/guides/safe-capture)介绍了相关的控制项。
+
+## 日志
+
+日志是应用在某个时间点留下的记录。一条有用的日志包含：
+
+- 事件在来源端发生的时间。
+- 规范的严重程度。
+- 项目和服务范围。
+- 环境和版本。
+- 有活动的链路上下文时，带有链路和 Span 标识符。
+- 少量具名属性，为事件提供上下文。
+
+日志响应在 `occurred_at`、`severity`、`project_id`、`service_name`、`environment`、`release`、`trace_id`、`span_id` 和 `attributes` 中包含这些值。把上下文放在具名属性中，不要写进消息文本。
+
+同一视图中来自多个服务的日志，并不因此存在链路关系。只有链路上下文才能建立这种关系。
+
+## 链路
+
+一条链路包含一次请求或操作的所有 Span，每个 Span 是一次计时操作。根 Span 没有父 Span。子 Span 会标明它的父 Span。同一链路中的所有 Span 都有相同的 Trace ID 和不同的 Span ID。参见[链路追踪](/zh-Hans/concepts/distributed-tracing)。
+
+在没有活动链路上下文时发送的日志、问题、操作或指标，会得到一条采集链路。这条链路只包含采集 Span，并不表示请求路径。参见[采集 Span](/zh-Hans/concepts/distributed-tracing#capture-spans)。
+
+## <span id="read-the-metric-value">指标</span>
+
+指标记录随时间变化的测量值。读取指标时，同时查看它的名称、单位、维度、项目、时间范围和间隔。LogBrew 根据指标的 `kind` 和 `temporality` 确定每个指标点的 `value`：
+
+| 指标约定 | `aggregation.code` | 指标点的 `value` |
+| --- | --- | --- |
+| `gauge` 搭配 `instant` | `gauge_last` | 该间隔内的最后一个状态，例如队列深度。 |
+| `counter` 搭配 `delta` | `delta_sum` | 该间隔内变化量的总和，例如已完成的任务数。 |
+| `histogram` 搭配 `delta` | `distribution_p95` | 近似的第 95 百分位数，例如请求耗时。 |
+| `cumulative` 数据流 | `raw_cumulative_last` | 最后一个原始累计值。它不是速率。 |
+| 其他组合 | `raw_last` | 最后一个原始样本。 |
+
+例如，一个间隔内有 3 个 delta 计数器样本，值分别为 `2`、`3` 和 `5`，得到的指标点 `value` 为 `10`，`sample_count` 为 `3`。如果是 3 个值相同、顺序也相同的 gauge 样本，指标点 `value` 为 `5`。p95 值不是平均值，约 95% 的已记录观测值小于或等于它。
+
+`status: "ready"` 表示可以使用推导出的聚合值。`status: "limited"` 时，查看 `aggregation.limitation`，并且只使用原始值。不要对 gauge 或累计数据流求和。没有指标点的间隔不等于测得的 0。查询字段的说明见[查询筛选条件](/zh-Hans/reference/telemetry-api-filters)。
+
+`GET /api/telemetry/metrics/series` 返回这些指标点。它需要 `project_id`、`name` 和 `since`。每个序列有一个 `identity`，其中包含 `kind`、`unit` 和 `temporality`。标识不同的序列不会合并。每个指标点还可能包含：
+
+| 字段 | 含义 |
+| --- | --- |
+| `min`、`max`、`average` | 该间隔内样本的范围和平均值。 |
+| `p50`、`p95`、`p99` | 直方图的近似百分位数。 |
+| `rate_per_second` | delta 计数器的总和除以间隔宽度。 |
+| `trace_exemplars` | 从该间隔中采样的 Trace ID。打开其中一个，检查该间隔内的一次请求。 |
+
+如果 `series_limit` 省略了数据量较小的序列，`coverage.truncated` 为 `true`。要把一段时间范围的指标与前一段等长的时间范围比较，运行：
+
+```bash
+logbrew explain metric '<metric-name>' --project '<project-id>' --since 24h --json
+```
+
+## 问题
+
+问题按稳定的指纹对重复出现的故障进行分组。每个问题都有严重程度、状态、发生次数、首次出现时间和最近出现时间。问题详情还可以包含异常链、堆栈帧、操作记录（Breadcrumbs）、相关日志和链路关系。
+
+`last_seen_at` 是该组中最新一条发生记录的时间。你选择的发生记录可能更早。两个时间都要查看。
+
+问题的 `status` 为 `unresolved`（未解决）、`resolved`（已解决）或 `archived`（已归档）。API 响应第 1 版把 `archived` 显示为 `ignored`。第 2 版和第 3 版响应增加了 `priority`（`high`、`medium` 或 `low`）和 `priority_source`。第 3 版还增加了 `assignee`。参见[状态值](/zh-Hans/guides/issue-workflow#status-values)和[优先级](/zh-Hans/guides/issue-workflow#priority)。
+
+## 操作
+
+操作反映产品活动。受支持的分类会把它标记为页面浏览、屏幕浏览或互动。仅凭事件名称无法设置分类。使用[产品事件采集](/zh-Hans/guides/product-events)添加这类上下文。
+
+会话不等于用户。匿名主体也不是已识别用户。
+
+## <span id="shared-fields">通用字段</span>
+
+| 字段 | 用途 |
+| --- | --- |
+| `project_id` | 拥有该遥测数据，并控制读取边界。 |
+| `service_name` | 标识发送该信号的应用或服务。 |
+| `environment` | 区分生产环境、预发布环境、预览环境和本地环境的数据。 |
+| `release` | 标识已部署的代码版本。 |
+| `occurred_at` | 给出单条日志或操作的来源时间。Span 使用 `started_at`。 |
+| `trace_id` | 关联在同一链路上下文中采集的信号。 |
+| `span_id` | 标识信号在其链路中所属的 Span。 |
+
+## <span id="severity-values">严重程度值</span>
+
+| 规范值 | 可接受的输入别名 |
+| --- | --- |
+| `info` | `trace`、`debug`、`info` |
+| `warning` | `warn`、`warning` |
+| `error` | `error` |
+| `critical` | `fatal`、`critical` |
+
+LogBrew 接受这些别名作为输入，不区分大小写。API、CLI 和实时事件使用规范值。未知的严重程度值会被拒绝。严重程度表示记录时的紧急程度，不代表业务影响或根本原因。
+
+用户可以更改问题或日志显示的严重程度。之后，响应中会包含一个带有 `effective_severity` 的 `triage` 对象。`severity` 字段保留采集时的值。
+
+## 实时读取与快照读取
+
+`logbrew read` 返回所选项目、时间范围和筛选条件下的快照。要读取新事件，再运行一次。连接保持期间，`logbrew watch` 会实时推送新的日志、问题和操作，但不推送链路或指标。连接失败并不表示项目中没有数据。
+
+## <span id="evidence-quality-and-trace-lifecycle">证据状态</span>
+
+响应会区分以下状态：已采集、缺失、已隐藏、已截断和不可用。链路证据有 4 种状态：`available`、`not_linked`、`not_found` 和 `unavailable`。它们的含义见[概览](/zh-Hans/introduction#follow-exact-relationships)，覆盖范围字段见[证据的局限](/zh-Hans/introduction#read-evidence-states-before-drawing-a-conclusion)。较新的 SDK 不会为之前发送的事件补充字段。
+
+## <span id="a-practical-investigation">排查单个项目</span>
+
+<Steps>
+  <Step title="查找未解决的问题">
+    ```bash
+    logbrew read issues --project '<project-id>' --status unresolved --since 24h --json
+    ```
+  </Step>
+
+  <Step title="读取单个问题">
+    该命令读取已保留的问题历史。列表中使用的 `--since` 筛选条件在这里不适用。
+
+    ```bash
+    logbrew investigate issue '<issue-id>' --json
+    ```
+  </Step>
+
+  <Step title="打开可用的链路">
+    仅当所选发生记录返回了 Trace ID 时，才使用它。
+
+    ```bash
+    logbrew read trace '<trace-id>' --project '<project-id>' --json
+    ```
+  </Step>
+
+  <Step title="读取相关证据">
+    用相同的项目、服务、环境和版本筛选日志、操作和指标。不要仅凭时间关联信号。
+  </Step>
+</Steps>
+
+响应字段的说明见[遥测 API](/zh-Hans/reference/telemetry-api) 和[响应格式](/zh-Hans/reference/telemetry-response-shapes)。

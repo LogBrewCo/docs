@@ -1,0 +1,173 @@
+---
+title: "应用故障排除：找不到应用日志时怎么办"
+sidebarTitle: "故障排除"
+description: "通过安全的 LogBrew 检查，排除应用日志缺失、项目接入、筛选条件、问题证据和链路关联方面的故障。"
+---
+
+当遥测数据缺失、不完整或范围过大时，使用本页。先检查访问权限。然后在查找原因的过程中，固定项目、服务、版本、环境和时间范围。
+
+<Note>
+  在智能体工作流中添加 `--json`。检查失败时，会返回一个稳定的 `next` 字段。
+</Note>
+
+## 从快速检查开始
+
+| 症状 | 首先检查 | 下一步 |
+| --- | --- | --- |
+| CLI 未登录 | `logbrew status --json` | 由人运行 `logbrew login`。 |
+| 找不到项目 | `logbrew projects --json` | 使用项目列表中的 ID。 |
+| 接入状态不明确 | `logbrew doctor --project "<project_id>" --json` | 按照返回的 `next` 值处理。 |
+| 日志为空 | 读取该项目在确切时间范围内的日志 | 分别检查其他信号类型。 |
+| 结果范围过大 | 添加项目、服务、版本和环境筛选条件 | 每次读取都保持相同的范围。 |
+| 缺少链路 | 读取问题详情 | 只有响应中包含 Trace ID 时，才读取链路。 |
+| JavaScript 帧显示的是构建后的代码 | 检查构建产物与 Source Map 是否匹配 | 参阅 [JavaScript Source Map](/zh-Hans/guides/source-maps)。 |
+| MCP 智能体无法读取某个项目 | 检查已批准的项目 | 参阅 [MCP 连接故障](/zh-Hans/guides/mcp#fix-connection-problems)。 |
+
+## <span id="recover-missing-first-telemetry">首条遥测数据缺失时的恢复</span>
+
+在修改 SDK 配置之前，先运行以下只读命令：
+
+```bash
+logbrew version --json
+logbrew status --json
+logbrew projects --json
+logbrew doctor --project "<project_id>" --json
+```
+
+`logbrew doctor` 会检查 API 访问、身份验证、项目、接入密钥、接入状态、遥测数据和日志可见性。它不会修改项目。阅读 [doctor 报告](/zh-Hans/reference/cli#read-a-project-doctor-report)中的总体 `status` 和每项检查。退出码 `0` 并不表示每项检查都已通过。
+
+| doctor 状态 | 下一步 |
+| --- | --- |
+| `needs_ingest_key` | 创建一个项目范围的接入密钥。请参阅[轮换接入密钥](/zh-Hans/guides/rotate-ingest-key)。 |
+| `needs_setup` | 完成 SDK 接入。请参阅 [SDK 接入](/zh-Hans/guides/sdk-ingestion)。 |
+| `needs_telemetry` | 从应用发送一个安全的测试信号，然后再次运行 doctor。 |
+| `ready` | 读取最近的日志、问题、版本或链路。 |
+
+报告的状态也可能是 `auth_invalid`、`project_missing`、`api_unreachable` 或 `check_failed`。[doctor 报告](/zh-Hans/reference/cli#read-a-project-doctor-report)给出了每种状态的下一步。
+
+状态为 `ready` 的项目仍可能没有日志，因为每种信号类型是独立的。`logs` 检查的结果可能是 `empty` 或 `unavailable`。日志读取失败不等于结果为空。
+
+### 发送一个安全的测试信号
+
+从已安装的 SDK 发送一条带有唯一消息的测试日志。不要包含令牌、用户数据或请求体。记录项目 ID、服务、环境、版本、UTC 开始时间和 SDK 版本号。等待投递完成，然后在同一项目中读取一个较短的时间范围。投递尚未完成时，不要再发送更多测试信号。
+
+## 查找缺失的日志
+
+先读取一个小而精确的范围：
+
+```bash
+logbrew read releases --project "<project_id>" --environment production --json
+logbrew read logs --project "<project_id>" --environment production \
+  --release checkout@1 --since 1h --limit 20 --json
+```
+
+按顺序检查以下各项：
+
+1. 项目 ID 属于发送该信号的那个应用。
+2. 服务、版本和环境完全一致，包括大小写和空格。
+3. 时间范围包含信号的发生时间。LogBrew 以 UTC 返回发生时间。`--until` 是不包含在内的上限。
+4. 没有搜索或严重程度筛选条件把信号隐藏。
+5. 应用发送的信号类型就是你读取的类型。日志不会创建问题或链路。
+
+如果仍然找不到该信号，每次移除一个筛选条件：
+
+1. 保持项目不变，扩大时间范围。
+2. 移除版本筛选条件。
+3. 移除环境筛选条件。
+4. 移除服务筛选条件。
+5. 移除搜索和严重程度筛选条件。
+
+信号出现后就停止。最后移除的那个筛选条件与应用配置不一致。不要用读取所有项目来代替读取已配置的项目。
+
+| 结果 | 说明了什么 | 下一步检查 |
+| --- | --- | --- |
+| 某个项目中没有任何行 | 该范围内没有匹配项 | 检查时间和筛选条件。 |
+| 有日志，但没有问题 | 没有分组后的错误符合筛选条件 | 确认应用发送了错误。 |
+| 有问题，但没有链路 | 该发生记录没有可用的链路关联 | 在问题排查结果中查看链路状态。 |
+| 有版本，但没有日志 | 该版本有其他信号，但在该范围内没有日志 | 比较 `logbrew read releases` 中的计数。在同一项目中分别读取每种信号类型。 |
+| 移除某个筛选条件后，信号出现了 | 该筛选条件排除了该信号 | 修正筛选条件或应用中的值。 |
+
+一页结果不等于总数。使用 `--pagination cursor` 时，用返回的 `next_cursor` 继续读取，并保持相同的筛选条件。请参阅[游标分页](/zh-Hans/reference/telemetry-api-filters#cursor-pagination)。
+
+### 检查控制台视图
+
+控制台显示的是每个列表的快照。在日志视图中打开**实时**，新日志到达时就会添加进来。其他视图不会实时更新。重新加载页面可获取新的快照。过时的快照与空结果不是一回事。
+
+LogBrew 只存储应用发送的遥测数据。发送之前，移除凭据、请求体、查询参数值和个人信息。按照[控制采集的数据](/zh-Hans/guides/safe-capture)中的方法检查你选择的字段。
+
+## 检查问题和链路
+
+使用 LogBrew 返回的问题 ID 或 Trace ID。切勿自行编造。
+
+```bash
+logbrew read issues --project "<project_id>" --environment production \
+  --status unresolved --since 24h --json
+logbrew read issue "<issue_id>" --json
+logbrew read trace "<trace_id>" --project "<project_id>" --json
+logbrew read logs --trace "<trace_id>" --project "<project_id>" --json
+```
+
+`--status` 接受 `unresolved`（未解决）、`resolved`（已解决）和 `archived`（已归档）。`ignored` 选择的问题与 `archived` 相同。
+
+问题状态和链路状态是两回事。链路状态值 `not_linked`、`not_found` 和 `unavailable` 的含义各不相同。各个值的含义请参阅[排查问题](/zh-Hans/guides/investigate-an-issue)。在解决、归档或重新打开问题之前，先阅读该问题及其日志。
+
+## 处理 CLI 和 API 错误
+
+在 JSON 模式下，CLI 错误包含 `ok`、`error`、`message` 和 `next`：
+
+```json
+{
+  "ok": false,
+  "error": "not_logged_in",
+  "message": "not logged in: run logbrew login",
+  "next": "run logbrew login"
+}
+```
+
+API 返回错误时，`error` 为 `api_error`。该错误还包含 `status`（HTTP 状态）、`api_code`（API 的 `code`）、`api_error` 和 `api_next`。如果是 `rate_limited` 错误，还包含 `retry_after_seconds`。CLI 不会自动重试。
+
+| 状态或错误 | 恢复方法 |
+| --- | --- |
+| `not_logged_in` 或 HTTP `401` | 由人运行 `logbrew login`，然后重试读取。 |
+| HTTP `403` | 为该项目使用正确的凭据。修改问题还需要拥有在该项目中管理问题的权限。不要显示凭据的值。 |
+| HTTP `404` | 使用响应中当前有效的项目 ID、问题 ID 或 Trace ID。 |
+| HTTP `422` | 修正响应中指出的字段。 |
+| HTTP `429` 且为 `rate_limited` | 等待 `retry_after_seconds` 秒，然后重试一次。 |
+| HTTP `429` 且为其他错误码 | 停止自动重试。按照 `api_next` 处理。 |
+| HTTP `5xx` | 稍等片刻，重试一次读取；如果故障持续，报告问题。 |
+
+各错误码请参阅 [API 错误](/zh-Hans/reference/api-errors)。
+
+## <span id="secure-a-compromised-account">保护可能已泄露的账号</span>
+
+如果其他人可能持有账号访问令牌、刷新令牌或会话 Cookie，让所有 LogBrew 客户端退出登录。按照[在整个账号范围内退出登录](/zh-Hans/reference/account-api#every-logbrew-login)的步骤进行。这一步必须由人批准。`logbrew logout` 和在浏览器中退出登录都只会结束一个客户端，因此不够。
+
+在整个账号范围内退出登录，还会停止此前批准的所有 MCP 连接。成功后，在每个客户端上清除本地的 LogBrew 凭据，并从受信任的客户端重新登录。确认可以信任 MCP 客户端之后，再重新批准它们。如果没有收到响应，不要报告所有客户端都已退出登录，也不要自动重复该请求。
+
+在整个账号范围内退出登录不会轮换项目接入密钥。如果接入密钥已泄露，请[轮换接入密钥](/zh-Hans/guides/rotate-ingest-key)。
+
+## 安全地进行故障排除
+
+CLI 读取使用账号访问凭据。项目范围的接入凭据只用于 SDK 写入。不要把令牌、授权请求头、原始日志、客户数据、请求体、本地路径或源代码放进命令、聊天或支持工单中。
+
+报告问题之前，用仍然失败的最小范围重复一次读取。记录命令（不含凭据值）、错误码、项目 ID 和筛选条件的值。如果这些检查无法解决故障，请[报告问题](/zh-Hans/guides/report-a-problem)。
+
+## 相关页面
+
+<CardGroup cols={2}>
+  <Card title="快速入门" icon="rocket" href="/zh-Hans/quickstart">
+    发送并读取第一个安全信号。
+  </Card>
+
+  <Card title="使用 CLI" icon="square-terminal" href="/zh-Hans/guides/cli">
+    使用精确的筛选条件和 JSON 输出。
+  </Card>
+
+  <Card title="排查问题" icon="search" href="/zh-Hans/guides/investigate-an-issue">
+    修改状态之前，先阅读问题证据。
+  </Card>
+
+  <Card title="API 错误" icon="triangle-alert" href="/zh-Hans/reference/api-errors">
+    按错误码进行恢复。
+  </Card>
+</CardGroup>

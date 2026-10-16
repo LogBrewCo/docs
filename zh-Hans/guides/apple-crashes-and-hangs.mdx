@@ -1,0 +1,316 @@
+---
+title: "iOS 崩溃报告：采集 Apple 崩溃与卡顿"
+sidebarTitle: "Apple 崩溃与卡顿"
+description: "为 iOS 应用接入崩溃报告，上传匹配的 dSYM，并在 LogBrew 中查看已符号化的 iOS 崩溃日志。"
+---
+
+按照此流程采集 iOS 应用中的原生崩溃和主线程卡顿。卡顿采集需要 UIKit。上传匹配的 dSYM，即可在堆栈帧中看到源码位置。
+
+应用崩溃时会在本地保存一份报告。之后某次启动时，应用调用回放（replay），把崩溃证据发送到 LogBrew。LogBrew 不会发送原始的 Apple 报告。
+
+<Note>
+  使用 LogBrew Swift 0.1.6 或更高版本。上传调试构建产物需要原生 LogBrew CLI 0.1.24 或更高版本。
+</Note>
+
+<Warning>
+  在应用内使用项目范围的接入配置。上传构建产物和读取问题时，使用账号登录。也可以在构建机器上用项目构建产物密钥上传。切勿在应用中包含账号访问令牌或构建产物密钥。
+</Warning>
+
+## 规划采集边界
+
+确认应用何时能回放每种故障。
+
+| 故障 | 采集结果 | 投递时间 |
+| --- | --- | --- |
+| 致命 Apple 崩溃 | 一个未处理的原生崩溃事件 | 之后某次应用启动时 |
+| 已恢复的主线程卡顿 | 一个已处理的卡顿事件 | 恢复后回放时 |
+| 卡顿后进程被终止 | 一个未处理的卡顿事件 | 之后某次应用启动时 |
+
+在构建前设置版本值。它必须能标识应用的版本号和构建号。SDK、dSYM 上传和问题筛选条件都要使用同一个值。
+
+不要把用户数据、请求体或请求头附加到崩溃元数据中。
+
+## 添加崩溃采集产品
+
+首先为应用完成 [SDK 接入](/zh-Hans/guides/sdk-ingestion)。回放会使用其中的 `client` 和 `transport`。
+
+通过 Swift Package Manager 添加公开 SDK。
+
+```swift
+.package(
+    url: "https://github.com/LogBrewCo/sdk.git",
+    from: "0.1.6"
+)
+```
+
+添加 `LogBrew` 产品以发送遥测数据。只有当应用明确启用原生崩溃或卡顿采集时，才添加 `LogBrewCrash`。
+
+采集集成支持 iOS 15 或更高版本。原生致命错误处理器作用于整个进程，因此应用只保留一个由自己持有的采集对象。
+
+## 配置一个准确的标识
+
+运行时设置和构建产物上传要使用相同的项目、版本、环境和服务。LogBrew 不会推导或替换这些值。
+
+```swift
+import Foundation
+import LogBrew
+import LogBrewCrash
+
+let applicationSupport = try FileManager.default.url(
+    for: .applicationSupportDirectory,
+    in: .userDomainMask,
+    appropriateFor: nil,
+    create: true
+)
+
+let identity = try NativeArtifactIdentity(
+    projectId: "550e8400-e29b-41d4-a716-446655440000",
+    release: "com.example.app@1.2.3+45",
+    environment: "production",
+    service: "ios-app"
+)
+
+let watchdog: NativeHangWatchdogConfiguration? = nil
+
+let crashCapture = NativeCrashCapture(
+    configuration: try NativeCrashConfiguration(
+        storageDirectory: applicationSupport.appendingPathComponent(
+            "LogBrewCrash",
+            isDirectory: true
+        ),
+        artifactIdentity: identity,
+        hangWatchdog: watchdog
+    )
+)
+
+try crashCapture.install()
+```
+
+在创建根 UI 之前，在主线程上安装采集对象。先创建它的父目录。存储目录要归应用所有，并保持私有。
+
+采集对象会记录 Mach 异常、信号、C++ 异常和 Objective-C 异常。本地报告不包含内存内容、队列名称或终端输出。
+
+本地崩溃报告可能包含敏感的应用和设备信息。不要让它进入云备份或共享目录。LogBrew 发送的是帧 UUID、架构和偏移量，而不是原始报告。
+
+`NativeCrashConfiguration` 有两个可选限制：
+
+| 参数 | 默认值 | 范围 | 作用 |
+| --- | --- | --- | --- |
+| `maxStoredReports` | `5` | 1 到 32 | 应用在本地保留的报告数量。 |
+| `maxReplayBytes` | 4 MiB | 1 KiB 到 16 MiB | 回放会丢弃大于此大小的报告。 |
+
+值超出范围时，配置会抛出 `crash_invalid_configuration`。
+
+## 启用卡顿采集
+
+当 `watchdog` 为 `nil` 时，卡顿采集处于关闭状态。要启用它，在调用 `install()` 之前替换上面的 `watchdog` 声明：
+
+```swift
+let watchdog = try NativeHangWatchdogConfiguration(
+    threshold: 2
+)
+```
+
+阈值以秒为单位，范围为 1 到 30。卡顿采集还需要 `artifactIdentity`。缺少它时，配置会抛出 `crash_invalid_configuration`。
+
+在进程的整个生命周期内只保留一个 `crashCapture` 对象。第二个采集对象无法安装，它的 `install()` 调用会抛出 `crash_capture_owned`。要修改阈值，在下次应用启动时使用新值。
+
+已恢复的卡顿回放时，`crash.handled` 为 `true`。如果卡顿一直持续到进程被终止，回放时 `crash.handled` 为 `false`。
+
+两种形式都包含数值型的 `durationMs` 元数据，并沿用致命崩溃帧所用的同一个构建产物标识。
+
+应用处于非活跃状态或连接调试器时，卡顿监测器会暂停。设备处于严重过热状态时，它也会停止采集。
+
+阈值过短可能会把正常的主线程工作报告为卡顿。使用你实际发布的构建配置测试阈值。已处理状态描述的是恢复情况，并不会把问题标记为已解决。已处理的卡顿同样阻塞过界面，所以也要查看。
+
+## 启动后回放
+
+安装采集对象后，通过 SDK 客户端回放待处理的报告。
+
+```swift
+let replay = try crashCapture.replayPendingReports(
+    in: client,
+    transport: transport
+)
+
+print(
+    "acknowledged=\(replay.acknowledged) " +
+    "discarded=\(replay.discarded) " +
+    "pending=\(replay.pending)"
+)
+```
+
+应用必须主动调用回放。卡顿恢复本身不会发送事件。在恢复后或下次启动时调用同一个方法。
+
+回放从最早的有效报告开始处理，并保留它们稳定的事件 ID。投递失败的报告保持待处理状态。投递被接受后，报告会被删除。
+
+回放会丢弃无法读取的报告和大于 `maxReplayBytes` 的报告。检查全部 3 个计数。仅凭待处理计数为 0，不能证明已经送达。
+
+如果失败的请求必须在再次重启后仍然保留，在回放前启用持久化投递。在常规的网络或身份验证恢复过程中，不要调用 `purge()`。
+
+## 上传匹配的 dSYM
+
+在启用调试信息的情况下归档应用。保留用户实际运行的那个构建的 dSYM。
+
+检查它的镜像 UUID。
+
+```bash
+xcrun dwarfdump --uuid "path/to/App.app.dSYM"
+```
+
+上传前在本地验证构建产物。
+
+```bash
+logbrew debug-artifacts upload "path/to/App.app.dSYM" \
+  --project "<project UUID>" \
+  --release "com.example.app@1.2.3+45" \
+  --environment "production" \
+  --service "ios-app" \
+  --expect-image-uuid "<Mach-O UUID>" \
+  --dry-run \
+  --json
+```
+
+为每个需要的架构重复 `--expect-image-uuid`。如果发现的 UUID 集合与预期集合不一致，命令会失败。
+
+检查账号访问权限。然后去掉 `--dry-run`，再运行同一条命令。
+
+```bash
+logbrew status --json
+
+logbrew debug-artifacts upload "path/to/App.app.dSYM" \
+  --project "<project UUID>" \
+  --release "com.example.app@1.2.3+45" \
+  --environment "production" \
+  --service "ios-app" \
+  --expect-image-uuid "<Mach-O UUID>" \
+  --json
+```
+
+上传命令会验证受支持的 Apple 对象，并核验每个已上传的标识。它不会把本地路径或文件名写入 API 元数据。
+
+JSON 中的 `status` 表示结果：
+
+| `status` | 含义 |
+| --- | --- |
+| `validated` | 试运行找到了预期的对象。没有上传任何内容。 |
+| `verified` | 已通过账号访问上传并核验每个标识。 |
+| `already_present` | LogBrew 已有全部标识。 |
+| `uploaded` | 项目构建产物密钥上传了文件。CLI 无法核验这些文件。 |
+
+构建机器可以不使用账号访问，改用 `LOGBREW_TOKEN` 中的项目构建产物密钥上传。按[创建构建产物密钥](/zh-Hans/guides/source-maps#create-an-artifact-key)中的说明创建密钥。这种上传会报告 `uploaded`。之后使用账号访问核验每个标识：
+
+```bash
+logbrew debug-artifacts lookup \
+  --project "<project UUID>" \
+  --release "com.example.app@1.2.3+45" \
+  --environment "production" \
+  --service "ios-app" \
+  --image-uuid "<Mach-O UUID>" \
+  --architecture arm64 \
+  --json
+```
+
+`status: "found"` 表示已确认该构建产物。`status: "missing"` 表示 LogBrew 没有该标识对应的构建产物。
+
+解析时匹配的是镜像 UUID 和完整的构建产物标识，而不是源文件名。同一份源码重新构建后，UUID 可能不同。上传对应构建的那个 dSYM 包，而不是整个构建目录。
+
+## 验证 LogBrew 回读
+
+使用相同的运行时范围筛选问题列表。此示例选择 `unresolved`（未解决）问题。已解决或已归档的问题不会出现。
+
+```bash
+logbrew read issues \
+  --project "<project UUID>" \
+  --release "com.example.app@1.2.3+45" \
+  --environment "production" \
+  --service "ios-app" \
+  --status "unresolved" \
+  --since "24h" \
+  --json
+```
+
+列表响应会标识分组后的问题。读取它的详情，以请求 LogBrew 解析帧。
+
+```bash
+logbrew read issue "<issue UUID>" --json
+```
+
+有匹配的构建产物时，响应会添加一个 `symbolication` 对象。此示例只展示一个帧已解析的问题中的部分字段，不是完整响应。
+
+```json
+{
+  "severity": "critical",
+  "attributes": {
+    "metadata": {
+      "crash.replayed": true
+    }
+  },
+  "symbolication": {
+    "status": "resolved",
+    "frames": [
+      {
+        "index": 0,
+        "status": "resolved",
+        "resolved": {
+          "source": "AppRuntime.swift",
+          "line": 42,
+          "column": 1,
+          "name": "terminateForCrash()"
+        }
+      }
+    ]
+  }
+}
+```
+
+## 查看崩溃证据
+
+每个帧都有自己的 `status`。`symbolication.status` 字段使用相同的值：
+
+| `status` | 含义 |
+| --- | --- |
+| `resolved` | 匹配的构建产物解析了该帧。`resolved` 包含构建产物提供的源文件、行号、列号或函数名。 |
+| `artifact_not_found` | 没有已上传的构建产物与事件标识和镜像 UUID 匹配。 |
+| `source_not_resolved` | 存在匹配的构建产物，但它没有解析这个帧。 |
+| `invalid_metadata` | 事件的构建产物元数据不完整或不一致。 |
+| `unavailable` | 帧解析读取未能完成。 |
+
+在你的记录中，把未解析的帧照实记为未解析。不要把它报告为空堆栈。
+
+LogBrew 在你读取问题时解析帧。之后上传的 dSYM 可以解析较早事件的帧，但不能补上事件当时没有采集到的帧。
+
+应用代码帧能缩小代码搜索范围，但不能证明原因。要查看操作记录（Breadcrumbs）、异常链和链路证据，读取问题排查结果：
+
+```bash
+logbrew investigate issue "<issue UUID>" --json
+```
+
+在该响应中，带有 `source: "symbolicated"` 的帧来自已上传的构建产物。带有 `source: "captured"` 的帧是应用发送的位置。响应字段请参阅[排查问题](/zh-Hans/guides/investigate-an-issue)。
+
+每次读取都要保留完整的项目、版本、环境和服务范围。查找失败时，不要把范围扩大到其他项目。
+
+## 验证生产环境接入
+
+在已部署的构建中使用经过批准的测试故障。切勿把客户的操作当作触发条件。按顺序检查每一项，遇到第一个失败就停止：
+
+1. 运行时标识与已上传的构建产物标识一致。
+2. 之后某次启动时回放了 1 个已确认的事件，已丢弃和待处理的报告都为 0。
+3. 限定范围的问题列表返回了该测试问题，且已处理状态符合预期。
+4. 预期的应用代码帧已解析。
+5. 之后再正常启动一次，不会新增发生记录。
+
+## 安全恢复
+
+| 结果 | 恢复方法 |
+| --- | --- |
+| 上传时身份验证失败 | 运行 `logbrew login`，用 `logbrew status --json` 确认登录状态，然后重复完全相同的上传。 |
+| 上传时 UUID 验证失败 | 选择已部署构建的 dSYM，然后重新试运行。 |
+| `artifact_not_found` | 核实事件标识，并以相同范围上传匹配的 dSYM。 |
+| `source_not_resolved` | 保留完整的构建调试信息，并检查已部署构建的设置。 |
+| `invalid_metadata` | 确认使用 LogBrew Swift 0.1.6 或更高版本。用准确的标识采集一个新事件。 |
+| `unavailable` | 保持问题可见，稍后重试相同范围的详情读取。 |
+| 回放一直处于待处理状态 | 修正传输层或身份验证状态，然后重新启动应用，不要清除报告。 |
+| 回放报告了已丢弃的条目 | 不要把它们算作已送达。检查采集配置，并用新的、经过批准的测试事件复现。 |
+
+一般的问题排查请参阅[排查问题](/zh-Hans/guides/investigate-an-issue)。
