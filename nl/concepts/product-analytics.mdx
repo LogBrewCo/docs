@@ -1,0 +1,368 @@
+---
+title: "Wat is productanalyse? Metrics en terugkerende gebruikers"
+sidebarTitle: "Productanalyse"
+description: "Kies een project en datums. Lees activiteit, trechters, retentie en levenscycluswijzigingen. Controleer de datadekking voordat je op de resultaten handelt."
+---
+
+Productanalyse laat zien hoe mensen je app gebruiken. LogBrew leest de
+productacties die je app verstuurt, waaronder paginaweergaven,
+schermweergaven en interacties. Gebruik
+[Productevents vastleggen](/nl/guides/product-events) om deze events met
+gebruikers- en sessiecontext te versturen.
+
+Elk resultaat geldt voor één project en één tijdsbereik. Een servicenaam
+selecteert geen project. Logs en issues zijn aparte signalen. Dat ze er zijn,
+betekent niet dat er analysegegevens voor hetzelfde bereik bestaan.
+
+## Events, gebruikers en sessies
+
+| Eenheid | Betekenis |
+| --- | --- |
+| Event | Eén vastgelegde actie. Eén persoon kan veel events versturen. |
+| Geïdentificeerde gebruiker | Een stabiel, ondoorzichtig subject-ID dat de app levert, van het type `user`. |
+| Anoniem subject | Een getypeerd subject-ID dat geen gebruiker is. Het telt nooit als gebruiker. |
+| Sessie | Een expliciet sessie-ID dat de app levert. Eén persoon kan veel sessies hebben. |
+
+200 acties in 20 sessies betekenen bijvoorbeeld niet dat 20 mensen de app
+hebben gebruikt. Eventtotalen zijn exact voor het gekozen tijdvenster. Aantallen
+unieke gebruikers, sessies en anonieme subjecten zijn bij benadering.
+
+Gebruik ondoorzichtige ID's. Gebruik geen namen, e-mailadressen of andere
+persoonsgegevens als ID. Responses van productanalyse bevatten nooit ruwe
+gebruikers- of sessie-ID's.
+
+## Het overzicht in het dashboard openen
+
+1. Open **Analytics** in het LogBrew-dashboard.
+2. Kies één project.
+3. Kies **24 uur**, **7 dagen**, **14 dagen**, **30 dagen** of **Aangepast**.
+4. Lees de activiteitsgrafiek en daarna **Belangrijkste events** en
+   **Belangrijkste pagina’s en schermen**.
+5. Open **Dekking en limieten** voordat je gebruikersaantallen leest.
+
+Kies bij **Aangepast** de eerste en de laatste dag en kies daarna
+**Toepassen**. Beide dagen horen bij het bereik. Zo telt 12 tot en met 16
+april als vijf dagen. Het dashboard gebruikt UTC-datums. Een aangepast
+bereik is maximaal 31 dagen en kan geen toekomstige datums bevatten.
+
+Het dashboard toont ook twee gebruikerstrends voor hetzelfde project en
+dezelfde datums. **Komen gebruikers terug?** toont de retentie. **Hoe
+verandert je gebruikersgroep?** toont de levenscyclusgroepen. Beide trends
+gebruiken alle geclassificeerde activiteit van geïdentificeerde gebruikers.
+Je kiest er geen event voor.
+
+## <span id="use-the-analytics-api">Het projectoverzicht lezen</span>
+
+```bash
+logbrew analytics overview --project "<project_id>" --since 7d --json
+```
+
+Voeg `--until <RFC3339>` toe voor een eindtijd. Dat tijdstip zelf valt buiten
+het bereik. `--interval` accepteert `auto`, `1m`, `5m`, `15m`, `1h`, `6h` of
+`1d`. `--top-limit` bepaalt het aantal rijen in elke toplijst, van `1` tot
+`20`. De standaardwaarde is `10`. Voeg `--service`, `--release` of
+`--environment` toe om op exacte context te filteren. Het API-endpoint is
+`GET /api/telemetry/analytics/overview`.
+
+Het overzicht bevat activiteitstotalen, een tijdreeks, de populairste acties
+en geclassificeerde activiteit. Dit fragment toont de totalen en hun dekking:
+
+```json
+{
+  "schema_version": 3,
+  "analysis_level": "user_and_session",
+  "summary": {
+    "actions": 120,
+    "active_identified_users": 18,
+    "active_anonymous_subjects": 7,
+    "sessions": 24
+  },
+  "coverage": {
+    "identified_actions": 100,
+    "anonymous_actions": 20,
+    "subject_coverage": {
+      "index_version": 1,
+      "identified_user_events": 100,
+      "anonymous_subject_events": 8,
+      "legacy_unknown_kind_events": 4,
+      "missing_subject_events": 6,
+      "historical_unindexed_events": 2
+    },
+    "sessionized_actions": 90,
+    "traced_actions": 60,
+    "top_actions_truncated": true
+  },
+  "next_action": { "code": "build_product_funnel" }
+}
+```
+
+De vijf aantallen in `subject_coverage` tellen op tot `summary.actions`.
+Alleen `identified_user_events` telt mee voor gebruikers. `anonymous_actions`
+omvat de vier andere statussen. In dit voorbeeld zijn er 8 events van
+anonieme subjecten, afkomstig van ongeveer 7 verschillende anonieme subjecten. Geen van beide
+getallen is een gebruikersaantal. Uit een afgekapte toplijst kun je niet
+afleiden dat events met een lager volume ontbreken.
+
+`analysis_level` is `no_data`, `event_only`, `user_level` of
+`user_and_session`. Het geeft aan welke vragen de gegevens kunnen
+beantwoorden. Het niveau is het hoogste niveau dat `summary` of
+`classified_activity` ondersteunt. Het betekent niet dat beide groepen
+gebruikers of sessies hebben.
+
+### De twee activiteitsgroepen gescheiden houden
+
+| Responsevelden | Getelde events |
+| --- | --- |
+| `summary`, `coverage`, `series`, `top_actions` | Productactie-events, ook acties zonder ondersteunde classificatie. |
+| `classified_activity` | Paginaweergaven, schermweergaven en interacties. Paginaweergaven zijn geen acties. |
+
+Geclassificeerde schermweergaven en interacties zijn ook acties. Tel
+`summary.actions` niet op bij `classified_activity.summary.events`. Lees de
+dekking van de groep die je gebruikt. De subjectaantallen in
+`classified_activity.coverage.subject_coverage` tellen op tot
+`classified_activity.summary.events`.
+
+`summary.actions` kan `0` zijn terwijl geclassificeerde paginaweergaven wel
+gebruikers- en sessieaantallen leveren. Controleer `classified_activity`
+voordat je concludeert dat er geen productactiviteit is.
+
+### De volgende actie volgen
+
+`next_action` heeft een `code`, een `target` en een `reason`. Het toont het
+belangrijkste gat in de vastlegging of de volgende analysestap:
+
+| `next_action.code` | Betekenis |
+| --- | --- |
+| `capture_product_activity` | Geen enkel productevent valt binnen de scope. |
+| `classify_product_activity` | Er zijn events, maar geen ervan is een paginaweergave, schermweergave of interactie. |
+| `identify_product_users` | Geen enkel event heeft een subject van het type `user`. |
+| `sessionize_product_activity` | Geen enkel event heeft een sessie-ID. |
+| `capture_funnel_steps` | Er zijn minder dan twee benoemde geclassificeerde events. |
+| `build_product_funnel` | De gegevens zijn geschikt voor een trechter. |
+
+Pas de vastlegging in de app aan en controleer daarna een nieuw event. Oudere
+events tonen niet aan dat de wijziging werkt.
+
+### De API direct aanroepen
+
+Stuur een account-bearer mee. Stuur `response_version=3` mee om dezelfde
+response te krijgen die de CLI leest. Laat je `response_version` weg, dan
+geeft de API versie `1` terug. Die versie heeft geen aantallen anonieme
+subjecten en geen `subject_coverage`.
+
+```bash
+curl -sS -G "https://api.logbrew.co/api/telemetry/analytics/overview" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project_id>" \
+  --data-urlencode "since=7d" \
+  --data-urlencode "response_version=3"
+```
+
+`since` is een positieve duur, zoals `24h`, `7d` of `30d`, of een
+RFC3339-tijdstempel. `until` is een optionele RFC3339-tijdstempel. Het bereik
+bevat `since` en bevat `until` niet. Laat je `until` weg, dan eindigt het
+bereik op het moment van het request. Een bereik kan niet langer zijn dan 31
+dagen.
+
+Stuur voor 12 tot en met 16 april 2026 `2026-04-12T00:00:00Z` als `since` en
+`2026-04-17T00:00:00Z` als `until`.
+
+Een bereik van meer dan 31 dagen geeft HTTP `422`:
+
+```json
+{
+  "error": "product analytics range must not exceed 31 days",
+  "code": "validation_failed",
+  "next": "use a shorter range or query consecutive bounded windows",
+  "next_action": { "code": "fix_request", "target": "request" }
+}
+```
+
+Gebruik `code` en `next_action` in programmalogica. Toon `error` en `next` aan
+een persoon. [API-fouten](/nl/reference/api-errors) beschrijft de andere
+foutresponses.
+
+De `POST`-routes voor productanalyse hieronder verwachten een JSON-body met
+dezelfde velden `project_id`, `since`, `until`, `service_name`, `release` en
+`environment`. Onbekende velden in de body worden geweigerd.
+
+## <span id="measure-a-funnel">Een trechter meten</span>
+
+Een trechter meet de conversie over twee tot acht geordende stappen:
+
+```bash
+logbrew analytics funnel --project "<project_id>" --since 7d \
+  --step page-view /pricing \
+  --step interaction checkout_started \
+  --step interaction checkout_completed \
+  --json
+```
+
+Elke volgende stap moet een later tijdstempel hebben dan de stap ervoor. Eén
+event kan geen twee stappen voltooien. De standaardeenheid is de sessie.
+Gebruik `--unit identified-user` om gebruikers over sessies heen te tellen.
+Kopieer de eventnamen uit het overzicht. De verhouding tussen twee totalen
+zonder verband is geen conversieratio.
+
+De laatste stap moet plaatsvinden binnen het conversievenster dat bij de
+eerste stap begint. Stel het in met `--conversion-window`, bijvoorbeeld `30m`
+of `1h`. De standaardwaarde is 24 uur, of het hele bereik als dat korter is.
+Het venster kan niet langer zijn dan het bereik.
+
+De API-route is `POST /api/telemetry/analytics/funnel`. De
+[response van de geordende trechter](/nl/reference/telemetry-response-shapes#ordered-funnel-response)
+toont de request-body en de response.
+
+## Paden rond één event verkennen
+
+Paden tonen de meest voorkomende reeksen benoemde events na of vóór één
+ankerevent:
+
+```bash
+logbrew analytics paths following --project "<project_id>" --since 24h \
+  --anchor-kind page-view --anchor-event /pricing \
+  --json
+```
+
+Gebruik `preceding` in plaats van `following` voor de events vóór het anker.
+`--depth` bepaalt het aantal events aan die kant, van `1` tot `8`. De
+standaardwaarde is `4`. `--path-limit` bepaalt het aantal paden, van `1` tot
+`20`. De standaardwaarde is `10`. Opeenvolgende identieke events tellen als
+één event. Voeg `--keep-repeated` toe om ze allemaal te houden.
+
+Paden gebruiken sessie-ID's. Een `following`-pad begint bij het eerste anker
+in elke sessie. Een `preceding`-pad eindigt bij het laatste anker. Paden
+tellen geen gebruikers en laten niet zien waarom een actie mislukte. De
+API-route is `POST /api/telemetry/analytics/paths`.
+
+## De retentie lezen
+
+Retentie laat zien of geïdentificeerde gebruikers terugkomen na een
+startevent:
+
+```bash
+logbrew analytics retention --project "<project_id>" --since 30d \
+  --start-kind page-view --start-event /signup \
+  --return-kind interaction --return-event report_opened \
+  --json
+```
+
+`--interval` is `hour`, `day`, `week` of `thirty-day`. `thirty-day` is 30
+dagen, geen kalendermaand. `--interval-count` loopt van `1` tot `31`. De
+standaardwaarde is `10`. `--mode return-on` telt terugkeer in elke exacte
+periode. `return-on-or-after` telt terugkeer in of na elke periode.
+
+Een terugkeer moet na het startevent van de gebruiker plaatsvinden. Elke
+gebruiker start één keer, bij het eerste startevent in het bereik. Dat event
+is niet altijd het allereerste event van de gebruiker. Een gebruiker die in
+één periode vaker terugkomt, telt één keer voor die periode.
+
+Lees per periode het aantal behouden gebruikers samen met het aantal
+gebruikers dat in aanmerking komt. Gebruikers van wie de periode nog niet
+voorbij is, komen niet in aanmerking. Ze tellen niet als verloren. Zo geven
+40 teruggekeerde gebruikers van de 100 die in aanmerking komen een retentie
+van 40%. Een lager terugkeerpercentage laat niet zien waarom mensen
+vertrokken.
+
+### Retentie voor alle activiteit opvragen
+
+De API-route is `POST /api/telemetry/analytics/retention`. Stuur
+`response_version` `2` en laat `start_event` en `return_event` weg om retentie
+zonder eventnamen te meten:
+
+```bash
+curl -sS "https://api.logbrew.co/api/telemetry/analytics/retention" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "project_id": "<project_id>",
+    "since": "14d",
+    "response_version": 2,
+    "interval": "day",
+    "interval_count": 10,
+    "mode": "return_on",
+    "cohort_mode": "first_in_range"
+  }'
+```
+
+De response zet `query.activity_scope` op `all_classified_activity`. Elke
+latere paginaweergave, schermweergave of interactie telt als terugkeer. Wil je
+events kiezen, laat dan `response_version` weg en stuur zowel `start_event`
+als `return_event` als `{ "kind": "page_view", "event_name": "/signup" }`.
+
+Het bereik gedeeld door het interval, vermenigvuldigd met `interval_count`,
+mag niet meer dan 500 zijn. 14 dagen met `day` en `10` perioden geeft
+bijvoorbeeld 140. Laat je `interval` weg, dan gebruikt de API `hour` voor
+bereiken tot 48 uur en `day` voor langere bereiken.
+
+## De levenscyclus lezen
+
+De levenscyclus plaatst geïdentificeerde gebruikers die een bepaald event
+uitvoerden, per periode in één groep:
+
+```bash
+logbrew analytics lifecycle --project "<project_id>" --since 30d \
+  --event-kind interaction --event report_opened \
+  --json
+```
+
+| Groep | Betekenis |
+| --- | --- |
+| Nieuw in de waargenomen geschiedenis | Nu actief, zonder eerder event in het geschiedenisvenster. |
+| Terugkerend | Nu actief en ook in de vorige periode. |
+| Opnieuw actief | Nu actief na een onderbreking. |
+| Inactief | Actief in de vorige periode, maar nu niet. |
+
+Nieuw in de waargenomen geschiedenis betekent niet dat het om een nieuwe klant
+gaat. Eerdere activiteit kan buiten het geschiedenisvenster vallen. Dat
+venster stel je in met `--history-periods`. Tel de totalen van perioden niet
+op om unieke gebruikers over het hele bereik te tellen.
+
+`--history-periods` loopt van `2` tot `31` perioden vóór `since`. De
+standaardwaarde is `2`. De geschiedenis kan niet langer zijn dan 62 dagen. Het
+bereik kan maximaal 100 perioden hebben. Elke periode heeft `fully_observed`.
+Dat is `false` als de periode nog niet voorbij is. Inactief betekent: niet
+actief in de huidige periode. Het betekent niet dat de gebruiker voorgoed
+verloren is.
+
+De API-route is `POST /api/telemetry/analytics/lifecycle`. Wil je alle
+geclassificeerde activiteit gebruiken in plaats van één event, stuur dan
+`response_version` `2` en laat `event` weg:
+
+```json
+{
+  "project_id": "<project_id>",
+  "since": "30d",
+  "response_version": 2,
+  "interval": "day",
+  "history_period_count": 7
+}
+```
+
+## Twee perioden vergelijken
+
+Vraag elke periode apart op. Gebruik hetzelfde project, dezelfde duur,
+dezelfde eventnamen en dezelfde filters. Vergelijk de activiteit, de eventmix
+en de dekking van identiteit en sessies voordat je gebruikersaantallen
+vergelijkt. Een onvolledige periode kan minder activiteit tonen dan een
+volledige.
+
+| Waarneming | Volgende controle | Beperking |
+| --- | --- | --- |
+| Eén event is gestegen | Controleer de sessies en de dekking ervan. | Meer events tonen niet aan dat er meer mensen zijn. |
+| Een conversieratio is veranderd | Gebruik voor beide perioden dezelfde trechterstappen en eenheid. | Vergelijk geen verschillende trechterdefinities. |
+| Terugkerende gebruikers zijn gedaald | Controleer de gebruikers die in aanmerking komen en de volledige perioden. | Een recent cohort kan er slechter uitzien dan een ouder cohort. |
+| Gebruikers stoppen bij één stap | Lees de issues en logs voor die stap. | Een gedeeld tijdsbereik toont geen oorzaak. |
+
+Wijst een resultaat op een fout, lees dan de bijbehorende issues en logs voor
+hetzelfde project en dezelfde tijd. Open een trace alleen als een event een
+exacte tracelink heeft. Een gedeeld tijdsbereik toont niet aan dat een fout
+een daling veroorzaakte.
+
+Wil je een vergelijking herhalen, noteer dan het project-ID, beide
+UTC-bereiken, het interval, de filters, de eenheid, de dekking en of
+resultaten zijn afgekapt. Noteer geen ruwe gebruikers-ID's.
+
+Lees voor responsevelden en fouten de
+[Telemetrie-API](/nl/reference/telemetry-api) en
+[API-fouten](/nl/reference/api-errors).

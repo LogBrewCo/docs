@@ -1,0 +1,482 @@
+---
+title: "Queryparameters van de API en cursorpaginering"
+sidebarTitle: "Queryfilters"
+description: "Filter LogBrew-telemetrie op project, service, release, omgeving, ernst, trace, issuestatus, prioriteit, toewijzing en tijd. Lees verder met een cursor."
+---
+
+Elke leesroute accepteert eigen queryparameters. Een route in de
+[filtermatrix](#filter-matrix) weigert een onbekende parameter of een waarde
+van het verkeerde type met `422` en `validation_failed`, tenzij de matrix iets
+anders zegt. Gebruiksvriendelijke aliassen zoals `project`, `trace` en `user`
+zijn geen queryparameters. Verplaats een filter niet van de ene route naar een andere.
+
+## Een gefilterd request opbouwen
+
+Zet de querystring na het pad. Gebruik `--data-urlencode`, zodat gereserveerde
+tekens veilig blijven. Dit request leest kritieke logs van één project uit de
+afgelopen 24 uur:
+
+```bash
+curl --get "https://api.logbrew.co/api/logs" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "severity=critical" \
+  --data-urlencode "since=24h"
+```
+
+Voeg filters in deze volgorde toe:
+
+1. Kies het project met `project_id` of `project_ids`.
+2. Voeg een tijdsbereik toe met `since`, en eventueel `until`.
+3. Voeg filters toe voor service, release, omgeving, status of een specifiek
+   signaal.
+4. Stel `limit` in voor een kleinere pagina.
+5. Voeg cursorvelden pas toe nadat een cursorresponse ze heeft teruggegeven.
+
+Elke teruggegeven rij past bij elke filter in het request. Een weggelaten
+filter gebruikt de standaardwaarde van de route. `GET /api/logs` gebruikt
+bijvoorbeeld `status=active` als je `status` weglaat.
+
+## <span id="filter-matrix">Filtermatrix</span>
+
+Parameters in de kolom ‘Verplicht’ moeten in het request staan. Alle andere
+parameters zijn optioneel.
+
+| Route | Verplicht | Optionele queryparameters |
+| --- | --- | --- |
+| `GET /api/logs` | Geen | `project_id` of `project_ids`, `severity`, `level` (alias voor compatibiliteit), `status`, `search`, `trace_id`, `service_name`, `release`, `environment`, `since`, `until`, `attribute_filters`, `pagination`, `cursor_time`, `cursor_id`, `limit` |
+| `GET /api/logs/attributes` | `since` | `project_id` of `project_ids`, `type`, `search`, `severity`, `level`, `service_name`, `release`, `environment`, `until`, `cursor_count`, `cursor_path`, `cursor_type`, `limit` |
+| `GET /api/telemetry/issues` | Geen | `project_id` of `project_ids`, `status`, `severity`, `priority`, `assignee`, `service_name`, `release`, `environment`, `since`, `until`, `pagination`, `cursor_time`, `cursor_id`, `limit`, `response_version` |
+| `GET /api/telemetry/issues/{issue_id}` | Geen | `response_version`. Deze route negeert andere parameters. |
+| `GET /api/telemetry/issues/{issue_id}/events` | Geen | `pagination`, `cursor_time`, `cursor_id`, `limit` |
+| `GET /api/telemetry/issues/assignees` | `project_id` | Geen |
+| `GET /api/telemetry/actions` | Geen | `project_id` of `project_ids`, `name`, `distinct_id`, `service_name`, `release`, `environment`, `since`, `until`, `pagination`, `cursor_time`, `cursor_id`, `limit` |
+| `GET /api/telemetry/metrics` | Geen | `project_id` of `project_ids`, `name`, `service_name`, `release`, `environment`, `since`, `until`, `pagination`, `cursor_time`, `cursor_id`, `limit` |
+| `GET /api/telemetry/metrics/series` | `project_id`, `name`, `since` | `until`, `interval`, `group_by`, `service_name`, `release`, `environment`, `series_limit` |
+| `GET /api/telemetry/releases` | Geen | `project_id` of `project_ids`, `service_name`, `release`, `environment`, `since`, `until`, `pagination`, `cursor_time`, `cursor_project_id`, `cursor_release`, `cursor_environment`, `cursor_service_name`, `limit` |
+| `GET /api/telemetry/traces` | Geen | `project_id` of `project_ids`, `service_name`, `release`, `environment`, `status`, `since`, `until`, `min_duration_ms`, `pagination`, `cursor_time`, `cursor_trace_id`, `limit` |
+| `GET /api/telemetry/traces/{trace_id}` en `.../summary` | Geen | `project_id`, `release`, `environment` |
+| `GET /api/telemetry/summary/volume` | `project_id`, `since` | `until`, `interval`, `service_name`, `release`, `environment`, `response_version` |
+| `GET /api/telemetry/deployments` | `project_id` | `release`, `environment`, `service_name`, `status`, `since`, `until`, `pagination`, `cursor_time`, `cursor_id`, `limit` |
+| `GET /api/telemetry/deployments/{deployment_id}` | `project_id` | Geen |
+| `GET /api/telemetry/traces/{trace_id}/investigation` | Geen | `project_id`, `release`, `environment`, `response_version` |
+| `GET /api/telemetry/traces/{trace_id}/spans/{span_id}/investigation` | `project_id`, `release`, `environment` | Geen |
+| `GET /api/telemetry/issues/{issue_id}/investigation` | Geen | `response_version`, en `selection` of `occurrence_id` |
+| `GET /api/telemetry/issues/{issue_id}/correction-verification` | `baseline_occurrence_id`, `candidate_deployment_id` | Geen |
+| `GET /api/telemetry/releases/investigation` | `project_id`, `release`, `environment`, `service_name` | `response_version` |
+| `GET /api/telemetry/metrics/investigation` | `project_id`, `name`, `since` | `until`, `interval`, `group_by`, `service_name`, `release`, `environment`, `series_limit`, `response_version` |
+| `GET /api/telemetry/analytics/overview` | `project_id`, `since` | `until`, `interval`, `top_limit`, `service_name`, `release`, `environment`, `response_version` |
+| `GET /api/telemetry/analytics/properties` | `project_id`, `since` | `until`, `limit`, `service_name`, `release`, `environment`, `response_version` |
+
+Bij een issueonderzoek is `selection` gelijk aan `first`, `latest` of
+`recommended`. Verzend `selection` of `occurrence_id`, niet allebei. Beide
+vereisen een `response_version` van 2 tot en met 13. Bij versie 2 of hoger
+zonder keuze gebruikt LogBrew `recommended`. Haal een `occurrence_id` op uit
+`GET /api/telemetry/issues/{issue_id}/events`.
+
+De `POST`-routes voor productanalyse accepteren een JSON-body. Zie
+[Productanalyse](/nl/concepts/product-analytics).
+
+## Gedeelde filters en filters per signaal
+
+`service_name`, `release` en `environment` beperken elke telemetrielijst.
+Gebruik exact de waarden die je SDK verzendt.
+
+Sommige filters horen bij één signaal:
+
+- Logs accepteren `search`, `trace_id`, `severity` en `attribute_filters`.
+- Logs accepteren `status`: `active` (standaard), `ignored` of `all`. `ignored`
+  selecteert de logs die een logregel verbergt in de actieve weergave.
+- Issues accepteren de issue-`status`: `unresolved`, `resolved` of `archived`.
+  `ignored` is een oudere naam voor `archived` en selecteert dezelfde issues.
+- Issues accepteren `severity`: `info`, `warning`, `error` of `critical`.
+- Issues accepteren `priority`: `high`, `medium` of `low`.
+- Issues accepteren `assignee`: `me` voor de issues die aan het ingelogde
+  account zijn toegewezen, `none` voor issues die aan niemand zijn toegewezen,
+  of een gebruikers-ID.
+- Acties en metrics accepteren `name`.
+- Acties accepteren `distinct_id`.
+- Traces accepteren de trace-`status` en `min_duration_ms`.
+- Deployments accepteren `status`: `succeeded` of `failed`.
+
+De filters `severity` voor logs en issues vergelijken de effectieve ernst.
+Heeft een regel de ernst gewijzigd? Dan gebruikt de filter de waarde van de
+regel. Zie [Ernstwaarden](/nl/reference/telemetry-response-shapes#severity-values).
+
+## Tijdsbereik
+
+`since` accepteert een positief geheel aantal uren of dagen, zoals `24h` of
+`7d`, of een RFC3339-tijdstempel. Een korte duur geldt vanaf het tijdstip van
+elk request.
+
+`until` accepteert alleen een RFC3339-tijdstempel. Het is een exclusief
+eindtijdstip: een rij op precies `until` zit niet in het resultaat. `since` is
+inclusief. `since=2026-10-01T00:00:00Z` en `until=2026-10-02T00:00:00Z`
+selecteren bijvoorbeeld 1 volledige dag. LogBrew vergelijkt tijden tot op de
+milliseconde.
+
+`until` moet later zijn dan `since`. Is dat niet zo, of is `until` geen
+RFC3339-tijdstempel? Dan mislukt het request met `422` en `validation_failed`.
+
+Kies voor het lezen van meerdere pagina's één RFC3339-starttijd en houd die op
+elke pagina aan. Houd ook dezelfde `until` op elke pagina aan.
+
+Dit request leest foutlogs van 1 dag:
+
+```bash
+curl --get "https://api.logbrew.co/api/logs" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "severity=error" \
+  --data-urlencode "since=2026-10-01T00:00:00Z" \
+  --data-urlencode "until=2026-10-02T00:00:00Z"
+```
+
+<Note>
+  De lijst met deployments gebruikt andere tijdregels. De `since` en `until`
+  daarvan accepteren alleen RFC3339-tijdstempels, en beide zijn inclusief. Ze
+  vergelijken het tijdstip waarop de deployment klaar was.
+</Note>
+
+## Responseversie van issues
+
+De lijst met issues en de details van een issue accepteren
+`response_version=1`, `response_version=2` of `response_version=3`. Versie 1 is
+de standaard. Een andere waarde mislukt met `422` en `validation_failed`.
+
+- Versie 1 toont de gearchiveerde status als `ignored`. De prioriteit staat er
+  niet in.
+- Versie 2 toont de gearchiveerde status als `archived`. Deze versie voegt
+  `priority` en `priority_source` toe.
+- Versie 3 heeft alle velden van versie 2. Deze versie voegt `assignee` toe.
+
+Elke versie accepteert `status=archived`, `priority` en `assignee`. Zie de
+[issueresponse](/nl/reference/telemetry-response-shapes#issue-response).
+
+## Ernstfilter
+
+Gebruik `severity=info|warning|error|critical` op `GET /api/logs`. De oudere
+parameter `level` is een alias voor compatibiliteit. Beide parameters
+accepteren de canonieke waarden en de aliassen `trace`, `debug`, `warn` en
+`fatal`. LogBrew zet een alias om naar de canonieke waarde voordat het
+vergelijkt.
+
+Verzendt een request zowel `severity` als `level`? Dan normaliseert LogBrew
+eerst beide. Tegenstrijdige waarden worden geweigerd met:
+
+```text
+log severity and level filters conflict; use one value
+```
+
+## <span id="trace-filters">Tracefilters</span>
+
+Bij het zoeken naar traces is `status` gelijk aan `error` of `ok`. Laat de
+parameter weg om beide op te nemen. `min_duration_ms` moet nul of groter zijn.
+De parameter geldt alleen bij het zoeken naar traces.
+
+Dit request vindt fouttraces die minstens 500 milliseconden duurden:
+
+```bash
+curl --get "https://api.logbrew.co/api/telemetry/traces" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "status=error" \
+  --data-urlencode "min_duration_ms=500" \
+  --data-urlencode "since=7d"
+```
+
+Codeer `trace_id` voor de details en de samenvatting van een trace met
+percent-encoding als padsegment. Verzend het niet als queryparameter.
+
+## <span id="project-scope">Projectbereik</span>
+
+Gebruik `project_id=<project-uuid>` om één project te lezen. Gebruik op de
+routes die in de matrix `project_ids` noemen `project_ids=<uuid>,<uuid>` voor
+een exacte set van 2 tot 50 projecten. Laat op die routes beide parameters weg
+om elk project te lezen dat het account kan lezen. Een route die `project_id`
+vereist, accepteert maar 1 project.
+
+```text
+project_id=00000000-0000-4000-8000-000000000001
+project_ids=00000000-0000-4000-8000-000000000001,00000000-0000-4000-8000-000000000002
+```
+
+LogBrew weigert deze selecties met `422` en `validation_failed`:
+
+- Een request met zowel `project_id` als `project_ids`.
+- Een waarde van `project_ids` met minder dan 2 of meer dan 50 ID's.
+- Een dubbel ID of een ID dat geen UUID is.
+
+Is één ID in `project_ids` een project dat het account niet kan lezen? Dan
+mislukt het request met `404` en `not_found`. Verwijder dat ID niet om toch
+verder te gaan. Vraag de gebruiker om een nieuwe set te kiezen.
+
+Houd op elke cursorpagina hetzelfde projectbereik aan. Verwijder de
+projectfilter niet na een leeg resultaat, want dan stel je een andere vraag.
+
+## Reeksen per tijdsinterval
+
+`GET /api/telemetry/metrics/series` geeft één metric terug, verdeeld over
+tijdsintervallen. `GET /api/telemetry/summary/volume` geeft aantallen signalen
+terug, verdeeld over tijdsintervallen. Voor beide routes gelden deze regels:
+
+- `since` is verplicht. `until` is optioneel en is standaard het tijdstip van
+  het request.
+- Het bereik van `since` tot `until` is maximaal 31 dagen.
+- `interval` is `auto`, `1m`, `5m`, `15m`, `1h`, `6h` of `1d`. De standaard
+  is `auto`. Een waarde die meer dan 500 tijdsintervallen oplevert, mislukt.
+- `service_name`, `release` en `environment` zijn exacte filters.
+
+Bij reeksen van metrics is `name` de exacte naam van de metric uit
+`GET /api/telemetry/metrics`. `group_by` is `none`, `service_name`, `release`
+of `environment`. `series_limit` is 1 tot 20.
+
+Bij het signaalvolume mag `until` niet in de toekomst liggen, en is
+`response_version` alleen `1`.
+
+## Logattributen filteren
+
+Gebruik `GET /api/logs/attributes` om de attribuutpaden en -typen te vinden
+waarop je kunt zoeken. Verzend daarna `attribute_filters` naar
+`GET /api/logs`. Beide requests vereisen `since`.
+
+### De attribuutcatalogus lezen
+
+Dit request vindt numerieke paden met `status` erin binnen één project:
+
+```bash
+curl --get "https://api.logbrew.co/api/logs/attributes" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "since=2026-06-01T00:00:00Z" \
+  --data-urlencode "type=number" \
+  --data-urlencode "search=status" \
+  --data-urlencode "limit=2"
+```
+
+De response is een object, geen gewone array. Dit fictieve voorbeeld heeft 2
+attributen en nog een pagina:
+
+```json
+{
+  "attributes": [
+    { "path": "/http/status_code", "type": "number", "observed_count": 50, "last_seen_at": "2026-06-01T12:00:03.789Z" },
+    { "path": "/response/status", "type": "number", "observed_count": 42, "last_seen_at": "2026-06-01T12:00:02.456Z" }
+  ],
+  "coverage": {
+    "total_logs": 60,
+    "fully_indexed_logs": 50,
+    "partially_indexed_logs": 2,
+    "unindexed_logs": 8
+  },
+  "next_cursor": { "observed_count": 42, "path": "/response/status", "type": "number" }
+}
+```
+
+`type` is `string`, `number` of `boolean`. `observed_count` is het aantal logs
+in het bereik met dat pad en dat type. `last_seen_at` is het tijdstip van de
+laatste daarvan. Eén log kan veel paden hebben. Tel de aantallen niet op om een
+aantal logs te krijgen.
+
+`coverage` vertelt welke logs een attribuutfilter kan doorzoeken:
+
+| Veld | Betekenis |
+| --- | --- |
+| `total_logs` | Logs die passen bij de filters van de catalogus voor project, tijd, ernst, service, release en omgeving. |
+| `fully_indexed_logs` | Logs waarvan alle ondersteunde attribuutwaarden doorzoekbaar zijn. |
+| `partially_indexed_logs` | Logs waarvan sommige waarden niet in de index staan. Een filter kan een waarde missen die niet in de index staat. |
+| `unindexed_logs` | Logs die getypeerde attribuutfilters niet kunnen doorzoeken. |
+
+De 3 groepen samen zijn gelijk aan `total_logs`. De `type`, de `search` en de
+cursor van de catalogus veranderen de dekking niet. Een lege lijst
+`attributes` betekent niet dat `total_logs` nul is.
+
+De catalogus heeft geen parameter `status`. De ernstfilter van de catalogus
+vergelijkt de vastgelegde ernst, niet de effectieve ernst.
+
+`search` is een deel van een pad van 1 tot 128 bytes zonder stuurtekens.
+`limit` bepaalt het aantal attributen op een pagina.
+
+### Verder lezen in de catalogus
+
+De catalogus gebruikt geen `pagination=cursor`. Herhaal elke filter en kopieer
+alle 3 velden uit `next_cursor`:
+
+| Teruggegeven veld | Parameter in het volgende request |
+| --- | --- |
+| `next_cursor.observed_count` | `cursor_count` |
+| `next_cursor.path` | `cursor_path` |
+| `next_cursor.type` | `cursor_type` |
+
+Stop als `next_cursor` gelijk is aan `null`.
+
+### Een getypeerde filter toepassen
+
+Kopieer het pad en het type uit de catalogus. Paden gebruiken de syntaxis van
+JSON Pointer, geen sleutels met punten. Laat een escape als `~0` of `~1` in het
+pad ongewijzigd.
+
+Dit request leest logs met een numerieke responsestatus van 500 of hoger:
+
+```bash
+curl --get "https://api.logbrew.co/api/logs" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "since=2026-06-01T00:00:00Z" \
+  --data-urlencode 'attribute_filters=[{"path":"/response/status","type":"number","operator":"gte","value":500}]'
+```
+
+`attribute_filters` is een JSON-array van 1 tot 4 filters. Een log moet bij
+elke filter passen. Elke filter heeft `path`, `type`, `operator` en `value`.
+Het JSON-type van `value` moet bij `type` passen: het getal `500` is niet de
+string `"500"`.
+
+| `type` | Waarden van `operator` |
+| --- | --- |
+| `string` | `eq`, `ne`, `contains`, `starts_with` |
+| `number` | `eq`, `ne`, `gt`, `gte`, `lt`, `lte` |
+| `boolean` | `eq`, `ne` |
+
+`ne` vindt alleen logs die het pad hebben. Een log zonder het pad past niet bij
+`ne`. Voor `string` is `case_sensitive` optioneel en standaard `false`.
+LogBrew weigert `"case_sensitive": true` voor `number` en `boolean`.
+
+Deze limieten gelden:
+
+- De JSON-array is maximaal 4.096 bytes.
+- Een stringwaarde is maximaal 1.024 bytes.
+- `contains` en `starts_with` vereisen een niet-lege string.
+- Een getal moet eindig zijn en liggen tussen -9.007.199.254.740.992 en
+  9.007.199.254.740.992.
+
+Een log die de index niet kan doorzoeken, past niet bij een filter. De log kan
+wel verschijnen in een request zonder `attribute_filters`. Zie
+[Logresponse](/nl/reference/telemetry-response-shapes#log-response) voor de
+response van logs.
+
+### Attribuutfouten corrigeren
+
+Elke fout hieronder geeft `422` met `validation_failed` terug:
+
+| `error` | Oplossing |
+| --- | --- |
+| `log attribute queries require since` | Voeg `since` toe aan het request voor de catalogus, of aan een logrequest met `attribute_filters`. |
+| `invalid log attribute filters` | Verzend een JSON-array van 1 tot 4 filters met een pad, type, operator en waarde uit de catalogus. |
+| `invalid log attribute cursor` | Verzend `cursor_count`, `cursor_path` en `cursor_type` samen uit `next_cursor`. |
+| `invalid log attribute search` | Verzend een niet-leeg deel van een pad van maximaal 128 bytes. |
+
+Corrigeer het request voordat je het opnieuw probeert. Verwijder geen filter,
+want dat verandert het resultaat.
+
+## <span id="cursor-pagination">Cursorpaginering</span>
+
+De cursormodus is optioneel. Zonder deze modus geven lijstroutes een gewone
+array terug. Verzend voor de eerste pagina `pagination=cursor` zonder
+cursorvelden. Herhaal voor elke volgende pagina elke filter en verzend de
+volledige set cursorvelden:
+
+| Route | Cursorvelden om verder te lezen |
+| --- | --- |
+| Logs, issues, voorvallen van issues, acties, metrics en deployments | `cursor_time` en `cursor_id` |
+| Releases | `cursor_time`, `cursor_project_id`, `cursor_release`, `cursor_environment` en `cursor_service_name` |
+| Traces zoeken | `cursor_time` en `cursor_trace_id` |
+
+Neem de teruggegeven velden van `next_cursor` zo over in het volgende request:
+
+- `next_cursor.time` gaat naar `cursor_time`.
+- `next_cursor.id` gaat naar `cursor_id`.
+- Bij traces gaat `next_cursor.trace_id` naar `cursor_trace_id`.
+- Zet bij releases `cursor_` voor elke teruggegeven veldnaam. Zo gaat
+  `next_cursor.release` bijvoorbeeld naar `cursor_release`.
+
+Stop als `next_cursor` gelijk is aan `null`. Bereken geen cursor op basis van
+de laatste rij. De releasecursor verandert de gekozen projecten niet. Houd de
+oorspronkelijke `project_id` of `project_ids` aan.
+
+```bash
+curl --get "https://api.logbrew.co/api/logs" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "severity=error" \
+  --data-urlencode "since=2026-06-01T00:00:00Z" \
+  --data-urlencode "pagination=cursor" \
+  --data-urlencode "limit=50"
+```
+
+`limit` bepaalt de paginagrootte. Een pagina kan minder rijen bevatten. Deze
+routes accepteren geen `page` of `page_number`.
+
+| Route | Standaard `limit` | Maximale `limit` |
+| --- | ---: | ---: |
+| Logs, logattributen, issues, acties, metrics, releases en traces zoeken | 100 | 500 |
+| Voorvallen van issues | 25 | 100 |
+| Deployments | 50 | 100 |
+
+Op de meeste routes verlaagt LogBrew een `limit` boven het maximum naar het
+maximum. De lijst met deployments weigert een `limit` buiten 1 tot 100 met
+`422`. De lijst met deployments geeft altijd een paginaobject met
+`next_cursor` terug, ook zonder `pagination=cursor`.
+
+LogBrew weigert deze requests met `422` en `validation_failed`:
+
+- Een waarde van `pagination` anders dan `cursor`.
+- Cursorvelden zonder `pagination=cursor`.
+- Een onvolledige set cursorvelden.
+- Een `cursor_time` die geen RFC3339-tijdstempel is.
+
+Een cursor markeert een positie, maar bevriest de gegevens niet. Begin opnieuw
+bij een eerste pagina als je een actuele weergave nodig hebt.
+
+De CLI gebruikt dezelfde velden:
+
+```bash
+logbrew read logs --severity error --pagination cursor --limit 50 --json
+logbrew read logs --severity error --pagination cursor --limit 50 \
+  --cursor-time <time> --cursor-id <id> --json
+```
+
+## Een leeg resultaat diagnosticeren
+
+Een lege lijst betekent dat geen rij bij elke filter paste. Over andere
+signalen zegt dat niets. Controleer het request in deze volgorde:
+
+1. Controleer het project-ID.
+2. Verwijder optionele filters één voor één.
+3. Is het verwachte event ouder? Zet `since` dan eerder. Is het verwachte
+   event nieuwer? Verwijder `until` dan of zet het later.
+4. Vergelijk `service_name`, `release` en `environment` met de waarden die je
+   SDK verzendt.
+5. Voeg bij logs `status=all` toe als een logregel de verwachte log kan
+   verbergen.
+6. Controleer of de route elke filter accepteert.
+
+## Herstellen na een geweigerde query
+
+Een geweigerde query geeft de standaardfoutenvelop terug. Een onbekende
+parameter of een waarde van het verkeerde type geeft `422` terug:
+
+```json
+{
+  "error": "invalid query parameters",
+  "code": "validation_failed",
+  "next": "check query parameter names and value types, then retry",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+Veelvoorkomende oplossingen:
+
+- Vervang een gebruiksvriendelijke alias door de parameter uit de
+  [filtermatrix](#filter-matrix).
+- Verzend elk cursorveld dat de route nodig heeft om verder te lezen.
+- Verwijder cursorvelden uit het request voor de eerste pagina.
+- Gebruik maar één projectselectie.
+- Vervang een niet-ondersteunde ernst of tracestatus door een canonieke
+  waarde.
+
+Zie [API-fouten](/nl/reference/api-errors) voor foutcodes en herstel. Zie
+[Responseformaten](/nl/reference/telemetry-response-shapes) voor
+de body's van responses.

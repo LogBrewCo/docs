@@ -1,0 +1,225 @@
+---
+title: "Applicatietelemetrie: logs, traces en metrics"
+sidebarTitle: "Telemetrie"
+description: "Vergelijk logs, traces, metrics, issues en productacties. Kies het LogBrew-signaal voor je onderzoek."
+---
+
+Telemetrie is het gestructureerde bewijs dat een applicatie over haar gedrag
+verzendt. Logs leggen gemelde events vast. Traces verbinden bewerkingen.
+Metrics meten waarden. Issues groeperen fouten. Acties leggen productactiviteit
+vast.
+
+Velden voor project, service, omgeving, release en tijd geven het bereik van
+elk resultaat. Lees de
+[handleiding voor SDK-integratie](/nl/guides/sdk-ingestion) voor de signalen
+die je SDK vastlegt.
+
+## <span id="choose-the-correct-telemetry-data-type">Een signaal kiezen</span>
+
+| Signaal | Waarvoor |
+| --- | --- |
+| Issues | Herhaalde fouten, zoals een checkout-exception met 18 voorvallen. |
+| Logs | Eén event dat de app heeft gemeld, zoals een mislukte betaling. |
+| Traces | De bewerkingen en de duur van één request over geïnstrumenteerde services. |
+| Metrics | Een gemeten waarde in de tijd, zoals de duur van requests of het aantal voltooide jobs. |
+| Acties | Productactiviteit, zoals een paginaweergave, een schermweergave of een interactie. |
+
+Begin een foutonderzoek met issues of logs. Gebruik een beschikbare trace om
+één uitvoering te onderzoeken. Gebruik een trend in een metric om de bredere
+periode te onderzoeken. Lees [Productanalyse](/nl/concepts/product-analytics)
+voor activiteit en retentie.
+
+Leg alleen de velden vast die een onderzoek nodig heeft. Gebruik stabiele namen
+voor services, bewerkingen en metrics. Verzend geen toegangsgegevens,
+betaalgegevens of ruwe requestbody's. De handleiding
+[Vastgelegde gegevens beheren](/nl/guides/safe-capture) beschrijft de
+instellingen.
+
+## Logs
+
+Een log is een record van de applicatie op één moment. Een bruikbare log heeft:
+
+- Het brontijdstip van het event.
+- Een canonieke ernst.
+- Een project- en servicebereik.
+- Omgeving en release.
+- Trace- en span-ID's als de log een actieve tracecontext heeft.
+- Kleine, benoemde attributen met context voor het event.
+
+Een logresponse bevat deze waarden in `occurred_at`, `severity`, `project_id`,
+`service_name`, `environment`, `release`, `trace_id`, `span_id` en
+`attributes`. Zet context in benoemde attributen, niet in de berichttekst.
+
+Logs van meerdere services in één weergave hebben geen tracerelatie. Alleen
+tracecontext legt die relatie.
+
+## Traces
+
+Een trace bevat de spans van één request of bewerking. Een rootspan heeft geen
+bovenliggende span. Een onderliggende span verwijst naar zijn bovenliggende
+span. Alle spans in een trace hebben hetzelfde trace-ID en verschillende
+span-ID's. Zie [Distributed tracing](/nl/concepts/distributed-tracing).
+
+Een log, issue, actie of metric die zonder actieve tracecontext is verzonden,
+krijgt een vastleggingstrace. Die trace bevat alleen vastleggingsspans. Een
+requestpad toont hij niet. Zie
+[Vastleggingsspans](/nl/concepts/distributed-tracing#capture-spans).
+
+## <span id="read-the-metric-value">Metrics</span>
+
+Een metric legt een gemeten waarde in de tijd vast. Lees elke metric samen met
+de naam, de eenheid, de dimensies, het project, het tijdsbereik en het
+interval. LogBrew bepaalt de `value` van elk punt op basis van `kind` en
+`temporality` van de metric:
+
+| Metriccontract | `aggregation.code` | `value` van het punt |
+| --- | --- | --- |
+| `gauge` met `instant` | `gauge_last` | De laatste toestand in het interval, zoals de lengte van een queue. |
+| `counter` met `delta` | `delta_sum` | De som van de wijzigingen in het interval, zoals voltooide jobs. |
+| `histogram` met `delta` | `distribution_p95` | Het 95e percentiel bij benadering, zoals de duur van requests. |
+| Een stream met `cumulative` | `raw_cumulative_last` | Het laatste ruwe totaal. Het is geen waarde per tijdseenheid. |
+| Een ander paar | `raw_last` | De laatste ruwe meting. |
+
+Drie metingen van een deltacounter met de waarden `2`, `3` en `5` in één
+interval geven bijvoorbeeld een `value` van `10` en een `sample_count` van `3`
+voor dat punt. Drie gaugemetingen met dezelfde waarden, in die volgorde, geven
+een `value` van `5`. Een p95-waarde is geen gemiddelde. Ongeveer 95% van de
+vastgelegde waarnemingen ligt op of onder die waarde.
+
+Bij `status: "ready"` is de afgeleide aggregatie beschikbaar. Lees bij
+`status: "limited"` het veld `aggregation.limitation` en gebruik alleen de
+ruwe waarden. Tel een gauge of een cumulatieve stream niet op. Een interval
+zonder punt is geen gemeten nul. Lees
+[Queryfilters van de Telemetrie-API](/nl/reference/telemetry-api-filters) voor de
+queryvelden.
+
+`GET /api/telemetry/metrics/series` geeft deze punten terug. Het endpoint
+vereist `project_id`, `name` en `since`. Elke reeks heeft één `identity` met
+een `kind`, `unit` en `temporality`. Reeksen met verschillende identiteiten
+blijven gescheiden. Elk punt kan ook deze velden bevatten:
+
+| Veld | Betekenis |
+| --- | --- |
+| `min`, `max`, `average` | Het bereik en het gemiddelde van de metingen in het interval. |
+| `p50`, `p95`, `p99` | Percentielen bij benadering voor een histogram. |
+| `rate_per_second` | De som van de deltacounter gedeeld door de breedte van het interval. |
+| `trace_exemplars` | Trace-ID's die uit het interval zijn gesampled. Open er een om een request uit dat interval te onderzoeken. |
+
+`coverage.truncated` is `true` als `series_limit` reeksen met een lager volume
+heeft weggelaten. Voer dit uit om een tijdvenster van een metric te vergelijken
+met het vorige tijdvenster van dezelfde lengte:
+
+```bash
+logbrew explain metric '<metric-name>' --project '<project-id>' --since 24h --json
+```
+
+## Issues
+
+Een issue groepeert herhaalde fouten op basis van een stabiele vingerafdruk. Het
+heeft een ernst, een status, een aantal voorvallen, een tijdstip ‘Eerst gezien’
+en een tijdstip ‘Laatst gezien’. De details van een issue kunnen exceptionketens,
+stackframes, breadcrumbs, gerelateerde logs en een tracerelatie toevoegen.
+
+`last_seen_at` is het nieuwste voorval in de groep. Het voorval dat je kiest,
+kan ouder zijn. Lees beide tijdstippen.
+
+De `status` van een issue is `unresolved`, `resolved` of `archived`. Versie 1
+van de API-response toont `archived` als `ignored`. Responseversies 2 en 3
+voegen `priority` (`high`, `medium` of `low`) en `priority_source` toe. Versie 3
+voegt ook `assignee` toe. Zie
+[Statuswaarden](/nl/guides/issue-workflow#status-values) en
+[Prioriteit](/nl/guides/issue-workflow#priority).
+
+## Acties
+
+Een actie legt productactiviteit vast. Een ondersteunde classificatie markeert
+die activiteit als paginaweergave, schermweergave of interactie. Een eventnaam
+alleen bepaalt de classificatie niet. Gebruik
+[Productevents vastleggen](/nl/guides/product-events) om deze context toe te
+voegen.
+
+Sessies zijn geen gebruikers. Anonieme subjecten zijn geen geïdentificeerde
+gebruikers.
+
+## <span id="shared-fields">Gedeelde velden</span>
+
+| Veld | Gebruik |
+| --- | --- |
+| `project_id` | Is eigenaar van de telemetrie en bepaalt de leesgrens. |
+| `service_name` | Identificeert de app of service die het signaal heeft verzonden. |
+| `environment` | Scheidt gegevens van productie, staging, preview en lokaal. |
+| `release` | Identificeert de gedeployde codeversie. |
+| `occurred_at` | Geeft het brontijdstip van één log of actie. Spans gebruiken `started_at`. |
+| `trace_id` | Koppelt signalen die in dezelfde tracecontext zijn vastgelegd. |
+| `span_id` | Identificeert de span in de trace waartoe een signaal behoort. |
+
+## <span id="severity-values">Ernstwaarden</span>
+
+| Canonieke waarde | Geaccepteerde aliassen bij invoer |
+| --- | --- |
+| `info` | `trace`, `debug`, `info` |
+| `warning` | `warn`, `warning` |
+| `error` | `error` |
+| `critical` | `fatal`, `critical` |
+
+LogBrew accepteert de aliassen als invoer, ongeacht hoofd- of kleine letters.
+De API, de CLI en live-events gebruiken de canonieke waarden. Onbekende
+ernstwaarden worden geweigerd. De ernst is de vastgelegde urgentie. Die toont
+geen zakelijke impact of grondoorzaak.
+
+Een gebruiker kan de getoonde ernst van een issue of log wijzigen. De response
+bevat dan een object `triage` met `effective_severity`. Het veld `severity`
+behoudt de vastgelegde waarde.
+
+## Live lezen en momentopnamen
+
+`logbrew read` geeft een momentopname terug voor het gekozen project, het gekozen
+tijdsbereik en de gekozen filters. Voer de opdracht opnieuw uit om nieuwe
+events te lezen. `logbrew watch` streamt nieuwe logs, issues en acties zolang
+de verbinding open is. Traces en metrics streamt de opdracht niet. Een
+verbindingsfout toont niet aan dat het project leeg is.
+
+## <span id="evidence-quality-and-trace-lifecycle">Bewijsstatussen</span>
+
+Responses houden deze statussen gescheiden: ‘Vastgelegd’, ‘Ontbreekt’,
+‘Afgeschermd’, ‘Afgekapt’ en ‘Niet beschikbaar’. Tracebewijs heeft vier
+statussen: `available`, `not_linked`, `not_found` en `unavailable`. Zie de
+[introductie](/nl/introduction#follow-exact-relationships) voor hun betekenis
+en [Grenzen van het bewijs](/nl/introduction#read-evidence-states-before-drawing-a-conclusion)
+voor de dekkingsvelden. Een nieuwere SDK voegt geen velden toe aan events die
+hij eerder heeft verzonden.
+
+## <span id="a-practical-investigation">Eén project onderzoeken</span>
+
+<Steps>
+  <Step title="Zoek onopgeloste issues">
+    ```bash
+    logbrew read issues --project '<project-id>' --status unresolved --since 24h --json
+    ```
+  </Step>
+
+  <Step title="Lees één issue">
+    Dit leest de bewaarde geschiedenis van het issue. De filter `--since` uit
+    de lijst geldt hier niet.
+
+    ```bash
+    logbrew investigate issue '<issue-id>' --json
+    ```
+  </Step>
+
+  <Step title="Open een beschikbare trace">
+    Gebruik het trace-ID alleen als het gekozen voorval er een teruggeeft.
+
+    ```bash
+    logbrew read trace '<trace-id>' --project '<project-id>' --json
+    ```
+  </Step>
+
+  <Step title="Lees gerelateerd bewijs">
+    Filter logs, acties en metrics op hetzelfde project en dezelfde service,
+    omgeving en release. Koppel signalen niet alleen op basis van tijd.
+  </Step>
+</Steps>
+
+Lees voor de responsevelden de [Telemetrie-API](/nl/reference/telemetry-api)
+en [Responseformaten](/nl/reference/telemetry-response-shapes).

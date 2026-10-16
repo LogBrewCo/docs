@@ -1,0 +1,397 @@
+---
+title: "iOS-crashrapportage voor Apple-crashes en vastlopers"
+sidebarTitle: "Apple-crashes en vastlopers"
+description: "Stel crashrapportage in voor je iOS-app, upload de bijbehorende dSYM's en lees gesymboliseerde crashlogs van je iOS-app in LogBrew."
+---
+
+Gebruik deze werkwijze om native crashes en vastlopers op de hoofdthread van
+een iOS-app vast te leggen. Voor het vastleggen van vastlopers is UIKit nodig.
+Upload de bijbehorende dSYM om bronlocaties in stackframes te zien.
+
+Bij een crash slaat de app een lokaal rapport op. Bij een latere start roept
+je app replay aan om het crashbewijs naar LogBrew te sturen. LogBrew verstuurt
+het ruwe Apple-rapport niet.
+
+<Note>
+  Gebruik LogBrew Swift 0.1.6 of later. Gebruik voor het uploaden van
+  debugartefacten de native LogBrew CLI 0.1.24 of later.
+</Note>
+
+<Warning>
+  Gebruik in de app een projectgebonden ingest-configuratie. Gebruik een
+  accountlogin voor het uploaden van artefacten en het lezen van issues. Een
+  artefactsleutel van het project kan ook vanaf een buildmachine uploaden.
+  Zet nooit een toegangstoken van je account of een artefactsleutel in de app.
+</Warning>
+
+## De vastlegging plannen
+
+Controleer wanneer je app elk type fout via replay kan versturen.
+
+| Fout | Resultaat van de vastlegging | Moment van aflevering |
+| --- | --- | --- |
+| Fatale Apple-crash | Een onafgehandeld native crashevent | Een latere start van de app |
+| Herstelde vastloper op de hoofdthread | Een afgehandeld vastloperevent | Bij replay na het herstel |
+| Vastloper gevolgd door beëindiging | Een onafgehandeld vastloperevent | Een latere start van de app |
+
+Stel de releasewaarde in vóór de build. Die moet de appversie en de build
+aanduiden. Gebruik dezelfde waarde in de SDK, bij de dSYM-upload en in het
+issuefilter.
+
+Voeg geen gebruikerspayloads, request-body's of headers toe aan crashmetadata.
+
+## Het crashproduct toevoegen
+
+Volg eerst [SDK-integratie](/nl/guides/sdk-ingestion) om SDK-telemetrie voor
+je app in te stellen. Replay gebruikt die `client` en `transport`.
+
+Voeg de openbare SDK toe via Swift Package Manager.
+
+```swift
+.package(
+    url: "https://github.com/LogBrewCo/sdk.git",
+    from: "0.1.6"
+)
+```
+
+Voeg het product `LogBrew` toe om telemetrie te versturen. Voeg `LogBrewCrash`
+alleen toe als de app het vastleggen van native crashes of vastlopers
+expliciet inschakelt.
+
+De capture-integratie ondersteunt iOS 15 of later. Gebruik één
+capture-object dat de app zelf beheert, want native handlers voor fatale
+fouten gelden voor het hele proces.
+
+## Eén exacte identiteit configureren
+
+Gebruik hetzelfde project, dezelfde release, dezelfde omgeving en dezelfde
+service bij het instellen van de runtime en bij het uploaden van artefacten. LogBrew
+leidt deze waarden niet af en vervangt ze niet.
+
+```swift
+import Foundation
+import LogBrew
+import LogBrewCrash
+
+let applicationSupport = try FileManager.default.url(
+    for: .applicationSupportDirectory,
+    in: .userDomainMask,
+    appropriateFor: nil,
+    create: true
+)
+
+let identity = try NativeArtifactIdentity(
+    projectId: "550e8400-e29b-41d4-a716-446655440000",
+    release: "com.example.app@1.2.3+45",
+    environment: "production",
+    service: "ios-app"
+)
+
+let watchdog: NativeHangWatchdogConfiguration? = nil
+
+let crashCapture = NativeCrashCapture(
+    configuration: try NativeCrashConfiguration(
+        storageDirectory: applicationSupport.appendingPathComponent(
+            "LogBrewCrash",
+            isDirectory: true
+        ),
+        artifactIdentity: identity,
+        hangWatchdog: watchdog
+    )
+)
+
+try crashCapture.install()
+```
+
+Installeer het capture-object op de hoofdthread voordat je de root-UI maakt.
+Maak eerst de bovenliggende map. Houd de opslagmap privé en in beheer van de
+app.
+
+Het capture-object legt Mach-exceptions, signalen, C++-exceptions en
+Objective-C-exceptions vast. Het lokale rapport bevat geen geheugeninhoud,
+queuenamen of consolelogs.
+
+Het lokale crashrapport kan gevoelige gegevens over de app en het apparaat
+bevatten. Houd het buiten cloudback-ups en gedeelde mappen. LogBrew verstuurt
+frame-UUID's, architecturen en offsets in plaats van het ruwe rapport.
+
+`NativeCrashConfiguration` heeft twee optionele limieten:
+
+| Parameter | Standaard | Bereik | Effect |
+| --- | --- | --- | --- |
+| `maxStoredReports` | `5` | 1 tot 32 | Het aantal lokale rapporten dat de app bewaart. |
+| `maxReplayBytes` | 4 MiB | 1 KiB tot 16 MiB | Replay gooit een rapport weg dat groter is dan deze waarde. |
+
+Bij een waarde buiten het bereik gooit de configuratie
+`crash_invalid_configuration`.
+
+## Het vastleggen van vastlopers inschakelen
+
+Het vastleggen van vastlopers staat uit als `watchdog` `nil` is. Vervang de
+declaratie van `watchdog` hierboven om het in te schakelen. Doe dat voordat je
+`install()` aanroept:
+
+```swift
+let watchdog = try NativeHangWatchdogConfiguration(
+    threshold: 2
+)
+```
+
+De drempel is in seconden, van 1 tot 30. Het vastleggen van vastlopers vereist
+ook `artifactIdentity`. Zonder die waarde gooit de configuratie
+`crash_invalid_configuration`.
+
+Gebruik één `crashCapture`-object zolang het proces draait. Een tweede
+capture-object kan niet worden geïnstalleerd. De aanroep van `install()` gooit dan
+`crash_capture_owned`. Wil je de drempel wijzigen, gebruik dan de nieuwe
+waarde bij de volgende start van de app.
+
+Een herstelde vastloper wordt via replay verstuurd met `crash.handled` op
+`true`. Een vastloper die nog liep toen het proces werd beëindigd, wordt
+verstuurd met `crash.handled` op `false`.
+
+Beide vormen bevatten numerieke `durationMs`-metadata. Ze behouden dezelfde
+artefactidentiteit als de frames van fatale crashes.
+
+De watchdog pauzeert als de app inactief is of onder een debugger draait. Bij
+ernstige thermische belasting legt hij ook niets vast.
+
+Een korte drempel kan normaal werk op de hoofdthread als vastloper melden.
+Test de drempel met de buildconfiguratie die je uitbrengt. De afgehandelde
+status beschrijft het herstel. Die markeert het issue niet als opgelost. Een
+afgehandelde vastloper heeft de interface toch geblokkeerd, dus bekijk die
+ook.
+
+## Replay na het opstarten
+
+Installeer eerst de vastlegging. Verstuur daarna openstaande rapporten met
+replay via je SDK-client.
+
+```swift
+let replay = try crashCapture.replayPendingReports(
+    in: client,
+    transport: transport
+)
+
+print(
+    "acknowledged=\(replay.acknowledged) " +
+    "discarded=\(replay.discarded) " +
+    "pending=\(replay.pending)"
+)
+```
+
+Je app moet replay aanroepen. Het herstel van een vastloper verstuurt op
+zichzelf geen event. Roep dezelfde methode aan na het herstel of bij de volgende start.
+
+Replay verwerkt geldige rapporten van oud naar nieuw en behoudt hun stabiele
+event-ID's. Bij een mislukte aflevering blijft het rapport openstaan. Na een
+geaccepteerde aflevering wordt het verwijderd.
+
+Replay gooit rapporten weg die niet leesbaar zijn, en rapporten die groter
+zijn dan `maxReplayBytes`. Controleer alle drie de aantallen. Nul openstaande
+rapporten bewijst op zichzelf geen aflevering.
+
+Schakel persistente aflevering in vóór replay als een mislukt request nog een
+herstart moet overleven. Roep `purge()` niet aan bij gewoon herstel van
+netwerk of authenticatie.
+
+## De bijbehorende dSYM uploaden
+
+Archiveer de app met ingeschakelde debuginformatie. Bewaar de dSYM van precies
+de build die gebruikers draaien.
+
+Bekijk de image-UUID's ervan.
+
+```bash
+xcrun dwarfdump --uuid "path/to/App.app.dSYM"
+```
+
+Valideer het artefact lokaal voordat je uploadt.
+
+```bash
+logbrew debug-artifacts upload "path/to/App.app.dSYM" \
+  --project "<project UUID>" \
+  --release "com.example.app@1.2.3+45" \
+  --environment "production" \
+  --service "ios-app" \
+  --expect-image-uuid "<Mach-O UUID>" \
+  --dry-run \
+  --json
+```
+
+Herhaal `--expect-image-uuid` voor elke vereiste architectuur. De opdracht
+mislukt als de gevonden set UUID's afwijkt van de verwachte set.
+
+Controleer de toegang tot je account. Voer daarna dezelfde opdracht uit
+zonder `--dry-run`.
+
+```bash
+logbrew status --json
+
+logbrew debug-artifacts upload "path/to/App.app.dSYM" \
+  --project "<project UUID>" \
+  --release "com.example.app@1.2.3+45" \
+  --environment "production" \
+  --service "ios-app" \
+  --expect-image-uuid "<Mach-O UUID>" \
+  --json
+```
+
+De uploadopdracht valideert ondersteunde Apple-objecten en verifieert elke
+geüploade identiteit. Lokale paden en bestandsnamen komen niet in de
+API-metadata.
+
+Het veld `status` in de JSON toont het resultaat:
+
+| `status` | Betekenis |
+| --- | --- |
+| `validated` | De proefrun vond de verwachte objecten. Er is niets geüpload. |
+| `verified` | Met accounttoegang is elke identiteit geüpload en geverifieerd. |
+| `already_present` | LogBrew heeft elke identiteit al. |
+| `uploaded` | Een artefactsleutel van het project heeft de bestanden geüpload. De CLI kon ze niet verifiëren. |
+
+Een buildmachine kan uploaden met een artefactsleutel van het project in
+`LOGBREW_TOKEN`, in plaats van met accounttoegang. Maak de sleutel zoals
+beschreven in
+[Een artefactsleutel maken](/nl/guides/source-maps#create-an-artifact-key).
+Die upload meldt `uploaded`. Verifieer elke identiteit later met
+accounttoegang:
+
+```bash
+logbrew debug-artifacts lookup \
+  --project "<project UUID>" \
+  --release "com.example.app@1.2.3+45" \
+  --environment "production" \
+  --service "ios-app" \
+  --image-uuid "<Mach-O UUID>" \
+  --architecture arm64 \
+  --json
+```
+
+`status: "found"` bevestigt het artefact. `status: "missing"` betekent dat
+LogBrew geen artefact voor die identiteit heeft.
+
+Frames worden herleid op basis van de image-UUID en de volledige
+artefactidentiteit, niet op basis van de naam van het bronbestand. Een nieuwe
+build van dezelfde broncode kan andere UUID's hebben. Upload precies de
+dSYM-bundel, niet een hele buildmap.
+
+## Controleren wat LogBrew teruggeeft
+
+Filter de issuelijst met dezelfde runtime-scope. Dit voorbeeld selecteert
+`unresolved` issues. Een opgelost of gearchiveerd issue verschijnt niet.
+
+```bash
+logbrew read issues \
+  --project "<project UUID>" \
+  --release "com.example.app@1.2.3+45" \
+  --environment "production" \
+  --service "ios-app" \
+  --status "unresolved" \
+  --since "24h" \
+  --json
+```
+
+De lijstresponse identificeert het gegroepeerde issue. Lees de details ervan
+om LogBrew de frames te laten herleiden.
+
+```bash
+logbrew read issue "<issue UUID>" --json
+```
+
+Een passend artefact voegt een `symbolication`-object toe. Dit voorbeeld toont
+geselecteerde velden van een issue met een herleid frame, niet de volledige
+response.
+
+```json
+{
+  "severity": "critical",
+  "attributes": {
+    "metadata": {
+      "crash.replayed": true
+    }
+  },
+  "symbolication": {
+    "status": "resolved",
+    "frames": [
+      {
+        "index": 0,
+        "status": "resolved",
+        "resolved": {
+          "source": "AppRuntime.swift",
+          "line": 42,
+          "column": 1,
+          "name": "terminateForCrash()"
+        }
+      }
+    ]
+  }
+}
+```
+
+## Crashbewijs lezen
+
+Elk frame heeft een eigen `status`. Het veld `symbolication.status` gebruikt
+dezelfde waarden:
+
+| `status` | Betekenis |
+| --- | --- |
+| `resolved` | Een passend artefact heeft het frame herleid. `resolved` bevat de bron, regel, kolom of functienaam die het artefact levert. |
+| `artifact_not_found` | Geen geüpload artefact past bij de eventidentiteit en de image-UUID. |
+| `source_not_resolved` | Er is een passend artefact, maar dat heeft dit frame niet herleid. |
+| `invalid_metadata` | Het event heeft onvolledige of inconsistente artefactmetadata. |
+| `unavailable` | Het herleiden van het frame kon niet worden voltooid. |
+
+Noteer een niet-herleid frame in je notities ook als niet-herleid. Meld het
+niet als een lege stack.
+
+LogBrew herleidt frames wanneer je het issue leest. Een later geüploade dSYM
+kan frames van een eerder event herleiden. Hij kan geen frames toevoegen die
+het event niet heeft vastgelegd.
+
+Een applicatieframe beperkt de zoektocht in de code, maar bewijst de
+oorzaak niet. Lees het issueonderzoek voor breadcrumbs, de exceptionketen en
+tracebewijs:
+
+```bash
+logbrew investigate issue "<issue UUID>" --json
+```
+
+In die response komt een frame met `source: "symbolicated"` uit een geüpload
+artefact. Een frame met `source: "captured"` is de locatie die de app
+verstuurde. Zie [Een issue onderzoeken](/nl/guides/investigate-an-issue) voor
+de responsevelden.
+
+Houd bij elke leesactie de volledige scope van project, release, omgeving en
+service aan. Verbreed een mislukte zoekactie niet naar andere projecten.
+
+## De productie-installatie verifiëren
+
+Gebruik een goedgekeurde testfout in de gedeployde build. Gebruik nooit een
+actie van een klant als trigger. Controleer elk punt op volgorde en stop bij
+de eerste fout:
+
+1. De runtime-identiteit komt overeen met de identiteit van het geüploade
+   artefact.
+2. Een latere start verstuurt via replay één bevestigd event, met nul
+   weggegooide en nul openstaande rapporten.
+3. De afgebakende issuelijst geeft het testissue terug met de verwachte
+   afgehandelde status.
+4. Het verwachte applicatieframe wordt herleid.
+5. Een latere schone start voegt geen nieuw voorval toe.
+
+## Veilig herstellen
+
+| Resultaat | Herstel |
+| --- | --- |
+| Authenticatie bij het uploaden mislukt | Voer `logbrew login` uit, controleer `logbrew status --json` en herhaal precies dezelfde upload. |
+| UUID-validatie bij het uploaden mislukt | Kies de dSYM van de gedeployde build en herhaal de proefrun. |
+| `artifact_not_found` | Controleer de eventidentiteit en upload de bijbehorende dSYM met dezelfde scope. |
+| `source_not_resolved` | Bewaar de volledige debuginformatie van de build en controleer de build-instellingen van de gedeployde build. |
+| `invalid_metadata` | Controleer of je LogBrew Swift 0.1.6 of later gebruikt. Leg een nieuw event vast met een exacte identiteit. |
+| `unavailable` | Houd het issue zichtbaar en vraag later opnieuw dezelfde details op met dezelfde scope. |
+| Replay blijft openstaan | Herstel de transport- of authenticatiestatus en start de app opnieuw zonder het rapport te wissen. |
+| Replay meldt weggegooide items | Tel ze niet als afgeleverd. Controleer de configuratie van de vastlegging en reproduceer met een nieuw goedgekeurd testevent. |
+
+Gebruik voor algemeen issueonderzoek
+[Een issue onderzoeken met de API](/nl/guides/investigate-an-issue).

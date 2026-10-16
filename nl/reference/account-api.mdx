@@ -1,0 +1,434 @@
+---
+title: "Account-API en gebruikslimieten van de API"
+sidebarTitle: "Account-API"
+description: "Lees de gebruikslimieten, quotageschiedenis en abonnementsstatus van je LogBrew-account, en de responses bij uitloggen."
+---
+
+Gebruik de account-API om gebruik, quotastatus, gebruiksgeschiedenis en de
+gereedheid van je abonnement te lezen, en om uit te loggen. Leesacties voor
+het account gebruiken een account-bearer of de browsersessie. Gebruik nooit
+een ingest-sleutel van een project voor een accountrequest. Gebruik nooit
+toegangsgegevens van een account als SDK- of ingest-configuratie.
+
+| Taak | Endpoint |
+| --- | --- |
+| Huidig gebruik en quotastatus lezen | `GET /api/account/usage` |
+| Gebruik door de tijd heen lezen | `GET /api/account/usage/history` |
+| Gereedheid van abonnement en organisatie lezen | `GET /api/account/subscription` |
+| Eén app- of CLI-login beëindigen | `POST /api/auth/logout` |
+| Elke LogBrew-login intrekken | `POST /api/auth/logout-all` |
+| De browsersessie wissen | `POST /api/auth/web/logout` |
+
+Fouten gebruiken de standaard [API-foutenvelop](/nl/reference/api-errors).
+Een leesactie zonder geldige accountauthenticatie geeft `401` met
+`code: "unauthorized"`. Toon die fout niet als nul gebruik, een lege grafiek of
+een gratis abonnement. Een niet-ondersteunde methode geeft `405` met
+`code: "method_not_allowed"`, en `next` noemt het ondersteunde request.
+
+De account-API rapporteert telemetriegebruik, geen geld. Hij rapporteert geen
+kosten, facturen of betaalstatus.
+
+## <span id="account-usage">Accountgebruik</span>
+
+`GET /api/account/usage` is het canonieke endpoint voor gebruik en quota.
+Gebruik het voor gebruikstotalen, het resetmoment, de quotastatus en
+uitsplitsingen per project en telemetriestroom. Bereken het gebruik niet uit
+SDK-bestanden, CLI-bestanden of tellers in de client. De CLI-opdracht
+`logbrew usage` leest dit endpoint. Zie de [CLI-referentie](/nl/reference/cli).
+
+```bash
+curl "https://api.logbrew.co/api/account/usage" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER"
+```
+
+Voorbeeldresponse met synthetische waarden. Dit gratis account heeft 1 project
+en heeft in de huidige periode alleen logs verstuurd:
+
+```json
+{
+  "period_start": "2026-06-01T00:00:00Z",
+  "period_end": "2026-07-01T00:00:00Z",
+  "reset_at": "2026-07-01T00:00:00Z",
+  "plan": { "tier": "free", "status": "free" },
+  "limits": { "events": null, "bytes": null, "projects": null, "retention_days": 30 },
+  "usage": { "events": 27000, "bytes": 10485760, "projects": 1 },
+  "state": "ok",
+  "warning_threshold": 0.8,
+  "percent_used": 0.2,
+  "warning": false,
+  "blocked": false,
+  "limit": null,
+  "next": "continue sending telemetry",
+  "next_action": {
+    "code": "continue_sending_telemetry",
+    "target": "telemetry_ingest",
+    "state": "ok",
+    "limit": null,
+    "reset_at": "2026-07-01T00:00:00Z"
+  },
+  "by_project": [
+    { "project_id": "00000000-0000-4000-8000-000000000001", "events": 27000, "bytes": 10485760 }
+  ],
+  "by_stream": [
+    { "kind": "logs", "events": 27000, "bytes": 10485760 }
+  ]
+}
+```
+
+| Veld | Betekenis |
+| --- | --- |
+| `period_start`, `period_end` | De huidige gebruiksperiode. Het einde valt er niet meer in. |
+| `reset_at` | Wanneer de gebruikslimiet wordt gereset. Gelijk aan `period_end`. |
+| `plan.tier` | Code van het abonnement: `free`, `pro` of `scale`. |
+| `plan.status` | `free`, `trial`, `active`, `past_due` of `disabled`. |
+| `limits.events`, `limits.bytes`, `limits.projects` | Compatibiliteitsvelden. Ze zijn `null`. `null` betekent niet onbeperkt. Gebruik `state`, `limit` en `percent_used` voor de quotastatus. |
+| `limits.retention_days` | De bewaartermijn van gegevens voor het abonnement, in dagen, of `null`. |
+| `usage.events`, `usage.bytes` | Totalen voor alle telemetriestromen in de periode. |
+| `usage.projects` | Het aantal projecten waarvan het account eigenaar is. |
+| `state` | `ok`, `warning` of `blocked`. |
+| `warning_threshold` | Het deel van een limiet waarbij de status `warning` begint, als fractie. |
+| `percent_used` | Het hoogste aandeel van een limiet, als percentage. `80` betekent bijvoorbeeld 80%. |
+| `warning`, `blocked` | Compatibiliteitsvormen van `state`. |
+| `limit` | De limiet die de status veroorzaakte: `events`, `bytes` of `null`. |
+| `next`, `next_action` | Hersteltekst en de getypeerde actie voor de huidige status. |
+| `by_project` | Gebruik per project. Er is 1 rij voor elk project van het account, ook als het gebruik nul is. Koppel rijen via `project_id`, niet via hun positie in de array. |
+| `by_stream` | Gebruik per telemetriestroom (`kind`), zoals `logs`, `issues`, `actions` of `traces`. |
+
+### Quotastatussen
+
+Gebruik `state` als hoofdvoorwaarde in je code. `limit` is alleen `null` als
+`state` `ok` is.
+
+| `state` | `warning` | `blocked` | `limit` | `next_action.code` | `next_action.target` |
+| --- | --- | --- | --- | --- | --- |
+| `ok` | `false` | `false` | `null` | `continue_sending_telemetry` | `telemetry_ingest` |
+| `warning` | `true` | `false` | `events` of `bytes` | `reduce_usage_or_upgrade` | `pricing` |
+| `blocked` | `false` | `true` | `events` of `bytes` | `wait_until_reset_or_upgrade` | `pricing` |
+
+`next_action.state`, `next_action.limit` en `next_action.reset_at` herhalen de
+waarden op het hoogste niveau. De waarden van `next_action.code` omvatten ook
+`check_usage_limits` met het target `account_usage`. Krijgt een client dat
+paar, lees het gebruik dan opnieuw en toon `next`.
+
+LogBrew meet elk telemetrietype tegen een eigen limiet. `limit` groepeert ze:
+
+- `events` omvat issue-events en trace-spans.
+- `bytes` omvat logbytes en metricbytes.
+
+Is één limiet geblokkeerd en staat een andere op waarschuwing, dan noemt
+`limit` de geblokkeerde limiet. De status `warning` begint als het gebruik
+`warning_threshold` van een limiet bereikt. De status `blocked` begint als het
+gebruik de limiet bereikt.
+
+De tekst in `next` kan veranderen, bijvoorbeeld als abonnementen niet te koop
+zijn. De waarden van `next_action` veranderen niet. Lokaliseer op basis van
+`next_action`. Parse `next` niet.
+
+Een gebruikslimiet van het account is geen rate limit van de API (een
+maximaal aantal requests per periode). Overschrijdt de opname een limiet, dan
+geeft het ingest-request `429` met `usage_limit_exceeded`, en de body bevat
+ook `limit` en `reset_at`. In die fout noemt `limit` de exacte limiet:
+`issue_events`, `log_bytes`, `metric_bytes` of `trace_spans`. LogBrew weigert
+het volledige request. Verstuur dat telemetrietype niet opnieuw tot
+`reset_at` of tot het abonnement verandert. Stuurt een client te veel
+requests, dan geeft de API `rate_limited` terug. Zie
+[API-fouten](/nl/reference/api-errors#retry-rules).
+
+De response is een momentopname. Lees hem opnieuw na een wijziging in het
+account.
+
+<Note>
+  `GET /api/logs/usage` is een verouderde compatibiliteitsresponse voor de
+  mobiele app, met `bytes_used`, `limit_bytes` en `month`. Gebruik
+  `GET /api/account/usage` voor nieuwe integraties.
+</Note>
+
+## Gebruiksgeschiedenis
+
+`GET /api/account/usage/history` geeft begrensde, met nullen gevulde
+gebruiksintervallen terug voor grafieken en rapporten. Zet `interval` op één
+ondersteunde waarde. Laat je `interval` weg, dan gebruikt de API `monthly`. De
+route accepteert geen andere queryparameter.
+
+```bash
+curl --get "https://api.logbrew.co/api/account/usage/history" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "interval=daily"
+```
+
+| `interval` | Intervallen | Begin van een interval |
+| --- | ---: | --- |
+| `daily` | 30 | 00:00 UTC |
+| `weekly` | 12 | Maandag, 00:00 UTC |
+| `monthly` | 12 | Eerste dag van de maand, 00:00 UTC |
+| `yearly` | 5 | 1 januari, 00:00 UTC |
+
+| Veld | Betekenis |
+| --- | --- |
+| `interval` | Het gevraagde interval. |
+| `period_start`, `period_end` | Het begin en het exclusieve einde van het geschiedenisvenster. |
+| `current` | De volledige response van `GET /api/account/usage` voor de huidige periode. |
+| `buckets` | Intervallen in tijdsvolgorde, oudste eerst. Elk interval heeft `period_start`, `period_end`, `usage`, `by_project` en `by_stream`. |
+
+Deze `yearly`-response gebruikt synthetische gegevens voor een request in
+juni 2026. Al het gebruik vond plaats in juni:
+
+```json
+{
+  "interval": "yearly",
+  "period_start": "2022-01-01T00:00:00Z",
+  "period_end": "2027-01-01T00:00:00Z",
+  "current": {
+    "period_start": "2026-06-01T00:00:00Z",
+    "period_end": "2026-07-01T00:00:00Z",
+    "reset_at": "2026-07-01T00:00:00Z",
+    "plan": { "tier": "free", "status": "free" },
+    "limits": { "events": null, "bytes": null, "projects": null, "retention_days": 30 },
+    "usage": { "events": 27000, "bytes": 10485760, "projects": 1 },
+    "state": "ok",
+    "warning_threshold": 0.8,
+    "percent_used": 0.2,
+    "warning": false,
+    "blocked": false,
+    "limit": null,
+    "next": "continue sending telemetry",
+    "next_action": {
+      "code": "continue_sending_telemetry",
+      "target": "telemetry_ingest",
+      "state": "ok",
+      "limit": null,
+      "reset_at": "2026-07-01T00:00:00Z"
+    },
+    "by_project": [
+      { "project_id": "00000000-0000-4000-8000-000000000001", "events": 27000, "bytes": 10485760 }
+    ],
+    "by_stream": [{ "kind": "logs", "events": 27000, "bytes": 10485760 }]
+  },
+  "buckets": [
+    { "period_start": "2022-01-01T00:00:00Z", "period_end": "2023-01-01T00:00:00Z", "usage": { "events": 0, "bytes": 0, "projects": 0 }, "by_project": [], "by_stream": [] },
+    { "period_start": "2023-01-01T00:00:00Z", "period_end": "2024-01-01T00:00:00Z", "usage": { "events": 0, "bytes": 0, "projects": 0 }, "by_project": [], "by_stream": [] },
+    { "period_start": "2024-01-01T00:00:00Z", "period_end": "2025-01-01T00:00:00Z", "usage": { "events": 0, "bytes": 0, "projects": 0 }, "by_project": [], "by_stream": [] },
+    { "period_start": "2025-01-01T00:00:00Z", "period_end": "2026-01-01T00:00:00Z", "usage": { "events": 0, "bytes": 0, "projects": 0 }, "by_project": [], "by_stream": [] },
+    {
+      "period_start": "2026-01-01T00:00:00Z",
+      "period_end": "2027-01-01T00:00:00Z",
+      "usage": { "events": 27000, "bytes": 10485760, "projects": 1 },
+      "by_project": [
+        { "project_id": "00000000-0000-4000-8000-000000000001", "events": 27000, "bytes": 10485760 }
+      ],
+      "by_stream": [{ "kind": "logs", "events": 27000, "bytes": 10485760 }]
+    }
+  ]
+}
+```
+
+Gebruik `current.reset_at` voor de reset van de limiet. Gebruik niet het
+einde van het geschiedenisvenster. `current` is niet de som van de
+intervallen, en de datums ervan kunnen afwijken van de datums van het venster.
+
+Het laatste interval bevat de huidige kalenderperiode, die nog niet voorbij
+is. De eindtijd in de toekomst betekent niet dat LogBrew toekomstig gebruik
+heeft gemeten. Een interval met nullen betekent dat LogBrew in dat interval
+geen gebruik heeft geteld.
+
+In een interval telt `usage.projects` de projecten met gebruik in dat
+interval. Tel deze aantallen niet op om het aantal projecten te krijgen.
+Gebruik `current.usage.projects` voor het aantal projecten van het account.
+
+Teken events en bytes als aparte reeksen, want ze hebben verschillende
+eenheden. De intervallen bevatten gebruik, geen kosten. Label de grafiek niet
+als uitgaven, facturen of API-requests.
+
+Een niet-ondersteund interval geeft `422`:
+
+```json
+{
+  "error": "Unsupported usage history interval",
+  "code": "validation_failed",
+  "next": "use interval=daily, weekly, monthly, or yearly",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+Een onbekende queryparameter geeft ook `422` met `validation_failed`.
+
+## Gereedheid van het abonnement
+
+`GET /api/account/subscription` is alleen-lezen. Gebruik het om te bepalen of
+je de opties voor betaalde abonnementen of organisaties inschakelt. Gebruik
+het gebruiksendpoint voor de quotastatus.
+
+```bash
+curl "https://api.logbrew.co/api/account/subscription" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER"
+```
+
+Een gratis account geeft deze response. De `account_id` is synthetisch:
+
+```json
+{
+  "account_id": "00000000-0000-4000-8000-0000000000aa",
+  "tier": "free",
+  "billing_interval": "none",
+  "state": "free",
+  "access_state": "active",
+  "current_period_start": null,
+  "current_period_end": null,
+  "renews_at": null,
+  "cancels_at": null,
+  "organization_creation_allowed": false,
+  "organization_creation_blocker": "subscription_required",
+  "limits": {
+    "organizations": 0,
+    "members_per_organization": 0,
+    "projects_per_organization": 0,
+    "invitations_per_day": 0
+  },
+  "next": "<display text>",
+  "next_action": {
+    "code": "choose_plan",
+    "target": "pricing"
+  }
+}
+```
+
+`next` is weergavetekst. Die verandert als betaalde abonnementen wel of niet
+te koop zijn. Toon de teruggegeven tekst, of lokaliseer op basis van
+`next_action`. Neem geen abonnementsnaam uit `next` vast op in je code.
+
+Enumwaarden:
+
+| Veld | Waarden |
+| --- | --- |
+| `tier` | `free`, `pro`, `scale` |
+| `billing_interval` | `none`, `monthly`, `yearly` |
+| `state` | `free`, `trialing`, `active`, `past_due`, `paused`, `canceled` |
+| `access_state` | `active` voor `free`, `trialing` en `active`. `paused` voor `past_due`, `paused` en `canceled`. |
+| `organization_creation_blocker` | `subscription_required`, `subscription_inactive`, `organization_limit_exceeded` of `null` |
+
+Elke blokkade heeft één `next_action`-paar:
+
+| `organization_creation_blocker` | `next_action.code` | `next_action.target` |
+| --- | --- | --- |
+| `null` | `create_or_manage_organization` | `organization` |
+| `subscription_required` | `choose_plan` | `pricing` |
+| `subscription_inactive` | `resume_subscription` | `billing` |
+| `organization_limit_exceeded` | `manage_organization_limit` | `organization` |
+
+Tierwaarden zijn identifiers, geen weergavenamen. Houd ze ongewijzigd in een
+gelokaliseerde client. Een betaald account kan nog steeds geblokkeerd zijn.
+Controleer `organization_creation_allowed` voordat je het maken van
+organisaties inschakelt.
+
+Dit endpoint maakt geen organisaties, verstuurt geen uitnodigingen, wijzigt
+geen rollen en wijzigt de facturering niet.
+
+## Uitloggen
+
+Kies de kleinste scope die bij de taak past. Deze endpoints verwijderen het
+account en de projecten niet, roteren geen ingest-sleutels en trekken de
+toegang van een externe inlogprovider niet in.
+
+| Scope | Endpoint | Toegangsgegevens |
+| --- | --- | --- |
+| Eén app- of CLI-login | `POST /api/auth/logout` | Het vernieuwingstoken van die client in de JSON-body. Geen bearer. |
+| Elke LogBrew-login | `POST /api/auth/logout-all` | Account-bearer of browsersessie. Geen body. |
+| De huidige browsersessie | `POST /api/auth/web/logout` | Geen. De response wist de browsercookie. |
+
+### Eén app- of CLI-login
+
+Verstuur het request vanaf de client die het vernieuwingstoken heeft. Zet
+`Content-Type: application/json`:
+
+```json
+{
+  "refresh_token": "<current refresh token>"
+}
+```
+
+Vraag een persoon of agent nooit om een vernieuwingstoken te printen of te
+plakken. Een geslaagde response is `200`:
+
+```json
+{
+  "revoked": true,
+  "next_action": {
+    "code": "clear_local_session",
+    "target": "local_credentials"
+  }
+}
+```
+
+Dit trekt één familie van vernieuwingstokens in. LogBrew weigert latere
+vernieuwingen voor die login. Andere logins op het account veranderen niet.
+Een toegangstoken dat de client al heeft, blijft geldig tot het verloopt.
+Kunnen de toegangsgegevens van het account uitgelekt zijn, gebruik dan
+[Elke LogBrew-login](#every-logbrew-login).
+
+Na de response verwijdert de client zijn lokale toegangsgegevens. Stuur je
+hetzelfde geldige vernieuwingstoken opnieuw, dan is de response dezelfde
+`200`. Is het token ongeldig of verlopen, of is het een toegangstoken, dan is
+de response `401` met `code: "unauthorized"` en
+`next_action.code: "authorize_request"`. Verwijder ook in dat geval de lokale
+toegangsgegevens. `logbrew logout` gebruikt dit endpoint.
+
+### <span id="every-logbrew-login">Elke LogBrew-login</span>
+
+<Warning>
+  Dit request logt elke client op het account uit. Vraag goedkeuring aan de
+  eigenaar van het account voordat een agent het verstuurt.
+</Warning>
+
+Een geslaagde response is `200`:
+
+```json
+{
+  "revoked": true,
+  "revoked_before": "2026-09-07T12:00:00.123Z",
+  "next_action": {
+    "code": "clear_local_session",
+    "target": "local_credentials"
+  }
+}
+```
+
+`revoked_before` is inclusief en heeft een precisie in milliseconden. LogBrew
+weigert toegangstokens, browsersessies en vernieuwingstokens van een inlog op
+of vóór dat tijdstip. Een token dat later is vernieuwd vanuit zo'n inlog,
+wordt ook geweigerd. Lopende livefeedsessies stoppen, en de response wist de
+cookie van de browsersessie. Een inlog na dat tijdstip blijft geldig. Elke
+client moet zijn lokale LogBrew-toegangsgegevens verwijderen en opnieuw
+inloggen.
+
+Log niet automatisch opnieuw in om dit request daarna te herhalen. Een nieuw
+request trekt ook de nieuwe inlog in.
+
+Gaat de response verloren, meld dan niet dat alle logins zijn ingetrokken.
+Een latere `401` van oude toegangsgegevens vervangt de geslaagde response
+niet. Lees
+[Een gecompromitteerd account beveiligen](/nl/guides/troubleshooting#secure-a-compromised-account)
+voor meer herstelstappen.
+
+### Browsersessie
+
+`POST /api/auth/web/logout` wist de browsercookie `logbrew_session` en geeft
+`204 No Content` terug zonder body. Roep het aan vanuit de browser. Kopieer de
+sessiecookie niet naar een opdracht. Dit request logt andere clients niet uit
+en trekt een kopie van de cookiewaarde niet in. Gebruik
+[Elke LogBrew-login](#every-logbrew-login) om elke sessie in te trekken.
+
+### Herstellen na een fout bij uitloggen
+
+| Resultaat | Herstel |
+| --- | --- |
+| `401` van `POST /api/auth/logout` | Verwijder de lokale toegangsgegevens van de client. Stuur geen ander type toegangsgegevens. |
+| `401` van `POST /api/auth/logout-all` | Log in vanaf een vertrouwde client als de gebruiker nog toegang wil. Vraag opnieuw goedkeuring voordat je het request herhaalt. |
+| `405` | Gebruik de methode die `next` noemt, en alleen voor de scope die de gebruiker heeft goedgekeurd. |
+| `invalid_json` van `POST /api/auth/logout` | Stuur een JSON-object met een string `refresh_token` en `Content-Type: application/json`. Print het token niet. |
+| Een time-out of een `5xx`-status | Meld geen succes. Start geen automatische lus van inloggen en uitloggen. Volg de [regels voor nieuwe pogingen bij schrijfacties](/nl/reference/api-errors#writes). |
+
+Lees de [Telemetrie-API](/nl/reference/telemetry-api) voor telemetrieroutes,
+filters en paginering.

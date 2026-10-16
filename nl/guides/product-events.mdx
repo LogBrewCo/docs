@@ -1,0 +1,266 @@
+---
+title: "Event tracking instellen in Node.js"
+sidebarTitle: "Productevents vastleggen"
+description: "Verstuur geclassificeerde productevents met getypeerde gebruikers en sessies vanuit Node.js. Test de vastlegging lokaal en lees de resultaten met de CLI."
+---
+
+Gebruik productevents om benoemde gebruikersacties in je app vast te leggen,
+zoals het openen van de checkout of het afronden van een aankoop. De SDK
+installeert geen kliklisteners en verzamelt geen formulierinhoud. Je eigen
+code legt elk event vast.
+
+Zie [Productanalyse](/nl/concepts/product-analytics) voor de telregels en de
+soorten rapporten.
+
+## De test voorbereiden
+
+Gebruik een app met Node.js 18 of nieuwer en een LogBrew-project dat je kunt
+lezen. Heb je nog niet eerder telemetrie verstuurd, begin dan met de
+[snelstart](/nl/quickstart). Houd deze test gescheiden van klantactiviteit.
+
+Installeer de pakketten in de map van de app:
+
+```bash
+npm install @logbrew/sdk@0.1.28 @logbrew/node@0.1.12
+```
+
+Gebruik een ingest-sleutel van het type server voor het project. Bewaar die
+in `LOGBREW_SERVER_API_KEY`, buiten versiebeheer. Zet een serversleutel nooit
+in een browserbundel. Met een toegangstoken van je account lees je
+resultaten. Daarmee configureer je de SDK niet.
+
+## Bepalen wat één event betekent
+
+Begin met een productvraag. Bijvoorbeeld: dienen gebruikers het
+checkoutformulier in nadat ze de checkout hebben geopend? Geef elk event een
+vaste naam, een exacte trigger en één plek in de app die het vastlegt.
+
+| Eventnaam | Trigger |
+| --- | --- |
+| `checkout.opened` | De app opent de checkout. Dit is geen aankoop. |
+| `checkout.submitted` | De app accepteert het indienen. Dit is geen geslaagde betaling. |
+| `checkout.completed` | De app bevestigt de afronding. Leg het niet vast bij elke klik of elke nieuwe netwerkpoging. |
+
+Houd eventnamen stabiel over releases en talen heen. Bouw namen niet op uit
+een e-mailadres, ordernummer, URL of tekst die de gebruiker invoert.
+
+Gebruik aangepaste eigenschappen met een kleine set goedgekeurde waarden.
+`checkout_mode` kan bijvoorbeeld `guest` of `signed_in` zijn. Maak geen
+nieuwe eventnaam voor elke waarde. Verstuur geen formulierinhoud.
+
+Leg elke bedrijfsactie op maar één plek vast. Leggen de browser en de server
+dezelfde actie allebei vast, dan verdubbelen de totalen.
+
+## Het juiste activiteitstype gebruiken
+
+| Type | Betekenis | Manier van vastleggen |
+| --- | --- | --- |
+| `interaction` | Een productactie die de app definieert. | `createProductActionAttributes`, zoals hieronder. |
+| `page_view` | Een paginaweergave in de browser. | De vastlegging van paginaweergaven in de browser-SDK. |
+| `screen_view` | Een schermweergave in de app. | Een helper voor schermweergaven in mobiele apps. |
+
+`createProductActionAttributes` zet `analyticsSchemaVersion: 1` en
+`analyticsKind: "interaction"` in de metadata van het event. De routetemplate
+of schermnaam bepaalt `analyticsSurface`. Gebruik een routetemplate, zoals
+`/orders/:id`, en geen concrete URL.
+
+De eventnaam bepaalt het type niet. Een interactie met de naam `page_view`
+blijft een interactie. Logs, issues en spans zijn geen productevents. Zie
+[SDK-integratie](/nl/guides/sdk-ingestion) voor andere runtimes.
+
+## <span id="set-users-and-sessions-on-each-event">Gebruikers en sessies op elk event zetten</span>
+
+- Zet voor een ingelogde gebruiker `context.subject` op een stabiel ID met
+  `kind: "user"`.
+- Gebruik voor een anonieme bezoeker een apart ID met `kind: "anonymous"`.
+- Zet het sessie-ID van de app in `context.session.id`. Gebruik het voor de
+  hele sessie.
+
+Gebruik nooit namen, e-mailadressen, IP-adressen of toegangstokens als ID. Een
+stabiel ID koppelt de acties van een gebruiker. Het maakt de gegevens niet
+anoniem.
+
+Stel geen standaardgebruiker of standaardsessie in op een gedeelde
+serverclient. Geef het subject en de sessie mee van het request dat het event
+veroorzaakte. De SDK maakt deze ID's niet aan en herkent niet wanneer iemand
+inlogt, uitlogt of van account wisselt. LogBrew voegt een anoniem subject na het inloggen
+niet samen met een gebruiker.
+
+## Het voorbeeld lokaal uitvoeren
+
+Sla dit voorbeeld op als `product-events.mjs`. Het legt vijf testacties vast,
+verspreid over anonieme bezoeken, inlogs en twee gebruikers. De client bevat
+alleen gedeelde context van de service en de deployment. Automatische
+aflevering staat uit voor deze test.
+
+```js
+import { randomUUID } from "node:crypto";
+import { createProductActionAttributes, SdkError } from "@logbrew/sdk";
+import { createLogBrewNodeClient } from "@logbrew/node";
+
+try {
+  const client = createLogBrewNodeClient({
+    automaticDelivery: false,
+    context: {
+      schemaVersion: 1,
+      resource: {
+        service: { name: "analytics-check", version: "analytics@1" },
+        deployment: { environment: "development", release: "analytics@1" }
+      }
+    }
+  });
+  const startedAt = new Date().toISOString();
+  client.release(randomUUID(), startedAt, { version: "analytics@1" });
+  client.environment(randomUUID(), startedAt, { name: "development" });
+
+  function record(name, subject, sessionId) {
+    client.action(randomUUID(), new Date().toISOString(), {
+      ...createProductActionAttributes({
+        name,
+        routeTemplate: "/checkout",
+        metadata: { checkout_mode: subject.kind === "user" ? "signed_in" : "guest" }
+      }),
+      context: { schemaVersion: 1, subject, session: { id: sessionId } }
+    });
+  }
+
+  record("checkout.opened", { id: "anon_demo_a", kind: "anonymous" }, randomUUID());
+  const userSession = randomUUID();
+  record("checkout.submitted", { id: "user_demo_a", kind: "user" }, userSession);
+  record("checkout.completed", { id: "user_demo_a", kind: "user" }, userSession);
+  record("checkout.opened", { id: "anon_demo_b", kind: "anonymous" }, randomUUID());
+  record("checkout.submitted", { id: "user_demo_b", kind: "user" }, randomUUID());
+
+  if (process.argv.includes("--send")) {
+    const response = await client.shutdown();
+    console.log(JSON.stringify({
+      mode: "sent",
+      status_code: response.statusCode,
+      attempts: response.attempts
+    }));
+  } else {
+    const batch = JSON.parse(client.previewJson());
+    const actions = batch.events.filter(event => event.type === "action");
+    console.log(JSON.stringify({
+      mode: "local_preview",
+      actions: actions.length,
+      kinds: [...new Set(actions.map(event => event.attributes.metadata.analyticsKind))],
+      dropped: client.droppedEvents()
+    }));
+  }
+} catch (error) {
+  console.error(JSON.stringify({
+    ok: false,
+    error: error instanceof SdkError ? error.code : "capture_failed"
+  }));
+  process.exitCode = 1;
+}
+```
+
+Voer het script uit zonder `--send`. Deze opdracht verstuurt geen request:
+
+```bash
+LOGBREW_SERVER_API_KEY=local-preview-only node product-events.mjs
+```
+
+Verwachte uitvoer:
+
+```json
+{"mode":"local_preview","actions":5,"kinds":["interaction"],"dropped":0}
+```
+
+De markeringen voor release en omgeving zijn geen productacties. Dit resultaat
+toont alleen de lokale wachtrij. Het laat niet zien dat LogBrew de events
+heeft ontvangen. Print `previewJson()` niet in een app met echte
+klantcontext.
+
+## Inloggen en uitloggen afhandelen
+
+- Stuur vóór het inloggen het huidige anonieme subject mee met elk event.
+- Stuur na het inloggen het stabiele ID van de gebruiker mee, met type `user`.
+- Stop bij het uitloggen met de context van die gebruiker. Maak een nieuw
+  anoniem subject aan volgens je privacybeleid.
+- Gebruik bij een accountwissel het ID van de nieuwe gebruiker.
+
+Het voorbeeld start een nieuwe sessie als de identiteit verandert. Kies je
+eigen sessieregel en pas die op elk event toe. De context van een event
+vervangt voor dat event het subject en de sessie van de client. Laat het event
+een van beide weg, dan gebruikt het event de waarde van de client. Daarom
+stelt het voorbeeld geen subject of sessie in op de client. Bewaar voor werk dat
+later draait de identiteit van de gebruiker die het startte.
+
+## Eén keer versturen en de resultaten lezen
+
+Zet de serversleutel van het testproject in de procesomgeving. Voer deze
+opdracht één keer uit:
+
+```bash
+node product-events.mjs --send
+```
+
+Elke run maakt nieuwe event-ID's, dus een tweede run voegt nog vijf events
+toe. Mislukt het proces, dan bevat de uitvoer de SDK-foutcode. Een geweigerde
+sleutel geeft:
+
+```json
+{"ok":false,"error":"unauthenticated"}
+```
+
+Zorg dat de ingest-sleutel actief is en bij het testproject hoort. Inloggen
+bij je account herstelt geen SDK-sleutel. Zie
+[API-fouten](/nl/reference/api-errors) en
+[Problemen oplossen](/nl/guides/troubleshooting) voor andere fouten.
+
+Zoek de events in het dashboard nadat LogBrew de batch heeft geaccepteerd:
+
+1. Open **Analytics**.
+2. Kies onder **Project** het testproject.
+3. Kies onder **Tijdsbereik** de optie **24 uur**.
+4. Zoek de 3 eventnamen onder **Belangrijkste events** en `/checkout` onder
+   **Belangrijkste pagina’s en schermen**.
+
+Andere activiteit in het project verandert deze totalen. Lees voor een exacte
+controle van service, release en omgeving het overzicht met de ingelogde
+[CLI](/nl/guides/cli):
+
+```bash
+logbrew analytics overview --project "<project_id>" --since 1h \
+  --service analytics-check --release analytics@1 \
+  --environment development --json
+```
+
+Verwacht bij één run in een verder leeg bereik:
+
+- 5 interacties, allemaal met sessiecontext, op de pagina `/checkout`.
+- 3 events van gebruikers en 2 van anonieme subjecten.
+- 2 gebruikers, 2 anonieme subjecten en 4 sessies.
+
+Aantallen unieke gebruikers, subjecten en sessies zijn bij benadering.
+Eventtotalen zijn exact binnen het gekozen tijdvenster. Deze test meet geen
+conversie of retentie.
+
+| Resultaat | Volgende controle |
+| --- | --- |
+| Geen productactiviteit | Controleer het afleverresultaat, het project, het tijdsbereik, de service, de release en de omgeving. |
+| Activiteit is niet geclassificeerd | Gebruik `createProductActionAttributes`. De eventnaam alleen bepaalt het type niet. |
+| Gebruikersaantallen wijken af | Controleer `context.subject` op elk event. Anonieme subjecten tellen niet als gebruikers. |
+| Sessieaantallen wijken af | Controleer `context.session.id` op elk event en je sessieregel. |
+| Meer events dan verwacht | Controleer op herhaalde runs en op acties die op twee plekken worden vastgelegd. |
+
+## De events in je app testen
+
+Verplaats de vastlegaanroepen naar de handlers van de app. Behoud voor elk
+event de betekenis, het type en de identiteitsregel. Test eerst met
+synthetische accounts.
+
+| Test in de app | Verwachte vastlegging |
+| --- | --- |
+| Checkout openen zonder in te dienen | Alleen `checkout.opened`. |
+| Een formulier indienen dat niet door de validatie komt | Geen `checkout.submitted`. Verstuur nooit de formulierinhoud. |
+| Een inzending accepteren en daarna de betaling laten mislukken | `checkout.submitted`, geen `checkout.completed`. |
+| Een request opnieuw proberen na een bevestigde afronding | Geen tweede `checkout.completed`. |
+| Uitloggen en daarna een ander account gebruiken | Latere events gebruiken het nieuwe subject en de nieuwe sessie. |
+
+Een lokale preview test de vastlegging. Een geaccepteerde batch test de
+aflevering. Geen van beide laat zien dat de vastlegaanroep op het juiste
+moment in je app draait.

@@ -1,0 +1,186 @@
+---
+title: "LogBrew-project instellen en signalen controleren"
+sidebarTitle: "Projecten en installatie"
+description: "Stel een LogBrew-project in. Kies namen voor services en omgevingen, lees de installatiestatus en vind de testevents van je applicatie."
+---
+
+Een project is de toegangsgrens voor telemetrie. Elk geaccepteerd signaal hoort
+bij één project, en elke leesopdracht kan op project filteren.
+
+Gebruik een apart project als telemetrie een aparte eigenaar of toegangsgrens
+nodig heeft. Voor de meeste teams is dat één app, service of productgebied. Een
+repository hoeft niet overeen te komen met één project. Een monorepo kan
+meerdere services naar één project verzenden. Gebruik servicenamen om ze uit
+elkaar te houden.
+
+## <span id="project-service-environment">Project, service, omgeving</span>
+
+| Term | Voorbeeld | Waarvoor |
+| --- | --- | --- |
+| Project | `checkout-platform` | Eigenaarschap en toegang. |
+| Service | `checkout-api` | De app of service die het signaal heeft verzonden. |
+| Omgeving | `production` | Runtimecontext. |
+| Release | `api@1.2.3` | Codeversie. |
+
+## <span id="recommended-model">Een project instellen</span>
+
+[Installeer de CLI](/nl/guides/cli). Voer `logbrew status --json` uit om de
+toegang van je account te lezen. Is de toegang niet geldig? Dan voert een mens
+`logbrew login` uit. Met een ingest-sleutel van een project kun je niet
+inloggen.
+
+<Steps>
+  <Step title="Maak of kies een project">
+    Bekijk eerst de lijst met je projecten. Maak alleen een project als het nog
+    niet bestaat.
+
+    ```bash
+    logbrew projects --json
+    install -d -m 700 "$HOME/.logbrew"
+
+    logbrew projects create checkout-api \
+      --runtime node \
+      --environment production \
+      --ingest-key-file "$HOME/.logbrew/checkout-api.ingest" \
+      --json
+    ```
+
+    De CLI schrijft de ingest-sleutel naar een nieuw bestand dat alleen de
+    eigenaar kan openen. De CLI toont nooit de sleutel of het bestandspad. Is
+    het resultaat niet duidelijk? Voer dan exact dezelfde opdracht opnieuw uit.
+    Wijzig de projectnaam en het sleutelbestand niet. De CLI hergebruikt de
+    identiteit van het openstaande request. De [Snelstart](/nl/quickstart) laat
+    zien hoe je het project-ID uit het resultaat leest.
+
+    Registreer voor een bestaand project de installatiestatus:
+
+    ```bash
+    logbrew projects setup "<project_id>" --source cli --environment production --json
+    ```
+
+    Gebruik `logbrew projects keys create` om nog een ingest-sleutel voor een
+    bestaand project te maken. De
+    [handleiding voor het roteren van ingest-sleutels](/nl/guides/rotate-ingest-key)
+    toont de opdracht.
+
+    `logbrew setup --create-project` toont alleen de helptekst. De opdracht
+    maakt geen project.
+  </Step>
+
+  <Step title="Stel servicenamen in de SDK in">
+    Gebruik namen uit je repository en deployment, zoals `api`, `worker`,
+    `web`, `ios` of `checkout-api`. Een servicenaam is een label en kiest geen
+    project. De ingest-sleutel bepaalt het project. Een service
+    hernoemen verplaatst geen opgeslagen events. Vind je een event niet?
+    Controleer dan het project en de ingest-sleutel die de applicatie gebruikt,
+    voordat je nog een project maakt.
+  </Step>
+
+  <Step title="Gebruik standaardomgevingen">
+    Gebruik `production`, `staging`, `preview` en `local`. Gebruikt je
+    deployment andere namen? Gebruik die dan consequent. Een omgevingsnaam mag
+    geen spaties, `/` of backslash bevatten.
+  </Step>
+
+  <Step title="Verzend een testevent en lees het">
+    Configureer de SDK met de ingest-sleutel van het project, zoals de
+    [handleiding voor SDK-integratie](/nl/guides/sdk-ingestion) beschrijft.
+    Een project maken installeert geen SDK in je applicatie. Houd de sleutel
+    buiten versiebeheer. Stel de service, de omgeving en de release in de
+    applicatie in. Verzend één veilig event en lees het daarna:
+
+    ```bash
+    logbrew read logs --project "<project_id>" --json
+    ```
+
+    Elk signaal heeft een eigen lijst. Een lege lijst met logs betekent niet dat
+    het project geen issues of traces heeft.
+
+    Kies in het dashboard hetzelfde project en een tijdsbereik waarin het
+    testevent valt. Controleer of de filters voor service, omgeving en release
+    bij het event passen.
+  </Step>
+</Steps>
+
+## <span id="diagnose-project-setup">Projectinstallatie diagnosticeren</span>
+
+Lees de installatiestatus met de projectdoctor. Leid de installatiestatus niet
+af uit lokale bestanden of een lege logquery.
+
+```bash
+: "${LOGBREW_PROJECT_ID:?set a project UUID}"
+
+logbrew doctor --project "$LOGBREW_PROJECT_ID" --json
+```
+
+De CLI geeft een rapport terug met `status`, `checks` en `next`. Exitcode `0`
+toont niet aan dat alle controles zijn geslaagd. Lees elk item in `checks`. Zie
+[Een doctor-rapport van een project lezen](/nl/reference/cli#read-a-project-doctor-report).
+
+### Directe response van de API
+
+API-clients roepen `GET /api/projects/{project_id}/doctor` aan met
+accountauthenticatie. Het endpoint heeft geen queryparameters en geen
+requestbody. Gebruik voor deze leesactie nooit een ingest-sleutel van een
+project.
+
+Een response met `200` heeft deze velden: `project_id`, `state`,
+`setup_status`, `setup_acknowledged`, `has_active_ingest_key`,
+`first_telemetry_seen_at`, `last_seen_at`, `last_signal`, `next` en
+`next_action`. Tijdstempels zijn RFC3339 of `null`. `last_signal` is een
+samenvatting die veilig te tonen is, geen ruw signaal.
+
+| `state` | `next_action.code` | `next_action.target` |
+| --- | --- | --- |
+| `needs_ingest_key` | `create_ingest_key` | `project_ingest_keys` |
+| `needs_setup` | `choose_setup_path` | `project_setup` |
+| `needs_telemetry` | `send_first_telemetry` | `telemetry_ingest` |
+| `ready` | `inspect_recent_telemetry` | `telemetry_reads` |
+
+De doctor controleert eerst de ingest-sleutel. Een project zonder actieve
+ingest-sleutel krijgt `needs_ingest_key`, ongeacht de installatiestatus.
+
+`setup_status` is `created`, `setup_started`, `sdk_seen`,
+`first_telemetry_seen` of `active`. `setup_acknowledged` is alleen `true` bij
+de laatste drie waarden. `created` geeft `needs_setup`. `setup_started` en
+`sdk_seen` geven `needs_telemetry`. `first_telemetry_seen` en `active` geven
+`ready`.
+
+| Response | Volgende stap |
+| --- | --- |
+| `404`, `code: "not_found"` | Een ontbrekend project, een gearchiveerd project en een project dat je account niet kan lezen, geven hetzelfde resultaat. Lees het project-ID opnieuw uit `logbrew projects`. Probeer geen andere ID's. |
+| `405`, `code: "method_not_allowed"` | Gebruik `GET` zonder body of queryparameters. |
+
+Mislukt het lezen nog steeds? [Meld dan een probleem](/nl/guides/report-a-problem).
+Voeg geen toegangsgegevens, headers, inhoud van signalen, klantgegevens, lokale
+paden of broncode toe.
+
+## <span id="archive-or-delete-a-project">Een project archiveren of verwijderen</span>
+
+Archiveer een project om het uit de lijst met actieve projecten te halen:
+
+```bash
+logbrew projects archive "<project_id>" --yes --json
+```
+
+De opdracht vereist `--yes`. Na het archiveren accepteren de ingest-sleutels van
+het project geen nieuwe telemetrie meer. De API-route is
+`DELETE /api/projects/{project_id}`. Die geeft `204` terug zonder body. Vraag
+gearchiveerde projecten op met `GET /api/projects/archived`. Herstel een
+project met `POST /api/projects/{project_id}/restore`. Ook die route geeft
+`204` terug.
+
+Verwijder een project alleen definitief als je het zeker weet:
+
+```bash
+logbrew projects delete "<project_id>" --confirm "<project_id>" --json
+```
+
+Herhaal het exacte project-ID na `--confirm`. Een geaccepteerd request maakt het
+project direct inactief en plant de definitieve verwijdering in. Daarna kun je
+het project niet meer herstellen.
+
+## <span id="rotate-an-ingest-key-without-telemetry-loss">Een ingest-sleutel roteren</span>
+
+De [handleiding voor het roteren van ingest-sleutels](/nl/guides/rotate-ingest-key)
+beschrijft hoe je de sleutel vervangt, deployt, test en intrekt.
