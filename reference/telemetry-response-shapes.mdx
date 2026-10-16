@@ -1143,10 +1143,365 @@ A bulk request fails as a whole in these cases:
 | `403` with `code: forbidden` | The account cannot manage issues in the project. |
 | `404`, `project not found` | The account cannot read the project. |
 
+## Analytics request scope
+
+The analytics routes, the metric-series route, and the signal-volume route
+read one project and one time range. Every request needs `project_id` and
+`since`. `since` accepts a compact duration such as `24h` or `7d`, or an
+RFC3339 timestamp. `until` accepts an RFC3339 timestamp and defaults to the
+request time. The range includes `since`, excludes `until`, and cannot exceed
+31 days.
+
+`service_name`, `release`, and `environment` are optional exact filters. Each
+value must have 1 to 256 characters after LogBrew trims spaces. The segment
+comparison route puts these filters inside each segment, not at the top level.
+
+If the account cannot read the project, these routes return `200 OK` with
+zero counts. They do not return `404`. An empty result does not confirm
+project access. Compare `project_id` with the projects that the account can
+read. A request through an MCP grant that does not include the project returns
+`403` and `forbidden`.
+
+| Route | `response_version` values | Default |
+| --- | --- | --- |
+| `GET /api/telemetry/analytics/overview` | `1`, `2`, or `3` | `1` |
+| `GET /api/telemetry/analytics/properties` | `1` or `2` | `1` |
+| `POST /api/telemetry/analytics/segments/compare` | `1` or `2` | `1` |
+| `POST /api/telemetry/analytics/retention` | `1` or `2` | `1` |
+| `POST /api/telemetry/analytics/lifecycle` | `1` or `2` | `1` |
+| `POST /api/telemetry/analytics/funnel` | Not accepted | Schema `1` |
+| `POST /api/telemetry/analytics/paths` | Not accepted | Schema `1` |
+| `GET /api/telemetry/metrics/series` | Not accepted | Schema `1` |
+| `GET /api/telemetry/summary/volume` | `1` | `1` |
+
+Each response starts with `schema_version`, `query`, and `purpose`. `query`
+echoes the effective scope. It omits a filter that you did not send. `purpose`
+is plain text that explains what the route answers.
+
+A rate is omitted when its denominator is zero. An omitted rate is not `0`
+and is not `null`. Read `coverage` before you trust a rate.
+
+### Shared scope errors
+
+These errors use HTTP `422` and `validation_failed`:
+
+| Cause | `error` |
+| --- | --- |
+| No `project_id` | `product analytics project_id is required` |
+| No `since` | `product analytics since is required` |
+| `since` is not a duration or RFC3339 timestamp | `invalid since value` |
+| `until` is not an RFC3339 timestamp | `product analytics until must be an RFC3339 timestamp` |
+| `since` is not earlier than `until` | `product analytics since must be earlier than until` |
+| The range is longer than 31 days | `product analytics range must not exceed 31 days` |
+| An empty filter, or a filter longer than 256 characters | `product analytics context filters must be non-empty and at most 256 characters` |
+
+For example, a request without `project_id` returns:
+
+```json
+{
+  "error": "product analytics project_id is required",
+  "code": "validation_failed",
+  "next": "choose one owned project and send its project_id",
+  "next_action": { "code": "fix_request", "target": "request" }
+}
+```
+
+The metric-series and signal-volume routes use the same scope rules, with
+their own `error` text. Their sections below list those errors.
+
+An unknown query key returns `422` with the
+[invalid query parameters](/reference/api-errors#invalid-query-parameters)
+response. An unknown JSON field, a missing required JSON field, or an
+unsupported enum value returns `invalid_json`. See
+[Invalid JSON](/reference/api-errors#invalid-json). A request with the wrong
+HTTP method returns `405` and `method_not_allowed`. Its `next` text names the
+supported method and fields. See
+[Unsupported method](/reference/api-errors#unsupported-method).
+
+## Product analytics overview response
+
+`GET /api/telemetry/analytics/overview` shows the activity in one project:
+action volume, users, sessions, a time series, top actions, and classified
+page views, screen views, and interactions. Use it to find the exact event
+names for the other analytics routes.
+
+Send `response_version=3`. Versions 1 and 2 return the same counts, but their
+`estimation.method` value is an older token. Version 1 does not check the
+subject kind when it counts identified users. Versions 2 and 3 count only
+subjects of kind `user`, and they add anonymous-subject counts and
+`subject_coverage`.
+
+This request reads one hour in five-minute buckets and returns two rows in
+each top list:
+
+```bash
+curl --get "https://api.logbrew.co/api/telemetry/analytics/overview" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project_id>" \
+  --data-urlencode "since=2026-06-01T11:00:00Z" \
+  --data-urlencode "until=2026-06-01T12:00:00Z" \
+  --data-urlencode "interval=5m" \
+  --data-urlencode "top_limit=2" \
+  --data-urlencode "response_version=3"
+```
+
+### Overview success
+
+In this synthetic result, the project has 120 actions in two of the twelve
+buckets. Twenty actions come from anonymous subjects. Every action has a
+session ID. Half of the actions have a trace ID.
+
+```json
+{
+  "schema_version": 3,
+  "query": {
+    "project_id": "11111111-1111-4111-8111-111111111111",
+    "since": "2026-06-01T11:00:00Z",
+    "until": "2026-06-01T12:00:00Z",
+    "interval": "5m",
+    "interval_seconds": 300,
+    "top_limit": 2
+  },
+  "purpose": "Shows what people do in one project through action volume, active identified users, separately labeled anonymous subjects, explicit sessions, activity over time, top actions, and versioned page-view, screen-view, interaction, surface, and exact event-name breakdowns. Exact classified event names can be used as ordered funnel steps. It never infers people from anonymous events or relabels arbitrary unclassified telemetry as product behavior.",
+  "analysis_level": "user_and_session",
+  "summary": {
+    "actions": 120,
+    "active_identified_users": 18,
+    "active_anonymous_subjects": 7,
+    "sessions": 24,
+    "distinct_action_names": 3,
+    "actions_per_identified_user": 5.555555555555555,
+    "actions_per_session": 5.0
+  },
+  "coverage": {
+    "identified_actions": 100,
+    "anonymous_actions": 20,
+    "subject_coverage": {
+      "index_version": 1,
+      "identified_user_events": 100,
+      "anonymous_subject_events": 20,
+      "legacy_unknown_kind_events": 0,
+      "missing_subject_events": 0,
+      "historical_unindexed_events": 0
+    },
+    "sessionized_actions": 120,
+    "traced_actions": 60,
+    "identification_rate": 0.8333333333333334,
+    "sessionization_rate": 1.0,
+    "trace_link_rate": 0.5,
+    "expected_buckets": 12,
+    "returned_points": 2,
+    "returned_top_actions": 2,
+    "top_actions_truncated": true,
+    "first_seen_at": "2026-06-01T11:00:10Z",
+    "last_seen_at": "2026-06-01T11:09:50Z",
+    "limitations": [
+      "Typed anonymous subjects are counted separately and never contribute to active identified-user counts.",
+      "Actions without a trace ID cannot link product behavior directly to trace investigation."
+    ]
+  },
+  "estimation": {
+    "unique_counts_are_approximate": true,
+    "method": "approximate_distinct",
+    "description": "Active identified-user, anonymous-subject, session, distinct action-name, distinct surface, and distinct exact event-name counts are approximate distinct counts. Event totals and capture-coverage counts are exact within the selected, fully evaluated query window."
+  },
+  "series": [
+    {
+      "bucket_start": "2026-06-01T11:00:00Z",
+      "bucket_end": "2026-06-01T11:05:00Z",
+      "actions": 50,
+      "active_identified_users": 8,
+      "sessions": 10,
+      "identified_actions": 40,
+      "sessionized_actions": 50,
+      "traced_actions": 25
+    },
+    {
+      "bucket_start": "2026-06-01T11:05:00Z",
+      "bucket_end": "2026-06-01T11:10:00Z",
+      "actions": 70,
+      "active_identified_users": 12,
+      "sessions": 14,
+      "identified_actions": 60,
+      "sessionized_actions": 70,
+      "traced_actions": 35
+    }
+  ],
+  "top_actions": [
+    {
+      "name": "checkout_started",
+      "actions": 50,
+      "active_identified_users": 12,
+      "sessions": 14,
+      "share_of_actions": 0.4166666666666667
+    },
+    {
+      "name": "purchase_completed",
+      "actions": 40,
+      "active_identified_users": 9,
+      "sessions": 10,
+      "share_of_actions": 0.3333333333333333
+    }
+  ],
+  "classified_activity": {
+    "summary": {
+      "events": 110,
+      "page_views": 50,
+      "screen_views": 20,
+      "interactions": 40,
+      "distinct_surfaces": 4,
+      "distinct_event_names": 5,
+      "active_identified_users": 17,
+      "active_anonymous_subjects": 6,
+      "sessions": 23
+    },
+    "coverage": {
+      "classified_actions": 60,
+      "unclassified_actions": 60,
+      "action_classification_rate": 0.5,
+      "surfaced_events": 110,
+      "named_events": 110,
+      "identified_events": 90,
+      "subject_coverage": {
+        "index_version": 1,
+        "identified_user_events": 90,
+        "anonymous_subject_events": 20,
+        "legacy_unknown_kind_events": 0,
+        "missing_subject_events": 0,
+        "historical_unindexed_events": 0
+      },
+      "sessionized_events": 110,
+      "traced_events": 55,
+      "surface_rate": 1.0,
+      "event_name_rate": 1.0,
+      "identification_rate": 0.8181818181818182,
+      "sessionization_rate": 1.0,
+      "trace_link_rate": 0.5,
+      "expected_buckets": 12,
+      "returned_points": 2,
+      "returned_top_surfaces": 2,
+      "returned_top_events": 2,
+      "top_surfaces_truncated": true,
+      "top_events_truncated": true,
+      "first_seen_at": "2026-06-01T11:00:20Z",
+      "last_seen_at": "2026-06-01T11:09:40Z",
+      "limitations": [
+        "Only events carrying supported version-1 analytics annotations appear in classified activity; arbitrary actions and technical spans are not relabeled.",
+        "Historical or unannotated actions contribute to the action summary but not to classified screen-view or interaction breakdowns.",
+        "Classified events with typed anonymous subjects are counted separately and never contribute to identified-user counts.",
+        "Classified events without a trace ID cannot link product behavior directly to trace investigation."
+      ]
+    },
+    "series": [
+      {
+        "bucket_start": "2026-06-01T11:00:00Z",
+        "bucket_end": "2026-06-01T11:05:00Z",
+        "events": 45,
+        "page_views": 20,
+        "screen_views": 10,
+        "interactions": 15
+      },
+      {
+        "bucket_start": "2026-06-01T11:05:00Z",
+        "bucket_end": "2026-06-01T11:10:00Z",
+        "events": 65,
+        "page_views": 30,
+        "screen_views": 10,
+        "interactions": 25
+      }
+    ],
+    "top_surfaces": [
+      {
+        "kind": "page_view",
+        "surface": "/checkout/:step",
+        "events": 40,
+        "active_identified_users": 12,
+        "sessions": 14,
+        "share_of_classified_events": 0.36363636363636365
+      },
+      {
+        "kind": "screen_view",
+        "surface": "Checkout",
+        "events": 20,
+        "active_identified_users": 9,
+        "sessions": 10,
+        "share_of_classified_events": 0.18181818181818182
+      }
+    ],
+    "top_events": [
+      {
+        "kind": "page_view",
+        "event_name": "/checkout/:step",
+        "events": 40,
+        "active_identified_users": 12,
+        "sessions": 14,
+        "share_of_classified_events": 0.36363636363636365
+      },
+      {
+        "kind": "interaction",
+        "event_name": "checkout_started",
+        "events": 30,
+        "active_identified_users": 10,
+        "sessions": 12,
+        "share_of_classified_events": 0.2727272727272727
+      }
+    ]
+  },
+  "next_action": {
+    "code": "build_product_funnel",
+    "target": "/api/telemetry/analytics/funnel",
+    "reason": "Use two through eight exact keys from classified_activity.top_events to measure ordered conversion and drop-off for explicit sessions or opaque identified users."
+  }
+}
+```
+
+### Read the overview
+
+The five `subject_coverage` counts add up to the event total of their
+section. Only `identified_user_events` counts toward users.
+`anonymous_actions` is `summary.actions` minus `identified_actions`.
+
+`series` contains only buckets that have activity. `expected_buckets` is the
+number of possible buckets in the range. Do not draw a missing bucket as a
+measured zero unless your chart states that rule. Buckets align to UTC
+interval boundaries. A range that starts inside a bucket includes that
+partial bucket.
+
+`classified_activity` counts page views, screen views, and interactions.
+Screen views and interactions are also actions. Page views are not. Do not
+add `summary.actions` to `classified_activity.summary.events`.
+
+Copy `kind` and `event_name` from `classified_activity.top_events` into funnel
+steps, retention selectors, lifecycle selectors, path anchors, and segment
+targets. A `true` value in `top_events_truncated` means that lower-volume
+names exist. Increase `top_limit` up to 20 to see more.
+
+`analysis_level` is `no_data`, `event_only`, `user_level`, or
+`user_and_session`. If the project has no actions and no classified events,
+`next_action.code` is `capture_product_activity`. See
+[Product analytics](/concepts/product-analytics#use-the-analytics-api).
+
+### Overview errors
+
+Besides the [shared scope errors](#shared-scope-errors), the overview returns
+`422` and `validation_failed` for these values:
+
+| Value | `error` |
+| --- | --- |
+| `response_version` other than `1`, `2`, or `3` | `product analytics response_version must be 1, 2, or 3` |
+| `top_limit` other than `1` to `20` | `product analytics top_limit must be between 1 and 20` |
+| `interval` other than `auto`, `1m`, `5m`, `15m`, `1h`, `6h`, or `1d` | `product analytics interval is not supported` |
+| An explicit `interval` that needs more than 500 buckets | `product analytics interval would exceed 500 buckets` |
+
+The default `interval` is `auto`. It selects the smallest interval that needs
+at most 300 buckets. The default `top_limit` is `10`.
+
 ## Ordered funnel response
 
 `POST /api/telemetry/analytics/funnel` measures ordered completion across 2 to
-8 steps. This request body counts sessions that view `/pricing` and then
+8 steps. Copy each exact `kind` and `event_name` from
+`classified_activity.top_events` in the overview. A similar action name is
+not a match. This request body counts sessions that view `/pricing` and then
 complete signup within one hour:
 
 ```json
@@ -1164,8 +1519,13 @@ complete signup within one hour:
 }
 ```
 
-`analysis_unit` is `session` or `identified_user`. Step `kind` is `page_view`,
-`screen_view`, or `interaction`. A `200 OK` response:
+`analysis_unit` is `session` or `identified_user`. The default is `session`.
+Step `kind` is `page_view`, `screen_view`, or `interaction`. The funnel route
+does not accept `response_version`.
+
+### Funnel success
+
+A `200 OK` response:
 
 ```json
 {
@@ -1178,7 +1538,7 @@ complete signup within one hour:
     "analysis_unit": "session",
     "conversion_window_seconds": 3600
   },
-  "purpose": "Measures exact ordered conversion without returning raw identity.",
+  "purpose": "Shows where explicit sessions or typed opaque user subjects enter, progress, and drop off across two through eight versioned page-view, screen-view, or interaction events. Steps must occur in order with strictly increasing timestamps inside the selected conversion window; raw session and subject identifiers are never returned.",
   "summary": {
     "candidate_units": 60,
     "entered_units": 50,
@@ -1196,7 +1556,13 @@ complete signup within one hour:
     "excluded_selected_step_events": 20,
     "event_name_rate": 0.9,
     "selected_unit_coverage_rate": 0.8333333333333334,
-    "limitations": ["Only exact named classified events participate."]
+    "limitations": [
+      "Only supported version-1 classified events with exact derived names participate; arbitrary actions and technical spans are never relabeled.",
+      "A unit reaches later steps only when timestamps strictly increase and the final match remains inside conversion_window_seconds from its first match.",
+      "Historical or surface-less classified events without a derived event name cannot match exact funnel steps.",
+      "Requested-step events without an explicit session ID are excluded from ordered unit counts.",
+      "Session funnels count visits or app sessions, not unique people; use analysis_unit=identified_user only when typed user-subject coverage is sufficient."
+    ]
   },
   "steps": [
     {
@@ -1220,16 +1586,653 @@ complete signup within one hour:
   "next_action": {
     "code": "compare_funnel_contexts",
     "target": "/api/telemetry/analytics/funnel",
-    "reason": "Compare the same steps across contexts."
+    "reason": "Compare the same exact steps across bounded releases, environments, or services to locate material conversion changes."
   }
 }
 ```
 
 Rates are fractions from 0 to 1. Read `coverage` before you trust a rate.
 `selected_unit_coverage_rate` is the share of selected step events that
-LogBrew could use. The response does not return raw identities. The other
-analytics routes return their own shapes. See
-[Product analytics](/concepts/product-analytics).
+LogBrew could use. The response does not return raw identities. See
+[Product analytics](/concepts/product-analytics#measure-a-funnel).
+
+### Read conversion and coverage
+
+`entry_rate` is `entered_units` divided by `candidate_units`: 50 of 60.
+`overall_conversion_rate` is `completed_units` divided by `entered_units`:
+15 of 50, or 30%. It is not 15 divided by all candidates. These counts do not
+explain why units stopped.
+
+Coverage counts events, not sessions. Here, 120 events match a step, and 20
+of them have no session ID. The result excludes those 20 events from the
+session counts. Do not treat them as 20 failed sessions.
+
+The first step has no `conversion_from_previous`. The last step has no
+`drop_off_to_next_units` and no `drop_off_to_next_rate`.
+
+A unit reaches a later step only when the step times strictly increase.
+Events with the same timestamp cannot satisfy two consecutive steps. The final
+step must occur within `conversion_window_seconds` of the first step.
+
+Session mode counts sessions, not people. Use `identified_user` only for events
+that carry an opaque subject ID of kind `user`. That mode can join events from
+different sessions inside the conversion window. Keep the same unit and the
+same steps when you compare results.
+
+The default `conversion_window_seconds` is 24 hours or the length of the
+range, whichever is shorter. The maximum is the range length in whole
+seconds, rounded up.
+
+### Empty funnel results
+
+A successful empty response still lists the requested steps with zero
+`units`. If there are no candidate units, `summary` omits `entry_rate` and
+`overall_conversion_rate`. The route does not return `404` because no events
+match.
+
+Read `coverage` and `next_action` to find the cause:
+
+| `next_action.code` | Cause |
+| --- | --- |
+| `capture_product_activity` | No classified events exist in the scope. |
+| `choose_captured_funnel_steps` | No event matches a requested step. |
+| `sessionize_product_activity` | Step events exist, but none has a session ID. |
+| `identify_product_users` | Step events exist, but none has a subject of kind `user`. |
+| `verify_funnel_entry` | No unit entered at step 1. |
+| `investigate_funnel_drop_off` | Units entered, but no unit completed every step. |
+| `compare_funnel_contexts` | At least one unit completed the funnel. |
+
+### Rejected funnel requests
+
+Besides the [shared scope errors](#shared-scope-errors), these requests return
+`422` and `validation_failed`. Fewer than 2 or more than 8 steps:
+
+```json
+{
+  "error": "product analytics funnel requires two through eight ordered steps",
+  "code": "validation_failed",
+  "next": "send a steps array containing 2 through 8 exact classified event selectors",
+  "next_action": { "code": "fix_request", "target": "request" }
+}
+```
+
+A `conversion_window_seconds` of `0`, or a value above the range length:
+
+```json
+{
+  "error": "product analytics funnel conversion window must fit inside the query range",
+  "code": "validation_failed",
+  "next": "use conversion_window_seconds from 1 through the selected range length",
+  "next_action": { "code": "fix_request", "target": "request" }
+}
+```
+
+An `event_name` that is empty, longer than 256 characters, or contains a
+control character returns
+`product analytics funnel event_name must be non-empty, control-free, and at most 256 characters`.
+An `interaction` step must also be a valid action name. Otherwise, the error
+is `product analytics interaction event_name must be a bounded stable action name`.
+
+Correct the request before you send it again. Do not remove steps or change
+the analysis unit only to get a non-empty result.
+
+## Exact-event and automatic analysis
+
+Retention and lifecycle accept two request shapes. Use `response_version` to
+select the shape that answers your question:
+
+| Analysis | `response_version` | Event selectors |
+| --- | --- | --- |
+| Retention for exact events | `1`, or omitted | Send both `start_event` and `return_event`. |
+| Lifecycle for one exact event | `1`, or omitted | Send `event`. |
+| Automatic retention or lifecycle | `2` | Send no event selector. |
+
+An exact selector contains `kind` and `event_name`. `kind` is `page_view`,
+`screen_view`, or `interaction`. Copy `event_name` from
+`classified_activity.top_events`. Do not guess an event name from a button
+label.
+
+Both shapes count only users: opaque subject IDs of kind `user`. Anonymous
+subjects and events without a usable subject ID are not counted as users.
+Responses never return subject IDs.
+
+Fixed intervals are `hour`, `day`, `week`, and `thirty_day`. They are fixed
+durations. `thirty_day` is 30 days, not a calendar month. If you omit
+`interval`, the API uses `hour` for a range of 48 hours or less, and `day` for
+a longer range.
+
+### Exact-event retention request
+
+Send this body to `POST /api/telemetry/analytics/retention`. It asks whether
+users complete another checkout after their first checkout in the range:
+
+```json
+{
+  "project_id": "11111111-1111-4111-8111-111111111111",
+  "since": "2026-06-01T00:00:00Z",
+  "until": "2026-06-03T00:00:00Z",
+  "response_version": 1,
+  "interval": "day",
+  "interval_count": 1,
+  "mode": "return_on",
+  "cohort_mode": "first_in_range",
+  "start_event": { "kind": "interaction", "event_name": "checkout_completed" },
+  "return_event": { "kind": "interaction", "event_name": "checkout_completed" }
+}
+```
+
+The first matching start event in the range anchors each user. A return must
+occur strictly after that anchor and before `until`. Both selectors can be the
+same event.
+
+| Field | Values | Default |
+| --- | --- | --- |
+| `interval_count` | `1` to `31` periods | `10` |
+| `mode` | `return_on` counts a return inside each exact period. `return_on_or_after` counts a return at or after the start of each period. | `return_on` |
+| `cohort_mode` | `first_in_range` | `first_in_range` |
+
+### Exact-event retention success
+
+In this synthetic example, two users complete checkout. The first user
+completes checkout at 12:00 on June 1 and again at 13:00. The second user
+completes checkout at 12:00 on June 2. At 13:00 on June 2, the second user
+views a page but does not complete another checkout.
+
+```json
+{
+  "schema_version": 1,
+  "query": {
+    "project_id": "11111111-1111-4111-8111-111111111111",
+    "since": "2026-06-01T00:00:00Z",
+    "until": "2026-06-03T00:00:00Z",
+    "start_event": { "kind": "interaction", "event_name": "checkout_completed" },
+    "return_event": { "kind": "interaction", "event_name": "checkout_completed" },
+    "interval": "day",
+    "interval_seconds": 86400,
+    "interval_count": 1,
+    "mode": "return_on",
+    "cohort_mode": "first_in_range"
+  },
+  "purpose": "Measures whether typed opaque user subjects return after their first matching start event inside the selected half-open query range. Returns must occur strictly after each subject's anchor. return_on measures one fixed subject-relative period; return_on_or_after measures from that period's threshold through the exclusive query upper bound. Eligibility-aware denominators prevent immature subjects from being reported as churned, cohorts are fixed buckets aligned to since, and raw subject identifiers are never returned.",
+  "summary": {
+    "cohort_subjects": 2,
+    "subjects_returned_after_start": 1,
+    "return_rate_after_start": 0.5,
+    "non_empty_cohorts": 2,
+    "periods_with_eligible_subjects": 1,
+    "fully_observed_periods": 0
+  },
+  "coverage": {
+    "classified_events": 4,
+    "named_events": 4,
+    "unnamed_events": 0,
+    "identified_events": 4,
+    "start_events": 3,
+    "usable_start_events": 3,
+    "excluded_start_events": 0,
+    "return_events": 3,
+    "usable_return_events": 3,
+    "excluded_return_events": 0,
+    "event_name_rate": 1.0,
+    "start_identity_coverage_rate": 1.0,
+    "return_identity_coverage_rate": 1.0,
+    "limitations": [
+      "Only application-supplied opaque subject IDs explicitly typed as users are counted. Anonymous, legacy-untyped, historical-unindexed, invalid, or absent subjects are excluded rather than inferred as people.",
+      "first_in_range anchors each subject at its first matching start inside the selected range; it does not prove that event was the subject's first-ever historical start.",
+      "Cohort buckets are fixed-width and aligned to the query's since value. hour, day, week, and thirty_day mean fixed elapsed durations; thirty_day is not a calendar month.",
+      "Returns must match the exact selected kind and derived event name, occur strictly after the subject anchor, and remain before the exclusive query upper bound.",
+      "This resource does not provide recurring-start cohorts, group retention, arbitrary property breakdowns, custom return ranges, or lifetime first-event lookup.",
+      "return_on includes only subjects whose complete exact period ends by until; later subjects are excluded from that period's denominator."
+    ]
+  },
+  "curve": [
+    {
+      "period": 0,
+      "threshold_seconds": 0,
+      "window_end_seconds": 86400,
+      "eligible_subjects": 1,
+      "retained_subjects": 1,
+      "weighted_retention_rate": 1.0,
+      "fully_observed_cohorts": 1,
+      "fully_observed_cohort_average_rate": 1.0,
+      "all_subjects_eligible": false
+    }
+  ],
+  "cohorts": [
+    {
+      "cohort": 0,
+      "started_at": "2026-06-01T00:00:00Z",
+      "ended_at": "2026-06-02T00:00:00Z",
+      "subjects": 1,
+      "subjects_returned_after_start": 1,
+      "periods": [
+        {
+          "period": 0,
+          "eligible_subjects": 1,
+          "retained_subjects": 1,
+          "retention_rate": 1.0,
+          "all_subjects_eligible": true
+        }
+      ]
+    },
+    {
+      "cohort": 1,
+      "started_at": "2026-06-02T00:00:00Z",
+      "ended_at": "2026-06-03T00:00:00Z",
+      "subjects": 1,
+      "subjects_returned_after_start": 0,
+      "periods": [
+        {
+          "period": 0,
+          "eligible_subjects": 0,
+          "retained_subjects": 0,
+          "all_subjects_eligible": false
+        }
+      ]
+    }
+  ],
+  "next_action": {
+    "code": "extend_retention_observation_window",
+    "target": "/api/telemetry/analytics/retention",
+    "reason": "Move since earlier, until later, or request fewer periods when a fully observed long-term comparison is required."
+  }
+}
+```
+
+### Read retention
+
+Coverage counts all four classified events, but only three match each
+checkout selector. The page view does not count as a return. One of the two
+users repeats checkout, so `return_rate_after_start` is `0.5`.
+
+Only the first user has a full day of observation after the anchor. That user
+returns within the day, so the curve rate is `1.0`. The second user has only
+12 hours of observation. That user is not eligible for period 0, so the second
+cohort's cell omits `retention_rate`. Do not count that user as lost.
+
+`weighted_retention_rate` divides all retained users by all eligible users.
+`fully_observed_cohort_average_rate` is the plain average of the rates of the
+cohorts in which every user is eligible. Cohorts are fixed buckets that start
+at `since`. `cohorts` contains only cohorts that have users.
+
+With `mode: "return_on_or_after"`, the curve omits `window_end_seconds`.
+
+### Automatic retention
+
+Send `response_version: 2` and no `start_event` or `return_event`. Every
+supported page view, screen view, and interaction counts as a start and as a
+return. This version selects a set of events. It does not select an SDK
+capture format.
+
+```json
+{
+  "project_id": "11111111-1111-4111-8111-111111111111",
+  "since": "2026-06-01T00:00:00Z",
+  "until": "2026-06-03T00:00:00Z",
+  "response_version": 2,
+  "interval": "day",
+  "interval_count": 1,
+  "mode": "return_on",
+  "cohort_mode": "first_in_range"
+}
+```
+
+The response has the same `summary`, `curve`, `cohorts`, and `next_action`
+shapes as the exact-event response. This excerpt shows the fields that change.
+In this example, the same two users have three events and no page view:
+
+```json
+{
+  "schema_version": 2,
+  "query": {
+    "project_id": "11111111-1111-4111-8111-111111111111",
+    "since": "2026-06-01T00:00:00Z",
+    "until": "2026-06-03T00:00:00Z",
+    "activity_scope": "all_classified_activity",
+    "interval": "day",
+    "interval_seconds": 86400,
+    "interval_count": 1,
+    "mode": "return_on",
+    "cohort_mode": "first_in_range"
+  },
+  "purpose": "Measures whether typed opaque user subjects perform any later supported classified product activity after their first such activity inside the selected half-open range. It does not choose or infer a top event. Returns must occur strictly after the anchor, anonymous and unidentified subjects remain excluded from user counts, eligibility-aware denominators prevent immature subjects from being reported as churned, and raw identifiers are never returned.",
+  "coverage": {
+    "classified_events": 3,
+    "named_events": 3,
+    "unnamed_events": 0,
+    "identified_events": 3,
+    "start_events": 3,
+    "usable_start_events": 3,
+    "excluded_start_events": 0,
+    "return_events": 3,
+    "usable_return_events": 3,
+    "excluded_return_events": 0,
+    "event_name_rate": 1.0,
+    "start_identity_coverage_rate": 1.0,
+    "return_identity_coverage_rate": 1.0,
+    "limitations": [
+      "Only application-supplied opaque subject IDs explicitly typed as users are counted. Anonymous, legacy-untyped, historical-unindexed, invalid, or absent subjects are excluded rather than inferred as people.",
+      "first_in_range anchors each subject at its first supported classified activity in the range; it does not prove that activity was the subject's first-ever product activity.",
+      "Cohort buckets are fixed-width and aligned to the query's since value. hour, day, week, and thirty_day mean fixed elapsed durations; thirty_day is not a calendar month.",
+      "Returns are any supported classified activity strictly after the subject anchor and before the exclusive query upper bound; no event is ranked, selected, or inferred.",
+      "This resource does not provide recurring-start cohorts, group retention, arbitrary property breakdowns, custom return ranges, or lifetime first-event lookup.",
+      "return_on includes only subjects whose complete exact period ends by until; later subjects are excluded from that period's denominator."
+    ]
+  }
+}
+```
+
+In automatic mode, `start_events` and `return_events` both equal
+`classified_events`. These counts are events, not users.
+
+### Retention without eligible users
+
+A successful result can have no cohort users. This excerpt shows one
+requested period without cohorts:
+
+```json
+{
+  "schema_version": 2,
+  "summary": {
+    "cohort_subjects": 0,
+    "subjects_returned_after_start": 0,
+    "non_empty_cohorts": 0,
+    "periods_with_eligible_subjects": 0,
+    "fully_observed_periods": 0
+  },
+  "curve": [
+    {
+      "period": 0,
+      "threshold_seconds": 0,
+      "window_end_seconds": 86400,
+      "eligible_subjects": 0,
+      "retained_subjects": 0,
+      "fully_observed_cohorts": 0,
+      "all_subjects_eligible": false
+    }
+  ],
+  "cohorts": []
+}
+```
+
+Read `coverage` and `next_action`. They separate a scope without classified
+events (`capture_product_activity`) from events without users
+(`identify_product_users` or `identify_returning_users`). A missing rate is
+not a measured zero.
+
+### Retention errors
+
+Besides the [shared scope errors](#shared-scope-errors), these requests return
+`422` and `validation_failed`:
+
+| Cause | `error` |
+| --- | --- |
+| Version 1 without both selectors, version 2 with a selector, or another version | `product analytics retention activity selection is contradictory` |
+| `interval_count` other than `1` to `31` | `product analytics retention interval_count must be between 1 and 31` |
+| Cohort buckets times `interval_count` is more than 500 | `product analytics retention interval and interval_count would exceed 500 cohort matrix cells` |
+
+The cell limit uses the range and the periods, not the number of users. A
+30-day range with `interval: "hour"` has 720 cohort buckets. With
+`interval_count: 1`, that is 720 cells, which is more than 500:
+
+```json
+{
+  "error": "product analytics retention interval and interval_count would exceed 500 cohort matrix cells",
+  "code": "validation_failed",
+  "next": "choose a wider interval, a shorter time range, or fewer retention periods",
+  "next_action": { "code": "fix_request", "target": "request" }
+}
+```
+
+To use automatic retention, remove both selectors. Do not change the SDK to
+correct this read request.
+
+### Exact-event lifecycle request
+
+Send this body to `POST /api/telemetry/analytics/lifecycle`. It classifies
+users by one event, not by every activity in the project:
+
+```json
+{
+  "project_id": "11111111-1111-4111-8111-111111111111",
+  "since": "2026-06-01T00:00:00Z",
+  "until": "2026-06-03T00:00:00Z",
+  "response_version": 1,
+  "interval": "day",
+  "history_period_count": 2,
+  "event": { "kind": "interaction", "event_name": "checkout_completed" }
+}
+```
+
+`history_period_count` sets the complete periods before `since` that LogBrew
+reads as history. It accepts `2` to `31`. The default is `2`. A user can be
+dormant for this event while the user does other activities.
+
+### Exact-event lifecycle success
+
+This synthetic example uses two days of history and two analysis days. The
+letters identify example users only. The response does not return user IDs.
+
+| Date, UTC | Users who complete checkout |
+| --- | --- |
+| May 30, history | B |
+| May 31, history | A and D |
+| June 1, analysis | A, B, and C |
+| June 2, analysis | A and B |
+
+C also views a page on June 2. That event does not match the checkout
+selector.
+
+```json
+{
+  "schema_version": 1,
+  "query": {
+    "project_id": "11111111-1111-4111-8111-111111111111",
+    "since": "2026-06-01T00:00:00Z",
+    "until": "2026-06-03T00:00:00Z",
+    "history_since": "2026-05-30T00:00:00Z",
+    "event": { "kind": "interaction", "event_name": "checkout_completed" },
+    "interval": "day",
+    "interval_seconds": 86400,
+    "history_period_count": 2,
+    "expected_buckets": 2
+  },
+  "purpose": "Classifies typed opaque user subjects for one exact product event in each fixed analysis period. new_within_observed_history means active now with no earlier matching event inside the bounded history window; returning means active now and in the immediately previous period; resurrected means active now, inactive in the previous period, and active earlier in observed history; dormant means active in the previous period but not now. These states are disjoint, incomplete buckets are marked, and raw subject identifiers are never returned.",
+  "summary": {
+    "observed_subjects": 4,
+    "analysis_active_subjects": 3,
+    "history_only_subjects": 1,
+    "returned_buckets": 2,
+    "fully_observed_buckets": 2,
+    "latest_fully_observed_period": 1,
+    "buckets_with_resurrection": 1,
+    "buckets_with_dormancy": 2
+  },
+  "coverage": {
+    "analysis_classified_events": 6,
+    "analysis_named_events": 6,
+    "analysis_unnamed_events": 0,
+    "analysis_identified_events": 6,
+    "selected_events": 5,
+    "usable_selected_events": 5,
+    "usable_selected_sessionized_events": 5,
+    "usable_selected_trace_linked_events": 5,
+    "excluded_selected_events": 0,
+    "history_selected_events": 3,
+    "usable_history_selected_events": 3,
+    "excluded_history_selected_events": 0,
+    "event_name_rate": 1.0,
+    "selected_identity_coverage_rate": 1.0,
+    "selected_sessionization_rate": 1.0,
+    "selected_trace_link_rate": 1.0,
+    "history_identity_coverage_rate": 1.0,
+    "limitations": [
+      "Only application-supplied opaque subject IDs explicitly typed as users are counted. Anonymous, legacy-untyped, historical-unindexed, invalid, or absent subjects are excluded rather than inferred as people.",
+      "new_within_observed_history means no earlier selected event between history_since and the current bucket. It does not prove that a subject is a lifetime-new user.",
+      "Observed history contains exactly 2 complete fixed periods before since; activity before history_since is intentionally unknown.",
+      "Buckets are fixed-width and aligned to since. hour, day, week, and thirty_day mean fixed elapsed durations; thirty_day is not a calendar month.",
+      "Returning, resurrected, and dormant compare only the selected exact kind and derived event name. They do not infer intent, identity merges, or causality.",
+      "This resource does not provide arbitrary property breakdowns, reusable cohorts, group lifecycle, lifetime first-event lookup, or per-subject lists."
+    ]
+  },
+  "buckets": [
+    {
+      "period": 0,
+      "started_at": "2026-06-01T00:00:00Z",
+      "ended_at": "2026-06-02T00:00:00Z",
+      "fully_observed": true,
+      "active_subjects": 3,
+      "new_within_observed_history_subjects": 1,
+      "returning_subjects": 1,
+      "resurrected_subjects": 1,
+      "dormant_subjects": 1,
+      "previous_active_subjects": 2,
+      "new_share_of_active": 0.3333333333333333,
+      "returning_share_of_active": 0.3333333333333333,
+      "resurrected_share_of_active": 0.3333333333333333,
+      "dormant_share_of_previous_active": 0.5,
+      "net_active_change": 1
+    },
+    {
+      "period": 1,
+      "started_at": "2026-06-02T00:00:00Z",
+      "ended_at": "2026-06-03T00:00:00Z",
+      "fully_observed": true,
+      "active_subjects": 2,
+      "new_within_observed_history_subjects": 0,
+      "returning_subjects": 2,
+      "resurrected_subjects": 0,
+      "dormant_subjects": 1,
+      "previous_active_subjects": 3,
+      "new_share_of_active": 0.0,
+      "returning_share_of_active": 1.0,
+      "resurrected_share_of_active": 0.0,
+      "dormant_share_of_previous_active": 0.3333333333333333,
+      "net_active_change": -1
+    }
+  ],
+  "next_action": {
+    "code": "investigate_lifecycle_loss",
+    "target": "/api/telemetry/analytics/paths",
+    "reason": "The latest complete bucket lost more prior active subjects than it added through new-within-observed-history and resurrected activity; compare bounded journeys around the selected event."
+  }
+}
+```
+
+### Read lifecycle
+
+On June 1, A is returning, B is resurrected, C is new, and D is dormant. On
+June 2, A and B are returning, and C is dormant for checkout despite the page
+view. The net change on June 2 is `2 - 3 = -1`.
+
+In each bucket, new, returning, and resurrected users add up to
+`active_subjects`. `returning_subjects` plus `dormant_subjects` equals
+`previous_active_subjects`. `net_active_change` is `active_subjects` minus
+`previous_active_subjects`.
+
+Do not add daily active counts to get distinct users. Here, the daily counts
+add up to 5, but `analysis_active_subjects` is 3. Four distinct users appear
+across history and analysis.
+
+`fully_observed` is `false` for a final bucket that ends after `until`. Its
+counts can change when the full period is observable. The `next_action`
+suggests an investigation. It does not show a cause.
+
+### Automatic lifecycle
+
+Send `response_version: 2` and no `event` selector. Every supported page view,
+screen view, and interaction counts as activity:
+
+```json
+{
+  "project_id": "11111111-1111-4111-8111-111111111111",
+  "since": "2026-06-01T00:00:00Z",
+  "until": "2026-06-03T00:00:00Z",
+  "response_version": 2,
+  "interval": "day",
+  "history_period_count": 2
+}
+```
+
+The response has the same `summary`, `buckets`, and `next_action` shapes as
+the exact-event response. This excerpt shows the fields that change:
+
+```json
+{
+  "schema_version": 2,
+  "query": {
+    "project_id": "11111111-1111-4111-8111-111111111111",
+    "since": "2026-06-01T00:00:00Z",
+    "until": "2026-06-03T00:00:00Z",
+    "history_since": "2026-05-30T00:00:00Z",
+    "activity_scope": "all_classified_activity",
+    "interval": "day",
+    "interval_seconds": 86400,
+    "history_period_count": 2,
+    "expected_buckets": 2
+  },
+  "purpose": "Classifies typed opaque user subjects by any supported classified product activity in each fixed period. It does not choose or infer a top event. new_within_observed_history, returning, resurrected, and dormant remain disjoint; anonymous and unidentified subjects are excluded from user counts, incomplete buckets are marked, and raw identifiers are never returned."
+}
+```
+
+In automatic mode, `coverage.selected_events` equals
+`coverage.analysis_classified_events`. The fifth `limitations` entry is
+`Returning, resurrected, and dormant compare any supported classified product activity; no event is ranked, selected, or inferred.`
+
+### Lifecycle without users
+
+If neither the analysis range nor the history contains usable users, `buckets`
+is empty and `summary` omits `latest_fully_observed_period`:
+
+```json
+{
+  "schema_version": 2,
+  "summary": {
+    "observed_subjects": 0,
+    "analysis_active_subjects": 0,
+    "history_only_subjects": 0,
+    "returned_buckets": 0,
+    "fully_observed_buckets": 0,
+    "buckets_with_resurrection": 0,
+    "buckets_with_dormancy": 0
+  },
+  "buckets": []
+}
+```
+
+Users who appear only in history can still produce buckets with dormant
+users when the analysis range has no activity.
+
+### Lifecycle errors
+
+Besides the [shared scope errors](#shared-scope-errors), these requests return
+`422` and `validation_failed`:
+
+| Cause | `error` |
+| --- | --- |
+| Version 1 without `event`, version 2 with `event`, or another version | `product analytics lifecycle activity selection is contradictory` |
+| `history_period_count` other than `2` to `31` | `product analytics lifecycle history_period_count must be between 2 and 31` |
+| History periods longer than 62 days in total | `product analytics lifecycle history must not exceed 62 days` |
+| More than 100 analysis buckets | `product analytics lifecycle interval would exceed 100 analysis buckets` |
+
+For example, ten `week` history periods need 70 days:
+
+```json
+{
+  "error": "product analytics lifecycle history must not exceed 62 days",
+  "code": "validation_failed",
+  "next": "use fewer history periods or a narrower fixed interval",
+  "next_action": { "code": "fix_request", "target": "request" }
+}
+```
+
+### Read the selected analysis scope
+
+Exact-event responses have `schema_version: 1`. Their `query` echoes the
+selectors and omits `activity_scope`. Automatic responses have
+`schema_version: 2` and `query.activity_scope: "all_classified_activity"`.
+They omit the selectors. A different selector can change the result without
+any change in the captured activity.
 
 ## Investigation responses
 
