@@ -2234,6 +2234,1006 @@ selectors and omits `activity_scope`. Automatic responses have
 They omit the selectors. A different selector can change the result without
 any change in the captured activity.
 
+## Metric-series response
+
+`GET /api/telemetry/metrics/series` reads one exact metric name in one
+project. Copy the name from `GET /api/telemetry/metrics`. This request groups
+a delta counter by service:
+
+```bash
+curl --get "https://api.logbrew.co/api/telemetry/metrics/series" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project_id>" \
+  --data-urlencode "name=jobs.completed" \
+  --data-urlencode "since=2026-06-01T12:00:00Z" \
+  --data-urlencode "until=2026-06-01T12:15:00Z" \
+  --data-urlencode "interval=5m" \
+  --data-urlencode "group_by=service_name"
+```
+
+### Metric-series success
+
+This synthetic response contains one delta-counter series. Three samples with
+values `2`, `3`, and `5` occur in the first bucket. Two samples with values
+`1` and `4` occur in the last bucket. No sample occurs in the middle bucket,
+so the response has no point for it.
+
+```json
+{
+  "schema_version": 1,
+  "query": {
+    "project_id": "11111111-1111-4111-8111-111111111111",
+    "name": "jobs.completed",
+    "since": "2026-06-01T12:00:00Z",
+    "until": "2026-06-01T12:15:00Z",
+    "interval": "5m",
+    "interval_seconds": 300,
+    "group_by": "service_name",
+    "series_limit": 10
+  },
+  "purpose": "Shows how one metric changes over time without changing its meaning: gauges use sampled state, delta counters use change volume and rate, histograms use distributions, and cumulative streams stay raw when reset-safe change is ambiguous.",
+  "coverage": {
+    "samples": 5,
+    "series": 1,
+    "returned_series": 1,
+    "points": 2,
+    "expected_buckets_per_series": 3,
+    "first_seen_at": "2026-06-01T12:00:10Z",
+    "last_seen_at": "2026-06-01T12:14:50Z",
+    "truncated": false
+  },
+  "series": [
+    {
+      "identity": {
+        "kind": "counter",
+        "unit": "{job}",
+        "temporality": "delta",
+        "group_by": "service_name",
+        "group_value": "checkout-worker"
+      },
+      "status": "ready",
+      "aggregation": {
+        "code": "delta_sum",
+        "description": "Primary value is the sum of recorded changes in each bucket; rate_per_second normalizes that change by bucket width."
+      },
+      "sample_count": 5,
+      "points": [
+        {
+          "bucket_start": "2026-06-01T12:00:00Z",
+          "bucket_end": "2026-06-01T12:05:00Z",
+          "sample_count": 3,
+          "value": 10.0,
+          "last": 5.0,
+          "min": 2.0,
+          "max": 5.0,
+          "average": 3.3333333333333335,
+          "sum": 10.0,
+          "rate_per_second": 0.03333333333333333,
+          "trace_exemplars": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
+        },
+        {
+          "bucket_start": "2026-06-01T12:10:00Z",
+          "bucket_end": "2026-06-01T12:15:00Z",
+          "sample_count": 2,
+          "value": 5.0,
+          "last": 4.0,
+          "min": 1.0,
+          "max": 4.0,
+          "average": 2.5,
+          "sum": 5.0,
+          "rate_per_second": 0.016666666666666666,
+          "trace_exemplars": []
+        }
+      ]
+    }
+  ],
+  "next_action": {
+    "code": "inspect_metric_change",
+    "target": "trace_summary",
+    "reason": "Open a trace exemplar from an unusual bucket to connect the metric change to spans, errors, logs, and release context."
+  }
+}
+```
+
+### Read a metric series
+
+The first point records 10 completed jobs, not 10 samples. `rate_per_second`
+divides that change by the 300-second bucket. `last` is the last recorded
+change, not the sum. See
+[metric aggregation meanings](/concepts/telemetry#read-the-metric-value).
+
+The kind and temporality of a series select its `aggregation.code` and the
+statistics in each point. A point omits a statistic that does not apply. A
+missing statistic is not zero.
+
+| Kind and temporality | `status` | `aggregation.code` | `value` | Other statistics |
+| --- | --- | --- | --- | --- |
+| `gauge`, `instant` | `ready` | `gauge_last` | Last sample | `last`, `min`, `max`, `average` |
+| `counter`, `delta` | `ready` | `delta_sum` | Sum of changes | `last`, `min`, `max`, `average`, `sum`, `rate_per_second` |
+| `histogram`, `delta` | `ready` | `distribution_p95` | Approximate p95 | `min`, `max`, `average`, `sum`, `p50`, `p95`, `p99` |
+| Any kind, `cumulative` | `limited` | `raw_cumulative_last` | Last raw sample | `last`, `min`, `max` |
+| Any other pair | `limited` | `raw_last` | Last raw sample | `last`, `min`, `max` |
+
+`limited` is a successful response, not an error. It adds
+`aggregation.limitation`, which explains why LogBrew shows only raw values.
+`ready` does not prove complete capture.
+
+Read `coverage` before you draw a chart:
+
+- `samples` counts the samples of all matching series, including series that
+  the response does not return.
+- `series` counts matching series. `returned_series` and `points` count the
+  returned data.
+- `truncated` is `true` when `series_limit` removed lower-volume series.
+- `expected_buckets_per_series` is the number of possible buckets in the range.
+
+Do not add a point for a bucket without samples. Do not insert a zero or copy
+the previous value. Each point returns up to 3 `trace_exemplars`. A trace
+exemplar links one sample to a trace. It does not explain every sample in the
+bucket. If no point has a trace exemplar, `next_action.target` is
+`metric_samples`.
+
+### Metric-series scope and errors
+
+`project_id`, `name`, and `since` are required. `name` can have at most 200
+characters. `interval` is `auto`, `1m`, `5m`, `15m`, `1h`, `6h`, or `1d`.
+The default is `auto`, which selects the smallest interval with at most 300
+buckets. An explicit interval cannot need more than 500 buckets.
+
+`group_by` is `none`, `service_name`, `release`, or `environment`. The default
+is `none`. Without grouping, different kinds, units, and temporalities stay in
+separate series. `series_limit` accepts `1` to `20`. The default is `10`.
+
+An empty result returns `200` with `series: []` and zero `samples`. The
+`coverage` object omits `first_seen_at` and `last_seen_at`. This does not
+prove that the application never sent the metric. Check the project, the
+metric name, and the time range.
+
+Omitting `name` returns `422`:
+
+```json
+{
+  "error": "metric series name is required",
+  "code": "validation_failed",
+  "next": "send the exact metric name returned by /api/telemetry/metrics",
+  "next_action": { "code": "fix_request", "target": "request" }
+}
+```
+
+One-minute buckets across seven days return `422`:
+
+```json
+{
+  "error": "metric series interval would exceed 500 buckets",
+  "code": "validation_failed",
+  "next": "use interval=auto or select a wider interval",
+  "next_action": { "code": "fix_request", "target": "request" }
+}
+```
+
+Other `422` errors are `metric series group_by is not supported`,
+`metric series interval is not supported`, and
+`metric series_limit must be between 1 and 20`.
+
+## Path-analysis response
+
+`POST /api/telemetry/analytics/paths` finds the named events before or after
+one selected event in the same session. The selected event is the anchor.
+Copy its `kind` and `event_name` from `classified_activity.top_events`. The
+route returns `schema_version: 1`. It does not accept `response_version` or
+`analysis_unit`.
+
+```json
+{
+  "project_id": "11111111-1111-4111-8111-111111111111",
+  "since": "2026-06-01T11:00:00Z",
+  "until": "2026-06-01T12:00:00Z",
+  "direction": "following",
+  "anchor": { "kind": "page_view", "event_name": "/checkout" },
+  "depth": 2,
+  "collapse_repeated": true,
+  "path_limit": 2
+}
+```
+
+`direction` and `anchor` are required.
+
+### Path success
+
+Four sessions contain the anchor in this synthetic result. The two returned
+paths represent three of those sessions. One lower-ranked path is not
+returned.
+
+```json
+{
+  "schema_version": 1,
+  "query": {
+    "project_id": "11111111-1111-4111-8111-111111111111",
+    "since": "2026-06-01T11:00:00Z",
+    "until": "2026-06-01T12:00:00Z",
+    "direction": "following",
+    "anchor": { "kind": "page_view", "event_name": "/checkout" },
+    "depth": 2,
+    "collapse_repeated": true,
+    "path_limit": 2
+  },
+  "purpose": "Shows the highest-volume named product-event sequences immediately before or after one exact version-1 page view, screen view, or interaction inside explicit sessions. Following paths use the earliest matching anchor in each session; preceding paths use the latest. Optional exact property predicates classify only the anchor, while surrounding events preserve the real session journey. Results aggregate exact bounded sequences and never return raw session or subject identifiers.",
+  "summary": {
+    "anchored_sessions": 4,
+    "represented_sessions": 3,
+    "unrepresented_sessions": 1,
+    "returned_paths": 2,
+    "paths_truncated": true
+  },
+  "coverage": {
+    "classified_events": 12,
+    "named_events": 12,
+    "unnamed_events": 0,
+    "sessionized_events": 10,
+    "unsessionized_events": 2,
+    "anchor_events": 5,
+    "usable_anchor_events": 4,
+    "excluded_anchor_events": 1,
+    "traced_anchor_events": 1,
+    "event_name_rate": 1.0,
+    "sessionization_rate": 0.8333333333333334,
+    "anchor_session_coverage_rate": 0.8,
+    "anchor_trace_link_rate": 0.2,
+    "ordered_event_cap_per_session": 1024,
+    "limitations": [
+      "Paths include only supported version-1 classified events with exact derived names; arbitrary actions, technical spans, and raw identity values are excluded.",
+      "Paths stay inside application-supplied session boundaries and the selected half-open time range; activity beyond either boundary is not inferred.",
+      "Each session retains at most 1024 direction-nearest named events before anchoring, so exceptionally noisy sessions can be omitted or truncated.",
+      "Classified events without an explicit opaque session ID cannot participate in session paths.",
+      "Trace exemplars prove only that a matching anchor carried the same trace ID. They do not prove root cause, and deeper investigation depends on retained spans for that trace.",
+      "Some matching anchors lack trace IDs, so trace-linked path evidence covers only the reported traced_anchor_events population."
+    ]
+  },
+  "paths": [
+    {
+      "rank": 1,
+      "sessions": 2,
+      "share_of_anchored_sessions": 0.5,
+      "traced_sessions": 1,
+      "trace_link_rate": 0.5,
+      "trace_exemplars": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+      "nodes": [
+        { "relative_position": 0, "kind": "page_view", "event_name": "/checkout" },
+        { "relative_position": 1, "kind": "interaction", "event_name": "checkout.submitted" },
+        { "relative_position": 2, "kind": "interaction", "event_name": "checkout.completed" }
+      ]
+    },
+    {
+      "rank": 2,
+      "sessions": 1,
+      "share_of_anchored_sessions": 0.25,
+      "traced_sessions": 0,
+      "trace_link_rate": 0.0,
+      "trace_exemplars": [],
+      "nodes": [
+        { "relative_position": 0, "kind": "page_view", "event_name": "/checkout" },
+        { "relative_position": 1, "kind": "interaction", "event_name": "checkout.failed" }
+      ]
+    }
+  ],
+  "next_action": {
+    "code": "inspect_path_trace",
+    "target": "/api/telemetry/traces/{trace_id}/investigation",
+    "reason": "Open an exemplar from the material path to connect the product journey to retained spans, issues, logs, actions, metrics, and release context as evidence rather than a root-cause claim."
+  }
+}
+```
+
+### Read paths
+
+`share_of_anchored_sessions` divides the sessions of a path by all four
+anchored sessions. The shares are 50% and 25%, not 67% and 33%.
+`unrepresented_sessions` counts anchored sessions that no returned path
+represents. `paths_truncated: true` means that the result is incomplete.
+
+Coverage counts events, not sessions. Here, five events match the anchor, but
+one has no session ID. That event cannot enter a path. Each path returns up to
+3 trace exemplars. Use a trace ID from your own response. A trace link does
+not show what caused a user action or a failure.
+
+| Field | Meaning |
+| --- | --- |
+| `following` | Starts at the earliest matching anchor in each session. The anchor has position `0`. Later nodes have positive positions. |
+| `preceding` | Ends at the latest matching anchor in each session. Earlier nodes have negative positions. The anchor has position `0`. |
+| `depth` | Number of nodes next to the anchor, not counting the anchor. `1` to `8`. The default is `4`. A path can have fewer nodes. |
+| `collapse_repeated` | Combines consecutive nodes with the same kind and name. The default is `true`. |
+| `path_limit` | Maximum returned paths, ranked by session count. `1` to `20`. The default is `10`. |
+
+Nodes are in time order in both directions. A path is not a full session
+replay. LogBrew reads at most 1024 named events per session before it selects
+the anchor: the earliest events for `following` and the latest events for
+`preceding`. An anchor outside that limit can be omitted.
+
+### Filter the anchor by property
+
+Send up to four `property_filters`, each with one exact `key` and `value`.
+Copy the key from the [property catalog](#analytics-property-catalog). The
+filters apply only to the anchor, not to the events around it. Values are
+case-sensitive. When filters are present, `query` echoes them, and
+`coverage.anchor_property_filters` reports:
+
+| Field | Meaning |
+| --- | --- |
+| `context_events` | Anchor events in scope before the property filters. |
+| `property_ready_events` | Anchor events that have every requested key. |
+| `missing_property_events` | Anchor events without one or more requested keys. |
+| `matching_events` | Anchor events whose values match every filter. |
+| `nonmatching_value_events` | Anchor events that have every key but a different value. |
+| `property_ready_rate` | `property_ready_events` divided by `context_events`. |
+| `match_rate` | `matching_events` divided by `property_ready_events`. |
+
+Missing keys and different values need different fixes. Do not add them
+together. The object is omitted when the request has no property filter.
+
+### Empty paths and rejected requests
+
+An empty `paths` array can be a successful `200` response. Read `summary`,
+`coverage`, and `next_action`. These codes separate the causes:
+`capture_product_activity`, `choose_captured_path_anchor`,
+`capture_anchor_properties`, `improve_anchor_property_coverage`,
+`verify_anchor_property_values`, `sessionize_product_activity`, and
+`narrow_or_move_path_anchor`.
+
+Besides the [shared scope errors](#shared-scope-errors), these requests return
+`422` and `validation_failed`:
+
+| Cause | `error` |
+| --- | --- |
+| `depth` other than `1` to `8` | `product analytics path depth must be between 1 and 8` |
+| `path_limit` other than `1` to `20` | `product analytics path_limit must be between 1 and 20` |
+| More than four property filters | `product analytics paths accept at most four exact anchor property filters` |
+| A key that is not in the property catalog | `product analytics path property keys must be supported privacy-safe keys` |
+| The same key twice | `product analytics path property keys must be unique` |
+| An empty value, a value longer than 256 characters, or a control character | `product analytics path property values must be non-empty, control-free, and at most 256 characters` |
+
+For example, `depth: 0` returns:
+
+```json
+{
+  "error": "product analytics path depth must be between 1 and 8",
+  "code": "validation_failed",
+  "next": "use depth from 1 through 8 adjacent named events",
+  "next_action": { "code": "fix_request", "target": "request" }
+}
+```
+
+## Analytics property catalog
+
+`GET /api/telemetry/analytics/properties` lists the property keys on
+classified product events in one project. Use the keys in
+[segment comparisons](#analytics-segment-comparison) and path anchor filters.
+The catalog returns keys and counts. It never returns property values or
+identities.
+
+### Read available property keys
+
+Send `project_id` and `since`. You can also send `until`, `service_name`,
+`release`, `environment`, `limit`, and `response_version`. `limit` accepts
+`1` to `50` keys. The default is `20`. Send `response_version=2` to get the
+public `estimation.method` value.
+
+```bash
+curl --get "https://api.logbrew.co/api/telemetry/analytics/properties" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project_id>" \
+  --data-urlencode "since=2026-06-01T00:00:00Z" \
+  --data-urlencode "until=2026-06-02T00:00:00Z" \
+  --data-urlencode "limit=20" \
+  --data-urlencode "response_version=2"
+```
+
+### Property catalog success
+
+In this synthetic result, 100 classified events exist. Five of them were
+captured before the current property index.
+
+```json
+{
+  "schema_version": 2,
+  "query": {
+    "project_id": "11111111-1111-4111-8111-111111111111",
+    "since": "2026-06-01T00:00:00Z",
+    "until": "2026-06-02T00:00:00Z",
+    "limit": 20
+  },
+  "purpose": "Discovers bounded privacy-safe runtime, framework, operating-system, device, application, and custom-tag keys captured on classified product events. It reports migration, capture, privacy-filtering, and per-key coverage without returning property values or identities, so humans and agents can build exact segment comparisons without guessing which dimensions exist.",
+  "summary": {
+    "classified_events": 100,
+    "available_property_keys": 3,
+    "returned_properties": 3
+  },
+  "coverage": {
+    "indexed_events": 95,
+    "unindexed_events": 5,
+    "complete_index_events": 95,
+    "incomplete_index_events": 0,
+    "privacy_filtered_events": 4,
+    "events_with_properties": 90,
+    "index_coverage_rate": 0.95,
+    "property_capture_rate": 0.9,
+    "properties_truncated": false,
+    "values_returned": false,
+    "limitations": [
+      "Property discovery returns keys and aggregate counts only; property values and identity columns are never returned.",
+      "Property filters use exact case-sensitive bounded string equality and combine with logical AND inside each segment.",
+      "Historical events written before the current property index are excluded from property descriptors and exact property filters.",
+      "Direct-identity, credential-like, and network-address custom tag keys were intentionally excluded from the analytics property index."
+    ]
+  },
+  "estimation": {
+    "count_accuracy": "approximate",
+    "method": "approximate_distinct",
+    "description": "Available property-key and per-key distinct-value counts are approximate distinct counts. Classified-event, index-coverage, privacy-filtering, and per-key event counts are exact within the selected fully evaluated window."
+  },
+  "properties": [
+    {
+      "key": "resource.runtime.name",
+      "source": "standard_context",
+      "value_type": "string",
+      "events": 90,
+      "coverage_rate": 0.9,
+      "distinct_values": 2
+    },
+    {
+      "key": "resource.application.version",
+      "source": "standard_context",
+      "value_type": "string",
+      "events": 70,
+      "coverage_rate": 0.7,
+      "distinct_values": 4
+    },
+    {
+      "key": "tag.plan",
+      "source": "custom_tag",
+      "value_type": "string",
+      "events": 60,
+      "coverage_rate": 0.6,
+      "distinct_values": 3
+    }
+  ],
+  "next_action": {
+    "code": "compare_property_segments",
+    "target": "/api/telemetry/analytics/segments/compare",
+    "reason": "Use exact returned keys with locally known values to compare behavior while preserving identity and property-value privacy."
+  }
+}
+```
+
+### Interpret the catalog
+
+`source` is `standard_context` for a standard context key, such as
+`resource.runtime.name`, or `custom_tag` for a key that starts with `tag.`.
+`value_type` is always `string`. `properties` is sorted by `events`, highest
+first.
+
+`tag.plan` is on 60 of 100 classified events. It has about 3 distinct values.
+The descriptor does not show those values. Use values that you know from your
+application. Do not guess a value from a count. One event can have several
+keys, so do not add the per-key `events` counts.
+
+| Field | Meaning |
+| --- | --- |
+| `summary.classified_events` | Classified events in scope. This is the denominator of each `coverage_rate`. |
+| `summary.available_property_keys` | Estimated number of distinct keys, not the number of returned rows. |
+| `coverage.unindexed_events` | Events captured before the current property index. They cannot contribute keys. |
+| `coverage.incomplete_index_events` | Events with some malformed or truncated context. Their valid keys still count. |
+| `coverage.privacy_filtered_events` | Events from which LogBrew removed sensitive custom tag keys. This is not a key count. |
+| `coverage.properties_truncated` | `true` when more keys exist than `limit`. Narrow the scope, or increase `limit` up to 50. |
+| `coverage.values_returned` | Always `false`. |
+
+An empty `properties` array does not prove that the project has no product
+events. Read `summary`, `coverage`, and `next_action`.
+
+### Property catalog errors
+
+Besides the [shared scope errors](#shared-scope-errors), `limit=0` or
+`limit=51` returns `422`:
+
+```json
+{
+  "error": "product analytics property limit must be between 1 and 50",
+  "code": "validation_failed",
+  "next": "use limit=1 through limit=50",
+  "next_action": { "code": "fix_request", "target": "request" }
+}
+```
+
+A `response_version` other than `1` or `2` returns
+`product analytics response_version must be 1 or 2`. LogBrew checks
+`response_version` before the other values.
+
+A `POST` request returns `405`:
+
+```json
+{
+  "error": "Method not allowed",
+  "code": "method_not_allowed",
+  "next": "send GET /api/telemetry/analytics/properties with required project_id and since plus optional until, service_name, release, environment, limit, or response_version query parameters",
+  "next_action": { "code": "use_supported_method", "target": "api_method" }
+}
+```
+
+## Analytics segment comparison
+
+`POST /api/telemetry/analytics/segments/compare` compares how often sessions
+or users reach one exact event across 2 to 4 segments in one project. A
+segment selects events by service, release, environment, and property values.
+The first segment is the baseline.
+
+### Define the comparison
+
+Send this JSON body with account authentication and
+`Content-Type: application/json`. Here, `basic` and `premium` are plan values
+of the example application, not LogBrew plans:
+
+```json
+{
+  "project_id": "11111111-1111-4111-8111-111111111111",
+  "since": "2026-06-01T11:00:00Z",
+  "until": "2026-06-01T12:00:00Z",
+  "interval": "1h",
+  "analysis_unit": "session",
+  "response_version": 2,
+  "target": { "kind": "interaction", "event_name": "checkout_completed" },
+  "segments": [
+    {
+      "key": "basic",
+      "label": "Basic plan",
+      "service_name": "checkout-api",
+      "environment": "production",
+      "property_filters": [{ "key": "tag.plan", "value": "basic" }]
+    },
+    {
+      "key": "premium",
+      "label": "Premium plan",
+      "service_name": "checkout-api",
+      "environment": "production",
+      "property_filters": [{ "key": "tag.plan", "value": "premium" }]
+    }
+  ]
+}
+```
+
+`target` and `segments` are required. `analysis_unit` is `session` or
+`identified_user`. The default is `session`, which counts sessions, not
+people. `interval` accepts the same values as the overview. The default is
+`auto`.
+
+Each segment needs a unique `key`, a `label`, and a different filter set:
+
+- `key`: 1 to 32 bytes. Start with a lowercase ASCII letter or a digit. Use
+  only lowercase ASCII letters, digits, `_`, and `-`.
+- `label`: 1 to 80 characters, without control characters.
+- `service_name`, `release`, `environment`: optional. Each value has 1 to 256
+  characters, without control characters.
+- `property_filters`: 0 to 4 filters. Each key can occur once in a segment.
+  An event must match all filters of the segment. Values are case-sensitive,
+  1 to 256 characters, and LogBrew trims spaces at the start and end.
+
+A segment without filters selects all classified activity in the project and
+time range. Segments can overlap. A different label or key does not make two
+identical filter sets valid.
+
+### Segment comparison success
+
+In this synthetic result, the baseline reaches checkout in 10 of 50 sessions.
+The premium segment reaches it in 18 of 60 sessions.
+
+```json
+{
+  "schema_version": 2,
+  "query": {
+    "project_id": "11111111-1111-4111-8111-111111111111",
+    "since": "2026-06-01T11:00:00Z",
+    "until": "2026-06-01T12:00:00Z",
+    "interval": "1h",
+    "interval_seconds": 3600,
+    "analysis_unit": "session",
+    "target": { "kind": "interaction", "event_name": "checkout_completed" },
+    "segments": [
+      {
+        "key": "basic",
+        "label": "Basic plan",
+        "service_name": "checkout-api",
+        "release": null,
+        "environment": "production",
+        "property_filters": [{ "key": "tag.plan", "value": "basic" }]
+      },
+      {
+        "key": "premium",
+        "label": "Premium plan",
+        "service_name": "checkout-api",
+        "release": null,
+        "environment": "production",
+        "property_filters": [{ "key": "tag.plan", "value": "premium" }]
+      }
+    ]
+  },
+  "purpose": "Compares how often explicit sessions or typed opaque user subjects reach one exact versioned page-view, screen-view, or interaction outcome across two through four named service, release, environment, and exact safe-property segments. It distinguishes missing property capture from nonmatching values, returns time trends and descriptive differences from the first segment, and never returns identities or claims causality or statistical significance.",
+  "summary": {
+    "segment_count": 2,
+    "baseline_segment_key": "basic",
+    "segments_with_eligible_units": 2,
+    "segments_with_target_events": 2,
+    "segments_with_reached_units": 2
+  },
+  "confidence": {
+    "interpretation": "descriptive_only",
+    "unique_count_accuracy": "approximate",
+    "estimation_method": "approximate_distinct",
+    "causal_inference": "not_established",
+    "statistical_significance": "not_tested",
+    "segment_overlap": "possible",
+    "limitations": [
+      "Unique session or typed user-subject counts use bounded cardinality estimates; event and capture-coverage totals are exact within the fully evaluated window.",
+      "Segments are evaluated independently and may overlap, so their totals must not be added or interpreted as a population partition.",
+      "Differences and relative lift are descriptive only. They do not control for exposure, assignment, seasonality, selection bias, or other confounders.",
+      "Bucket-level unique counts are recalculated inside each bucket and are not additive across the series.",
+      "Session analysis compares visits or app sessions, not unique people.",
+      "At least one segment has classified events without the selected unit ID; compare unit_coverage_rate before interpreting reach differences.",
+      "Property predicates are exact case-sensitive string matches. Events without the current property index or every requested key are excluded from segment results and reported separately as missing_property_events.",
+      "Direct-identity, credential-like, and network-address custom tag keys are excluded from the analytics property index and cannot be used for segmentation."
+    ]
+  },
+  "segments": [
+    {
+      "key": "basic",
+      "label": "Basic plan",
+      "eligible_units": 50,
+      "reached_units": 10,
+      "reach_rate": 0.2,
+      "usable_target_events_per_reached_unit": 1.8,
+      "coverage": {
+        "classified_events": 200,
+        "unit_identified_events": 190,
+        "excluded_events": 10,
+        "unit_coverage_rate": 0.95,
+        "target_events": 20,
+        "usable_target_events": 18,
+        "excluded_target_events": 2,
+        "target_unit_coverage_rate": 0.9,
+        "traced_target_events": 10,
+        "target_trace_link_rate": 0.5,
+        "property_filters": {
+          "context_events": 500,
+          "property_ready_events": 480,
+          "missing_property_events": 20,
+          "property_ready_rate": 0.96,
+          "matching_events": 200,
+          "nonmatching_value_events": 280,
+          "match_rate": 0.4166666666666667
+        }
+      },
+      "series": [
+        {
+          "bucket_start": "2026-06-01T11:00:00Z",
+          "bucket_end": "2026-06-01T12:00:00Z",
+          "classified_events": 200,
+          "eligible_units": 50,
+          "target_events": 20,
+          "usable_target_events": 18,
+          "reached_units": 10,
+          "reach_rate": 0.2
+        }
+      ]
+    },
+    {
+      "key": "premium",
+      "label": "Premium plan",
+      "eligible_units": 60,
+      "reached_units": 18,
+      "reach_rate": 0.3,
+      "usable_target_events_per_reached_unit": 1.8888888888888888,
+      "coverage": {
+        "classified_events": 240,
+        "unit_identified_events": 228,
+        "excluded_events": 12,
+        "unit_coverage_rate": 0.95,
+        "target_events": 36,
+        "usable_target_events": 34,
+        "excluded_target_events": 2,
+        "target_unit_coverage_rate": 0.9444444444444444,
+        "traced_target_events": 18,
+        "target_trace_link_rate": 0.5,
+        "property_filters": {
+          "context_events": 500,
+          "property_ready_events": 480,
+          "missing_property_events": 20,
+          "property_ready_rate": 0.96,
+          "matching_events": 240,
+          "nonmatching_value_events": 240,
+          "match_rate": 0.5
+        }
+      },
+      "series": [
+        {
+          "bucket_start": "2026-06-01T11:00:00Z",
+          "bucket_end": "2026-06-01T12:00:00Z",
+          "classified_events": 240,
+          "eligible_units": 60,
+          "target_events": 36,
+          "usable_target_events": 34,
+          "reached_units": 18,
+          "reach_rate": 0.3
+        }
+      ],
+      "comparison_to_baseline": {
+        "eligible_units_difference": 10,
+        "reached_units_difference": 8,
+        "target_events_difference": 16,
+        "reach_rate_difference": 0.09999999999999998,
+        "relative_reach_rate_lift": 0.4999999999999998
+      }
+    }
+  ],
+  "next_action": {
+    "code": "investigate_segment_paths",
+    "target": "/api/telemetry/analytics/paths",
+    "reason": "Inspect paths around the target in the weakest segment, then use correlated traces to explain a material behavioral difference."
+  }
+}
+```
+
+### Read rates and differences
+
+`eligible_units` estimates the sessions or users with classified activity in
+the segment. `reached_units` estimates how many of them reached the target.
+`reach_rate` is `reached_units` divided by `eligible_units`. Events without
+the selected unit ID do not count toward these units.
+
+The baseline rate is 20%. The premium rate is 30%. The difference is 10
+percentage points. The relative lift is 50%, not 10%. Small decimal errors
+come from floating-point arithmetic. Round rates for display, but calculate
+with the returned values. The baseline segment has no
+`comparison_to_baseline`. Relative lift is omitted when the baseline reach
+rate is zero.
+
+In `query`, a segment filter that you did not send is `null`. An empty
+`property_filters` list is omitted.
+
+`coverage.property_filters` has the same fields as the
+[path anchor filter coverage](#filter-the-anchor-by-property). Here,
+`matching_events` equals `classified_events`. Keep missing keys and
+different values separate. Segments can overlap, and one session can occur in
+several buckets. Do not add unit counts across segments or buckets.
+
+The comparison is descriptive. `confidence.causal_inference` is
+`not_established` and `confidence.statistical_significance` is `not_tested`.
+A 30% rate against 20% does not show that a plan caused more checkouts.
+
+### Segment comparison errors
+
+Besides the [shared scope errors](#shared-scope-errors), these requests return
+`422` and `validation_failed`:
+
+| Cause | `error` |
+| --- | --- |
+| Fewer than 2 or more than 4 segments | `product analytics segment comparison requires two through four segments` |
+| Two segments with the same key | `product analytics segment keys must be unique` |
+| Two segments with the same filters | `product analytics segment filters must be unique` |
+| A key that is not 1 to 32 permitted bytes | `product analytics segment keys must be 1 through 32 machine-safe bytes` |
+| A label that is empty, too long, or has a control character | `product analytics segment labels must be non-empty, control-free, and at most 80 characters` |
+| A filter value with a control character | `product analytics segment filters must be control-free` |
+| More than four property filters in a segment | `product analytics segments accept at most four exact property filters` |
+| A key that is not in the property catalog | `product analytics segment property keys must be supported privacy-safe keys` |
+| The same property key twice in a segment | `product analytics segment property keys must be unique within each segment` |
+| An empty, too long, or control-character property value | `product analytics segment property values must be non-empty, control-free, and at most 256 characters` |
+| A `response_version` other than `1` or `2` | `product analytics response_version must be 1 or 2` |
+
+The `interval` errors are the same as the [overview errors](#overview-errors).
+
+For example, two segments with different keys and identical filters return:
+
+```json
+{
+  "error": "product analytics segment filters must be unique",
+  "code": "validation_failed",
+  "next": "change at least one exact service_name, release, environment, or property filter",
+  "next_action": { "code": "fix_request", "target": "request" }
+}
+```
+
+A different label or a different order of property filters does not change
+the selected events. A validation failure is not evidence that no events
+match.
+
+A `GET` request returns `405`:
+
+```json
+{
+  "error": "Method not allowed",
+  "code": "method_not_allowed",
+  "next": "send POST /api/telemetry/analytics/segments/compare with project_id, since, one exact target, two through four named segments, and optional until, interval, analysis_unit, property_filters, or response_version JSON fields",
+  "next_action": { "code": "use_supported_method", "target": "api_method" }
+}
+```
+
+## Signal-volume response
+
+`GET /api/telemetry/summary/volume` counts retained signals for one project
+and time range. It requires `project_id` and `since`. It does not accept
+`project_ids`.
+
+`until` cannot be in the future. If you omit it, the end is the request time.
+A compact `since` such as `24h` counts back from `until`. `interval` is
+`auto`, `1m`, `5m`, `15m`, `1h`, `6h`, or `1d`. The default `auto` selects
+the smallest interval with at most 120 buckets. A request cannot need more
+than 500 buckets. The only `response_version` is `1`.
+
+### Signal counts
+
+This synthetic response covers two one-minute buckets. The request ran at
+12:02 UTC without `until`. The account has a 30-day retention policy. Read
+the returned policy and cutoff. Do not assume that these values apply to your
+account.
+
+```json
+{
+  "schema_version": 1,
+  "query": {
+    "project_id": "11111111-1111-4111-8111-111111111111",
+    "requested_since": "2026-09-08T12:00:00Z",
+    "since": "2026-09-08T12:00:00Z",
+    "until": "2026-09-08T12:02:00Z",
+    "interval": "1m",
+    "interval_seconds": 60,
+    "bucket_alignment": "query_relative_utc_half_open",
+    "bucket_count": 2,
+    "service_name": "checkout-api",
+    "release": "api@1.2.3",
+    "environment": "production"
+  },
+  "purpose": "Compares retained issue occurrences, log events, unique traces, action events, and metric points over one exact project and time scope. Every lane is independently scalable, uses explicit zero-filled half-open buckets, returns no source telemetry rows, and qualifies retention and sampling so different signal volumes are not mistaken for equivalent impact.",
+  "series": [
+    {
+      "signal": "issues",
+      "count_unit": "issue_occurrences",
+      "total": 1,
+      "peak": 1,
+      "non_empty_buckets": 1,
+      "points": [
+        { "bucket_start": "2026-09-08T12:00:00Z", "bucket_end": "2026-09-08T12:01:00Z", "count": 1 },
+        { "bucket_start": "2026-09-08T12:01:00Z", "bucket_end": "2026-09-08T12:02:00Z", "count": 0 }
+      ]
+    },
+    {
+      "signal": "logs",
+      "count_unit": "log_events",
+      "total": 3,
+      "peak": 2,
+      "non_empty_buckets": 2,
+      "points": [
+        { "bucket_start": "2026-09-08T12:00:00Z", "bucket_end": "2026-09-08T12:01:00Z", "count": 2 },
+        { "bucket_start": "2026-09-08T12:01:00Z", "bucket_end": "2026-09-08T12:02:00Z", "count": 1 }
+      ]
+    },
+    {
+      "signal": "traces",
+      "count_unit": "unique_traces_by_first_observed_span",
+      "total": 1,
+      "peak": 1,
+      "non_empty_buckets": 1,
+      "points": [
+        { "bucket_start": "2026-09-08T12:00:00Z", "bucket_end": "2026-09-08T12:01:00Z", "count": 1 },
+        { "bucket_start": "2026-09-08T12:01:00Z", "bucket_end": "2026-09-08T12:02:00Z", "count": 0 }
+      ]
+    },
+    {
+      "signal": "actions",
+      "count_unit": "action_events",
+      "total": 1,
+      "peak": 1,
+      "non_empty_buckets": 1,
+      "points": [
+        { "bucket_start": "2026-09-08T12:00:00Z", "bucket_end": "2026-09-08T12:01:00Z", "count": 1 },
+        { "bucket_start": "2026-09-08T12:01:00Z", "bucket_end": "2026-09-08T12:02:00Z", "count": 0 }
+      ]
+    },
+    {
+      "signal": "metrics",
+      "count_unit": "metric_points",
+      "total": 2,
+      "peak": 2,
+      "non_empty_buckets": 1,
+      "points": [
+        { "bucket_start": "2026-09-08T12:00:00Z", "bucket_end": "2026-09-08T12:01:00Z", "count": 0 },
+        { "bucket_start": "2026-09-08T12:01:00Z", "bucket_end": "2026-09-08T12:02:00Z", "count": 2 }
+      ]
+    }
+  ],
+  "coverage": {
+    "storage_evaluation": "complete",
+    "output_truncation": "not_truncated",
+    "payload_shape": "aggregate_only",
+    "count_precision": "exact",
+    "integer_safety": "javascript_safe",
+    "javascript_safe_integer_max": 9007199254740991,
+    "returned_series": 5,
+    "returned_points": 10,
+    "max_buckets_per_series": 500,
+    "retention": {
+      "policy_days": 30,
+      "cutoff": "2026-08-09T12:02:00Z",
+      "window_clipped": false
+    },
+    "sampling": {
+      "server": "not_applied",
+      "upstream": "unknown"
+    },
+    "limitations": ["upstream_sampling_unknown", "release_volume_not_included"]
+  }
+}
+```
+
+### Read each count in its own unit
+
+| Signal | What `total` counts | Do not read it as |
+| --- | --- | --- |
+| `issues` | Retained issue occurrences | Grouped issues or affected users |
+| `logs` | Retained log events | Requests |
+| `traces` | Unique trace IDs, counted at their first retained span in this window | Spans or lifetime trace starts |
+| `actions` | Retained action events | Users or sessions |
+| `metrics` | Retained metric points | The sum of metric values |
+
+`total` is the sum of the bucket counts of the series. `peak` is its largest
+bucket count. `non_empty_buckets` counts buckets with a count above zero. The
+five series always occur in this order. Do not combine different signal counts
+into one impact score.
+
+Buckets start at `query.since`. A bucket includes its start and excludes its
+end. The last bucket can be shorter than the interval. The response has no
+release-count series. Do not read `release_volume_not_included` as zero
+releases.
+
+### Empty and shortened windows
+
+If no signal matches, all five series remain, and their points have explicit
+zero counts. A failed request is different. Do not replace an error with a
+zero-filled chart.
+
+Compare `query.requested_since` with `query.since`. If retention shortens the
+window, `coverage.retention.window_clipped` is `true` and `limitations`
+contains `retention_window_clipped`. If none of the requested window remains,
+`query.bucket_count` is `0` and each series has an empty `points` array. This
+does not prove that no events occurred in that period.
+
+`policy_days` is `null` and `cutoff` is omitted when no retention limit
+applies. `sampling.upstream` is always `unknown`, also when
+`storage_evaluation` is `complete`. Do not claim that the response counts
+every event that the application produced.
+
+### Rejected signal-volume requests
+
+These requests return `422` and `validation_failed`:
+
+| Cause | `error` |
+| --- | --- |
+| No `project_id` | `signal volume project_id is required` |
+| No `since` | `signal volume since is required` |
+| `until` later than the request time | `signal volume until must not be in the future` |
+| The range is longer than 31 days | `signal volume range must not exceed 31 days` |
+| An explicit interval that needs more than 500 buckets | `signal volume interval would exceed 500 buckets` |
+| `response_version` other than `1` | `signal volume response_version must be 1` |
+
+For example:
+
+```json
+{
+  "error": "signal volume interval would exceed 500 buckets",
+  "code": "validation_failed",
+  "next": "use interval=auto or select a wider interval",
+  "next_action": { "code": "fix_request", "target": "request" }
+}
+```
+
+Use a wider interval within the same scope. For authentication and other
+failures, see [API errors](/reference/api-errors).
+
 ## Investigation responses
 
 Investigation routes return a versioned bundle for one subject. The bundle
