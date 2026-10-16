@@ -1,0 +1,420 @@
+---
+title: "Account API وحدود استخدام API"
+sidebarTitle: "Account API"
+description: "اقرأ حدود استخدام حساب LogBrew والحصة عبر الزمن وجاهزية الاشتراك واستجابات تسجيل الخروج."
+---
+
+استخدم Account API لقراءة الاستخدام وحالة الحصة والاستخدام عبر الزمن وجاهزية
+الاشتراك، ولتسجيل الخروج. تستخدم قراءات الحساب رمز Bearer للحساب أو جلسة
+المتصفح. لا تستخدم أبدًا مفتاح استيعاب خاصًا بمشروع في طلب للحساب. ولا تستخدم
+أبدًا بيانات اعتماد الحساب في إعدادات الـ SDK أو الاستيعاب.
+
+| المهمة | نقطة النهاية |
+| --- | --- |
+| قراءة الاستخدام الحالي وحالة الحصة | `GET /api/account/usage` |
+| قراءة الاستخدام عبر الزمن | `GET /api/account/usage/history` |
+| قراءة جاهزية الاشتراك والمؤسسة | `GET /api/account/subscription` |
+| تسجيل الخروج من تطبيق واحد أو من تسجيل دخول CLI واحد | `POST /api/auth/logout` |
+| إبطال كل عمليات تسجيل الدخول إلى LogBrew | `POST /api/auth/logout-all` |
+| مسح جلسة المتصفح | `POST /api/auth/web/logout` |
+
+تستخدم الأخطاء [غلاف أخطاء API](/ar/reference/api-errors) القياسي. القراءة دون
+مصادقة حساب صالحة تعيد `401` مع `code: "unauthorized"`. لا تعرض هذا الفشل
+كاستخدام صفري أو رسم بياني فارغ أو خطة مجانية. والطريقة غير المدعومة تعيد `405`
+مع `code: "method_not_allowed"`، ويذكر `next` الطلب المدعوم.
+
+يبلّغ Account API عن استخدام بيانات القياس عن بُعد، لا عن المال. ولا يبلّغ عن
+الرسوم أو الفواتير أو حالة الدفع.
+
+## <span id="account-usage">استخدام الحساب</span>
+
+`GET /api/account/usage` هي نقطة النهاية المرجعية للاستخدام والحصة. استخدمها
+لمجاميع الاستخدام ووقت إعادة الضبط وحالة الحصة والتقسيم حسب المشروع وتدفق بيانات
+القياس عن بُعد. لا تحسب الاستخدام من ملفات الـ SDK أو ملفات CLI أو عدّادات
+العميل. يقرأ أمر CLI `logbrew usage` نقطة النهاية هذه. راجع
+[مرجع CLI](/ar/reference/cli).
+
+```bash
+curl "https://api.logbrew.co/api/account/usage" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER"
+```
+
+مثال استجابة بقيم اصطناعية. لهذا الحساب المجاني مشروع واحد، ولم يرسل إلا سجلات
+في الفترة الحالية:
+
+```json
+{
+  "period_start": "2026-06-01T00:00:00Z",
+  "period_end": "2026-07-01T00:00:00Z",
+  "reset_at": "2026-07-01T00:00:00Z",
+  "plan": { "tier": "free", "status": "free" },
+  "limits": { "events": null, "bytes": null, "projects": null, "retention_days": 30 },
+  "usage": { "events": 27000, "bytes": 10485760, "projects": 1 },
+  "state": "ok",
+  "warning_threshold": 0.8,
+  "percent_used": 0.2,
+  "warning": false,
+  "blocked": false,
+  "limit": null,
+  "next": "continue sending telemetry",
+  "next_action": {
+    "code": "continue_sending_telemetry",
+    "target": "telemetry_ingest",
+    "state": "ok",
+    "limit": null,
+    "reset_at": "2026-07-01T00:00:00Z"
+  },
+  "by_project": [
+    { "project_id": "00000000-0000-4000-8000-000000000001", "events": 27000, "bytes": 10485760 }
+  ],
+  "by_stream": [
+    { "kind": "logs", "events": 27000, "bytes": 10485760 }
+  ]
+}
+```
+
+| الحقل | المعنى |
+| --- | --- |
+| `period_start`، `period_end` | فترة الاستخدام الحالية. النهاية غير مشمولة. |
+| `reset_at` | وقت إعادة ضبط حصة الاستخدام. وهو نفسه `period_end`. |
+| `plan.tier` | معرّف الخطة: `free` أو `pro` أو `scale`. |
+| `plan.status` | `free` أو `trial` أو `active` أو `past_due` أو `disabled`. |
+| `limits.events`، `limits.bytes`، `limits.projects` | حقول للتوافق. قيمتها `null`. و`null` لا تعني بلا حدود. استخدم `state` و`limit` و`percent_used` لحالة الحصة. |
+| `limits.retention_days` | مدة الاحتفاظ بالبيانات في الخطة بالأيام، أو `null`. |
+| `usage.events`، `usage.bytes` | المجاميع لكل تدفقات بيانات القياس عن بُعد في الفترة. |
+| `usage.projects` | عدد المشاريع التي يملكها الحساب. |
+| `state` | `ok` أو `warning` أو `blocked`. |
+| `warning_threshold` | نسبة الحصة التي تبدأ عندها الحالة `warning`، ككسر عشري. |
+| `percent_used` | أعلى نسبة مستخدمة من أي حصة، كنسبة مئوية. مثلًا، `80` تعني 80%. |
+| `warning`، `blocked` | صيغ توافق للحقل `state`. |
+| `limit` | الحصة التي سببت الحالة: `events` أو `bytes` أو `null`. |
+| `next`، `next_action` | نص التعافي والإجراء المحدد النوع للحالة الحالية. |
+| `by_project` | الاستخدام لكل مشروع. يوجد صف واحد لكل مشروع مملوك، حتى لو كان استخدامه صفرًا. طابق الصفوف حسب `project_id`، لا حسب موضعها في المصفوفة. |
+| `by_stream` | الاستخدام لكل `kind` من تدفقات بيانات القياس عن بُعد، مثل `logs` أو `issues` أو `actions` أو `traces`. |
+
+### حالات الحصة
+
+استخدم `state` للتفرّع الرئيسي. تكون قيمة `limit` هي `null` فقط عندما تكون قيمة
+`state` هي `ok`.
+
+| `state` | `warning` | `blocked` | `limit` | `next_action.code` | `next_action.target` |
+| --- | --- | --- | --- | --- | --- |
+| `ok` | `false` | `false` | `null` | `continue_sending_telemetry` | `telemetry_ingest` |
+| `warning` | `true` | `false` | `events` أو `bytes` | `reduce_usage_or_upgrade` | `pricing` |
+| `blocked` | `false` | `true` | `events` أو `bytes` | `wait_until_reset_or_upgrade` | `pricing` |
+
+تكرر `next_action.state` و`next_action.limit` و`next_action.reset_at` القيم
+الموجودة في المستوى الأعلى. وتشمل قيم `next_action.code` أيضًا
+`check_usage_limits` مع الهدف `account_usage`. إذا تلقى عميل هذا الزوج، فليقرأ
+الاستخدام مرة أخرى ويعرض `next`.
+
+يقيس LogBrew كل نوع من بيانات القياس عن بُعد مقابل حصته الخاصة. ويجمعها `limit`:
+
+- يغطي `events` أحداث المشكلات والـ Spans في التتبّعات.
+- يغطي `bytes` بايتات السجلات وبايتات المقاييس.
+
+إذا كانت إحدى الحصص محظورة والأخرى في حالة تحذير، فإن `limit` يذكر الحصة
+المحظورة. تبدأ الحالة `warning` عندما يبلغ الاستخدام نسبة `warning_threshold` من
+الحصة. وتبدأ الحالة `blocked` عندما يبلغ الاستخدام الحصة.
+
+قد يتغير نص `next`، مثلًا عندما لا تكون الخطط معروضة للبيع. أما قيم
+`next_action` فلا تتغير. ترجم النص في واجهتك انطلاقًا من `next_action`. لا تحلّل
+`next`.
+
+حد استخدام الحساب ليس حد المعدّل في API. عندما يتجاوز الاستيعاب حصة، يعيد طلب
+الاستيعاب `429` مع `usage_limit_exceeded`، ويضيف النص `limit` و`reset_at`. في
+هذا الخطأ، يذكر `limit` الحصة بالضبط: `issue_events` أو `log_bytes` أو
+`metric_bytes` أو `trace_spans`. يرفض LogBrew الطلب كاملًا. لا ترسل نوع بيانات
+القياس عن بُعد هذا مرة أخرى حتى `reset_at` أو حتى تتغير الخطة. عندما يرسل عميل
+طلبات كثيرة جدًا، يعيد API الرمز `rate_limited`. راجع
+[أخطاء API](/ar/reference/api-errors#retry-rules).
+
+الاستجابة لقطة. اقرأها مرة أخرى بعد أي تغيير في الحساب.
+
+<Note>
+  `GET /api/logs/usage` استجابة قديمة للتوافق مع تطبيق الهاتف المحمول، فيها
+  `bytes_used` و`limit_bytes` و`month`. استخدم `GET /api/account/usage` في
+  التكاملات الجديدة.
+</Note>
+
+## الاستخدام عبر الزمن
+
+تعيد `GET /api/account/usage/history` فواصل زمنية محدودة العدد للاستخدام، مملوءة
+بالأصفار حيث لا يوجد استخدام، للرسوم البيانية والتقارير. اضبط `interval` على قيمة
+واحدة مدعومة. إذا حذفت `interval`، فسيستخدم API القيمة `monthly`. لا يقبل المسار
+أي مفتاح استعلام آخر.
+
+```bash
+curl --get "https://api.logbrew.co/api/account/usage/history" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "interval=daily"
+```
+
+| `interval` | الفواصل الزمنية | بداية الفاصل الزمني |
+| --- | ---: | --- |
+| `daily` | 30 | 00:00 UTC |
+| `weekly` | 12 | الاثنين، 00:00 UTC |
+| `monthly` | 12 | اليوم الأول من الشهر، 00:00 UTC |
+| `yearly` | 5 | 1 يناير، 00:00 UTC |
+
+| الحقل | المعنى |
+| --- | --- |
+| `interval` | الفاصل المطلوب. |
+| `period_start`، `period_end` | بداية النطاق الزمني للاستخدام السابق ونهايته غير المشمولة. |
+| `current` | استجابة `GET /api/account/usage` الكاملة للفترة الحالية. |
+| `buckets` | الفواصل الزمنية مرتبة زمنيًا، الأقدم أولًا. لكل فاصل زمني `period_start` و`period_end` و`usage` و`by_project` و`by_stream`. |
+
+تستخدم استجابة `yearly` هذه بيانات اصطناعية لطلب في يونيو 2026. حدث كل الاستخدام
+في يونيو:
+
+```json
+{
+  "interval": "yearly",
+  "period_start": "2022-01-01T00:00:00Z",
+  "period_end": "2027-01-01T00:00:00Z",
+  "current": {
+    "period_start": "2026-06-01T00:00:00Z",
+    "period_end": "2026-07-01T00:00:00Z",
+    "reset_at": "2026-07-01T00:00:00Z",
+    "plan": { "tier": "free", "status": "free" },
+    "limits": { "events": null, "bytes": null, "projects": null, "retention_days": 30 },
+    "usage": { "events": 27000, "bytes": 10485760, "projects": 1 },
+    "state": "ok",
+    "warning_threshold": 0.8,
+    "percent_used": 0.2,
+    "warning": false,
+    "blocked": false,
+    "limit": null,
+    "next": "continue sending telemetry",
+    "next_action": {
+      "code": "continue_sending_telemetry",
+      "target": "telemetry_ingest",
+      "state": "ok",
+      "limit": null,
+      "reset_at": "2026-07-01T00:00:00Z"
+    },
+    "by_project": [
+      { "project_id": "00000000-0000-4000-8000-000000000001", "events": 27000, "bytes": 10485760 }
+    ],
+    "by_stream": [{ "kind": "logs", "events": 27000, "bytes": 10485760 }]
+  },
+  "buckets": [
+    { "period_start": "2022-01-01T00:00:00Z", "period_end": "2023-01-01T00:00:00Z", "usage": { "events": 0, "bytes": 0, "projects": 0 }, "by_project": [], "by_stream": [] },
+    { "period_start": "2023-01-01T00:00:00Z", "period_end": "2024-01-01T00:00:00Z", "usage": { "events": 0, "bytes": 0, "projects": 0 }, "by_project": [], "by_stream": [] },
+    { "period_start": "2024-01-01T00:00:00Z", "period_end": "2025-01-01T00:00:00Z", "usage": { "events": 0, "bytes": 0, "projects": 0 }, "by_project": [], "by_stream": [] },
+    { "period_start": "2025-01-01T00:00:00Z", "period_end": "2026-01-01T00:00:00Z", "usage": { "events": 0, "bytes": 0, "projects": 0 }, "by_project": [], "by_stream": [] },
+    {
+      "period_start": "2026-01-01T00:00:00Z",
+      "period_end": "2027-01-01T00:00:00Z",
+      "usage": { "events": 27000, "bytes": 10485760, "projects": 1 },
+      "by_project": [
+        { "project_id": "00000000-0000-4000-8000-000000000001", "events": 27000, "bytes": 10485760 }
+      ],
+      "by_stream": [{ "kind": "logs", "events": 27000, "bytes": 10485760 }]
+    }
+  ]
+}
+```
+
+استخدم `current.reset_at` لمعرفة إعادة ضبط الحصة. لا تستخدم نهاية النطاق الزمني
+للاستخدام السابق. ليست `current` مجموع الفواصل الزمنية، وقد تختلف تواريخها عن
+تواريخ النطاق.
+
+يحتوي الفاصل الزمني الأخير على الفترة التقويمية الحالية، وهي غير مكتملة. ووقت
+نهايته في المستقبل لا يعني أن LogBrew قاس استخدامًا مستقبليًا. الفاصل الزمني
+المملوء بالأصفار يعني أن LogBrew لم يحسب أي استخدام فيه.
+
+في الفاصل الزمني، يعدّ `usage.projects` المشاريع التي لها استخدام في ذلك الفاصل.
+لا تجمع هذه الأعداد لتحصل على عدد المشاريع. استخدم `current.usage.projects`
+لعدد المشاريع المملوكة.
+
+ارسم الأحداث والبايتات كسلسلتين منفصلتين، لأنهما تستخدمان وحدات مختلفة. تحتوي
+الفواصل الزمنية على الاستخدام، لا على التكلفة. لا تسمِّ الرسم البياني إنفاقًا أو
+فواتير أو طلبات API.
+
+الفاصل غير المدعوم يعيد `422`:
+
+```json
+{
+  "error": "Unsupported usage history interval",
+  "code": "validation_failed",
+  "next": "use interval=daily, weekly, monthly, or yearly",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+ومفتاح الاستعلام غير المعروف يعيد أيضًا `422` مع `validation_failed`.
+
+## جاهزية الاشتراك
+
+`GET /api/account/subscription` للقراءة فقط. استخدمها لتقرر ما إذا كنت ستفعّل
+أدوات التحكم في الخطط المدفوعة أو المؤسسات. استخدم نقطة نهاية الاستخدام لحالة
+الحصة.
+
+```bash
+curl "https://api.logbrew.co/api/account/subscription" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER"
+```
+
+يعيد الحساب المجاني هذه الاستجابة. قيمة `account_id` اصطناعية:
+
+```json
+{
+  "account_id": "00000000-0000-4000-8000-0000000000aa",
+  "tier": "free",
+  "billing_interval": "none",
+  "state": "free",
+  "access_state": "active",
+  "current_period_start": null,
+  "current_period_end": null,
+  "renews_at": null,
+  "cancels_at": null,
+  "organization_creation_allowed": false,
+  "organization_creation_blocker": "subscription_required",
+  "limits": {
+    "organizations": 0,
+    "members_per_organization": 0,
+    "projects_per_organization": 0,
+    "invitations_per_day": 0
+  },
+  "next": "<display text>",
+  "next_action": {
+    "code": "choose_plan",
+    "target": "pricing"
+  }
+}
+```
+
+`next` نص للعرض. يتغير عندما تكون الخطط المدفوعة معروضة للبيع أو غير معروضة.
+اعرض النص المُعاد، أو ترجم النص في واجهتك انطلاقًا من `next_action`. لا تثبّت في
+الشيفرة اسم خطة مأخوذًا من `next`.
+
+قيم التعداد:
+
+| الحقل | القيم |
+| --- | --- |
+| `tier` | `free`، `pro`، `scale` |
+| `billing_interval` | `none`، `monthly`، `yearly` |
+| `state` | `free`، `trialing`، `active`، `past_due`، `paused`، `canceled` |
+| `access_state` | `active` للقيم `free` و`trialing` و`active`. و`paused` للقيم `past_due` و`paused` و`canceled`. |
+| `organization_creation_blocker` | `subscription_required` أو `subscription_inactive` أو `organization_limit_exceeded` أو `null` |
+
+لكل مانع زوج `next_action` واحد:
+
+| `organization_creation_blocker` | `next_action.code` | `next_action.target` |
+| --- | --- | --- |
+| `null` | `create_or_manage_organization` | `organization` |
+| `subscription_required` | `choose_plan` | `pricing` |
+| `subscription_inactive` | `resume_subscription` | `billing` |
+| `organization_limit_exceeded` | `manage_organization_limit` | `organization` |
+
+قيم `tier` معرّفات، لا أسماء للعرض. أبقِها دون تغيير في العميل المترجَم. قد يكون
+الحساب المدفوع ممنوعًا مع ذلك. افحص `organization_creation_allowed` قبل أن تفعّل
+إنشاء المؤسسات.
+
+لا تنشئ نقطة النهاية هذه مؤسسات، ولا ترسل دعوات، ولا تغيّر الأدوار أو الفوترة.
+
+## تسجيل الخروج
+
+اختر أصغر نطاق يناسب المهمة. لا تحذف نقاط النهاية هذه الحساب أو مشاريعه، ولا
+تدوّر مفاتيح الاستيعاب، ولا تبطل الإذن الممنوح لمزوّد تسجيل دخول خارجي.
+
+| النطاق | نقطة النهاية | بيانات الاعتماد |
+| --- | --- | --- |
+| تطبيق واحد أو تسجيل دخول CLI واحد | `POST /api/auth/logout` | رمز التحديث المميز لذلك العميل في نص JSON. دون Bearer. |
+| كل عمليات تسجيل الدخول إلى LogBrew | `POST /api/auth/logout-all` | رمز Bearer للحساب أو جلسة المتصفح. دون نص. |
+| جلسة المتصفح الحالية | `POST /api/auth/web/logout` | لا شيء. تمسح الاستجابة ملف تعريف الارتباط في المتصفح. |
+
+### تطبيق واحد أو تسجيل دخول CLI واحد
+
+أرسل الطلب من العميل الذي يحمل رمز التحديث المميز. اضبط
+`Content-Type: application/json`:
+
+```json
+{
+  "refresh_token": "<current refresh token>"
+}
+```
+
+لا تطلب أبدًا من شخص أو وكيل أن يطبع رمز التحديث المميز أو يلصقه. الاستجابة
+الناجحة هي `200`:
+
+```json
+{
+  "revoked": true,
+  "next_action": {
+    "code": "clear_local_session",
+    "target": "local_credentials"
+  }
+}
+```
+
+يبطل هذا عائلة واحدة من رموز التحديث المميزة. يرفض LogBrew عمليات التحديث اللاحقة
+لتسجيل الدخول ذلك. ولا تتغير عمليات تسجيل الدخول الأخرى على الحساب. يبقى رمز
+الوصول المميز الموجود لدى العميل صالحًا حتى تنتهي صلاحيته. إذا كان من الممكن كشف
+بيانات اعتماد الحساب، فاستخدم [كل عمليات تسجيل الدخول إلى LogBrew](#every-logbrew-login).
+
+بعد الاستجابة، يحذف العميل بيانات اعتماده المحلية. إذا أرسلت رمز التحديث المميز
+الصالح نفسه مرة أخرى، فستكون الاستجابة `200` نفسها. إذا كان الرمز غير صالح أو
+منتهي الصلاحية، أو كان رمز وصول، فستكون الاستجابة `401` مع
+`code: "unauthorized"` و`next_action.code: "authorize_request"`. احذف بيانات
+الاعتماد المحلية في هذه الحالة أيضًا. يستخدم `logbrew logout` نقطة النهاية هذه.
+
+### <span id="every-logbrew-login">كل عمليات تسجيل الدخول إلى LogBrew</span>
+
+<Warning>
+  يسجّل هذا الطلب خروج كل عميل على الحساب. احصل على موافقة مالك الحساب قبل أن
+  يرسله وكيل.
+</Warning>
+
+الاستجابة الناجحة هي `200`:
+
+```json
+{
+  "revoked": true,
+  "revoked_before": "2026-09-07T12:00:00.123Z",
+  "next_action": {
+    "code": "clear_local_session",
+    "target": "local_credentials"
+  }
+}
+```
+
+`revoked_before` شامل، ودقته بالمللي ثانية. يرفض LogBrew رموز الوصول المميزة
+وجلسات المتصفح ورموز التحديث المميزة الناتجة عن تسجيل دخول في ذلك الوقت أو قبله.
+ويُرفض أيضًا الرمز المميز الذي جرى تحديثه لاحقًا من تسجيل دخول كهذا. تنتهي جلسات
+الموجز المباشر الحالية، وتمسح الاستجابة ملف تعريف ارتباط جلسة المتصفح. يبقى
+تسجيل الدخول بعد ذلك الوقت صالحًا. يجب على كل عميل أن يحذف بيانات اعتماد LogBrew
+المحلية لديه ويسجّل الدخول مرة أخرى.
+
+لا تسجّل الدخول مرة أخرى وتكرر هذا الطلب تلقائيًا. فالطلب الجديد يبطل أيضًا
+تسجيل الدخول الجديد.
+
+إذا ضاعت الاستجابة، فلا تبلّغ بأن كل عمليات تسجيل الدخول أُبطلت. الاستجابة `401`
+اللاحقة من بيانات اعتماد قديمة لا تحل محل استجابة النجاح. لمزيد من خطوات
+التعافي، اقرأ
+[أمّن حسابًا مخترقًا](/ar/guides/troubleshooting#secure-a-compromised-account).
+
+### جلسة المتصفح
+
+يمسح `POST /api/auth/web/logout` ملف تعريف الارتباط `logbrew_session` في
+المتصفح، ويعيد `204 No Content` دون نص. استدعِه من المتصفح. لا تنسخ ملف تعريف
+ارتباط الجلسة إلى أمر. لا يسجّل هذا الطلب خروج العملاء الآخرين، ولا يبطل أي نسخة
+من قيمة ملف تعريف الارتباط. لإبطال كل جلسة، استخدم
+[كل عمليات تسجيل الدخول إلى LogBrew](#every-logbrew-login).
+
+### تعافَ من خطأ في تسجيل الخروج
+
+| النتيجة | التعافي |
+| --- | --- |
+| `401` من `POST /api/auth/logout` | احذف بيانات الاعتماد المحلية للعميل. لا ترسل نوعًا آخر من بيانات الاعتماد. |
+| `401` من `POST /api/auth/logout-all` | سجّل الدخول من عميل موثوق إذا كان المستخدم ما زال يريد الوصول. احصل على الموافقة مرة أخرى قبل أن تكرر الطلب. |
+| `405` | استخدم الطريقة التي يذكرها `next`، وللنطاق الذي وافق عليه المستخدم فقط. |
+| `invalid_json` من `POST /api/auth/logout` | أرسل كائن JSON فيه `refresh_token` كسلسلة نصية مع `Content-Type: application/json`. لا تطبع الرمز المميز. |
+| انتهاء المهلة أو حالة `5xx` | لا تبلّغ بالنجاح. لا تبدأ حلقة تلقائية لتسجيل الدخول وتسجيل الخروج. اتّبع [قواعد إعادة محاولة الكتابة](/ar/reference/api-errors#writes). |
+
+لمسارات بيانات القياس عن بُعد وعوامل التصفية وترقيم الصفحات، اقرأ
+[Telemetry API](/ar/reference/telemetry-api).

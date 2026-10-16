@@ -1,0 +1,240 @@
+---
+title: "خرائط المصدر لـ JavaScript مع Vite"
+sidebarTitle: "خرائط المصدر لـ JavaScript"
+description: "ارفع خرائط المصدر لـ JavaScript من بناء Vite. أبقِ بيانات الاعتماد خارج تطبيقك. اربط إطارات المكدّس المصغّرة بمواقعها في المصدر الأصلي."
+---
+
+قد يضع ملف JavaScript المصغّر (minified) عدة أسطر من المصدر في سطر واحد. ويشير
+إطار المكدّس القادم من هذا الملف إلى سطر وعمود مولَّدين. تربط
+[خريطة المصدر (Source map)](https://ecma-international.org/publications-and-standards/standards/ecma-426/)
+هذا الموضع بالملف والسطر والعمود الأصلية.
+
+تستخدم هذه الإرشادات إضافة Vite في `@logbrew/sdk` 0.1.28. تحتاج إلى تطبيق Vite،
+ووصول إلى مخرجات بنائه، وصلاحية لإنشاء مفتاح للمشروع. لملفات تصحيح الأخطاء من
+Apple، راجع [أعطال Apple والتجمّد](/ar/guides/apple-crashes-and-hangs).
+
+## أبقِ البناء والأحداث معًا
+
+استخدم المشروع والإصدار والبيئة والخدمة نفسها للرفع ولأحداث التطبيق أثناء
+التشغيل. راجع [الإصدارات](/ar/concepts/releases) لمعرفة أسماء الإصدارات. تستخدم
+هذه الإرشادات `web@1.2.3` و`staging` و`checkout-web`.
+
+غيّر الإصدار عندما تتغير الشيفرة المبنية. ارفع البناء المُعَدّ، ثم انشر البناء
+نفسه. لا تُعِد البناء ولا تغيّر شيفرة JavaScript الخاصة به بعد الرفع.
+
+## أضف إضافة Vite
+
+ثبّت الـ SDK في مجلد التطبيق:
+
+```bash
+npm install @logbrew/sdk@0.1.28
+```
+
+أضف الإضافة إلى `vite.config.js`. أبقِ الإضافات الأخرى وإعدادات البناء كما هي.
+استبدل معرّف المشروع:
+
+```js
+import { createLogBrewViteReleaseArtifactsPlugin } from "@logbrew/sdk/vite-release-artifacts";
+
+export default {
+  plugins: [
+    createLogBrewViteReleaseArtifactsPlugin({
+      projectId: "<project_id>",
+      release: "web@1.2.3",
+      environment: "staging",
+      service: "checkout-web",
+      minifiedPathPrefix: "https://app.example.com"
+    })
+  ]
+};
+```
+
+`minifiedPathPrefix` هو عنوان URL المنشور لمجلد البناء. تضيف الإضافة مسار كل
+ملف داخل هذا المجلد. مثلًا، يصبح `dist/assets/app.js`
+`https://app.example.com/assets/app.js`. إذا كنت تقدّم البناء على المسار `/web`،
+فضمّن `/web` في البادئة. لا تضف `/assets` إلى البادئة.
+
+دون الخيار `upload`، لا ترسل الإضافة أي شيء إلى LogBrew. وهي أيضًا:
+
+- تضبط `build.sourcemap` على `"hidden"` عندما لا تضبطه أنت. إذا ضبطته على
+  `false`، فغيّره إلى `"hidden"`.
+- تحتفظ بأسماء الدوال عندما لا تضبط خيارات أداة التصغير. إذا ضبطت خياراتك
+  الخاصة، فاحتفظ بالأسماء فيها.
+
+تبقى خرائط المصدر المخفية في مخرجات البناء كملفات عادية. ولا يخضع الوصول إليها
+لأي تحكم. لا تستخدم خرائط المصدر المضمَّنة داخل الملف. فالإضافة لا تقبل خريطة
+داخل ملف JavaScript.
+
+## البناء والفحص محليًا
+
+شغّل بناء الإنتاج:
+
+```bash
+npm run build
+```
+
+تمنح الإضافة كل ملف JavaScript وخريطة المصدر الخاصة به معرّف Debug ID نفسه.
+وتزيل `sourcesContent` المضمَّن ومسار جذر التطبيق المحلي. وتكتب
+`dist/logbrew-release-artifacts.json`.
+
+افتح ملف البيان (manifest). تأكد من أن قيمة `validation.status` هي `ready` ومن
+أنه يسرد ملفات هذا البناء وعناوين URL المنشورة. تسبّب الخرائط المخفية التحذير
+`sourceMappingURL comment missing`. وهذا التحذير متوقع.
+
+لا ترفع خريطة تحتوي على مسار خاص أو على نص مصدري لا تريد مشاركته. يحتوي الرفع
+أيضًا على شيفرة JavaScript المترجَمة، لذا أبقِ الأسرار خارج حزمة التطبيق.
+
+افحص الرفع محليًا. هذا الأمر لا يرسل أي طلب ولا يحتاج إلى مفتاح:
+
+```bash
+npx --no-install logbrew-release-artifacts upload-js \
+  --build-dir dist \
+  --manifest dist/logbrew-release-artifacts.json \
+  --endpoint https://api.logbrew.co/api/release-artifacts \
+  --allow-hosted \
+  --dry-run
+```
+
+لا تتابع إلا عندما ينتهي الأمر برمز الخروج `0` ويطبع `"status": "dry_run"`.
+يفحص هذا الأمر الملفات المحلية وملف البيان، ولا يختبر الخادم. إذا كان البناء لديك
+يستخدم مجلد مخرجات آخر، فغيّر المسارين كليهما.
+
+لفحص ربط، شغّل التطبيق المبني وانسخ إطار مكدّس مولَّدًا واحدًا مع ملفه وسطره
+وعموده:
+
+```bash
+npx --no-install logbrew-release-artifacts symbolicate-js \
+  --build-dir dist \
+  --manifest dist/logbrew-release-artifacts.json \
+  --stack-frame "at checkoutTotal (https://app.example.com/assets/index-a1b2c3.js:2:780)"
+```
+
+تأكد من أن النتيجة تحتوي على `"status": "resolved"`. يُظهر الكائن `original`
+الملف المصدري والسطر والعمود. يعمل هذا الأمر محليًا ولا يرفع أي شيء.
+
+## <span id="create-an-artifact-key">إنشاء مفتاح لملفات البناء</span>
+
+سجّل الدخول باستخدام [LogBrew CLI](/ar/guides/cli). اعثر على معرّف المشروع:
+
+```bash
+logbrew projects --json
+```
+
+أنشئ مفتاحًا لملفات البناء (artifact) للمشروع. استخدم مسار ملف جديدًا داخل مجلد
+لا يصل إليه إلا مالكه:
+
+```bash
+install -d -m 700 "$HOME/.logbrew" &&
+logbrew projects keys create "<project_id>" \
+  --ingest-key-file "$HOME/.logbrew/checkout-web.artifact" \
+  --label "Checkout web build" \
+  --kind artifact \
+  --json
+```
+
+لا تتابع إلا بعد نجاح الأمر. إذا كانت النتيجة غير واضحة، فشغّل الأمر نفسه مرة
+أخرى بالوسيطات نفسها. لا تستخدم `--abandon-retry`.
+
+مفتاح ملفات البناء خاص بمشروع واحد وللكتابة فقط. يرفع خرائط المصدر وملفات تصحيح
+الأخطاء. ولا يمكنه إرسال بيانات القياس عن بُعد ولا قراءة البيانات الوصفية لملفات
+البناء. لا تستخدم بيانات اعتماد الحساب أو مفتاح SDK الخاص بوقت التشغيل بدلًا منه.
+
+خزّن المفتاح باسم `LOGBREW_RELEASE_ARTIFACT_TOKEN` في إعدادات الأسرار لبيئة
+البناء لديك. لا تطبعه ولا تودعه في المستودع. لا تضعه في متغير مرئي للعميل، مثل
+`VITE_*` أو `EXPO_PUBLIC_*`.
+
+اضبط المتغير في العملية التي تشغّل الرفع. لا تقرأ الأداة المساعدة ملفات `.env`.
+ولا يحمّلها Vite إلى `process.env` أثناء
+[تقييم الإعدادات](https://vite.dev/config/#using-environment-variables-in-config).
+
+## ارفع البناء المُعَدّ
+
+استخدم الملفات وملف البيان نفسها التي فحصتها. يرسل هذا الأمر الرفع إلى LogBrew:
+
+```bash
+npx --no-install logbrew-release-artifacts upload-js \
+  --build-dir dist \
+  --manifest dist/logbrew-release-artifacts.json \
+  --endpoint https://api.logbrew.co/api/release-artifacts \
+  --allow-hosted
+```
+
+تُظهر `"status": "uploaded"` أن LogBrew قبِل الرفع. إذا انتهى الأمر بخطأ، فتوقف
+واستخدم الجدول أدناه.
+
+تعيد الأداة المساعدة المحاولة حتى مرتين عند خطأ في الشبكة، أو عند الاستجابة
+`408` أو `429` أو `5xx`. وترسل الملفات المُعَدّة نفسها في كل مرة. استخدم
+`--max-retries` لتغيير العدد.
+
+بعد أن ينجح الرفع اليدوي، يمكنك الرفع أثناء بناء Vite بدلًا منه. أضف هذا الخيار
+إلى إعدادات الإضافة:
+
+```js
+upload: {
+  endpoint: "https://api.logbrew.co/api/release-artifacts",
+  allowHostedUpload: true,
+  tokenEnv: "LOGBREW_RELEASE_ARTIFACT_TOKEN"
+}
+```
+
+استخدم طريقة رفع واحدة. توقف الإضافة البناء عند حدوث خطأ في الإعداد أو الرفع.
+أضف `dryRun: true` للاختبار دون رفع.
+
+لا تحذف الإضافة خرائط المصدر من مجلد المخرجات. لا تنشر ملفات `.map` أو ملف
+البيان على الموقع الإلكتروني العام أو شبكة CDN.
+
+لربط إطار من مشكلة ملتقَطة، شغّل `symbolicate-js` بهذا الإطار على البناء المُعَدّ
+نفسه.
+
+## <span id="verify-a-new-issue">قراءة مشكلة جديدة</span>
+
+انشر البناء المُعَدّ نفسه في بيئة الاختبار. أحدِث خطأ اختبار آمنًا واحدًا عبر
+مسار التقاط المشكلات لديك. لا ترسل في هذا الاختبار مدخلات المستخدمين أو بيانات
+الاعتماد أو مكدّسًا خامًا.
+
+اعثر على المشكلة الجديدة بسياق المشروع والبناء نفسه:
+
+```bash
+logbrew read issues --project "<project_id>" \
+  --release "web@1.2.3" --environment staging \
+  --service checkout-web --since 1h --json
+```
+
+انسخ معرّف المشكلة من النتيجة. اقرأ أحدث حدوث لها:
+
+```bash
+logbrew investigate issue "<issue_id>" --occurrence latest --json
+```
+
+اقرأ أولًا وقت الحدث والمشروع والخدمة والبيئة والإصدار. ثم اقرأ
+`event.stack_frames`. الإطار الذي يحمل `source: "symbolicated"` فيه الملف والسطر
+والعمود الأصلية من الرفع الذي أجريته. والإطار الذي يحمل `source: "captured"`
+فيه الموضع الذي أرسله التطبيق.
+
+يُرجع `logbrew read issue "<issue_id>" --json` أيضًا الكائن `symbolication`. لكل
+إطار فيه `status`: `resolved` أو `artifact_not_found` أو `source_not_resolved` أو
+`invalid_metadata` أو `unavailable`. لا يحتوي على موضع أصلي إلا الإطار `resolved`.
+
+يربط LogBrew الإطارات عندما تقرأ المشكلة. لذلك يمكن لرفع يتم بعد الخطأ أن يربط
+حدثًا سابقًا يحمل معرّف Debug ID نفسه. يشير الإطار المربوط إلى شيفرة يجب فحصها،
+ولا يُظهر سبب الخطأ. راجع [التحقيق في مشكلة](/ar/guides/investigate-an-issue)
+لمعرفة الحقول الأخرى.
+
+## الاستعادة من فحص فاشل
+
+| النتيجة | الخطوة التالية |
+| --- | --- |
+| حالة ملف البيان ليست `ready` | اقرأ `validation.errors`. أصلح إعدادات البناء وأعد البناء. لا تعدّل ملف البيان. |
+| يتوقف البناء لأن خريطة المصدر مفقودة أو مضمَّنة | اضبط `build.sourcemap` على `"hidden"` أو `true`. أعد البناء. |
+| `auth_missing` | اضبط `LOGBREW_RELEASE_ARTIFACT_TOKEN` في عملية الرفع. التشغيل التجريبي لا يختبر المفتاح. |
+| `auth_failed` (`401` أو `403`) | استخدم مفتاح ملفات بناء للمشروع نفسه. لا تستخدم مفتاح وقت التشغيل أو مفتاح الحساب. |
+| `validation_failed` (`400` أو `413`) | افحص الملفات المُعَدّة وحجمها. لا ترسل الرفع نفسه مرة أخرى. |
+| `validation_failed` مع خطأ محلي | اقرأ `validation.errors`. إذا تغيّر ملف بعد البناء، فأعد البناء والفحص. |
+| `retryable_error` | فشلت كل المحاولات بعد خطأ في الشبكة، أو `408` أو `429` أو خطأ في الخادم. أعد المحاولة لاحقًا بالملفات المُعَدّة نفسها. |
+| `upload_failed` | أرجع الخادم حالة أخرى. تحقّق من قيمة `--endpoint`. |
+| لا يُحَلّ الإطار | تحقّق من Debug ID وبادئة عنوان URL المنشور والبناء. لا تستخدم خريطة من بناء آخر أو إصدار آخر. |
+| لا تظهر مشكلة جديدة | تحقّق من التقاط المشكلات ومفتاح وقت التشغيل وعامل التصفية الزمني قبل أن تختبر خرائط المصدر. |
+
+أبقِ الملفات المصدرية والمفاتيح والمسارات الخاصة خارج رسائل الدعم. راجع
+[استكشاف الأخطاء وإصلاحها](/ar/guides/troubleshooting)
+و[أخطاء API](/ar/reference/api-errors).

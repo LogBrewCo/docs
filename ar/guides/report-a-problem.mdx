@@ -1,0 +1,212 @@
+---
+title: "Support API: إنشاء تذكرة دعم ومتابعتها"
+sidebarTitle: "الإبلاغ عن مشكلة"
+description: "أنشئ تذكرة دعم في LogBrew من CLI أو من Support API. أضف بيانات تشخيص آمنة، وتابع حالتها، وأرسل سياقًا إضافيًا عند الطلب."
+---
+
+أنشئ تذكرة دعم عندما تحتاج مشكلة إلى متابعة. بعدها يمكن لشخص أو لوكيل ذكاء اصطناعي
+متابعة التذكرة وإضافة السياق المطلوب. لا يقرأ التذكرة إلا الحساب الذي أنشأها وفريق
+الدعم في LogBrew.
+
+<Warning>
+  استخدم رمز Bearer للحساب، مثل `$LOGBREW_TOKEN`. لا تستخدم
+  أبدًا مفتاح استيعاب المشروع. أزل البيانات الخاصة قبل أن تكتب العنوان أو الوصف أو
+  بيانات التشخيص. الحجب التلقائي لا يغني عن هذه المراجعة.
+</Warning>
+
+## <span id="create-a-ticket">إنشاء تذكرة</span>
+
+من CLI، شغّل:
+
+```bash
+logbrew support create --category docs_confusion \
+  --title "First event is not visible" \
+  --description "Steps: send one info event, then read logs in the same project. Expected: one row. Observed: no rows." \
+  --project "<project_id>" --json
+```
+
+يضبط CLI قيمة `source` على `cli`. يضيف `--diagnostics` اسم الملف التنفيذي ونسخة
+CLI ونظام التشغيل والمعمارية فقط. شغّل `logbrew support --help` لعرض كل الخيارات.
+
+لا يرسل CLI مفتاح إعادة محاولة عند إنشاء التذكرة. إذا لم تكن النتيجة مؤكدة، فشغّل
+`logbrew support list --json` قبل أن تشغّل الأمر مرة أخرى. وإلا فقد تنشئ تذكرة ثانية.
+
+من الـ API، أرسل `POST /api/support/tickets` مع `source` و`category`
+و`title` و`description`. لتكون إعادة المحاولة آمنة، أنشئ مفتاح إعادة محاولة مرة
+واحدة للبلاغ، وأرسله في الترويسة `Idempotency-Key`. يستخدم هذا المثال قيمًا
+اصطناعية:
+
+```bash
+LOGBREW_SUPPORT_RETRY_KEY="$(uuidgen)"
+
+curl -sS "https://api.logbrew.co/api/support/tickets" \
+  -H "Authorization: Bearer ${LOGBREW_TOKEN:?Set an account access bearer}" \
+  -H "Idempotency-Key: ${LOGBREW_SUPPORT_RETRY_KEY:?Create a retry key for this report}" \
+  -H "Content-Type: application/json" \
+  --data '{
+    "source": "docs",
+    "category": "docs_confusion",
+    "title": "First event is not visible",
+    "description": "Steps: send one info event, then read logs in the same project. Expected: one row. Observed: no rows.",
+    "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    "diagnostics": {
+      "steps": 2,
+      "expected": "one matching row",
+      "observed": "no matching rows"
+    }
+  }'
+```
+
+يتكون مفتاح إعادة المحاولة من 1 إلى 128 حرف ASCII مرئيًا، بلا مسافات. لإعادة
+المحاولة، أرسل المفتاح نفسه مع نص الطلب نفسه، فتُرجع الاستجابة التذكرة نفسها.
+استخدم مفتاحًا جديدًا لكل بلاغ مختلف. انتهاء المهلة لا يثبت أن الإنشاء فشل. الترويسة
+`Idempotency-Key` اختيارية. ومن دونها، قد ينشئ الطلب المكرر تذكرة أخرى.
+
+الحقول الاختيارية هي `project_id` و`environment` و`runtime` و`framework`
+و`sdk_package` و`sdk_version` و`release` و`trace_id` و`event_id`
+و`diagnostics`. احذف `project_id` عندما لا تخص المشكلة مشروعًا معيّنًا. ويجب أن
+يحدد `project_id` مشروعًا نشطًا في حسابك.
+
+| الحقل | القيم المقبولة |
+| --- | --- |
+| `source` | `cli`، `sdk`، `website`، `docs`، `mobile` |
+| `category` | `sdk_install_failure`، `ingest_failure`، `auth_failure`، `project_setup`، `dashboard_issue`، `docs_confusion`، `cli_issue`، `mobile_issue`، `billing_question`، `other` |
+| `title` | من 1 إلى 160 حرفًا بعد أن يزيل LogBrew المسافات المحيطة. |
+| `description` | من 1 إلى 4,000 حرف بعد أن يزيل LogBrew المسافات المحيطة. |
+| حقول النص الأخرى | حتى 256 حرفًا لكل حقل. |
+
+يُرجع الطلب الناجح HTTP `200`:
+
+```json
+{
+  "ticket_id": "sup_11111111111141118111111111111111",
+  "status": "open",
+  "created_at": "2026-10-01T09:30:00Z",
+  "next": "Support ticket created. LogBrew will review the attached diagnostics.",
+  "next_action": {
+    "code": "review_ticket",
+    "target": "support_ticket"
+  }
+}
+```
+
+تبدأ معرّفات التذاكر بـ `sup_`. استخدم `next` إرشادًا للشخص، و`next_action` للتحكم
+في البرنامج.
+
+لحذف مشروع، استخدم إعدادات المشروع أو `logbrew projects delete`. لا تطلب حذف مشروع
+في تذكرة دعم.
+
+## <span id="write-a-useful-report">كتابة بلاغ مفيد</span>
+
+- أبلغ عن مشكلة واحدة في كل تذكرة.
+- اختر أقرب `category`. لا تستخدم `other` إلا عندما لا تناسب أي فئة.
+- اذكر في `title` عَرَضًا واحدًا وواجهة واحدة.
+- اكتب `description` في صورة خطوات، ثم النتيجة المتوقعة والنتيجة الملاحَظة.
+- أضف معرّفات المشروع أو الإصدار أو التتبّع أو الحدث فقط عندما تحدد العطل نفسه.
+
+استخدم مفاتيح `diagnostics` التالية:
+
+| المفتاح | المحتوى |
+| --- | --- |
+| `steps` | عدد خطوات إعادة الإنتاج. |
+| `expected` | النتيجة المتوقعة باختصار. |
+| `observed` | النتيجة الملاحَظة باختصار. |
+| `command_name` | اسم الأمر والأمر الفرعي، بلا وسائط. |
+| `exit_code` | رمز خروج العملية الرقمي. |
+| `error_code` | رمز خطأ ثابت. |
+| `error_summary` | ملخص قصير ومحجوب للخطأ. |
+| `retry_count` | عدد محاولات الإعادة المتطابقة. |
+| `last_delivery_status` | حالة HTTP لآخر محاولة تسليم، مثل `401`. |
+
+`diagnostics` كائن JSON بحجم يصل إلى 16 KB بعد الحجب. يستبدل LogBrew القيمة
+بـ `[redacted]` عندما يدل مفتاحها على بيانات اعتماد أو جلسة أو عنوان بريد
+إلكتروني. ويستبدل أيضًا النص الذي يشبه بيانات اعتماد أو عنوان URL أو مسارًا محليًا.
+ويقصّر LogBrew كذلك النصوص الطويلة، ويحدّ من التداخل والمفاتيح وعناصر القوائم. لا
+تعتمد على هذا الحجب. أزل البيانات الخاصة قبل أن ترسل الطلب.
+
+## <span id="track-the-ticket">متابعة التذكرة</span>
+
+| أمر CLI | مسار الـ API | النتيجة |
+| --- | --- | --- |
+| `logbrew support list` | `GET /api/support/tickets` | عرض تذاكر الحساب. |
+| `logbrew support show <ticket_id>` | `GET /api/support/tickets/{ticket_id}` | قراءة تذكرة واحدة وإجرائها التالي. |
+| `logbrew support context <ticket_id>` | `GET /api/support/tickets/{ticket_id}/context` | قراءة السياق المضاف إلى التذكرة. |
+| `logbrew support reply <ticket_id>` | `POST /api/support/tickets/{ticket_id}/context` | إضافة السياق المطلوب. |
+| `logbrew support close <ticket_id>` | `PATCH /api/support/tickets/{ticket_id}` | ضبط الحالة على `closed`. |
+| `logbrew support reopen <ticket_id>` | `PATCH /api/support/tickets/{ticket_id}` | ضبط الحالة على `open`. |
+
+تقبل القائمة `project_id` و`status` و`source` و`category` و`release`
+و`limit`. القيمة الافتراضية لـ `limit` هي 100، والحد الأقصى 500. لترقيم الصفحات
+بالمؤشر، أرسل `pagination=cursor`. في الصفحات التالية، كرر عوامل التصفية نفسها،
+وأرسل `cursor_time` و`cursor_id` من `next_cursor`. معرّف المؤشر هو معرّف تذكرة يبدأ
+بـ `sup_`. توقف عندما تكون قيمة `next_cursor` هي `null`. يستخدم CLI الخيارات
+`--project` و`--status` و`--source` و`--category` و`--release` و`--limit`
+و`--pagination` و`--cursor-time` و`--cursor-id`.
+
+قيم الحالة هي `open` و`routed` و`in_progress` و`waiting_on_user`
+و`resolved` و`closed`. يمكنك ضبط `open` أو `closed` فقط. طلب الإغلاق أو إعادة
+الفتح المكرر ينجح دون أن يغيّر شيئًا، لذلك يمكنك إعادة الطلب نفسه تمامًا. اتبع
+الحالة المُرجَعة و`next_action`:
+
+| الحالة | `next_action.code` | الخطوة التالية |
+| --- | --- | --- |
+| `open`، `routed`، `in_progress` | `await_owner_update` | انتظر التحديث. واقرأ التذكرة مرة أخرى لاحقًا. |
+| `waiting_on_user` | `provide_context` | أرسل السياق المطلوب. |
+| `resolved`، `closed` | `open_new_ticket_if_needed` | أنشئ تذكرة جديدة إذا تكررت المشكلة. |
+
+## <span id="add-requested-context">إضافة السياق المطلوب</span>
+
+ردّ عندما تطلب التذكرة سياقًا. تكون حالة هذه التذكرة
+`waiting_on_user`، وقيمة `next_action.code` هي `provide_context`.
+
+```bash
+logbrew support reply sup_11111111111141118111111111111111 \
+  --context "The same project and time filters still return no logs." \
+  --retry-key "<retry_key>" --json
+```
+
+يحتوي نص طلب الـ API على `context` و`diagnostics` الاختياري. يجب أن يحتوي نص
+`context` على 1 إلى 4,000 حرف. لا تضع بيانات اعتماد أو عناوين URL أو أسماء مضيفين
+أو مسارات محلية في `context`. يرفض الـ API هذا النص مع `422`. أرسل مفتاح إعادة
+محاولة في الترويسة `Idempotency-Key`، فمسار السياق يتطلب هذه الترويسة. يتكون
+المفتاح من 1 إلى 128 حرف ASCII مرئيًا، بلا مسافات. استخدم مفتاحًا جديدًا لكل رد،
+ولا تُعِد استخدام المفتاح إلا لإعادة محاولة الرد نفسه.
+
+يقبل الـ API السياق ما دامت التذكرة `open` أو `routed` أو `in_progress` أو
+`waiting_on_user`. ويقبل ردًا واحدًا لكل حالة من حالات التذكرة. بعد الرد، انتظر
+تغيّر الحالة قبل أن ترسل مزيدًا من السياق. الرد على تذكرة حالتها
+`waiting_on_user` يضبط حالتها على `open`. اقرأ `status` المُرجَعة بدلًا من افتراض
+هذا التغيير.
+
+يُرجع الرد الناجح `ticket_id` و`context_id` و`status` و`created_at`
+و`next` و`next_action`. يبدأ `context_id` بـ `ctx_`. اقرأ التذكرة مرة أخرى قبل
+أن تجيب عن أي طلب لاحق.
+
+يُرجع `GET /api/support/tickets/{ticket_id}/context` أحدث 20 إدخال سياق، من الأقدم
+إلى الأحدث. لكل إدخال `context_id` و`context`
+و`diagnostics` و`created_at`. هذه القائمة بلا مؤشر.
+
+الرد على تذكرة حالتها `resolved` أو `closed` يُرجع `422` مع
+`code: "validation_failed"`. لا تُعِد فتح التذكرة إلا إذا أراد المستخدم متابعة طلب
+الدعم هذا. لا يمنح `next_action` الوكيل إذنًا بتغيير حالة الحساب.
+
+## <span id="recover-from-errors">التعافي من الأخطاء</span>
+
+| حالة HTTP | `code` | طريقة التعافي |
+| --- | --- | --- |
+| `401` | `unauthorized` | أرسل رمز Bearer صالحًا للحساب. |
+| `404` | `not_found` | اعرض تذاكر الحساب، واستخدم معرّف `sup_` مُرجَعًا. لخطأ في المشروع، تحقق من `project_id` أو احذفه. |
+| `405` | `method_not_allowed` | استخدم طريقة من الجدول في [متابعة التذكرة](#track-the-ticket). |
+| `409` | `idempotency_conflict` | استُخدم مفتاح إعادة المحاولة مع طلب مختلف. أعد محاولة الطلب الأصلي، أو اقرأ التذكرة واستخدم مفتاحًا جديدًا. |
+| `422` | `validation_failed` | صحّح الحقل المذكور. مع PATCH، أرسل `status: "open"` أو `status: "closed"` فقط. |
+| `429` | `rate_limited` | انتظر، ثم أعد المحاولة. |
+
+تحتوي استجابات الأخطاء على `error` و`code` و`next` و`next_action`. راجع
+[أخطاء API](/ar/reference/api-errors).
+
+## <span id="keep-the-report-safe">الحفاظ على أمان البلاغ</span>
+
+لا ترسل أبدًا أسرارًا أو رموزًا مميزة أو ترويسات تفويض أو مفاتيح استيعاب أو سجلات
+خامًا أو بيانات عملاء أو مسارات محلية أو أسماء مضيفين أو شيفرة مصدرية لا علاقة لها
+بالمشكلة. أرسل ملخصًا قصيرًا ومحجوبًا. للفحوص التي تجريها بنفسك، راجع
+[استكشاف الأخطاء وإصلاحها](/ar/guides/troubleshooting).
