@@ -1,0 +1,209 @@
+---
+title: "Log-Schwärzung: sensible Daten aus Logs heraushalten"
+sidebarTitle: "Erfasste Daten steuern"
+description: "Wählen Sie freigegebene Log-Felder. Testen Sie lokal auf sensible Daten. Lesen Sie die Grenzen der Erfassung in JavaScript, Node.js und im Browser."
+---
+
+Legen Sie fest, was Ihre App sendet, bevor Sie die Erfassung aktivieren.
+Halten Sie Passwörter, Zugriffstokens, Formularinhalte und private
+Nutzerdaten aus Ereignissen heraus.
+
+Bauen Sie jedes Ereignis aus freigegebenen Feldern auf. Kopieren Sie kein
+vollständiges Anfrage-, Antwort- oder Fehlerobjekt in die Metadaten. Die
+Schwärzung ersetzt einen sensiblen Wert. Ein Filter lässt ein ganzes
+Ereignis weg. Auch ein gültiges SDK-Ereignis kann Daten enthalten, die Ihre
+App nicht senden darf.
+
+Dieser Leitfaden gilt für diese Paketversionen:
+
+- `@logbrew/sdk` 0.1.28
+- `@logbrew/node` 0.1.12
+- `@logbrew/browser` 0.1.11
+
+Für andere Laufzeiten lesen Sie den Paket-Leitfaden unter
+[SDK-Integration](/de/guides/sdk-ingestion).
+
+## Felder für die Erfassung wählen
+
+Zeichnen Sie für einen fehlgeschlagenen Checkout eine feste Nachricht, eine
+Routenvorlage und einen Statuscode auf. Zeichnen Sie keine Namen,
+E-Mail-Adressen oder Zahlungsdaten auf.
+
+| Feld | Erfassungsregel |
+| --- | --- |
+| Nachricht | Verwenden Sie einen festen Text wie `checkout.failed`. Fügen Sie keinen Formulartext und keine Zugangsdaten ein. |
+| Route | Verwenden Sie eine Vorlage wie `/orders/:id`. Ein URL-Pfad, eine Query oder ein Fragment kann private Werte enthalten. |
+| Status | Nehmen Sie nur einen gültigen Statuscode an, keinen String aus Nutzereingaben. |
+| Metadaten | Wählen Sie benannte Felder. Kopieren Sie nicht alle Eigenschaften einer Anfrage, Antwort oder eines Fehlers. |
+| Subjekt und Sitzung | Verwenden Sie freigegebene Telemetrie-Kennungen, kein Anmelde-Token und kein Sitzungs-Cookie. |
+
+Zu Nutzer- und Sitzungskontext lesen Sie
+[Produktereignisse erfassen](/de/guides/product-events#set-users-and-sessions-on-each-event).
+Eine ID kann eine Person identifizieren, auch wenn sie keinen Namen enthält.
+
+## Feldauswahl lokal testen
+
+Verwenden Sie Node.js 18 oder neuer. Installieren Sie das Paket in einem
+leeren Verzeichnis:
+
+```bash
+npm install --save-exact @logbrew/sdk@0.1.28
+```
+
+Dieser Test nutzt keinen echten Schlüssel und sendet keine Anfrage.
+Speichern Sie ihn als `safe-capture.mjs`:
+
+```js
+import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import { LogBrewClient, SdkError } from "@logbrew/sdk";
+
+try {
+  const client = LogBrewClient.create({
+    apiKey: "local-preview-only",
+    sdkName: "privacy-check",
+    sdkVersion: "0.1.28",
+    automaticDelivery: false
+  });
+
+  function recordCheckoutFailure(input) {
+    const status = input?.status;
+    if (!Number.isInteger(status) || status < 400 || status > 599) {
+      return false;
+    }
+    client.log(randomUUID(), new Date().toISOString(), {
+      message: "checkout.failed",
+      level: "error",
+      metadata: { route: "/checkout", status }
+    });
+    return true;
+  }
+
+  const excludedValue = "SYNTHETIC_PRIVATE_VALUE";
+  assert.equal(recordCheckoutFailure({
+    status: 503,
+    authorization: excludedValue,
+    body: excludedValue
+  }), true);
+  assert.equal(recordCheckoutFailure({ status: excludedValue }), false);
+
+  const preview = client.previewJson();
+  const batch = JSON.parse(preview);
+  assert.equal(batch.events.length, 1);
+  assert.equal(preview.includes(excludedValue), false);
+  assert.deepEqual(batch.events[0].attributes.metadata, {
+    route: "/checkout",
+    status: 503
+  });
+  client.purgePendingEvents();
+  console.log(JSON.stringify({
+    ok: true,
+    checked_events: 1,
+    excluded_value_found: false
+  }));
+} catch (error) {
+  console.error(JSON.stringify({
+    ok: false,
+    error: error instanceof SdkError ? error.code : "privacy_check_failed"
+  }));
+  process.exitCode = 1;
+}
+```
+
+
+Führen Sie den Test aus:
+
+```bash
+node safe-capture.mjs
+```
+
+Erwartete Ausgabe:
+
+```json
+{"ok":true,"checked_events":1,"excluded_value_found":false}
+```
+
+Eine fehlgeschlagene Assertion gibt `"ok":false` aus und endet mit Code 1.
+Ein Validierungsfehler des SDK gibt seinen SDK-Fehlercode aus. Geben Sie
+keine Vorschau mit echten Daten aus und laden Sie keine hoch.
+
+Verwenden Sie dasselbe Muster in Ihrem Erfassungscode und behalten Sie die
+Assertions in Ihren Tests. Fügen Sie eine Prüfung für jedes Feld und jeden
+Wert hinzu, die Ihre App nicht senden darf. Wenn Sie Schwärzung mit Mustern
+nutzen, führen Sie die Prüfungen nach jeder Regeländerung erneut aus. Dieser
+Test prüft ein Log in der Warteschlange. Er ersetzt keine
+Datenschutzprüfung.
+
+## Fehlermeldungen und Stacks
+
+| Erfassungsweg | Verhalten |
+| --- | --- |
+| `createIssueAttributesFromError` (Core) | Behält den Fehlertext in der Issue-Nachricht und in `metadata.errorMessage`. Fügt `metadata.errorStack` nur mit `includeErrorStack: true` hinzu. Einträge der Ausnahmekette markieren jede Nachricht als `redacted` und enthalten ihren Text nicht. |
+| Konsolen-Umwandlung im Core | Kann den Fehlertext in der Log-Nachricht und in den Metadaten behalten. |
+| `createBrowserErrorEvent` (Browser) | Nutzt eine feste Fehlerzusammenfassung, entfernt `metadata.errorMessage` und markiert Nachrichten der Ausnahmekette als geschwärzt. |
+
+Ein eigenes `options.message` entfernt `metadata.errorMessage` nicht. Prüfen
+Sie das ganze Ereignis, nicht nur seinen Titel. Halten Sie sensible Werte
+schon an der Quelle aus Fehlermeldungen heraus.
+
+## Jede Steuerung in ihrem Bereich nutzen
+
+### JavaScript-Core und Node.js
+
+`LogBrewClient.create` nimmt `eventFilter` an. Geben Sie `false` zurück, um
+ein Ereignis wegzulassen, bevor es in die Warteschlange kommt. Jeder andere
+Rückgabewert behält das Ereignis. Der Filter erhält eine Kopie des
+Ereignisses. Änderungen daran schwärzen also nichts.
+`createLogBrewNodeClient` und `createLogBrewBrowserClient` wenden
+`eventFilter` in diesen Versionen nicht an.
+
+`droppedEvents()` zählt Ereignisse, die wegen Größen- oder
+Warteschlangengrenzen verworfen wurden. Ereignisse, die `eventFilter`
+weggelassen hat, zählt es nicht.
+
+Der Node-Client fügt Laufzeitkontext hinzu, zum Beispiel die Node-Version,
+das Betriebssystem und die Architektur. Setzen Sie
+`captureRuntimeContext: false`, um ihn wegzulassen. Diese Einstellung
+entfernt keinen Kontext, den Ihre App liefert, und stoppt die Erfassung
+nicht.
+
+### Browser
+
+Der Browser-Client erfasst standardmäßig globale Fehler, unbehandelte
+Rejections und einen ersten Seitenaufruf. Setzen Sie `captureGlobalErrors`,
+`captureUnhandledRejections` oder `capturePageViews` auf `false`, um eines
+davon auszuschalten.
+
+Seitenaufrufe enthalten den Pfadnamen. Sie lassen Query-String, Fragment,
+Dokumenttitel und den vollständigen User-Agent weg, außer Sie setzen
+`includeQueryString`, `includeHash`, `includeDocumentTitle` oder
+`includeUserAgent`. Wenn ein Pfadname private Werte enthalten kann, schalten
+Sie automatische Seitenaufrufe aus und senden Sie einen eigenen
+Seitenaufruf mit einem sicheren Routennamen.
+
+`sanitizeMetadata` ändert nur Metadaten. Es ändert keine Namen von
+Seitenaufrufen oder Aktionen. Der Name eines Seitenaufrufs enthält den
+konkreten Pfadnamen, zum Beispiel `page_view /orders/1234`. Ein
+`routeTemplate` in den Metadaten legt die Oberfläche in den Analysen fest,
+ändert aber den Namen nicht. `shouldCaptureError` lässt nur Issues aus dem
+Browser weg. Es filtert keine Logs und keine anderen Signale.
+
+Setzen Sie `captureRuntimeContext: false`, um Browsermarke, Plattform und
+Geräteklasse wegzulassen. Diese Einstellung steuert nicht
+`includeUserAgent`.
+
+## Vor der echten Erfassung
+
+Testen Sie jeden aktivierten Erfassungsweg mit synthetischen Daten, auch
+Fehlerpfade und Logging-Integrationen.
+
+Änderungen an der Erfassung gelten nur für neue Ereignisse.
+`purgePendingEvents()` leert eine ruhende lokale Warteschlange und schlägt
+fehl, solange eine Zustellung läuft. Es stoppt keine spätere Erfassung und
+entfernt keine Ereignisse, die LogBrew angenommen hat. `uninstall()` im
+Browser entfernt Listener, behält aber Ereignisse in der Warteschlange.
+Diese Methoden sind kein Ablauf für Einwilligung oder Löschung.
+
+Senden Sie dann mit dem [Schnellstart](/de/quickstart) ein synthetisches
+Ereignis. Wenn es fehlt, lesen Sie [Fehlerbehebung](/de/guides/troubleshooting).
+Zu HTTP-Fehlern lesen Sie [API-Fehler](/de/reference/api-errors).

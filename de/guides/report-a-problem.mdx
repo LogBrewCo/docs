@@ -1,0 +1,233 @@
+---
+title: "Support-API: Ticket erstellen und verfolgen"
+sidebarTitle: "Problem melden"
+description: "Erstellen Sie ein LogBrew-Support-Ticket über die CLI oder die Support-API. Fügen Sie sichere Diagnosedaten hinzu, verfolgen Sie den Status, und senden Sie weiteren Kontext."
+---
+
+Erstellen Sie ein Support-Ticket, wenn ein Problem Nacharbeit braucht. Eine
+Person oder ein KI-Agent kann das Ticket dann verfolgen und angeforderten
+Kontext ergänzen. Nur das Konto, das das Ticket erstellt hat, und das
+LogBrew-Support-Team können es lesen.
+
+<Warning>
+  Verwenden Sie ein Konto-Bearer-Token wie `$LOGBREW_TOKEN`. Verwenden Sie nie
+  einen Projekt-Ingest-Schlüssel. Entfernen Sie private Daten, bevor Sie
+  Titel, Beschreibung oder Diagnosedaten schreiben. Die automatische Schwärzung
+  ersetzt diese Prüfung nicht.
+</Warning>
+
+## Ticket erstellen
+
+Führen Sie in der CLI diesen Befehl aus:
+
+```bash
+logbrew support create --category docs_confusion \
+  --title "First event is not visible" \
+  --description "Steps: send one info event, then read logs in the same project. Expected: one row. Observed: no rows." \
+  --project "<project_id>" --json
+```
+
+Die CLI setzt `source` auf `cli`. `--diagnostics` fügt nur den Namen des
+Binarys, die CLI-Version, das Betriebssystem und die Architektur hinzu. Alle
+Flags zeigt `logbrew support --help`.
+
+Die CLI sendet beim Erstellen eines Tickets keinen Wiederholungsschlüssel. Ist
+das Ergebnis unklar, führen Sie `logbrew support list --json` aus, bevor Sie
+den Befehl erneut ausführen. Sonst erstellen Sie womöglich ein zweites Ticket.
+
+Über die API senden Sie `POST /api/support/tickets` mit `source`, `category`,
+`title` und `description`. Damit eine Wiederholung sicher ist, erstellen Sie
+einmal pro Meldung einen Wiederholungsschlüssel und senden ihn im Header
+`Idempotency-Key`. Dieses Beispiel verwendet erfundene Werte:
+
+```bash
+LOGBREW_SUPPORT_RETRY_KEY="$(uuidgen)"
+
+curl -sS "https://api.logbrew.co/api/support/tickets" \
+  -H "Authorization: Bearer ${LOGBREW_TOKEN:?Set an account access bearer}" \
+  -H "Idempotency-Key: ${LOGBREW_SUPPORT_RETRY_KEY:?Create a retry key for this report}" \
+  -H "Content-Type: application/json" \
+  --data '{
+    "source": "docs",
+    "category": "docs_confusion",
+    "title": "First event is not visible",
+    "description": "Steps: send one info event, then read logs in the same project. Expected: one row. Observed: no rows.",
+    "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    "diagnostics": {
+      "steps": 2,
+      "expected": "one matching row",
+      "observed": "no matching rows"
+    }
+  }'
+```
+
+Der Wiederholungsschlüssel enthält 1 bis 128 sichtbare ASCII-Zeichen, ohne
+Leerzeichen. Für eine Wiederholung senden Sie denselben Schlüssel mit
+demselben Body. Die Antwort liefert dann dasselbe Ticket. Verwenden Sie für
+eine andere Meldung einen neuen Schlüssel. Eine Zeitüberschreitung beweist
+nicht, dass das Erstellen fehlgeschlagen ist. Der Header `Idempotency-Key` ist
+optional. Ohne ihn kann eine wiederholte Anfrage ein weiteres Ticket
+erstellen.
+
+Optionale Felder sind `project_id`, `environment`, `runtime`, `framework`,
+`sdk_package`, `sdk_version`, `release`, `trace_id`, `event_id` und
+`diagnostics`. Lassen Sie `project_id` weg, wenn das Problem nicht ein
+bestimmtes Projekt betrifft. Eine `project_id` muss ein aktives Projekt Ihres
+Kontos bezeichnen.
+
+| Feld | Zulässige Werte |
+| --- | --- |
+| `source` | `cli`, `sdk`, `website`, `docs`, `mobile` |
+| `category` | `sdk_install_failure`, `ingest_failure`, `auth_failure`, `project_setup`, `dashboard_issue`, `docs_confusion`, `cli_issue`, `mobile_issue`, `billing_question`, `other` |
+| `title` | 1 bis 160 Zeichen, nachdem LogBrew Leerzeichen am Anfang und Ende entfernt hat. |
+| `description` | 1 bis 4.000 Zeichen, nachdem LogBrew Leerzeichen am Anfang und Ende entfernt hat. |
+| Andere Textfelder | Jeweils bis zu 256 Zeichen. |
+
+Eine erfolgreiche Anfrage liefert HTTP `200`:
+
+```json
+{
+  "ticket_id": "sup_11111111111141118111111111111111",
+  "status": "open",
+  "created_at": "2026-10-01T09:30:00Z",
+  "next": "Support ticket created. LogBrew will review the attached diagnostics.",
+  "next_action": {
+    "code": "review_ticket",
+    "target": "support_ticket"
+  }
+}
+```
+
+Ticket-IDs beginnen mit `sup_`. Verwenden Sie `next` als Hinweis für eine
+Person und `next_action` zur Programmsteuerung.
+
+Um ein Projekt zu löschen, verwenden Sie die Projekteinstellungen oder
+`logbrew projects delete`. Bitten Sie nicht in einem Support-Ticket um das
+Löschen eines Projekts.
+
+## Hilfreiche Meldung schreiben
+
+- Melden Sie ein Problem pro Ticket.
+- Wählen Sie die passendste `category`. Verwenden Sie `other` nur, wenn keine
+  Kategorie passt.
+- Nennen Sie im `title` ein Symptom und einen Produktbereich.
+- Schreiben Sie die `description` als Schritte, danach das erwartete und das
+  beobachtete Ergebnis.
+- Fügen Sie Projekt-, Release-, Trace- oder Ereignis-IDs nur hinzu, wenn sie
+  denselben Fehler bezeichnen.
+
+Verwenden Sie diese Schlüssel in `diagnostics`:
+
+| Schlüssel | Inhalt |
+| --- | --- |
+| `steps` | Anzahl der Schritte zur Reproduktion. |
+| `expected` | Kurzes erwartetes Ergebnis. |
+| `observed` | Kurzes beobachtetes Ergebnis. |
+| `command_name` | Name von Befehl und Unterbefehl, ohne Argumente. |
+| `exit_code` | Numerischer Exit-Code des Prozesses. |
+| `error_code` | Stabiler Fehlercode. |
+| `error_summary` | Kurze, geschwärzte Zusammenfassung des Fehlers. |
+| `retry_count` | Anzahl gleicher Wiederholungsversuche. |
+| `last_delivery_status` | HTTP-Status des letzten Zustellversuchs, zum Beispiel `401`. |
+
+`diagnostics` ist ein JSON-Objekt mit höchstens 16 KB nach der Schwärzung.
+LogBrew ersetzt einen Wert durch `[redacted]`, wenn sein Schlüssel auf
+Zugangsdaten, eine Sitzung oder eine E-Mail-Adresse hinweist. LogBrew ersetzt
+auch Text, der wie Zugangsdaten, eine URL oder ein lokaler Pfad aussieht.
+Außerdem kürzt LogBrew lange Zeichenketten und begrenzt Verschachtelung,
+Schlüssel und Listeneinträge. Verlassen Sie sich nicht auf diese Schwärzung.
+Entfernen Sie private Daten, bevor Sie die Anfrage senden.
+
+## <span id="track-the-ticket">Ticket verfolgen</span>
+
+| CLI-Befehl | API-Route | Ergebnis |
+| --- | --- | --- |
+| `logbrew support list` | `GET /api/support/tickets` | Listet die Tickets des Kontos auf. |
+| `logbrew support show <ticket_id>` | `GET /api/support/tickets/{ticket_id}` | Liest ein Ticket und seine nächste Aktion. |
+| `logbrew support context <ticket_id>` | `GET /api/support/tickets/{ticket_id}/context` | Liest den Kontext, der dem Ticket hinzugefügt wurde. |
+| `logbrew support reply <ticket_id>` | `POST /api/support/tickets/{ticket_id}/context` | Fügt angeforderten Kontext hinzu. |
+| `logbrew support close <ticket_id>` | `PATCH /api/support/tickets/{ticket_id}` | Setzt `closed`. |
+| `logbrew support reopen <ticket_id>` | `PATCH /api/support/tickets/{ticket_id}` | Setzt `open`. |
+
+Die Liste akzeptiert `project_id`, `status`, `source`, `category`, `release`
+und `limit`. Der Standardwert für `limit` ist 100, das Maximum 500. Für die
+Cursor-Paginierung senden Sie `pagination=cursor`. Wiederholen Sie auf den
+folgenden Seiten dieselben Filter, und senden Sie `cursor_time` und
+`cursor_id` aus `next_cursor`. Die Cursor-ID ist eine Ticket-ID mit `sup_`.
+Hören Sie auf, wenn `next_cursor` gleich `null` ist. Die CLI verwendet die
+Flags `--project`, `--status`, `--source`, `--category`, `--release`,
+`--limit`, `--pagination`, `--cursor-time` und `--cursor-id`.
+
+Die Statuswerte sind `open`, `routed`, `in_progress`, `waiting_on_user`,
+`resolved` und `closed`. Sie selbst können nur `open` oder `closed` setzen.
+Eine wiederholte Anfrage zum Schließen oder Wiederöffnen ist erfolgreich und
+ändert nichts. Sie können die exakte Anfrage also wiederholen. Folgen Sie dem
+zurückgegebenen Status und `next_action`:
+
+| Status | `next_action.code` | Nächster Schritt |
+| --- | --- | --- |
+| `open`, `routed`, `in_progress` | `await_owner_update` | Warten Sie auf ein Update. Lesen Sie das Ticket später erneut. |
+| `waiting_on_user` | `provide_context` | Senden Sie den angeforderten Kontext. |
+| `resolved`, `closed` | `open_new_ticket_if_needed` | Erstellen Sie ein neues Ticket, wenn das Problem erneut auftritt. |
+
+## Angeforderten Kontext hinzufügen
+
+Antworten Sie, wenn das Ticket nach Kontext fragt. Dieses Ticket hat den
+Status `waiting_on_user` und `next_action.code` `provide_context`.
+
+```bash
+logbrew support reply sup_11111111111141118111111111111111 \
+  --context "The same project and time filters still return no logs." \
+  --retry-key "<retry_key>" --json
+```
+
+Der API-Body enthält `context` und optional `diagnostics`. Der Text in
+`context` muss 1 bis 4.000 Zeichen enthalten. Schreiben Sie keine
+Zugangsdaten, URLs, Hostnamen oder lokalen Pfade in `context`. Die API lehnt
+solchen Text mit `422` ab. Senden Sie einen Wiederholungsschlüssel im Header
+`Idempotency-Key`. Die Kontext-Route verlangt diesen Header. Der Schlüssel
+enthält 1 bis 128 sichtbare ASCII-Zeichen, ohne Leerzeichen. Verwenden Sie für
+jede Antwort einen neuen Schlüssel. Verwenden Sie einen Schlüssel nur erneut,
+um dieselbe Antwort zu wiederholen.
+
+Die API akzeptiert Kontext, solange das Ticket `open`, `routed`,
+`in_progress` oder `waiting_on_user` ist. Sie akzeptiert 1 Antwort pro
+Ticket-Status. Warten Sie nach einer Antwort auf eine Statusänderung, bevor
+Sie weiteren Kontext senden. Eine Antwort auf ein Ticket mit
+`waiting_on_user` setzt das Ticket auf `open`. Lesen Sie den
+zurückgegebenen `status`, statt diese Änderung anzunehmen.
+
+Eine erfolgreiche Antwort liefert `ticket_id`, `context_id`, `status`,
+`created_at`, `next` und `next_action`. Die `context_id` beginnt mit `ctx_`.
+Lesen Sie das Ticket erneut, bevor Sie auf eine spätere Anfrage antworten.
+
+`GET /api/support/tickets/{ticket_id}/context` liefert die 20 neuesten
+Kontexteinträge, die ältesten zuerst. Jeder Eintrag enthält `context_id`,
+`context`, `diagnostics` und `created_at`. Diese Liste hat keinen Cursor.
+
+Eine Antwort auf ein Ticket mit `resolved` oder `closed` liefert `422` mit
+`code: "validation_failed"`. Öffnen Sie das Ticket nur wieder, wenn der
+Nutzer diese Support-Anfrage fortsetzen möchte. Eine `next_action` erlaubt
+einem Agenten nicht, den Kontozustand zu ändern.
+
+## Fehler beheben
+
+| HTTP-Status | `code` | Wiederherstellung |
+| --- | --- | --- |
+| `401` | `unauthorized` | Senden Sie ein gültiges Konto-Bearer-Token. |
+| `404` | `not_found` | Listen Sie die Tickets des Kontos auf, und verwenden Sie eine zurückgegebene `sup_`-ID. Prüfen Sie bei einem Projektfehler `project_id`, oder lassen Sie das Feld weg. |
+| `405` | `method_not_allowed` | Verwenden Sie eine Methode aus der Tabelle unter [Ticket verfolgen](#track-the-ticket). |
+| `409` | `idempotency_conflict` | Der Wiederholungsschlüssel wurde mit einer anderen Anfrage verwendet. Wiederholen Sie die ursprüngliche Anfrage, oder lesen Sie das Ticket und verwenden Sie einen neuen Schlüssel. |
+| `422` | `validation_failed` | Korrigieren Sie das genannte Feld. Senden Sie bei PATCH nur `status: "open"` oder `status: "closed"`. |
+| `429` | `rate_limited` | Warten Sie, und versuchen Sie es dann erneut. |
+
+Fehlerantworten enthalten `error`, `code`, `next` und `next_action`. Siehe
+[API-Fehler](/de/reference/api-errors).
+
+## Meldung sicher halten
+
+Senden Sie nie Secrets, Tokens, Authorization-Header, Ingest-Schlüssel,
+Roh-Logs, Kundendaten, lokale Pfade, Hosts oder Quellcode, der nichts mit dem
+Problem zu tun hat. Senden Sie eine kurze, geschwärzte Zusammenfassung.
+Prüfungen, die Sie selbst durchführen können, finden Sie unter
+[Fehlerbehebung](/de/guides/troubleshooting).

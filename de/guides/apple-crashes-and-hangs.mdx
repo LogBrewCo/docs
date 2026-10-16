@@ -1,0 +1,405 @@
+---
+title: "iOS-Absturzberichte für Apple-Abstürze und Hänger"
+sidebarTitle: "Apple-Abstürze und Hänger"
+description: "Richten Sie Absturzberichte für iOS-Apps ein, laden Sie passende dSYMs hoch und lesen Sie symbolisierte iOS-Absturz-Logs in LogBrew."
+---
+
+Mit diesem Ablauf erfassen Sie native Abstürze und Hänger des Main-Threads in
+einer iOS-App. Die Erfassung von Hängern braucht UIKit. Laden Sie das
+passende dSYM hoch, um Quellcode-Stellen in den Stackframes zu sehen.
+
+Bei einem Absturz speichert die App einen lokalen Bericht. Bei einem
+späteren Start ruft Ihre App Replay auf und sendet die Absturz-Belege an
+LogBrew. LogBrew sendet nicht den rohen Apple-Bericht.
+
+<Note>
+  Verwenden Sie LogBrew Swift 0.1.6 oder neuer. Verwenden Sie für das
+  Hochladen von Debug-Artefakten die native LogBrew-CLI 0.1.24 oder neuer.
+</Note>
+
+<Warning>
+  Verwenden Sie in der App eine Ingest-Konfiguration für das Projekt.
+  Verwenden Sie für das Hochladen von Artefakten und das Lesen von Issues
+  eine Kontoanmeldung. Ein Projekt-Artefaktschlüssel kann auch von einer
+  Build-Maschine hochladen.
+  Bauen Sie nie ein Konto-Zugriffstoken oder einen Artefaktschlüssel in die App ein.
+</Warning>
+
+## Grenzen der Erfassung planen
+
+Prüfen Sie, wann Ihre App jede Fehlerart per Replay senden kann.
+
+| Fehler | Ergebnis der Erfassung | Zeitpunkt der Zustellung |
+| --- | --- | --- |
+| Fataler Apple-Absturz | Ein unbehandeltes natives Absturzereignis | Ein späterer App-Start |
+| Überstandener Hänger des Main-Threads | Ein behandeltes Hänger-Ereignis | Beim Replay nach der Erholung |
+| Hänger mit anschließendem Beenden | Ein unbehandeltes Hänger-Ereignis | Ein späterer App-Start |
+
+Legen Sie den Release-Wert vor dem Build fest. Er muss App-Version und Build
+eindeutig bezeichnen. Verwenden Sie denselben Wert im SDK, beim Hochladen
+des dSYM und im Issue-Filter.
+
+Hängen Sie keine Nutzerdaten, Anfrage-Bodys oder Header an die
+Absturz-Metadaten an.
+
+## Absturz-Produkt hinzufügen
+
+[Richten Sie zuerst die SDK-Telemetrie](/de/guides/sdk-ingestion) für Ihre App
+ein. Replay nutzt diesen `client` und diesen `transport`.
+
+Fügen Sie das öffentliche SDK über den Swift Package Manager hinzu.
+
+```swift
+.package(
+    url: "https://github.com/LogBrewCo/sdk.git",
+    from: "0.1.6"
+)
+```
+
+Fügen Sie das Produkt `LogBrew` hinzu, um Telemetrie zu senden. Fügen Sie
+`LogBrewCrash` nur hinzu, wenn die App die Erfassung nativer Abstürze oder
+Hänger ausdrücklich aktiviert.
+
+Die Erfassung unterstützt iOS 15 oder neuer. Behalten Sie genau ein
+Erfassungsobjekt, das der App gehört, denn native Handler für fatale Fehler
+gelten für den ganzen Prozess.
+
+## Eine exakte Identität konfigurieren
+
+Verwenden Sie dasselbe Projekt, dasselbe Release, dieselbe Umgebung und
+denselben Dienst in der Laufzeit-Einrichtung und beim Hochladen der
+Artefakte. LogBrew leitet diese Werte nicht ab und ersetzt sie nicht.
+
+```swift
+import Foundation
+import LogBrew
+import LogBrewCrash
+
+let applicationSupport = try FileManager.default.url(
+    for: .applicationSupportDirectory,
+    in: .userDomainMask,
+    appropriateFor: nil,
+    create: true
+)
+
+let identity = try NativeArtifactIdentity(
+    projectId: "550e8400-e29b-41d4-a716-446655440000",
+    release: "com.example.app@1.2.3+45",
+    environment: "production",
+    service: "ios-app"
+)
+
+let watchdog: NativeHangWatchdogConfiguration? = nil
+
+let crashCapture = NativeCrashCapture(
+    configuration: try NativeCrashConfiguration(
+        storageDirectory: applicationSupport.appendingPathComponent(
+            "LogBrewCrash",
+            isDirectory: true
+        ),
+        artifactIdentity: identity,
+        hangWatchdog: watchdog
+    )
+)
+
+try crashCapture.install()
+```
+
+Installieren Sie das Erfassungsobjekt auf dem Main-Thread, bevor Sie die
+Root-UI erstellen. Legen Sie vorher sein übergeordnetes Verzeichnis an.
+Halten Sie das Speicherverzeichnis privat und im Besitz der App.
+
+Das Erfassungsobjekt zeichnet Mach-Exceptions, Signale, C++-Exceptions und
+Objective-C-Exceptions auf. Der lokale Bericht enthält keine
+Speicherinhalte, keine Queue-Namen und keine Konsolen-Logs.
+
+Der lokale Absturzbericht kann sensible Details zu App und Gerät enthalten.
+Halten Sie ihn aus Cloud-Backups und geteilten Verzeichnissen heraus.
+LogBrew sendet Frame-UUIDs, Architekturen und Offsets statt des rohen
+Berichts.
+
+`NativeCrashConfiguration` hat zwei optionale Grenzen:
+
+| Parameter | Standardwert | Bereich | Wirkung |
+| --- | --- | --- | --- |
+| `maxStoredReports` | `5` | 1 bis 32 | Die Zahl der lokalen Berichte, die die App aufbewahrt. |
+| `maxReplayBytes` | 4 MiB | 1 KiB bis 16 MiB | Replay verwirft einen Bericht, der größer ist. |
+
+Ein Wert außerhalb seines Bereichs lässt die Konfiguration
+`crash_invalid_configuration` auslösen.
+
+## Erfassung von Hängern aktivieren
+
+Die Erfassung von Hängern ist aus, wenn `watchdog` `nil` ist. Um sie zu
+aktivieren, ersetzen Sie die obige Deklaration von `watchdog`, bevor Sie
+`install()` aufrufen:
+
+```swift
+let watchdog = try NativeHangWatchdogConfiguration(
+    threshold: 2
+)
+```
+
+Der Schwellenwert ist in Sekunden angegeben, von 1 bis 30. Die Erfassung
+von Hängern braucht außerdem `artifactIdentity`. Ohne diesen Wert löst die
+Konfiguration `crash_invalid_configuration` aus.
+
+Behalten Sie ein `crashCapture`-Objekt für die gesamte Laufzeit des
+Prozesses. Ein zweites Erfassungsobjekt kann sich nicht installieren. Sein
+Aufruf von `install()` löst `crash_capture_owned` aus. Um den
+Schwellenwert zu ändern, verwenden Sie den neuen Wert beim nächsten
+App-Start.
+
+Ein überstandener Hänger wird mit `crash.handled` auf `true` per Replay
+gesendet. Ein laufender Hänger, den ein Beenden des Prozesses hinterlassen
+hat, wird mit `crash.handled` auf `false` gesendet.
+
+Beide Formen enthalten numerische Metadaten in `durationMs`. Sie behalten
+dieselbe Artefakt-Identität wie die Frames fataler Abstürze.
+
+Der Watchdog pausiert, solange die App inaktiv ist oder unter einem Debugger
+läuft. Bei starker thermischer Belastung unterdrückt er die Erfassung
+ebenfalls.
+
+Ein kurzer Schwellenwert kann normale Arbeit auf dem Main-Thread als Hänger
+melden. Testen Sie den Schwellenwert mit der Build-Konfiguration, die Sie
+ausliefern. Der behandelte Zustand beschreibt die Erholung. Er markiert das
+Issue nicht als gelöst. Ein behandelter Hänger hat die Oberfläche trotzdem
+blockiert. Prüfen Sie ihn also auch.
+
+## Replay nach dem Start
+
+Senden Sie ausstehende Berichte nach der Installation der Erfassung per
+Replay über Ihren SDK-Client.
+
+```swift
+let replay = try crashCapture.replayPendingReports(
+    in: client,
+    transport: transport
+)
+
+print(
+    "acknowledged=\(replay.acknowledged) " +
+    "discarded=\(replay.discarded) " +
+    "pending=\(replay.pending)"
+)
+```
+
+Ihre App muss Replay aufrufen. Die Erholung von einem Hänger allein sendet
+kein Ereignis. Rufen Sie dieselbe Methode nach der Erholung oder beim
+nächsten Start auf.
+
+Replay verarbeitet gültige Berichte vom ältesten zum neuesten und behält
+ihre stabilen Ereignis-IDs. Eine fehlgeschlagene Zustellung lässt den
+Bericht ausstehend. Eine angenommene Zustellung entfernt ihn.
+
+Replay verwirft Berichte, die es nicht lesen kann, und Berichte, die größer
+als `maxReplayBytes` sind. Prüfen Sie alle drei Zahlen. Eine Null bei den
+ausstehenden Berichten allein beweist keine Zustellung.
+
+Aktivieren Sie vor dem Replay die dauerhafte Zustellung, wenn eine
+fehlgeschlagene Anfrage einen weiteren Neustart überstehen muss. Rufen Sie
+`purge()` nicht bei einer gewöhnlichen Erholung von Netzwerk- oder
+Authentifizierungsfehlern auf.
+
+## Passendes dSYM hochladen
+
+Archivieren Sie die App mit aktivierten Debug-Informationen. Behalten Sie
+das dSYM genau des Builds, den die Nutzer ausführen.
+
+Prüfen Sie seine Image-UUIDs.
+
+```bash
+xcrun dwarfdump --uuid "path/to/App.app.dSYM"
+```
+
+Prüfen Sie das Artefakt vor dem Hochladen lokal.
+
+```bash
+logbrew debug-artifacts upload "path/to/App.app.dSYM" \
+  --project "<project UUID>" \
+  --release "com.example.app@1.2.3+45" \
+  --environment "production" \
+  --service "ios-app" \
+  --expect-image-uuid "<Mach-O UUID>" \
+  --dry-run \
+  --json
+```
+
+Wiederholen Sie `--expect-image-uuid` für jede benötigte Architektur. Der
+Befehl schlägt fehl, wenn die gefundenen UUIDs von den erwarteten abweichen.
+
+Prüfen Sie den Kontozugriff. Führen Sie dann denselben Befehl ohne
+`--dry-run` aus.
+
+```bash
+logbrew status --json
+
+logbrew debug-artifacts upload "path/to/App.app.dSYM" \
+  --project "<project UUID>" \
+  --release "com.example.app@1.2.3+45" \
+  --environment "production" \
+  --service "ios-app" \
+  --expect-image-uuid "<Mach-O UUID>" \
+  --json
+```
+
+Der Upload-Befehl prüft unterstützte Apple-Objekte und verifiziert jede
+hochgeladene Identität. Er nimmt keine lokalen Pfade oder Dateinamen in die
+API-Metadaten auf.
+
+Das JSON-Feld `status` zeigt das Ergebnis:
+
+| `status` | Bedeutung |
+| --- | --- |
+| `validated` | Der Probelauf hat die erwarteten Objekte gefunden. Nichts wurde hochgeladen. |
+| `verified` | Der Kontozugriff hat jede Identität hochgeladen und verifiziert. |
+| `already_present` | LogBrew hat bereits jede Identität. |
+| `uploaded` | Ein Projekt-Artefaktschlüssel hat die Dateien hochgeladen. Die CLI konnte sie nicht verifizieren. |
+
+Eine Build-Maschine kann statt mit Kontozugriff mit einem
+Projekt-Artefaktschlüssel in `LOGBREW_TOKEN` hochladen. Erstellen Sie den
+Schlüssel wie unter
+[Artefaktschlüssel erstellen](/de/guides/source-maps#create-an-artifact-key)
+beschrieben. Dieser Upload meldet `uploaded`. Verifizieren Sie jede
+Identität später mit Kontozugriff:
+
+```bash
+logbrew debug-artifacts lookup \
+  --project "<project UUID>" \
+  --release "com.example.app@1.2.3+45" \
+  --environment "production" \
+  --service "ios-app" \
+  --image-uuid "<Mach-O UUID>" \
+  --architecture arm64 \
+  --json
+```
+
+`status: "found"` bestätigt das Artefakt. `status: "missing"` heißt, dass
+LogBrew für diese Identität kein Artefakt hat.
+
+Die Zuordnung prüft die Image-UUID und die vollständige Artefakt-Identität,
+nicht den Namen der Quelldatei. Ein neuer Build desselben Quellcodes kann
+andere UUIDs haben. Laden Sie genau das dSYM-Bundle hoch, nicht ein ganzes
+Build-Verzeichnis.
+
+## Gehostetes Ergebnis prüfen
+
+Filtern Sie die Issue-Liste mit demselben Laufzeitbereich. Dieses Beispiel
+wählt Issues mit `unresolved` aus. Ein gelöstes oder archiviertes Issue
+erscheint nicht.
+
+```bash
+logbrew read issues \
+  --project "<project UUID>" \
+  --release "com.example.app@1.2.3+45" \
+  --environment "production" \
+  --service "ios-app" \
+  --status "unresolved" \
+  --since "24h" \
+  --json
+```
+
+Die Antwort der Liste bezeichnet das gruppierte Issue. Lesen Sie seine
+Details, um die gehostete Frame-Zuordnung anzufordern.
+
+```bash
+logbrew read issue "<issue UUID>" --json
+```
+
+Ein passendes Artefakt fügt ein `symbolication`-Objekt hinzu. Dieses
+Beispiel zeigt ausgewählte Felder eines Issues mit einem zugeordneten Frame,
+nicht die vollständige Antwort.
+
+```json
+{
+  "severity": "critical",
+  "attributes": {
+    "metadata": {
+      "crash.replayed": true
+    }
+  },
+  "symbolication": {
+    "status": "resolved",
+    "frames": [
+      {
+        "index": 0,
+        "status": "resolved",
+        "resolved": {
+          "source": "AppRuntime.swift",
+          "line": 42,
+          "column": 1,
+          "name": "terminateForCrash()"
+        }
+      }
+    ]
+  }
+}
+```
+
+## Absturz-Belege lesen
+
+Jeder Frame hat einen eigenen `status`. Das Feld `symbolication.status`
+verwendet dieselben Werte:
+
+| `status` | Bedeutung |
+| --- | --- |
+| `resolved` | Ein passendes Artefakt hat den Frame zugeordnet. `resolved` enthält die Quelle, Zeile, Spalte oder den Funktionsnamen, den das Artefakt liefert. |
+| `artifact_not_found` | Kein hochgeladenes Artefakt passt zur Ereignis-Identität und zur Image-UUID. |
+| `source_not_resolved` | Es gibt ein passendes Artefakt, aber es hat diesen Frame nicht zugeordnet. |
+| `invalid_metadata` | Das Ereignis hat unvollständige oder widersprüchliche Artefakt-Metadaten. |
+| `unavailable` | Das Lesen der Frame-Zuordnung konnte nicht abgeschlossen werden. |
+
+Notieren Sie einen nicht zugeordneten Frame als nicht zugeordnet. Melden Sie
+ihn nicht als leeren Stack.
+
+LogBrew ordnet Frames zu, wenn Sie das Issue lesen. Ein später
+hochgeladenes dSYM kann Frames eines früheren Ereignisses zuordnen. Es kann
+keine Frames hinzufügen, die das Ereignis nicht erfasst hat.
+
+Ein Anwendungsframe grenzt die Codesuche ein, beweist aber nicht die
+Ursache. Für vorherige Schritte, die Ausnahmekette und Trace-Belege lesen
+Sie die Untersuchung des Issues:
+
+```bash
+logbrew investigate issue "<issue UUID>" --json
+```
+
+In dieser Antwort stammt ein Frame mit `source: "symbolicated"` aus einem
+hochgeladenen Artefakt. Ein Frame mit `source: "captured"` ist die Stelle,
+die die App gesendet hat. Die Antwortfelder finden Sie unter
+[Issue untersuchen](/de/guides/investigate-an-issue).
+
+Behalten Sie bei jedem Lesen den vollständigen Bereich aus Projekt, Release,
+Umgebung und Dienst bei. Weiten Sie eine fehlgeschlagene Suche nicht auf
+andere Projekte aus.
+
+## Einrichtung in Produktion prüfen
+
+Verwenden Sie im bereitgestellten Build einen freigegebenen Testfehler.
+Lösen Sie ihn nie mit einer Kundenaktion aus. Prüfen Sie die Punkte der
+Reihe nach und halten Sie beim ersten Fehler an:
+
+1. Die Laufzeit-Identität passt zur Identität des hochgeladenen Artefakts.
+2. Ein späterer Start sendet per Replay ein bestätigtes Ereignis, mit null
+   verworfenen und null ausstehenden Berichten.
+3. Die eingegrenzte Issue-Liste gibt das Test-Issue mit dem erwarteten
+   behandelten Zustand zurück.
+4. Der erwartete Anwendungsframe wird zugeordnet.
+5. Ein späterer fehlerfreier Start fügt kein weiteres Vorkommen hinzu.
+
+## Sicher wiederherstellen
+
+| Ergebnis | Wiederherstellung |
+| --- | --- |
+| Authentifizierung beim Hochladen schlägt fehl | Führen Sie `logbrew login` aus, bestätigen Sie `logbrew status --json` und wiederholen Sie genau denselben Upload. |
+| UUID-Prüfung beim Hochladen schlägt fehl | Wählen Sie das dSYM aus dem bereitgestellten Build und wiederholen Sie den Probelauf. |
+| `artifact_not_found` | Prüfen Sie die Ereignis-Identität und laden Sie das passende dSYM mit demselben Bereich hoch. |
+| `source_not_resolved` | Behalten Sie die vollständigen Debug-Informationen des Builds und prüfen Sie die Einstellungen des bereitgestellten Builds. |
+| `invalid_metadata` | Prüfen Sie, ob Sie LogBrew Swift 0.1.6 oder neuer verwenden. Erfassen Sie ein neues Ereignis mit exakter Identität. |
+| `unavailable` | Lassen Sie das Issue sichtbar und wiederholen Sie später dieselbe eingegrenzte Detailabfrage. |
+| Replay bleibt ausstehend | Beheben Sie den Zustand von Transport oder Authentifizierung und starten Sie die App neu, ohne den Bericht zu löschen. |
+| Replay meldet verworfene Einträge | Zählen Sie sie nicht als zugestellt. Prüfen Sie die Erfassungskonfiguration und reproduzieren Sie den Fehler mit einem neuen freigegebenen Testereignis. |
+
+Für allgemeine Issue-Untersuchungen nutzen Sie
+[Issue mit der API untersuchen](/de/guides/investigate-an-issue).

@@ -1,0 +1,192 @@
+---
+title: "LogBrew-Projekt einrichten und Signale prüfen"
+sidebarTitle: "Projekte und Einrichtung"
+description: "Richten Sie ein LogBrew-Projekt ein. Wählen Sie Namen für Dienst und Umgebung, lesen Sie den Einrichtungsstatus, und finden Sie Ihre Testereignisse."
+---
+
+Ein Projekt ist die Zugriffsgrenze für Telemetrie. Jedes angenommene Signal
+gehört zu genau einem Projekt, und jeder lesende Befehl kann nach Projekt
+filtern.
+
+Legen Sie ein eigenes Projekt an, wenn Telemetrie eine eigene Zuständigkeit
+oder eine eigene Zugriffsgrenze braucht. Für die meisten Teams ist das eine
+App, ein Dienst oder ein Produktbereich. Ein Repository muss nicht genau einem
+Projekt entsprechen. Ein Monorepo kann mehrere Dienste an ein Projekt senden.
+Unterscheiden Sie diese Dienste über ihre Namen.
+
+## <span id="project-service-environment">Projekt, Dienst, Umgebung</span>
+
+| Begriff | Beispiel | Wofür Sie ihn nutzen |
+| --- | --- | --- |
+| Projekt | `checkout-platform` | Zuständigkeit und Zugriff. |
+| Dienst | `checkout-api` | Die App oder der Dienst, die das Signal gesendet hat. |
+| Umgebung | `production` | Laufzeitkontext. |
+| Release | `api@1.2.3` | Code-Version. |
+
+## <span id="recommended-model">Projekt einrichten</span>
+
+[Installieren Sie die CLI](/de/guides/cli). Führen Sie `logbrew status --json`
+aus, um Ihren Kontozugriff zu lesen. Ist der Zugriff nicht gültig, führt ein
+Mensch `logbrew login` aus. Mit einem Projekt-Ingest-Schlüssel können Sie sich
+nicht anmelden.
+
+<Steps>
+  <Step title="Projekt anlegen oder auswählen">
+    Listen Sie zuerst Ihre Projekte auf. Legen Sie ein Projekt nur an, wenn es
+    noch nicht existiert.
+
+    ```bash
+    logbrew projects --json
+    install -d -m 700 "$HOME/.logbrew"
+
+    logbrew projects create checkout-api \
+      --runtime node \
+      --environment production \
+      --ingest-key-file "$HOME/.logbrew/checkout-api.ingest" \
+      --json
+    ```
+
+    Die CLI schreibt den Ingest-Schlüssel in eine neue Datei, die nur der
+    Eigentümer lesen kann. Sie gibt weder den Schlüssel noch den Dateipfad
+    aus. Ist das Ergebnis unklar, führen Sie genau denselben Befehl erneut
+    aus. Ändern Sie dabei weder den Projektnamen noch die Schlüsseldatei. Die
+    CLI verwendet die Identität ihrer ausstehenden Anfrage erneut. Der
+    [Schnellstart](/de/quickstart) zeigt, wie Sie die Projekt-ID aus dem
+    Ergebnis lesen.
+
+    Erfassen Sie für ein bestehendes Projekt den Einrichtungsstatus:
+
+    ```bash
+    logbrew projects setup "<project_id>" --source cli --environment production --json
+    ```
+
+    Einen weiteren Ingest-Schlüssel für ein bestehendes Projekt erstellen Sie
+    mit `logbrew projects keys create`. Den Befehl zeigt der
+    [Leitfaden zur Rotation von Ingest-Schlüsseln](/de/guides/rotate-ingest-key).
+
+    `logbrew setup --create-project` zeigt nur die Hilfe an. Es legt kein
+    Projekt an.
+  </Step>
+
+  <Step title="Dienstnamen im SDK festlegen">
+    Verwenden Sie Namen aus Ihrem Repository und Ihrer Bereitstellung, zum
+    Beispiel `api`, `worker`, `web`, `ios` oder `checkout-api`. Ein Dienstname
+    ist eine Bezeichnung, keine Projektauswahl. Der Ingest-Schlüssel wählt das
+    Projekt aus. Wenn Sie einen Dienst umbenennen, werden gespeicherte
+    Ereignisse nicht verschoben. Finden Sie ein Ereignis nicht, prüfen Sie
+    zuerst das Projekt und den Ingest-Schlüssel, die die Anwendung verwendet,
+    bevor Sie ein weiteres Projekt anlegen.
+  </Step>
+
+  <Step title="Standardumgebungen verwenden">
+    Verwenden Sie `production`, `staging`, `preview` und `local`. Nutzt Ihre
+    Bereitstellung andere Namen, verwenden Sie diese einheitlich. Ein
+    Umgebungsname darf keine Leerzeichen, kein `/` und keinen Backslash
+    enthalten.
+  </Step>
+
+  <Step title="Testereignis senden und lesen">
+    Konfigurieren Sie das SDK mit dem Projekt-Ingest-Schlüssel, wie im
+    [Leitfaden zur SDK-Integration](/de/guides/sdk-ingestion) beschrieben.
+    Das Anlegen eines Projekts installiert kein SDK in Ihrer Anwendung.
+    Halten Sie den Schlüssel aus der Versionsverwaltung heraus. Legen Sie
+    Dienst, Umgebung und Release in der Anwendung fest. Senden Sie ein
+    sicheres Ereignis, und lesen Sie es dann:
+
+    ```bash
+    logbrew read logs --project "<project_id>" --json
+    ```
+
+    Jedes Signal hat eine eigene Liste. Eine leere Log-Liste bedeutet nicht,
+    dass das Projekt keine Issues oder Traces hat.
+
+    Wählen Sie im Dashboard dasselbe Projekt und einen Zeitraum, der das
+    Testereignis enthält. Prüfen Sie, dass die Filter für Dienst, Umgebung
+    und Release zum Ereignis passen.
+  </Step>
+</Steps>
+
+## <span id="diagnose-project-setup">Projekteinrichtung diagnostizieren</span>
+
+Lesen Sie den Einrichtungsstatus mit dem Projekt-Doctor. Schließen Sie nicht
+aus lokalen Dateien oder einer leeren Log-Abfrage auf den Einrichtungsstatus.
+
+```bash
+: "${LOGBREW_PROJECT_ID:?set a project UUID}"
+
+logbrew doctor --project "$LOGBREW_PROJECT_ID" --json
+```
+
+Die CLI liefert einen Bericht mit `status`, `checks` und `next`. Der Exit-Code
+`0` zeigt nicht, dass alle Prüfungen bestanden wurden. Lesen Sie jeden
+Eintrag in `checks`. Siehe
+[Bericht des Projekt-Doctors lesen](/de/reference/cli#read-a-project-doctor-report).
+
+### Direkte API-Antwort
+
+API-Clients rufen `GET /api/projects/{project_id}/doctor` mit
+Kontoauthentifizierung auf. Der Endpunkt hat keine Query-Parameter und keinen
+Anfrage-Body. Verwenden Sie für diesen Lesezugriff nie einen
+Projekt-Ingest-Schlüssel.
+
+Eine `200`-Antwort hat diese Schlüssel: `project_id`, `state`, `setup_status`,
+`setup_acknowledged`, `has_active_ingest_key`, `first_telemetry_seen_at`,
+`last_seen_at`, `last_signal`, `next` und `next_action`. Zeitstempel sind
+RFC3339 oder `null`. `last_signal` ist eine sicher anzeigbare Zusammenfassung,
+kein rohes Signal.
+
+| `state` | `next_action.code` | `next_action.target` |
+| --- | --- | --- |
+| `needs_ingest_key` | `create_ingest_key` | `project_ingest_keys` |
+| `needs_setup` | `choose_setup_path` | `project_setup` |
+| `needs_telemetry` | `send_first_telemetry` | `telemetry_ingest` |
+| `ready` | `inspect_recent_telemetry` | `telemetry_reads` |
+
+Der Doctor prüft zuerst den Ingest-Schlüssel. Ein Projekt ohne aktiven
+Ingest-Schlüssel ist `needs_ingest_key`, unabhängig vom Einrichtungsstatus.
+
+`setup_status` ist `created`, `setup_started`, `sdk_seen`,
+`first_telemetry_seen` oder `active`. `setup_acknowledged` ist nur bei den
+letzten drei Werten `true`. `created` ergibt `needs_setup`. `setup_started`
+und `sdk_seen` ergeben `needs_telemetry`. `first_telemetry_seen` und `active`
+ergeben `ready`.
+
+| Antwort | Nächster Schritt |
+| --- | --- |
+| `404`, `code: "not_found"` | Ein fehlendes Projekt, ein archiviertes Projekt und ein Projekt, das Ihr Konto nicht lesen darf, liefern dasselbe Ergebnis. Lesen Sie die Projekt-ID erneut aus `logbrew projects`. Probieren Sie keine anderen IDs aus. |
+| `405`, `code: "method_not_allowed"` | Verwenden Sie `GET` ohne Body und ohne Query-Parameter. |
+
+Schlägt der Lesezugriff weiterhin fehl, nutzen Sie [Problem melden](/de/guides/report-a-problem).
+Geben Sie keine Zugangsdaten, Header, Signal-Inhalte, Kundendaten, lokalen
+Pfade oder Quellcode an.
+
+## <span id="archive-or-delete-a-project">Projekt archivieren oder löschen</span>
+
+Archivieren Sie ein Projekt, um es aus der Liste aktiver Projekte zu
+entfernen:
+
+```bash
+logbrew projects archive "<project_id>" --yes --json
+```
+
+Der Befehl braucht `--yes`. Nach dem Archivieren nehmen die
+Ingest-Schlüssel des Projekts keine neue Telemetrie mehr an. Die API-Route ist
+`DELETE /api/projects/{project_id}`. Sie liefert `204` ohne Body. Archivierte
+Projekte listen Sie mit `GET /api/projects/archived` auf. Ein Projekt stellen
+Sie mit `POST /api/projects/{project_id}/restore` wieder her. Auch diese Route
+liefert `204`.
+
+Löschen Sie ein Projekt nur dann endgültig, wenn Sie sicher sind:
+
+```bash
+logbrew projects delete "<project_id>" --confirm "<project_id>" --json
+```
+
+Wiederholen Sie die exakte Projekt-ID nach `--confirm`. Eine angenommene
+Anfrage macht das Projekt sofort inaktiv und plant die endgültige Löschung.
+Danach können Sie das Projekt nicht wiederherstellen.
+
+## <span id="rotate-an-ingest-key-without-telemetry-loss">Ingest-Schlüssel rotieren</span>
+
+Der [Leitfaden zur Rotation von Ingest-Schlüsseln](/de/guides/rotate-ingest-key)
+beschreibt Ersatz, Bereitstellung, Test und Widerruf.

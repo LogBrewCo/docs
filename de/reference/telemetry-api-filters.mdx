@@ -1,0 +1,499 @@
+---
+title: "API-Query-Parameter und Cursor-Paginierung"
+sidebarTitle: "Abfragefilter"
+description: "Filtern Sie LogBrew-Telemetrie nach Projekt, Dienst, Release, Umgebung, Schweregrad, Trace, Issue-Status, Priorität, Zuständigkeit und Zeit. Lesen Sie per Cursor weiter."
+---
+
+Jede lesende Route akzeptiert ihre eigenen Query-Schlüssel. Eine Route aus der
+[Filtermatrix](#filter-matrix) lehnt einen unbekannten Schlüssel oder einen
+Wert mit falschem Typ mit `422` und `validation_failed` ab, sofern die Matrix
+nichts anderes angibt. Kurzformen wie `project`, `trace` und `user` sind keine
+Query-Schlüssel. Übertragen Sie einen Filter nicht von einer Route auf eine
+andere.
+
+## Gefilterte Anfrage aufbauen
+
+Setzen Sie den Query-String hinter den Pfad. Verwenden Sie
+`--data-urlencode`, damit reservierte Zeichen sicher bleiben. Diese Anfrage
+liest kritische Logs eines Projekts aus den letzten 24 Stunden:
+
+```bash
+curl --get "https://api.logbrew.co/api/logs" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "severity=critical" \
+  --data-urlencode "since=24h"
+```
+
+Fügen Sie Filter in dieser Reihenfolge hinzu:
+
+1. Wählen Sie das Projekt mit `project_id` oder `project_ids` aus.
+2. Ergänzen Sie einen Zeitraum mit `since` und optional `until`.
+3. Ergänzen Sie Filter für Dienst, Release, Umgebung, Status oder ein
+   bestimmtes Signal.
+4. Setzen Sie `limit` für eine kleinere Seite.
+5. Ergänzen Sie Cursor-Felder erst, wenn eine Cursor-Antwort sie liefert.
+
+Jede gelieferte Zeile passt zu jedem Filter der Anfrage. Ein weggelassener
+Filter verwendet den Standardwert der Route. Zum Beispiel verwendet
+`GET /api/logs` den Wert `status=active`, wenn Sie `status` weglassen.
+
+## <span id="filter-matrix">Filtermatrix</span>
+
+Schlüssel in der Spalte „Erforderlich“ müssen in der Anfrage stehen. Alle
+anderen Schlüssel sind optional.
+
+| Route | Erforderlich | Optionale Query-Schlüssel |
+| --- | --- | --- |
+| `GET /api/logs` | Keine | `project_id` oder `project_ids`, `severity`, `level` (Alias für Kompatibilität), `status`, `search`, `trace_id`, `service_name`, `release`, `environment`, `since`, `until`, `attribute_filters`, `pagination`, `cursor_time`, `cursor_id`, `limit` |
+| `GET /api/logs/attributes` | `since` | `project_id` oder `project_ids`, `type`, `search`, `severity`, `level`, `service_name`, `release`, `environment`, `until`, `cursor_count`, `cursor_path`, `cursor_type`, `limit` |
+| `GET /api/telemetry/issues` | Keine | `project_id` oder `project_ids`, `status`, `severity`, `priority`, `assignee`, `service_name`, `release`, `environment`, `since`, `until`, `pagination`, `cursor_time`, `cursor_id`, `limit`, `response_version` |
+| `GET /api/telemetry/issues/{issue_id}` | Keine | `response_version`. Diese Route ignoriert andere Schlüssel. |
+| `GET /api/telemetry/issues/{issue_id}/events` | Keine | `pagination`, `cursor_time`, `cursor_id`, `limit` |
+| `GET /api/telemetry/issues/assignees` | `project_id` | Keine |
+| `GET /api/telemetry/actions` | Keine | `project_id` oder `project_ids`, `name`, `distinct_id`, `service_name`, `release`, `environment`, `since`, `until`, `pagination`, `cursor_time`, `cursor_id`, `limit` |
+| `GET /api/telemetry/metrics` | Keine | `project_id` oder `project_ids`, `name`, `service_name`, `release`, `environment`, `since`, `until`, `pagination`, `cursor_time`, `cursor_id`, `limit` |
+| `GET /api/telemetry/metrics/series` | `project_id`, `name`, `since` | `until`, `interval`, `group_by`, `service_name`, `release`, `environment`, `series_limit` |
+| `GET /api/telemetry/releases` | Keine | `project_id` oder `project_ids`, `service_name`, `release`, `environment`, `since`, `until`, `pagination`, `cursor_time`, `cursor_project_id`, `cursor_release`, `cursor_environment`, `cursor_service_name`, `limit` |
+| `GET /api/telemetry/traces` | Keine | `project_id` oder `project_ids`, `service_name`, `release`, `environment`, `status`, `since`, `until`, `min_duration_ms`, `pagination`, `cursor_time`, `cursor_trace_id`, `limit` |
+| `GET /api/telemetry/traces/{trace_id}` und `.../summary` | Keine | `project_id`, `release`, `environment` |
+| `GET /api/telemetry/summary/volume` | `project_id`, `since` | `until`, `interval`, `service_name`, `release`, `environment`, `response_version` |
+| `GET /api/telemetry/deployments` | `project_id` | `release`, `environment`, `service_name`, `status`, `since`, `until`, `pagination`, `cursor_time`, `cursor_id`, `limit` |
+| `GET /api/telemetry/deployments/{deployment_id}` | `project_id` | Keine |
+| `GET /api/telemetry/traces/{trace_id}/investigation` | Keine | `project_id`, `release`, `environment`, `response_version` |
+| `GET /api/telemetry/traces/{trace_id}/spans/{span_id}/investigation` | `project_id`, `release`, `environment` | Keine |
+| `GET /api/telemetry/issues/{issue_id}/investigation` | Keine | `response_version` sowie `selection` oder `occurrence_id` |
+| `GET /api/telemetry/issues/{issue_id}/correction-verification` | `baseline_occurrence_id`, `candidate_deployment_id` | Keine |
+| `GET /api/telemetry/releases/investigation` | `project_id`, `release`, `environment`, `service_name` | `response_version` |
+| `GET /api/telemetry/metrics/investigation` | `project_id`, `name`, `since` | `until`, `interval`, `group_by`, `service_name`, `release`, `environment`, `series_limit`, `response_version` |
+| `GET /api/telemetry/analytics/overview` | `project_id`, `since` | `until`, `interval`, `top_limit`, `service_name`, `release`, `environment`, `response_version` |
+| `GET /api/telemetry/analytics/properties` | `project_id`, `since` | `until`, `limit`, `service_name`, `release`, `environment`, `response_version` |
+
+Bei der Issue-Untersuchung ist `selection` gleich `first`, `latest` oder
+`recommended`. Senden Sie `selection` oder `occurrence_id`, nicht beides.
+Beide brauchen eine `response_version` von 2 bis 13. Ab Version 2 und ohne
+Auswahl verwendet LogBrew `recommended`. Eine `occurrence_id` erhalten Sie
+über `GET /api/telemetry/issues/{issue_id}/events`.
+
+Die `POST`-Routen für Analysen nehmen einen JSON-Body an. Siehe
+[Produktanalysen](/de/concepts/product-analytics).
+
+## Gemeinsame und signalspezifische Filter
+
+`service_name`, `release` und `environment` grenzen jede Telemetrie-Liste
+ein. Verwenden Sie genau die Werte, die Ihr SDK sendet.
+
+Manche Filter gehören zu einem bestimmten Signal:
+
+- Logs akzeptieren `search`, `trace_id`, `severity` und `attribute_filters`.
+- Logs akzeptieren `status`: `active` (Standard), `ignored` oder `all`.
+  `ignored` wählt die Logs aus, die eine Log-Regel in der aktiven Ansicht
+  ausblendet.
+- Issues akzeptieren den Issue-`status`: `unresolved`, `resolved` oder
+  `archived`. `ignored` ist ein älterer Name für `archived` und wählt
+  dieselben Issues aus.
+- Issues akzeptieren `severity`: `info`, `warning`, `error` oder `critical`.
+- Issues akzeptieren `priority`: `high`, `medium` oder `low`.
+- Issues akzeptieren `assignee`: `me` für die Issues, die dem angemeldeten
+  Konto zugewiesen sind, `none` für Issues ohne zuständige Person oder eine
+  Nutzer-ID.
+- Aktionen und Metriken akzeptieren `name`.
+- Aktionen akzeptieren `distinct_id`.
+- Traces akzeptieren den Trace-`status` und `min_duration_ms`.
+- Bereitstellungen akzeptieren `status`: `succeeded` oder `failed`.
+
+Die `severity`-Filter für Logs und Issues vergleichen den effektiven
+Schweregrad. Hat eine Regel den Schweregrad geändert, verwendet der Filter den
+Wert der Regel. Siehe
+[Werte für den Schweregrad](/de/reference/telemetry-response-shapes#severity-values).
+
+## Zeitraum
+
+`since` akzeptiert eine positive ganze Zahl von Stunden oder Tagen, zum
+Beispiel `24h` oder `7d`, oder einen RFC3339-Zeitstempel. Eine kompakte
+Dauer bezieht sich auf den Zeitpunkt der jeweiligen Anfrage.
+
+`until` akzeptiert nur einen RFC3339-Zeitstempel. Es ist ein exklusiver
+Endzeitpunkt: Eine Zeile genau zum Zeitpunkt `until` ist nicht im Ergebnis.
+`since` ist inklusiv. Zum Beispiel wählen `since=2026-10-01T00:00:00Z` und
+`until=2026-10-02T00:00:00Z` genau 1 vollen Tag aus. LogBrew vergleicht
+Zeitpunkte auf die Millisekunde genau.
+
+`until` muss später sein als `since`. Ist das nicht so, oder ist `until` kein
+RFC3339-Zeitstempel, schlägt die Anfrage mit `422` und `validation_failed`
+fehl.
+
+Wählen Sie für einen Lesezugriff über mehrere Seiten einen festen
+RFC3339-Startzeitpunkt, und behalten Sie ihn auf jeder Seite bei. Behalten Sie
+auch dasselbe `until` auf jeder Seite bei.
+
+Diese Anfrage liest Fehler-Logs eines Tages:
+
+```bash
+curl --get "https://api.logbrew.co/api/logs" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "severity=error" \
+  --data-urlencode "since=2026-10-01T00:00:00Z" \
+  --data-urlencode "until=2026-10-02T00:00:00Z"
+```
+
+<Note>
+  Die Bereitstellungsliste verwendet andere Zeitregeln. Ihre Werte `since` und
+  `until` akzeptieren nur RFC3339-Zeitstempel, und beide sind inklusiv. Sie
+  vergleichen den Zeitpunkt, zu dem die Bereitstellung abgeschlossen wurde.
+</Note>
+
+## Antwortversion für Issues
+
+Die Issue-Liste und die Issue-Details akzeptieren `response_version=1`,
+`response_version=2` oder `response_version=3`. Version 1 ist der Standard.
+Ein anderer Wert schlägt mit `422` und `validation_failed` fehl.
+
+- Version 1 zeigt den archivierten Zustand als `ignored`. Sie zeigt keine
+  Priorität.
+- Version 2 zeigt den archivierten Zustand als `archived`. Sie ergänzt
+  `priority` und `priority_source`.
+- Version 3 hat alle Felder von Version 2. Sie ergänzt `assignee`.
+
+Jede Version akzeptiert `status=archived`, `priority` und `assignee`. Siehe
+die [Issue-Antwort](/de/reference/telemetry-response-shapes#issue-response).
+
+## Filter für den Schweregrad
+
+Verwenden Sie `severity=info|warning|error|critical` bei `GET /api/logs`. Der
+ältere Schlüssel `level` ist ein Alias für Kompatibilität. Beide Schlüssel
+akzeptieren die kanonischen Werte und die Aliasse `trace`, `debug`, `warn`
+und `fatal`. LogBrew wandelt einen Alias vor dem Vergleich in seinen
+kanonischen Wert um.
+
+Sendet eine Anfrage sowohl `severity` als auch `level`, normalisiert LogBrew
+zuerst beide. Widersprüchliche Werte werden abgelehnt mit:
+
+```text
+log severity and level filters conflict; use one value
+```
+
+## <span id="trace-filters">Trace-Filter</span>
+
+Bei der Trace-Suche ist `status` gleich `error` oder `ok`. Lassen Sie den
+Wert weg, um beides einzuschließen. `min_duration_ms` muss null oder größer
+sein. Der Wert gilt nur für die Trace-Suche.
+
+Diese Anfrage findet Fehler-Traces, die mindestens 500 Millisekunden gedauert
+haben:
+
+```bash
+curl --get "https://api.logbrew.co/api/telemetry/traces" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "status=error" \
+  --data-urlencode "min_duration_ms=500" \
+  --data-urlencode "since=7d"
+```
+
+Für Trace-Details und Trace-Zusammenfassung kodieren Sie `trace_id` per
+Prozent-Kodierung als Pfadsegment. Senden Sie den Wert nicht als
+Query-Schlüssel.
+
+## <span id="project-scope">Projektbereich</span>
+
+Verwenden Sie `project_id=<project-uuid>`, um ein Projekt zu lesen. Auf den
+Routen, die in der Matrix `project_ids` aufführen, verwenden Sie
+`project_ids=<uuid>,<uuid>` für eine exakte Menge von 2 bis 50 Projekten.
+Lassen Sie auf diesen Routen beide Schlüssel weg, um jedes Projekt zu lesen,
+das das Konto lesen darf. Eine Route, die `project_id` erfordert, akzeptiert
+nur 1 Projekt.
+
+```text
+project_id=00000000-0000-4000-8000-000000000001
+project_ids=00000000-0000-4000-8000-000000000001,00000000-0000-4000-8000-000000000002
+```
+
+LogBrew lehnt diese Auswahlen mit `422` und `validation_failed` ab:
+
+- Eine Anfrage, die sowohl `project_id` als auch `project_ids` enthält.
+- Einen Wert für `project_ids` mit weniger als 2 oder mehr als 50 IDs.
+- Eine doppelte ID oder eine ID, die keine UUID ist.
+
+Ist eine ID in `project_ids` ein Projekt, das das Konto nicht lesen darf,
+schlägt die Anfrage mit `404` und `not_found` fehl. Entfernen Sie diese ID
+nicht einfach, um weiterzumachen. Bitten Sie die Person, eine neue Menge
+auszuwählen.
+
+Behalten Sie denselben Projektbereich auf jeder Cursor-Seite bei. Entfernen
+Sie den Projektfilter nicht nach einem leeren Ergebnis, denn damit stellen Sie
+eine andere Frage.
+
+## Zeitreihen in Zeitfenstern
+
+`GET /api/telemetry/metrics/series` liefert eine Metrik in Zeitfenstern.
+`GET /api/telemetry/summary/volume` liefert die Anzahl der Signale in
+Zeitfenstern. Für beide Routen gelten diese Regeln:
+
+- `since` ist erforderlich. `until` ist optional, Standard ist der Zeitpunkt
+  der Anfrage.
+- Der Bereich von `since` bis `until` umfasst höchstens 31 Tage.
+- `interval` ist `auto`, `1m`, `5m`, `15m`, `1h`, `6h` oder `1d`. Standard
+  ist `auto`. Ein Intervall, das mehr als 500 Zeitfenster ergibt, schlägt
+  fehl.
+- `service_name`, `release` und `environment` sind exakte Filter.
+
+Bei Metrik-Zeitreihen ist `name` der exakte Metrikname aus
+`GET /api/telemetry/metrics`. `group_by` ist `none`, `service_name`,
+`release` oder `environment`. `series_limit` liegt zwischen 1 und 20.
+
+Beim Signalvolumen darf `until` nicht in der Zukunft liegen, und
+`response_version` ist nur `1`.
+
+## Log-Attribute filtern
+
+Mit `GET /api/logs/attributes` finden Sie die Attributpfade und Typen, die Sie
+durchsuchen können. Senden Sie dann `attribute_filters` an `GET /api/logs`.
+Beide Anfragen brauchen `since`.
+
+### Attributkatalog lesen
+
+Diese Anfrage findet in einem Projekt numerische Pfade, die `status`
+enthalten:
+
+```bash
+curl --get "https://api.logbrew.co/api/logs/attributes" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "since=2026-06-01T00:00:00Z" \
+  --data-urlencode "type=number" \
+  --data-urlencode "search=status" \
+  --data-urlencode "limit=2"
+```
+
+Die Antwort ist ein Objekt, kein reines Array. Dieses synthetische Beispiel
+hat 2 Attribute und eine weitere Seite:
+
+```json
+{
+  "attributes": [
+    { "path": "/http/status_code", "type": "number", "observed_count": 50, "last_seen_at": "2026-06-01T12:00:03.789Z" },
+    { "path": "/response/status", "type": "number", "observed_count": 42, "last_seen_at": "2026-06-01T12:00:02.456Z" }
+  ],
+  "coverage": {
+    "total_logs": 60,
+    "fully_indexed_logs": 50,
+    "partially_indexed_logs": 2,
+    "unindexed_logs": 8
+  },
+  "next_cursor": { "observed_count": 42, "path": "/response/status", "type": "number" }
+}
+```
+
+`type` ist `string`, `number` oder `boolean`. `observed_count` ist die Anzahl
+der Logs im Bereich, die diesen Pfad und Typ haben. `last_seen_at` ist der
+Zeitpunkt des neuesten davon. Ein Log kann viele Pfade haben. Addieren Sie die
+Anzahlen nicht, um eine Anzahl von Logs zu erhalten.
+
+`coverage` zeigt, welche Logs ein Attributfilter durchsuchen kann:
+
+| Feld | Bedeutung |
+| --- | --- |
+| `total_logs` | Logs, die zu den Filtern des Katalogs für Projekt, Zeit, Schweregrad, Dienst, Release und Umgebung passen. |
+| `fully_indexed_logs` | Logs, deren unterstützte Attributwerte alle durchsuchbar sind. |
+| `partially_indexed_logs` | Logs, bei denen einige Werte nicht im Index sind. Ein Filter kann einen Wert übersehen, der nicht im Index ist. |
+| `unindexed_logs` | Logs, die typisierte Attributfilter nicht durchsuchen können. |
+
+Die 3 Gruppen ergeben zusammen `total_logs`. `type`, `search` und der Cursor
+des Katalogs ändern die Abdeckung nicht. Eine leere `attributes`-Liste
+bedeutet nicht, dass `total_logs` null ist.
+
+Der Katalog hat keinen Schlüssel `status`. Sein Filter für den Schweregrad
+vergleicht den erfassten Schweregrad, nicht den effektiven.
+
+`search` ist ein Teilstring des Pfads mit 1 bis 128 Byte ohne Steuerzeichen.
+`limit` legt die Anzahl der Attribute pro Seite fest.
+
+### Katalog weiterlesen
+
+Der Katalog verwendet nicht `pagination=cursor`. Wiederholen Sie jeden Filter,
+und kopieren Sie alle 3 Felder aus `next_cursor`:
+
+| Geliefertes Feld | Schlüssel der nächsten Anfrage |
+| --- | --- |
+| `next_cursor.observed_count` | `cursor_count` |
+| `next_cursor.path` | `cursor_path` |
+| `next_cursor.type` | `cursor_type` |
+
+Hören Sie auf, wenn `next_cursor` gleich `null` ist.
+
+### Typisierten Filter anwenden
+
+Kopieren Sie Pfad und Typ aus dem Katalog. Pfade verwenden die Syntax von
+JSON Pointer, keine Schlüssel mit Punkten. Lassen Sie jedes Escape `~0` oder
+`~1` im Pfad unverändert.
+
+Diese Anfrage liest Logs, deren numerischer Antwortstatus 500 oder höher ist:
+
+```bash
+curl --get "https://api.logbrew.co/api/logs" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "since=2026-06-01T00:00:00Z" \
+  --data-urlencode 'attribute_filters=[{"path":"/response/status","type":"number","operator":"gte","value":500}]'
+```
+
+`attribute_filters` ist ein JSON-Array mit 1 bis 4 Filtern. Ein Log muss zu
+jedem Filter passen. Jeder Filter hat `path`, `type`, `operator` und `value`.
+Der JSON-Typ von `value` muss zu `type` passen: Die Zahl `500` ist nicht der
+String `"500"`.
+
+| `type` | Werte für `operator` |
+| --- | --- |
+| `string` | `eq`, `ne`, `contains`, `starts_with` |
+| `number` | `eq`, `ne`, `gt`, `gte`, `lt`, `lte` |
+| `boolean` | `eq`, `ne` |
+
+`ne` passt nur zu Logs, die den Pfad haben. Ein Log ohne den Pfad passt nicht
+zu `ne`. Bei `string` ist `case_sensitive` optional, Standard ist `false`.
+LogBrew lehnt `"case_sensitive": true` für `number` und `boolean` ab.
+
+Es gelten diese Limits:
+
+- Das JSON-Array hat höchstens 4.096 Byte.
+- Ein String-Wert hat höchstens 1.024 Byte.
+- `contains` und `starts_with` brauchen einen nicht leeren String.
+- Eine Zahl muss endlich sein und zwischen -9.007.199.254.740.992 und
+  9.007.199.254.740.992 liegen.
+
+Ein Log, das der Index nicht durchsuchen kann, passt zu keinem Filter. Es kann
+trotzdem in einer Anfrage ohne `attribute_filters` erscheinen. Zur
+Log-Antwort siehe
+[Log-Antwort](/de/reference/telemetry-response-shapes#log-response).
+
+### Attributfehler korrigieren
+
+Jeder Fehler unten liefert `422` mit `validation_failed`:
+
+| `error` | Korrektur |
+| --- | --- |
+| `log attribute queries require since` | Ergänzen Sie `since` in der Katalog-Anfrage oder in einer Log-Anfrage mit `attribute_filters`. |
+| `invalid log attribute filters` | Senden Sie ein JSON-Array mit 1 bis 4 Filtern, jeweils mit Pfad, Typ, Operator und Wert aus dem Katalog. |
+| `invalid log attribute cursor` | Senden Sie `cursor_count`, `cursor_path` und `cursor_type` gemeinsam aus `next_cursor`. |
+| `invalid log attribute search` | Senden Sie einen nicht leeren Teilstring des Pfads mit höchstens 128 Byte. |
+
+Korrigieren Sie die Anfrage, bevor Sie sie wiederholen. Entfernen Sie keinen
+Filter, denn das ändert das Ergebnis.
+
+## <span id="cursor-pagination">Cursor-Paginierung</span>
+
+Der Cursor-Modus muss aktiv eingeschaltet werden. Ohne ihn liefern
+Listen-Routen ein reines Array. Senden Sie für die erste Seite
+`pagination=cursor` ohne Cursor-Felder. Wiederholen Sie für jede weitere Seite
+jeden Filter, und senden Sie alle Cursor-Felder vollständig:
+
+| Route | Cursor-Felder zum Weiterlesen |
+| --- | --- |
+| Logs, Issues, Issue-Vorkommen, Aktionen, Metriken und Bereitstellungen | `cursor_time` und `cursor_id` |
+| Releases | `cursor_time`, `cursor_project_id`, `cursor_release`, `cursor_environment` und `cursor_service_name` |
+| Trace-Suche | `cursor_time` und `cursor_trace_id` |
+
+Übertragen Sie die gelieferten Felder von `next_cursor` in die nächste
+Anfrage:
+
+- `next_cursor.time` wird zu `cursor_time`.
+- `next_cursor.id` wird zu `cursor_id`.
+- Bei Traces wird `next_cursor.trace_id` zu `cursor_trace_id`.
+- Bei Releases setzen Sie `cursor_` vor jeden gelieferten Feldnamen. Zum
+  Beispiel wird `next_cursor.release` zu `cursor_release`.
+
+Hören Sie auf, wenn `next_cursor` gleich `null` ist. Berechnen Sie keinen
+Cursor aus der letzten Zeile. Der Release-Cursor ändert die ausgewählten
+Projekte nicht. Behalten Sie das ursprüngliche `project_id` oder
+`project_ids` bei.
+
+```bash
+curl --get "https://api.logbrew.co/api/logs" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "severity=error" \
+  --data-urlencode "since=2026-06-01T00:00:00Z" \
+  --data-urlencode "pagination=cursor" \
+  --data-urlencode "limit=50"
+```
+
+`limit` legt die Seitengröße fest. Eine Seite kann weniger Zeilen enthalten.
+Diese Routen akzeptieren weder `page` noch `page_number`.
+
+| Route | Standard für `limit` | Maximum für `limit` |
+| --- | ---: | ---: |
+| Logs, Log-Attribute, Issues, Aktionen, Metriken, Releases und Trace-Suche | 100 | 500 |
+| Issue-Vorkommen | 25 | 100 |
+| Bereitstellungen | 50 | 100 |
+
+Auf den meisten Routen setzt LogBrew ein `limit` über dem Maximum auf das
+Maximum herab. Die Bereitstellungsliste lehnt ein `limit` außerhalb von 1 bis 100
+mit `422` ab. Die Bereitstellungsliste liefert immer ein Seitenobjekt mit
+`next_cursor`, auch ohne `pagination=cursor`.
+
+LogBrew lehnt diese Anfragen mit `422` und `validation_failed` ab:
+
+- Einen Wert für `pagination` außer `cursor`.
+- Cursor-Felder ohne `pagination=cursor`.
+- Unvollständige Cursor-Felder.
+- Einen Wert für `cursor_time`, der kein RFC3339-Zeitstempel ist.
+
+Ein Cursor markiert eine Position. Er friert die Daten nicht ein. Beginnen
+Sie mit einer neuen ersten Seite, wenn Sie eine aktuelle Ansicht brauchen.
+
+Die CLI verwendet dieselben Felder:
+
+```bash
+logbrew read logs --severity error --pagination cursor --limit 50 --json
+logbrew read logs --severity error --pagination cursor --limit 50 \
+  --cursor-time <time> --cursor-id <id> --json
+```
+
+## Leeres Ergebnis diagnostizieren
+
+Eine leere Liste bedeutet, dass keine Zeile zu allen Filtern passt. Über
+andere Signale sagt sie nichts aus. Prüfen Sie die Anfrage in dieser
+Reihenfolge:
+
+1. Prüfen Sie die Projekt-ID.
+2. Entfernen Sie optionale Filter einzeln.
+3. Erweitern Sie `since`, wenn das erwartete Ereignis älter ist. Entfernen
+   Sie `until`, oder verschieben Sie es nach hinten, wenn das erwartete
+   Ereignis neuer ist.
+4. Vergleichen Sie `service_name`, `release` und `environment` mit den
+   Werten, die Ihr SDK sendet.
+5. Ergänzen Sie bei Logs `status=all`, wenn eine Log-Regel das erwartete Log
+   ausblenden kann.
+6. Prüfen Sie, ob die Route jeden Filter akzeptiert.
+
+## Abgelehnte Abfrage beheben
+
+Eine abgelehnte Abfrage liefert den Standard-Fehlerumschlag. Ein unbekannter
+Schlüssel oder ein Wert mit falschem Typ liefert `422`:
+
+```json
+{
+  "error": "invalid query parameters",
+  "code": "validation_failed",
+  "next": "check query parameter names and value types, then retry",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+Häufige Korrekturen:
+
+- Ersetzen Sie eine Kurzform durch den Schlüssel aus der
+  [Filtermatrix](#filter-matrix).
+- Senden Sie jedes Cursor-Feld zum Weiterlesen, das die Route braucht.
+- Entfernen Sie Cursor-Felder aus der Anfrage für die erste Seite.
+- Verwenden Sie nur eine Projektauswahl.
+- Ersetzen Sie einen nicht unterstützten Schweregrad oder Trace-Status durch
+  einen kanonischen Wert.
+
+Fehlercodes und Behebung beschreibt [API-Fehler](/de/reference/api-errors).
+Antwort-Bodys beschreiben die
+[Antwortformate der Telemetrie-API](/de/reference/telemetry-response-shapes).
