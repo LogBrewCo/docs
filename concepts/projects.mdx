@@ -10,7 +10,7 @@ to one project, and every read command can filter by project.
 Use a separate project when telemetry needs a separate ownership or access
 boundary. For most teams, that is one app, service, or product area. A
 repository does not have to match one project. A monorepo can send several
-services to one project.
+services to one project. Use service names to tell them apart.
 
 ## <span id="project-service-environment">Project, service, environment</span>
 
@@ -44,15 +44,19 @@ project ingest key cannot sign you in.
 
     The CLI writes the ingest key to a new owner-only file. It never prints
     the key or the file path. If the result is not clear, run the exact
-    command again. The CLI reuses its pending request identity. The
-    [Quickstart](/quickstart) shows how to read the project ID from the
-    result.
+    command again. Do not change the project name or the key file. The CLI
+    reuses its pending request identity. The [Quickstart](/quickstart) shows
+    how to read the project ID from the result.
 
     For an existing project, record the setup state:
 
     ```bash
     logbrew projects setup "<project_id>" --source cli --environment production --json
     ```
+
+    To create another ingest key for an existing project, use
+    `logbrew projects keys create`. The
+    [ingest-key rotation guide](/guides/rotate-ingest-key) shows the command.
 
     `logbrew setup --create-project` only shows help. It does not create a
     project.
@@ -62,18 +66,22 @@ project ingest key cannot sign you in.
     Use names from your repository and deployment, such as `api`, `worker`,
     `web`, `ios`, or `checkout-api`. A service name is a label, not a project
     selector. The ingest key selects the project. Renaming a service does not
-    move stored events.
+    move stored events. If you cannot find an event, check the project and
+    ingest key that the application uses before you create another project.
   </Step>
 
   <Step title="Use standard environments">
     Use `production`, `staging`, `preview`, and `local`. If your deployment
-    uses other names, use them consistently.
+    uses other names, use them consistently. An environment name cannot
+    contain spaces, `/`, or a backslash.
   </Step>
 
   <Step title="Send a test event and read it">
     Configure the SDK with the project ingest key, as the
-    [SDK ingestion guide](/guides/sdk-ingestion) describes. Keep the key out
-    of source control. Send one safe event, then read it:
+    [SDK ingestion guide](/guides/sdk-ingestion) describes. Creating a project
+    does not install an SDK in your application. Keep the key out of source
+    control. Set the service, environment, and release in the application.
+    Send one safe event, then read it:
 
     ```bash
     logbrew read logs --project "<project_id>" --json
@@ -81,6 +89,10 @@ project ingest key cannot sign you in.
 
     Each signal has its own list. An empty log list does not mean that the
     project has no issues or traces.
+
+    In the dashboard, select the same project and a time range that includes
+    the test event. Make sure that the service, environment, and release
+    filters match the event.
   </Step>
 </Steps>
 
@@ -96,8 +108,8 @@ logbrew doctor --project "$LOGBREW_PROJECT_ID" --json
 ```
 
 The CLI returns a report with `status`, `checks`, and `next`. Exit code `0`
-does not show that all checks passed. Read each item in `checks`. See the
-[CLI reference](/reference/cli).
+does not show that all checks passed. Read each item in `checks`. See
+[Read a project doctor report](/reference/cli#read-a-project-doctor-report).
 
 ### Direct API response
 
@@ -117,18 +129,47 @@ RFC3339 or `null`. `last_signal` is a display-safe summary, not a raw signal.
 | `needs_telemetry` | `send_first_telemetry` | `telemetry_ingest` |
 | `ready` | `inspect_recent_telemetry` | `telemetry_reads` |
 
+The doctor checks the ingest key first. A project without an active ingest
+key is `needs_ingest_key`, whatever its setup status.
+
 `setup_status` is `created`, `setup_started`, `sdk_seen`,
 `first_telemetry_seen`, or `active`. `setup_acknowledged` is `true` only for
-the last three values.
+the last three values. `created` gives `needs_setup`. `setup_started` and
+`sdk_seen` give `needs_telemetry`. `first_telemetry_seen` and `active` give
+`ready`.
 
 | Response | Next step |
 | --- | --- |
-| `404`, `code: "not_found"` | Missing, archived, and other-account projects give the same result. Read the project ID again from `logbrew projects`. Do not try other IDs. |
+| `404`, `code: "not_found"` | A missing project, an archived project, and a project that your account cannot read give the same result. Read the project ID again from `logbrew projects`. Do not try other IDs. |
 | `405`, `code: "method_not_allowed"` | Use `GET` without a body or query parameters. |
 
 If the read still fails, [report a problem](/guides/report-a-problem). Do not
 include credentials, headers, signal bodies, customer data, local paths, or
 source code.
+
+## <span id="archive-or-delete-a-project">Archive or delete a project</span>
+
+Archive a project to remove it from the active project list:
+
+```bash
+logbrew projects archive "<project_id>" --yes --json
+```
+
+The command needs `--yes`. After archival, the project's ingest keys stop
+accepting new telemetry. The API route is `DELETE /api/projects/{project_id}`.
+It returns `204` with no body. List archived projects with
+`GET /api/projects/archived`. Restore one with
+`POST /api/projects/{project_id}/restore`, which also returns `204`.
+
+Delete a project permanently only when you are sure:
+
+```bash
+logbrew projects delete "<project_id>" --confirm "<project_id>" --json
+```
+
+Repeat the exact project ID after `--confirm`. An accepted request makes the
+project inactive at once and schedules permanent deletion. You cannot restore
+the project after that.
 
 ## <span id="rotate-an-ingest-key-without-telemetry-loss">Rotate an ingest key</span>
 

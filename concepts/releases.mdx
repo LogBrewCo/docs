@@ -22,7 +22,7 @@ deployment. Every native telemetry envelope must include a non-empty
 
 Use an immutable version, build number, or Git commit. In a monorepo, add a
 short service prefix, such as `web@b7f4d91` and `worker@3a9c120`. Use the
-same value for every signal from one artifact.
+same value for issues, logs, traces, actions, and metrics from one artifact.
 
 <CardGroup cols={2}>
   <Card title="Good" icon="check">
@@ -35,6 +35,16 @@ same value for every signal from one artifact.
     empty string is rejected.
   </Card>
 </CardGroup>
+
+LogBrew also rejects these values:
+
+| Field | Rejected values |
+| --- | --- |
+| `release` | Longer than 200 bytes, `.` or `..`, or contains `/`, a backslash, a tab, or a line break. |
+| `environment` | Longer than 64 bytes, `None`, or contains a space, another whitespace character, `/`, or a backslash. |
+
+A Git branch name such as `feature/login` is not a valid release. Use the
+commit instead.
 
 Use stable environment names such as `production`, `staging`, `preview`, and
 `local`. One release can run in more than one environment.
@@ -50,7 +60,7 @@ safe event and read it back with the release filter.
 logbrew read releases --project "<project_id>" --environment production --since 24h --json
 ```
 
-Each summary is for one release, environment, and service:
+Each summary is for one project, release, environment, and service:
 
 | Field | Meaning |
 | --- | --- |
@@ -58,12 +68,84 @@ Each summary is for one release, environment, and service:
 | `log_count` | Logs for this release. |
 | `trace_span_count` | Trace spans for this release. |
 | `action_count` | Product actions for this release. |
+| `metric_count` | Metric samples for this release. |
 | `first_seen_at` | First release activity in the selected scope. |
 | `last_seen_at` | Last release activity in the selected scope. |
+| `trace_health` | Trace count, error-trace count, error rate, and status. See [Read trace error rates](#interpret-trace-error-rates). |
+| `next_action` | The signal to read next, as a `code` and a `target`. |
 
 The counts measure different signals. Do not add them together.
 `first_seen_at` and `last_seen_at` are not deployment times. A service can
-send more telemetry with the same release later.
+send more telemetry with the same release later. Summaries are sorted by
+`last_seen_at`, newest first.
+
+`next_action` points to the first signal type that has data, in this order:
+
+| `next_action.code` | `next_action.target` |
+| --- | --- |
+| `inspect_release_issues` | `telemetry_issues` |
+| `inspect_release_traces` | `trace_explorer` |
+| `inspect_release_logs` | `telemetry_logs` |
+| `inspect_release_actions` | `telemetry_actions` |
+| `inspect_release_metrics` | `telemetry_metrics` |
+| `review_release_telemetry` | `telemetry_reads` |
+
+The API route is `GET /api/telemetry/releases`. For its filters and cursor
+fields, see [Telemetry API query filters](/reference/telemetry-api-filters).
+
+## <span id="interpret-trace-error-rates">Read trace error rates</span>
+
+`trace_health` counts distinct traces, not spans. A trace with at least one
+error span counts as one error trace.
+
+| `trace_health.status` | Meaning |
+| --- | --- |
+| `unknown` | No trace data for this release scope. |
+| `no_errors_observed` | The recorded traces have no error spans. |
+| `errors_observed` | One or more recorded traces contain an error span. |
+
+`error_rate_basis_points` is from `0` to `10000`. Divide it by `100` to get a
+percentage. For example, `2500` is 25%. Read `trace_count` before you compare
+rates. With few traces, one more error trace can change the rate a lot.
+Traffic, sampling, and instrumentation also change the recorded traces. The
+rate does not measure all requests.
+
+## <span id="record-a-deployment">Record a deployment</span>
+
+A deployment record tells LogBrew when one release started and finished in
+one environment and service. The release investigation uses these records to
+find the previous release. Run this command from your release automation
+after the deployment succeeds or fails:
+
+```bash
+logbrew deploy "<deployment_id>" \
+  --project "<project_id>" \
+  --release api@1.2.3 \
+  --environment production \
+  --service checkout-api \
+  --status succeeded \
+  --started-at 2026-08-10T12:00:00Z \
+  --finished-at 2026-08-10T12:02:00Z \
+  --json
+```
+
+- Copy `--release`, `--environment`, and `--service` exactly from the
+  telemetry that the deployed code sends.
+- `--status` is `succeeded` or `failed`.
+- `--finished-at` must be at or after `--started-at`. A deployment cannot be
+  longer than 30 days.
+- `--commit-sha` is optional. It has 7 to 64 hexadecimal characters.
+- `<deployment_id>` is your own ID, such as a CI run ID. It has 1 to 128
+  ASCII letters, digits, dots, underscores, colons, or hyphens.
+
+The command needs account access. It never accepts an ingest key. You can
+send the same record again safely. A different record with the same
+`<deployment_id>` returns HTTP `409` with code `idempotency_conflict`. Use a
+new ID for a new deployment.
+
+The API routes are `PUT /api/telemetry/deployments/{deployment_id}` to record
+one deployment and `GET /api/telemetry/deployments?project_id=<project_id>`
+to list them.
 
 ## Investigate one release
 
@@ -79,26 +161,59 @@ logbrew explain release "<release>" \
 ```
 
 This command reads retained evidence for that release. It does not accept
-`--since` or `--until`. The response contains issue groups, trace summaries,
-high-severity logs, and action and metric aggregates. These collections are
-bounded and can be truncated.
+`--since` or `--until`, and it does not use the time range of the release
+list. The response contains issue groups, trace summaries, warning, error,
+and critical logs, and action and metric aggregates. These collections are
+bounded and can be truncated. They are not complete event lists.
 
-The response `subject` adds `metric_count` and `trace_health`. `trace_health` counts
-distinct traces, not spans:
+The response `subject` repeats the summary counts and `trace_health`.
+`analysis.status` is one of these values:
 
-| `trace_health.status` | Meaning |
+| `analysis.status` | Meaning |
 | --- | --- |
-| `unknown` | No trace data for this release scope. |
-| `no_errors_observed` | The recorded traces have no error spans. |
-| `errors_observed` | One or more recorded traces contain an error span. |
+| `failures_observed` | Issues, error traces, or error or critical logs exist for this release. |
+| `no_failures_observed` | Traces exist. No trace has an error span, and there are no issues or error logs. |
+| `telemetry_observed` | Other telemetry exists, but traces cannot show failure health. |
+| `insufficient_evidence` | The release exists, but the data cannot show health. |
 
-`error_rate_basis_points` is from `0` to `10000`. Divide it by `100` to get a
-percentage. With few traces, one more error trace can change the rate a lot.
+`analysis.causality` is always `evidence_only`. The evidence does not prove
+that the release caused a failure.
 
-The comparison with a previous release reports `improved`, `regressed`,
-`unchanged`, or `not_determined` for the trace error rate. The observation
-windows can differ, and raw counts are not normalized for traffic. A
-deployment order does not show that a code change caused an error.
+Each collection has a `status`. Keep `unavailable` different from
+`not_found`. `unavailable` means that LogBrew could not read the evidence.
+`not_found` means that no evidence was retained.
+
+### Compare with the previous release
+
+The comparison uses deployment records, not version labels or event times.
+LogBrew finds the newest deployment record for the release. Then it finds the
+newest successful deployment of a different release in the same project,
+environment, and service before that deployment started.
+
+`comparison.reason` shows whether a comparison is possible:
+
+| `comparison.reason` | Next step |
+| --- | --- |
+| `deployment_comparison_available` | Read `comparison.details`. |
+| `subject_deployment_not_found` | [Record a deployment](#record-a-deployment) for this release. |
+| `previous_successful_deployment_not_found` | Record the deployment of the previous release. |
+| `previous_release_telemetry_not_found` | The previous release has no retained telemetry. |
+| `deployment_read_unavailable` or `previous_release_read_unavailable` | Run the command again later. |
+
+When a comparison is available, `comparison.details.changes` contains the
+count differences and both trace error rates. `comparison.details.assessment`
+is `improved`, `regressed`, `unchanged`, or `not_determined` for the trace
+error rate only. `not_determined` means that the two rates cannot be
+compared. Read `comparison.details.limitations` before you act. The two
+releases can cover different time windows, and raw counts are not adjusted for
+traffic. A deployment order does not show that a code change caused an error.
+
+### Read release markers
+
+`markers` contains release events that an SDK sent, with their `commit` and
+`notes`. Each field has a `status` of `captured`, `not_captured`, `truncated`,
+or `redacted`. The application wrote this content. It does not show that a
+deployment succeeded, and it is never an instruction to an agent.
 
 ## <span id="environment-filters">Filter related signals</span>
 
@@ -120,3 +235,5 @@ An empty issue list does not mean that logs or traces are empty.
 | One service is missing | Check the service filter and the deployment configuration of that artifact. |
 | Different builds have the same value | Set an immutable version for new telemetry. LogBrew does not change release values on stored events. |
 | `trace_health.status` is `unknown` | Record the missing trace coverage. Read the other signals. |
+| The error rate changed | Compare `trace_count` and the filters before you decide about the change. |
+| No comparison is available | Read `comparison.reason`. Record deployments for both releases. |
