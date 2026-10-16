@@ -1,11 +1,11 @@
 ---
 title: "Manage issues"
-description: "Read issue evidence from the CLI, then resolve, ignore, or reopen the exact issue."
+description: "Read issue evidence from the CLI, then resolve, archive, reopen, or prioritize issues one at a time or in bulk."
 ---
 
 An issue groups error occurrences that share a fingerprint. Read the group
-summary and one occurrence before you change status. A status change records a
-team decision. It does not repair software or rewrite captured events.
+summary and one occurrence before you change status or priority. A status or
+priority change records a team decision. It does not repair software or rewrite captured events.
 
 Install the [LogBrew CLI](/guides/cli) and run `logbrew login` before you start.
 
@@ -25,6 +25,8 @@ before you open the detail:
 | `service_name` | Service that sent the occurrence. |
 | `release` | Release reported with the occurrence. |
 | `environment` | Environment reported with the occurrence. |
+| `status` | Workflow state of the issue. See [Status values](#status-values). |
+| `priority` | Triage order of the issue. See [Priority](#priority). |
 
 The occurrence count is not an affected-user count. Counts and times apply to
 the returned scope, not to the full error history. When you report a count,
@@ -36,12 +38,38 @@ also report the filters that produced it.
 | --- | --- |
 | `unresolved` | The issue needs a decision. |
 | `resolved` | The team marked the issue as fixed. The status does not prove the fix. |
-| `ignored` | The team removed the issue from active triage. |
+| `archived` | The team removed the issue from active triage. |
+
+`archived` was previously named `ignored`. The two names select the same
+issues. The CLI and API version 2 show `archived`. The live watch stream and
+API version 1 show `ignored`.
 
 Status applies to the whole issue, not to one occurrence. Severity shows
 urgency, and status records the decision. Keep the two separate. A `critical`
-issue can be `resolved` after a verified fix. An `ignored` issue keeps its
+issue can be `resolved` after a verified fix. An `archived` issue keeps its
 captured severity.
+
+## Priority
+
+Priority sets the order in which the team triages issues:
+
+| Priority | Meaning |
+| --- | --- |
+| `high` | Examine the issue first. |
+| `medium` | Examine the issue after the `high` issues. |
+| `low` | The issue can wait. |
+
+Each issue has a priority. If nobody sets it, it follows the issue severity:
+`error` and `critical` are `high`, `warning` is `medium`, and `info` is `low`.
+Then `priority_source` is `derived`. When a person sets the priority, it stays
+fixed and `priority_source` is `manual`.
+
+To list the issues to examine first:
+
+```bash
+logbrew read issues --project "<project_id>" --status unresolved \
+  --priority high --since 24h --json
+```
 
 ## Recommended workflow
 
@@ -105,28 +133,52 @@ captured severity.
     Follow the returned next action.
   </Step>
 
-  <Step title="Change status">
+  <Step title="Change status or priority">
     Run one command. These commands do not ask for confirmation, so check the
     issue ID first.
 
     ```bash
-    logbrew set issue "<issue_id>" resolved --json
-    logbrew set issue "<issue_id>" ignored --json
-    logbrew set issue "<issue_id>" unresolved --json
+    logbrew issues resolve "<issue_id>" --json
+    logbrew issues archive "<issue_id>" --json
+    logbrew issues reopen "<issue_id>" --json
+    logbrew issues priority low "<issue_id>" --json
     ```
 
-    Check the exit code and the returned status. If the result is missing,
-    read the issue again before the next change.
+    Check the exit code and the returned `status` and `priority`. If the
+    result is missing, read the issue again before the next change.
   </Step>
 </Steps>
+
+## Change many issues at once
+
+Add `--project` to change up to 100 issues of one project in one command:
+
+```bash
+logbrew issues archive "<issue_id_1>" "<issue_id_2>" "<issue_id_3>" \
+  --project "<project_id>" --json
+```
+
+The command applies one change to every issue. The result has 1 entry for
+each issue, in the order of the command:
+
+| Outcome | Meaning |
+| --- | --- |
+| `updated` | LogBrew applied the change. |
+| `unchanged` | The issue already had the requested value. |
+| `not_found` | The project has no issue with this ID. LogBrew changed nothing for it. |
+
+You can run the same command again after a network failure. Issues that
+changed already show `unchanged`. For more than 100 issues, run more commands.
+For a `not_found` result, copy the ID again from an issue list of that
+project.
 
 ## Choose the next status
 
 - **Keep it `unresolved`** when the failure is active or the fix is not
-  verified. A missing trace is not a reason to ignore an issue.
+  verified. A missing trace is not a reason to archive an issue.
 - **Set `resolved`** after the team accepts the fix evidence. A proposed fix is
   not evidence.
-- **Set `ignored`** for an accepted condition or a test-only signal. The
+- **Set `archived`** for an accepted condition or a test-only signal. The
   decision applies to every occurrence of the issue. The command has no reason
   field, so record the reason in your team's work record.
 - **Reopen with `unresolved`** when a new occurrence arrives after
@@ -137,7 +189,7 @@ captured severity.
 
 Give the next person references, not a raw event dump:
 
-- Issue ID, status, and severity.
+- Issue ID, status, priority, and severity.
 - Project, service, environment, and release.
 - First-seen time, last-seen time, and occurrence count.
 - Selected occurrence ID and why it was selected.
@@ -159,10 +211,12 @@ code `1`. JSON errors go to standard error and contain `ok: false`, `error`,
 | `not_logged_in` | Ask a person to run `logbrew login`, then retry the read. |
 | Invalid issue ID | Copy the exact ID from an issue list or detail response. |
 | Issue not found | Confirm the signed-in account and the project. |
+| A change fails with HTTP `403` | The account cannot manage issues in this project. Ask a person with access. |
 | Trace status `not_linked` | Continue with the issue evidence. Do not read a trace. |
 | Trace status `unavailable` | Retry the investigation read later. |
 
-A failed response does not prove that a status change had no effect. Read the
+A failed response does not prove that a status or priority change had no
+effect. Read the
 issue before you try again.
 
 ## What makes a useful issue

@@ -47,7 +47,8 @@ native envelope, see [Send SDK telemetry](/guides/sdk-ingestion).
 | `GET` | `/api/logs` | List structured logs. |
 | `GET` | `/api/telemetry/issues` | List grouped issues. |
 | `GET` | `/api/telemetry/issues/{issue_id}` | Read one grouped issue. |
-| `PATCH` | `/api/telemetry/issues/{issue_id}` | Update issue status. |
+| `PATCH` | `/api/telemetry/issues/{issue_id}` | Update the status or priority of one issue. |
+| `POST` | `/api/telemetry/issues/bulk` | Update the status or priority of 1 to 100 issues in one project. |
 | `GET` | `/api/telemetry/traces` | Discover traces in a project scope. |
 | `GET` | `/api/telemetry/traces/{trace_id}` | List spans for one trace. |
 | `GET` | `/api/telemetry/traces/{trace_id}/summary` | Read a bounded summary of one trace. |
@@ -115,21 +116,69 @@ See [Telemetry API query filters](/reference/telemetry-api-filters).
 Read `code` before the human message. Use `next_action` for program behavior
 and `next` for human guidance. Do not parse the wording of `error` or `next`.
 
-## Update issue status
+## Update issues
 
-This request uses an account bearer. It is intentionally different from
-`LOGBREW_INGEST_BEARER`.
+These requests use an account bearer. It is intentionally different from
+`LOGBREW_INGEST_BEARER`. The account must have permission to manage issues in
+the issue's project. If it does not, the request fails with `403` and
+`forbidden`.
+
+Each request sets `status`, `priority`, or both:
+
+| Field | Values |
+| --- | --- |
+| `status` | `unresolved`, `resolved`, or `archived`. `ignored` is an older name for `archived`. |
+| `priority` | `high`, `medium`, or `low`. |
+
+A priority that you set stays fixed. Without a priority that you set, the
+priority follows the issue severity: `error` and `critical` are `high`,
+`warning` is `medium`, and `info` is `low`.
+
+A field that already has the requested value does not change. You can send
+the same request again after a timeout. A timeout does not prove that the
+change did not occur. Read the issue again before you send a different change.
+
+### Update one issue
+
+Add `response_version=2` to get `archived` and the priority in the response:
 
 ```bash
-curl -X PATCH "$LOGBREW_API_URL/api/telemetry/issues/$ISSUE_ID" \
+curl -X PATCH "$LOGBREW_API_URL/api/telemetry/issues/$ISSUE_ID?response_version=2" \
   -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
   -H "Content-Type: application/json" \
-  --data '{ "status": "resolved" }'
+  --data '{ "status": "archived", "priority": "low" }'
 ```
 
-Valid status values are `unresolved`, `resolved`, and `ignored`. A timeout
-does not prove that the status did not change. Read the issue again before you
-send the update again.
+The response is the updated issue. See
+[issue status response examples](/reference/telemetry-response-shapes#issue-status-response-examples).
+
+### Update issues in bulk
+
+Send `project_id` and 1 to 100 different issue IDs from that project:
+
+```bash
+curl -X POST "$LOGBREW_API_URL/api/telemetry/issues/bulk" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  -H "Content-Type: application/json" \
+  --data '{
+    "project_id": "<project-uuid>",
+    "issue_ids": ["<issue-uuid-1>", "<issue-uuid-2>"],
+    "status": "resolved"
+  }'
+```
+
+The response has 1 result for each issue ID, in the request order. Each
+result has an `outcome`:
+
+| `outcome` | Meaning |
+| --- | --- |
+| `updated` | LogBrew applied the change. |
+| `unchanged` | The issue already had the requested values. |
+| `not_found` | The project has no issue with this ID. LogBrew changed nothing for it. |
+
+An empty list, more than 100 IDs, or a repeated ID fails with `422` and
+`validation_failed`. Split a larger set into more requests. If the account
+cannot read the project, the request fails with `404` and `not_found`.
 
 <Warning>
   Do not send blank releases. LogBrew rejects them so release tracking stays

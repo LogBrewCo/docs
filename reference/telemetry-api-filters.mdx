@@ -1,7 +1,7 @@
 ---
 title: "Telemetry API query filters"
 sidebarTitle: "Query filters"
-description: "Filter LogBrew telemetry reads by project, service, release, environment, severity, and time, and page through results with a cursor."
+description: "Filter LogBrew telemetry reads by project, service, release, environment, severity, issue status and priority, and time range, and page through results with a cursor."
 ---
 
 Each read route accepts its own query keys. Unknown keys fail closed. Friendly
@@ -25,7 +25,7 @@ curl --get "https://api.logbrew.co/api/logs" \
 Add filters in this order:
 
 1. Select the project with `project_id`.
-2. Add a time range with `since`.
+2. Add a time range with `since`, and optionally `until`.
 3. Add service, release, environment, status, or signal-specific filters.
 4. Set `limit` for a smaller page.
 5. Add cursor fields only after a cursor response returns them.
@@ -36,12 +36,13 @@ Each returned row matches every filter in the request.
 
 | Route | Query keys |
 | --- | --- |
-| `GET /api/logs` | `project_id`, `severity`, `level` (compatibility alias), `search`, `trace_id`, `service_name`, `release`, `environment`, `since`, `pagination`, `cursor_time`, `cursor_id`, `limit` |
-| `GET /api/telemetry/issues` | `project_id`, `status`, `service_name`, `release`, `environment`, `since`, `pagination`, `cursor_time`, `cursor_id`, `limit` |
-| `GET /api/telemetry/actions` | `project_id`, `name`, `distinct_id`, `service_name`, `release`, `environment`, `since`, `pagination`, `cursor_time`, `cursor_id`, `limit` |
-| `GET /api/telemetry/metrics` | `project_id`, `name`, `service_name`, `release`, `environment`, `since`, `pagination`, `cursor_time`, `cursor_id`, `limit` |
-| `GET /api/telemetry/releases` | `project_id`, `service_name`, `release`, `environment`, `since`, `pagination`, `cursor_time`, `cursor_project_id`, `cursor_release`, `cursor_environment`, `cursor_service_name`, `limit` |
-| `GET /api/telemetry/traces` | `project_id`, `service_name`, `release`, `environment`, `status`, `since`, `min_duration_ms`, `pagination`, `cursor_time`, `cursor_trace_id`, `limit` |
+| `GET /api/logs` | `project_id`, `severity`, `level` (compatibility alias), `search`, `trace_id`, `service_name`, `release`, `environment`, `since`, `until`, `pagination`, `cursor_time`, `cursor_id`, `limit` |
+| `GET /api/telemetry/issues` | `project_id`, `status`, `priority`, `service_name`, `release`, `environment`, `since`, `until`, `pagination`, `cursor_time`, `cursor_id`, `limit`, `response_version` |
+| `GET /api/telemetry/issues/{issue_id}` | `response_version` |
+| `GET /api/telemetry/actions` | `project_id`, `name`, `distinct_id`, `service_name`, `release`, `environment`, `since`, `until`, `pagination`, `cursor_time`, `cursor_id`, `limit` |
+| `GET /api/telemetry/metrics` | `project_id`, `name`, `service_name`, `release`, `environment`, `since`, `until`, `pagination`, `cursor_time`, `cursor_id`, `limit` |
+| `GET /api/telemetry/releases` | `project_id`, `service_name`, `release`, `environment`, `since`, `until`, `pagination`, `cursor_time`, `cursor_project_id`, `cursor_release`, `cursor_environment`, `cursor_service_name`, `limit` |
+| `GET /api/telemetry/traces` | `project_id`, `service_name`, `release`, `environment`, `status`, `since`, `until`, `min_duration_ms`, `pagination`, `cursor_time`, `cursor_trace_id`, `limit` |
 | `GET /api/telemetry/traces/{trace_id}` and `.../summary` | `project_id`, with optional `release` and `environment` only |
 | `GET /api/telemetry/traces/{trace_id}/investigation` | `response_version` |
 | `GET /api/telemetry/traces/{trace_id}/spans/{span_id}/investigation` | `project_id`, `release`, `environment` |
@@ -66,14 +67,51 @@ the exact values that your SDK sends.
 Some filters belong to one signal:
 
 - Logs accept `search`, `trace_id`, and `severity`.
-- Issues accept issue `status`: `unresolved`, `resolved`, or `ignored`.
+- Issues accept issue `status`: `unresolved`, `resolved`, or `archived`.
+  `ignored` is an older name for `archived` and selects the same issues.
+- Issues accept `priority`: `high`, `medium`, or `low`.
 - Actions and metrics accept `name`.
 - Actions accept `distinct_id`.
 - Traces accept trace `status` and `min_duration_ms`.
 
+## Time range
+
 `since` accepts a positive compact duration such as `24h` or `7d`, or an
 RFC3339 timestamp. A compact duration is relative to the time of each request.
+
+`until` accepts an RFC3339 timestamp only. It is an exclusive end time: a row
+at exactly `until` is not in the result. `since` is inclusive. For example,
+`since=2026-10-01T00:00:00Z` and `until=2026-10-02T00:00:00Z` select 1 full
+day. LogBrew compares times to the millisecond.
+
+`until` must be later than `since`. If it is not, or if `until` is not an
+RFC3339 timestamp, the request fails with `422` and `validation_failed`.
+
 For a multi-page read, choose one RFC3339 start time and keep it on every page.
+Keep the same `until` on every page too.
+
+This request reads error logs from 1 day:
+
+```bash
+curl --get "https://api.logbrew.co/api/logs" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "severity=error" \
+  --data-urlencode "since=2026-10-01T00:00:00Z" \
+  --data-urlencode "until=2026-10-02T00:00:00Z"
+```
+
+## Issue response version
+
+The issue list and the issue detail accept `response_version=1` or
+`response_version=2`. Version 1 is the default.
+
+- Version 1 shows the archived state as `ignored`. It does not show priority.
+- Version 2 shows the archived state as `archived`. It adds `priority` and
+  `priority_source`.
+
+Every version accepts `status=archived` and `priority`. See the
+[issue response](/reference/telemetry-response-shapes#issue-response).
 
 ## Severity filter
 
@@ -158,7 +196,8 @@ other signals. Check the request in this order:
 
 1. Confirm the project ID.
 2. Remove optional filters one at a time.
-3. Widen `since` if the expected event is older.
+3. Widen `since` if the expected event is older. Remove `until` or move it
+   later if the expected event is newer.
 4. Compare `service_name`, `release`, and `environment` with the values that
    your SDK sends.
 5. Confirm that the route accepts each filter.
