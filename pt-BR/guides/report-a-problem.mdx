@@ -1,0 +1,227 @@
+---
+title: "API de suporte: crie e acompanhe um relato"
+sidebarTitle: "Relatar um problema"
+description: "Crie um relato de suporte do LogBrew pela CLI ou pela API de suporte. Adicione diagnósticos seguros, acompanhe o status e envie mais contexto."
+---
+
+Crie um relato de suporte quando um problema precisar de acompanhamento.
+Depois, uma pessoa ou um agente de IA pode acompanhar o relato e adicionar o
+contexto solicitado. Só a conta que criou o relato e a equipe de suporte do
+LogBrew podem lê-lo.
+
+<Warning>
+  Use um token bearer de acesso à conta, como `$LOGBREW_TOKEN`. Nunca use uma
+  chave de ingestão do projeto. Remova dados privados antes de escrever o
+  título, a descrição ou os diagnósticos. A ocultação automática não substitui
+  essa revisão.
+</Warning>
+
+## Crie um relato
+
+Pela CLI, execute:
+
+```bash
+logbrew support create --category docs_confusion \
+  --title "First event is not visible" \
+  --description "Steps: send one info event, then read logs in the same project. Expected: one row. Observed: no rows." \
+  --project "<project_id>" --json
+```
+
+A CLI define `source` como `cli`. `--diagnostics` adiciona só o nome do
+binário, a versão da CLI, o sistema operacional e a arquitetura. Execute
+`logbrew support --help` para ver todas as flags.
+
+A CLI não envia uma chave de nova tentativa ao criar um relato. Se o resultado
+não estiver claro, execute `logbrew support list --json` antes de executar o
+comando de novo. Caso contrário, você pode criar um segundo relato.
+
+Pela API, envie `POST /api/support/tickets` com `source`, `category`,
+`title` e `description`. Para que uma nova tentativa seja segura, crie uma
+chave de nova tentativa uma única vez para o relato e envie essa chave no
+cabeçalho `Idempotency-Key`. Este exemplo usa valores fictícios:
+
+```bash
+LOGBREW_SUPPORT_RETRY_KEY="$(uuidgen)"
+
+curl -sS "https://api.logbrew.co/api/support/tickets" \
+  -H "Authorization: Bearer ${LOGBREW_TOKEN:?Set an account access bearer}" \
+  -H "Idempotency-Key: ${LOGBREW_SUPPORT_RETRY_KEY:?Create a retry key for this report}" \
+  -H "Content-Type: application/json" \
+  --data '{
+    "source": "docs",
+    "category": "docs_confusion",
+    "title": "First event is not visible",
+    "description": "Steps: send one info event, then read logs in the same project. Expected: one row. Observed: no rows.",
+    "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    "diagnostics": {
+      "steps": 2,
+      "expected": "one matching row",
+      "observed": "no matching rows"
+    }
+  }'
+```
+
+A chave de nova tentativa tem de 1 a 128 caracteres ASCII visíveis, sem
+espaços. Para tentar de novo, envie a mesma chave com o mesmo corpo. A resposta
+traz o mesmo relato. Use uma chave nova para um relato diferente. Um timeout
+não prova que a criação falhou. O cabeçalho `Idempotency-Key` é opcional. Sem
+ele, uma requisição repetida pode criar outro relato.
+
+Os campos opcionais são `project_id`, `environment`, `runtime`, `framework`,
+`sdk_package`, `sdk_version`, `release`, `trace_id`, `event_id` e
+`diagnostics`. Omita `project_id` quando o problema não for de um projeto
+específico. Um `project_id` precisa identificar um projeto ativo da sua conta.
+
+| Campo | Valores aceitos |
+| --- | --- |
+| `source` | `cli`, `sdk`, `website`, `docs`, `mobile` |
+| `category` | `sdk_install_failure`, `ingest_failure`, `auth_failure`, `project_setup`, `dashboard_issue`, `docs_confusion`, `cli_issue`, `mobile_issue`, `billing_question`, `other` |
+| `title` | De 1 a 160 caracteres, depois que o LogBrew remove os espaços das pontas. |
+| `description` | De 1 a 4.000 caracteres, depois que o LogBrew remove os espaços das pontas. |
+| Outros campos de texto | Até 256 caracteres cada. |
+
+Uma requisição bem-sucedida retorna HTTP `200`:
+
+```json
+{
+  "ticket_id": "sup_11111111111141118111111111111111",
+  "status": "open",
+  "created_at": "2026-10-01T09:30:00Z",
+  "next": "Support ticket created. LogBrew will review the attached diagnostics.",
+  "next_action": {
+    "code": "review_ticket",
+    "target": "support_ticket"
+  }
+}
+```
+
+Os IDs de relato começam com `sup_`. Use `next` como orientação para uma
+pessoa e `next_action` para controlar o programa.
+
+Para excluir um projeto, use as configurações do projeto ou
+`logbrew projects delete`. Não peça a exclusão de um projeto em um relato de
+suporte.
+
+## Escreva um relato útil
+
+- Descreva um só problema em cada relato.
+- Escolha a `category` mais próxima. Use `other` só quando nenhuma categoria
+  servir.
+- No `title`, cite um sintoma e uma área do produto.
+- Escreva a `description` em etapas, seguidas do resultado esperado e do
+  resultado observado.
+- Adicione IDs de projeto, versão, trace ou evento só quando eles
+  identificarem a mesma falha.
+
+Use estas chaves em `diagnostics`:
+
+| Chave | Conteúdo |
+| --- | --- |
+| `steps` | Número de etapas para reproduzir. |
+| `expected` | Resultado esperado, em poucas palavras. |
+| `observed` | Resultado observado, em poucas palavras. |
+| `command_name` | Nome do comando e do subcomando, sem argumentos. |
+| `exit_code` | Código numérico de saída do processo. |
+| `error_code` | Código de erro estável. |
+| `error_summary` | Resumo curto do erro, com os dados sensíveis ocultados. |
+| `retry_count` | Número de tentativas iguais repetidas. |
+| `last_delivery_status` | Status HTTP da última tentativa de entrega, como `401`. |
+
+`diagnostics` é um objeto JSON de até 16 KB depois da ocultação. O LogBrew
+troca um valor por `[redacted]` quando a chave dele indica uma credencial, uma
+sessão ou um endereço de e-mail. Ele também troca textos que parecem uma
+credencial, uma URL ou um caminho local. O LogBrew também encurta strings
+longas e limita o aninhamento, as chaves e os itens de listas. Não dependa
+dessa ocultação. Remova os dados privados antes de enviar a requisição.
+
+## <span id="track-the-ticket">Acompanhe o relato</span>
+
+| Comando da CLI | Rota da API | Resultado |
+| --- | --- | --- |
+| `logbrew support list` | `GET /api/support/tickets` | Lista os relatos da conta. |
+| `logbrew support show <ticket_id>` | `GET /api/support/tickets/{ticket_id}` | Lê um relato e a próxima ação dele. |
+| `logbrew support context <ticket_id>` | `GET /api/support/tickets/{ticket_id}/context` | Lê o contexto adicionado ao relato. |
+| `logbrew support reply <ticket_id>` | `POST /api/support/tickets/{ticket_id}/context` | Adiciona o contexto solicitado. |
+| `logbrew support close <ticket_id>` | `PATCH /api/support/tickets/{ticket_id}` | Define `closed`. |
+| `logbrew support reopen <ticket_id>` | `PATCH /api/support/tickets/{ticket_id}` | Define `open`. |
+
+A lista aceita `project_id`, `status`, `source`, `category`, `release` e
+`limit`. O `limit` padrão é 100, e o máximo é 500. Para paginação por cursor,
+envie `pagination=cursor`. Nas páginas seguintes, repita os mesmos filtros e
+envie `cursor_time` e `cursor_id` de `next_cursor`. O ID do cursor é um ID de
+relato `sup_`. Pare quando `next_cursor` for `null`. A CLI usa as flags
+`--project`, `--status`, `--source`, `--category`, `--release`, `--limit`,
+`--pagination`, `--cursor-time` e `--cursor-id`.
+
+Os valores de status são `open`, `routed`, `in_progress`, `waiting_on_user`,
+`resolved` e `closed`. Você só pode definir `open` ou `closed`. Um pedido
+repetido de fechamento ou de reabertura dá certo sem mudar nada, então você
+pode repetir exatamente a mesma requisição. Siga o status e o `next_action`
+retornados:
+
+| Status | `next_action.code` | Próximo passo |
+| --- | --- | --- |
+| `open`, `routed`, `in_progress` | `await_owner_update` | Aguarde uma atualização. Leia o relato de novo mais tarde. |
+| `waiting_on_user` | `provide_context` | Envie o contexto solicitado. |
+| `resolved`, `closed` | `open_new_ticket_if_needed` | Crie um relato novo se o problema voltar a acontecer. |
+
+## Adicione o contexto solicitado
+
+Responda quando o relato pedir contexto. Esse relato tem o status
+`waiting_on_user` e `next_action.code` igual a `provide_context`.
+
+```bash
+logbrew support reply sup_11111111111141118111111111111111 \
+  --context "The same project and time filters still return no logs." \
+  --retry-key "<retry_key>" --json
+```
+
+O corpo da API tem `context` e, opcionalmente, `diagnostics`. O texto de
+`context` precisa ter de 1 a 4.000 caracteres. Não coloque credenciais, URLs,
+nomes de host nem caminhos locais em `context`. A API rejeita esse texto com
+`422`. Envie uma chave de nova tentativa no cabeçalho `Idempotency-Key`. A
+rota de contexto exige esse cabeçalho. A chave tem de 1 a 128 caracteres ASCII
+visíveis, sem espaços. Use uma chave nova para cada resposta. Reutilize uma
+chave só para tentar enviar de novo a mesma resposta.
+
+A API aceita contexto enquanto o relato está `open`, `routed`, `in_progress` ou
+`waiting_on_user`. Ela aceita 1 resposta para cada estado do relato. Depois de
+uma resposta, aguarde uma mudança de status antes de enviar mais contexto. Uma
+resposta a um relato `waiting_on_user` muda o relato para `open`. Leia o
+`status` retornado em vez de supor essa mudança.
+
+Quando a resposta é aceita, a API retorna `ticket_id`, `context_id`, `status`,
+`created_at`, `next` e `next_action`. O `context_id` começa com `ctx_`. Leia
+o relato de novo antes de responder a um pedido posterior.
+
+`GET /api/support/tickets/{ticket_id}/context` retorna as 20 entradas de
+contexto mais recentes, da mais antiga para a mais nova. Cada entrada tem
+`context_id`, `context`, `diagnostics` e `created_at`. Essa lista não tem
+cursor.
+
+Uma resposta a um relato `resolved` ou `closed` retorna `422` com
+`code: "validation_failed"`. Reabra o relato só se o usuário quiser continuar
+essa solicitação de suporte. Um `next_action` não dá a um agente permissão
+para alterar o estado da conta.
+
+## Trate os erros
+
+| Status HTTP | `code` | Recuperação |
+| --- | --- | --- |
+| `401` | `unauthorized` | Envie um token bearer válido de acesso à conta. |
+| `404` | `not_found` | Liste os relatos da conta e use um ID `sup_` retornado. Se o erro for de projeto, confira `project_id` ou omita esse campo. |
+| `405` | `method_not_allowed` | Use um método da tabela em [Acompanhe o relato](#track-the-ticket). |
+| `409` | `idempotency_conflict` | A chave de nova tentativa foi usada com outra requisição. Repita a requisição original ou leia o relato e use uma chave nova. |
+| `422` | `validation_failed` | Corrija o campo indicado. Em PATCH, envie só `status: "open"` ou `status: "closed"`. |
+| `429` | `rate_limited` | Aguarde e tente novamente. |
+
+As respostas de erro têm `error`, `code`, `next` e `next_action`. Consulte
+[Erros da API](/pt-BR/reference/api-errors).
+
+## Mantenha o relato seguro
+
+Nunca envie segredos, tokens, cabeçalhos de autorização, chaves de ingestão,
+logs brutos, dados de clientes, caminhos locais, hosts nem código-fonte sem
+relação com o problema. Envie um resumo curto, com os dados sensíveis
+ocultados. Para verificações que você mesmo pode fazer, consulte
+[Solução de problemas](/pt-BR/guides/troubleshooting).
