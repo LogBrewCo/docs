@@ -1,0 +1,204 @@
+---
+title: "Log gizleme: hassas verileri loglardan uzak tutun"
+sidebarTitle: "Yakalanan verileri denetleyin"
+description: "Onaylı log alanlarını seçin. Hassas veriler için yerel bir test çalıştırın. LogBrew JavaScript, Node.js ve tarayıcı yakalama denetimlerinin sınırlarını okuyun."
+---
+
+Yakalamayı açmadan önce uygulamanızın ne göndereceğini seçin. Parolaları,
+erişim tokenlarını, form içeriklerini ve kullanıcıların özel verilerini
+olaylardan uzak tutun.
+
+Her olayı onaylı alanlardan oluşturun. Bir isteğin, yanıtın veya hata
+nesnesinin tamamını meta verilere kopyalamayın. Gizleme, hassas bir değerin
+yerine başka bir değer koyar. Filtre ise olayın tamamını dışarıda bırakır.
+Geçerli bir SDK olayı bile uygulamanızın göndermemesi gereken veriler
+içerebilir.
+
+Bu rehber şu paket sürümleri için geçerlidir:
+
+- `@logbrew/sdk` 0.1.28
+- `@logbrew/node` 0.1.12
+- `@logbrew/browser` 0.1.11
+
+Diğer çalışma ortamları için [SDK entegrasyonu](/tr/guides/sdk-ingestion)
+sayfasından ilgili paket rehberini okuyun.
+
+## Yakalanacak alanları seçin
+
+Başarısız bir ödeme için sabit bir mesaj, bir rota şablonu ve bir durum kodu
+kaydedin. Adları, e-posta adreslerini veya ödeme verilerini kaydetmeyin.
+
+| Alan | Yakalama kuralı |
+| --- | --- |
+| Mesaj | `checkout.failed` gibi sabit bir metin kullanın. Form metni veya kimlik bilgisi eklemeyin. |
+| Rota | `/orders/:id` gibi bir şablon kullanın. URL yolu, sorgu dizesi veya parça (fragment) özel değerler içerebilir. |
+| Durum | Kullanıcı girdisinden gelen bir dizeyi değil, yalnızca geçerli bir durum kodunu kabul edin. |
+| Meta veriler | Adlandırılmış alanları seçin. Bir isteğin, yanıtın veya hatanın tüm özelliklerini kopyalamayın. |
+| Özne ve oturum | Giriş tokenı veya oturum çerezi yerine onaylı telemetri tanımlayıcıları kullanın. |
+
+Kullanıcı ve oturum bağlamı için
+[Ürün olaylarını yakalama](/tr/guides/product-events#set-users-and-sessions-on-each-event)
+sayfasına bakın. Bir kimlik ad içermese bile bir kişiyi tanımlayabilir.
+
+## Alan seçimini yerelde test edin
+
+Node.js 18 veya daha yeni bir sürüm kullanın. Boş bir dizinde paketi kurun:
+
+```bash
+npm install --save-exact @logbrew/sdk@0.1.28
+```
+
+Bu test gerçek bir anahtar kullanmaz ve istek göndermez. Testi
+`safe-capture.mjs` olarak kaydedin:
+
+```js
+import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import { LogBrewClient, SdkError } from "@logbrew/sdk";
+
+try {
+  const client = LogBrewClient.create({
+    apiKey: "local-preview-only",
+    sdkName: "privacy-check",
+    sdkVersion: "0.1.28",
+    automaticDelivery: false
+  });
+
+  function recordCheckoutFailure(input) {
+    const status = input?.status;
+    if (!Number.isInteger(status) || status < 400 || status > 599) {
+      return false;
+    }
+    client.log(randomUUID(), new Date().toISOString(), {
+      message: "checkout.failed",
+      level: "error",
+      metadata: { route: "/checkout", status }
+    });
+    return true;
+  }
+
+  const excludedValue = "SYNTHETIC_PRIVATE_VALUE";
+  assert.equal(recordCheckoutFailure({
+    status: 503,
+    authorization: excludedValue,
+    body: excludedValue
+  }), true);
+  assert.equal(recordCheckoutFailure({ status: excludedValue }), false);
+
+  const preview = client.previewJson();
+  const batch = JSON.parse(preview);
+  assert.equal(batch.events.length, 1);
+  assert.equal(preview.includes(excludedValue), false);
+  assert.deepEqual(batch.events[0].attributes.metadata, {
+    route: "/checkout",
+    status: 503
+  });
+  client.purgePendingEvents();
+  console.log(JSON.stringify({
+    ok: true,
+    checked_events: 1,
+    excluded_value_found: false
+  }));
+} catch (error) {
+  console.error(JSON.stringify({
+    ok: false,
+    error: error instanceof SdkError ? error.code : "privacy_check_failed"
+  }));
+  process.exitCode = 1;
+}
+```
+
+
+Testi çalıştırın:
+
+```bash
+node safe-capture.mjs
+```
+
+Beklenen çıktı:
+
+```json
+{"ok":true,"checked_events":1,"excluded_value_found":false}
+```
+
+Başarısız bir doğrulama `"ok":false` yazdırır ve 1 koduyla çıkar. Bir SDK
+doğrulama hatası kendi SDK hata kodunu yazdırır. Gerçek veri içeren bir
+önizlemeyi yazdırmayın veya yüklemeyin.
+
+Aynı kalıbı yakalama kodunuzda kullanın ve doğrulamaları testlerinizde tutun.
+Uygulamanızın göndermemesi gereken her alan ve değer için bir kontrol ekleyin.
+Kalıp tabanlı gizleme kullanıyorsanız her kural değişikliğinden sonra
+kontrolleri yeniden çalıştırın. Bu test kuyruktaki tek bir logu kontrol eder.
+Gizlilik incelemesinin yerini tutmaz.
+
+## Hata mesajları ve yığınlar
+
+| Yakalama yolu | Davranış |
+| --- | --- |
+| `createIssueAttributesFromError` (çekirdek) | Hata metnini sorun mesajında ve `metadata.errorMessage` içinde tutar. `metadata.errorStack` alanını yalnızca `includeErrorStack: true` ile ekler. İstisna zinciri girdileri her mesajı `redacted` olarak işaretler ve metnini taşımaz. |
+| Çekirdek konsol dönüştürmesi | Hata metnini log mesajında ve meta verilerde tutabilir. |
+| `createBrowserErrorEvent` (tarayıcı) | Sabit bir hata özeti kullanır, `metadata.errorMessage` alanını kaldırır ve istisna zinciri mesajlarını gizlendi olarak işaretler. |
+
+Özel bir `options.message`, `metadata.errorMessage` alanını kaldırmaz. Yalnızca
+başlığı değil, olayın tamamını kontrol edin. Hassas değerleri daha kaynağında
+hata mesajlarının dışında tutun.
+
+## Her denetimi kendi kapsamında kullanın
+
+### JavaScript çekirdeği ve Node.js
+
+`LogBrewClient.create`, `eventFilter` kabul eder. Bir olayı kuyruğa girmeden
+dışarıda bırakmak için `false` döndürün. Başka her dönüş değeri olayı tutar.
+Filtre olayın bir kopyasını alır. Bu yüzden kopyada yaptığınız değişiklikler
+hiçbir şeyi gizlemez. Bu sürümlerde `createLogBrewNodeClient` ve
+`createLogBrewBrowserClient`, `eventFilter` uygulamaz.
+
+`droppedEvents()`, boyut veya kuyruk sınırları yüzünden düşürülen olayları
+sayar. `eventFilter` ile dışarıda bırakılan olayları saymaz.
+
+Node istemcisi Node sürümü, işletim sistemi ve mimari gibi çalışma ortamı
+bağlamını ekler. Bunu dışarıda bırakmak için `captureRuntimeContext: false`
+ayarlayın. Bu ayar uygulamanızın verdiği bağlamı kaldırmaz ve yakalamayı
+durdurmaz.
+
+### Tarayıcı
+
+Tarayıcı istemcisi varsayılan olarak genel hataları, işlenmemiş promise
+reddetmelerini ve ilk sayfa görüntülemeyi yakalar. Birini kapatmak için
+`captureGlobalErrors`, `captureUnhandledRejections` veya `capturePageViews`
+değerini `false` yapın.
+
+Sayfa görüntülemeleri yol adını (pathname) içerir. `includeQueryString`,
+`includeHash`, `includeDocumentTitle` veya `includeUserAgent` ayarlamadığınız
+sürece sorgu dizesini, parçayı, belge başlığını ve tam user agent bilgisini
+dışarıda bırakır. Yol adı özel değerler içerebiliyorsa otomatik sayfa
+görüntülemelerini kapatın. Bunun yerine güvenli bir rota adıyla kendi sayfa
+görüntüleme olayınızı gönderin.
+
+`sanitizeMetadata` yalnızca meta verileri değiştirir. Sayfa görüntüleme veya
+aksiyon adlarını değiştirmez. Sayfa görüntüleme adı `page_view /orders/1234`
+gibi somut yol adını içerir. Meta verilerdeki `routeTemplate`, Analizler'de
+gösterilen yüzeyi belirler ama adı değiştirmez. `shouldCaptureError`
+yalnızca tarayıcı sorunlarını dışarıda bırakır. Logları veya diğer sinyalleri
+filtrelemez.
+
+Tarayıcı markasını, platformu ve cihaz ailesini dışarıda bırakmak için
+`captureRuntimeContext: false` ayarlayın. Bu ayar `includeUserAgent` değerini
+denetlemez.
+
+## Gerçek yakalamadan önce
+
+Açık olan her yakalama yolunu, hata yolları ve log entegrasyonları dâhil,
+sentetik verilerle test edin.
+
+Yakalama değişiklikleri yalnızca yeni olaylara uygulanır.
+`purgePendingEvents()` boşta bekleyen yerel kuyruğu temizler. Gönderim
+sürerken başarısız olur. Sonraki yakalamayı durdurmaz ve LogBrew'ün kabul
+ettiği olayları kaldırmaz. Tarayıcıdaki `uninstall()` dinleyicileri kaldırır
+ama kuyruktaki olayları tutar. Bu yöntemler bir onay veya silme süreci
+değildir.
+
+Ardından [hızlı başlangıç](/tr/quickstart) ile tek bir sentetik olay gönderin.
+Olay görünmüyorsa [Sorun giderme](/tr/guides/troubleshooting) sayfasına
+bakın. HTTP hataları için [API hataları](/tr/reference/api-errors) sayfasına
+bakın.

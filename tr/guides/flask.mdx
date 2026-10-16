@@ -1,0 +1,352 @@
+---
+title: "LogBrew ile Flask loglama ve istisna yakalama"
+sidebarTitle: "Flask"
+description: "Flask loglamayı yapılandırın, ele alınmamış istisnaları ve istek izlerini yakalayın, her sinyalin LogBrew'e ulaştığını CLI ile doğrulayın."
+---
+
+`logbrew-flask` 0.1.5 veya daha yeni bir sürüm kullanın. Paket istek
+span'lerini ve ele alınmamış istisnaları yakalar. İsteğe bağlı loglama
+handler'ı Python loglarını istek izine bağlar. İstek süresi metrikleri de
+isteğe bağlıdır.
+
+Paket Python 3.10 veya üstünü ve Flask 3.1 veya üstünü gerektirir.
+
+<Note>
+  Uygulamada proje kapsamlı bir sunucu alım anahtarı (ingest key) kullanın.
+  CLI'a yetki veren hesap kimlik bilgisini kullanmayın.
+</Note>
+
+`<project_id>`, `<trace_id>` ve `<issue_id>` yerine LogBrew'deki kimlikleri
+yazın. Test istekleri için bir geliştirme projesi kullanın. Kabuk örnekleri
+Bash kullanır.
+
+## İlk isteği gönderin
+
+<Steps>
+  <Step title="Bir proje anahtarı oluşturun veya seçin">
+    [CLI](/tr/guides/cli) ile giriş yapın. Ardından yeni bir proje veya mevcut
+    bir proje kullanın. İki örneği birden çalıştırmayın. Yeni bir proje için
+    alım anahtarını yalnızca sahibinin okuyabildiği yeni bir dosyada
+    saklayın:
+
+    ```bash
+    install -d -m 700 "$HOME/.logbrew"
+    logbrew projects create my-flask-app \
+      --runtime flask \
+      --environment development \
+      --ingest-key-file "$HOME/.logbrew/my-flask-app.ingest" \
+      --json
+    ```
+
+    Mevcut bir proje için kimliğini `logbrew projects --json` çıktısından
+    alın. Ardından ayrı bir sunucu anahtarı oluşturun:
+
+    ```bash
+    logbrew projects keys create "<project_id>" \
+      --kind server \
+      --label "Flask server" \
+      --ingest-key-file "$HOME/.logbrew/my-flask-app.ingest" \
+      --json
+    ```
+
+    CLI alım anahtarını yalnızca sahibinin erişebildiği izinlerle saklar.
+    Anahtarı veya dosya yolunu yazdırmaz. Production'da bu yerel dosya
+    yerine dağıtım platformunuzun gizli anahtar yöneticisini kullanın.
+
+    Bir oluşturma isteğinin sonucu belirsizse aynı komutu yeniden
+    çalıştırın.
+  </Step>
+
+  <Step title="Yayınlanmış entegrasyonu kurun">
+    Uygulamanın sanal ortamını oluşturun veya etkinleştirin, ardından
+    framework paketini kurun. Paket uyumlu çekirdek SDK bağımlılığını da
+    kurar.
+
+    ```bash
+    python3 -m pip install "logbrew-flask>=0.1.5,<0.2"
+    ```
+  </Step>
+
+  <Step title="Dağıtım kimliğini yapılandırın">
+    Proje anahtarını yazdırmadan yerelde yükleyin. Her sinyalin yararlı
+    dağıtım bağlamı taşıması için kararlı bir hizmet, ortam ve sürüm
+    ayarlayın.
+
+    ```bash
+    export LOGBREW_SERVER_API_KEY="$(tr -d '\r\n' < "$HOME/.logbrew/my-flask-app.ingest")"
+    export LOGBREW_SERVICE_NAME="my-flask-app"
+    export LOGBREW_ENVIRONMENT="development"
+    export LOGBREW_RELEASE="my-flask-app@1.0.0"
+    ```
+
+    `init_logbrew()` önce açık argümanlara, sonra Flask uygulama
+    yapılandırmasına, sonra bu ortam değişkenlerine bakar. Hizmet adı
+    yapılandırılmamışsa Flask import adını kullanır.
+  </Step>
+
+  <Step title="Flask'ı bir kez başlatın">
+    Yeni bir uygulama için örneği `app.py` olarak kaydedin. Başlatıcıyı
+    Flask uygulamasını oluşturduktan sonra ekleyin. Loglama handler'ı
+    isteğe bağlıdır. Uygulama loglarının etkin istek izini ve span'ini
+    paylaşmasını sağlar.
+
+    ```python
+    import logging
+
+    from flask import Flask
+    from logbrew_flask import init_logbrew
+    from logbrew_sdk import LogBrewLoggingHandler
+
+    app = Flask(__name__)
+    logbrew = init_logbrew(app, capture_request_metrics=True)
+
+    logger = logging.getLogger("my-flask-app")
+    logger.setLevel(logging.INFO)
+    logger.addHandler(LogBrewLoggingHandler(logbrew.client))
+
+
+    @app.get("/health")
+    def health() -> dict[str, bool]:
+        logger.info("health check completed")
+        return {"ok": True}
+    ```
+
+    Tekrarlanan `init_logbrew(app)` çağrıları aynı Flask eklentisini
+    döndürür. Yinelenen istek veya istisna hook'ları kurmaz. Başlatıcı
+    loglama handler'ı eklemez. Handler'ı uygulamanın kendi logger'ına bir
+    kez ekleyin.
+  </Step>
+
+  <Step title="Bir istek çalıştırın">
+    Uygulamayı başlatın ve rotayı başka bir terminalden çağırın.
+    Uygulamanız farklı bir modül adı kullanıyorsa komuttaki `app` değerini
+    değiştirin.
+
+    ```bash
+    flask --app app run
+    ```
+
+    ```bash
+    curl -fsS http://127.0.0.1:5000/health
+    ```
+
+    Gönderim bir arka plan çalışanında yürür ve yanıtı açık tutmaz.
+  </Step>
+
+  <Step title="LogBrew'e ulaşan kanıtı doğrulayın">
+    Tam proje ve dağıtım kapsamını okuyun. Sağlık isteğinin izini ve
+    örnekteki loglama handler'ından gelen ilişkili logu arayın.
+
+    ```bash
+    logbrew read traces \
+      --project "<project_id>" \
+      --service my-flask-app \
+      --environment development \
+      --release my-flask-app@1.0.0 \
+      --since 1h \
+      --json
+
+    logbrew read logs \
+      --project "<project_id>" \
+      --service my-flask-app \
+      --environment development \
+      --release my-flask-app@1.0.0 \
+      --search "health check completed" \
+      --since 1h \
+      --json
+    ```
+
+    Dönen iz kimliğini sınırlı inceleme komutuna kopyalayın:
+
+    ```bash
+    logbrew explain trace "<trace_id>" --json
+    ```
+
+    Eşleşen bir okuma, LogBrew'ün sinyali sakladığını doğrular. Yereldeki
+    `200` yanıtı yalnızca Flask'ın isteği işlediğini kanıtlar.
+  </Step>
+</Steps>
+
+## İhtiyacınız olan sinyalleri seçin
+
+Başlatıcı, istek izleri ve ele alınmamış istisnalar açık olarak başlar.
+İstek metrikleri ve Python log iletimi ayrı seçimlerdir.
+
+| Seçenek | Varsayılan | Ne zaman kullanılır |
+| --- | --- | --- |
+| `capture_successful_requests` | `True` | Tamamlanan her istek için bir span istiyorsanız. Bu seçenek kapalıyken de durum kodu `500` veya üstü olan bir yanıt span oluşturur. |
+| `capture_exceptions` | `True` | Flask'ın ele alınmamış olarak bildirdiği istisnalar için türü belirli bir sorun ve eşleşen bir hata span'i istiyorsanız. |
+| `capture_request_metrics` | `False` | Tamamlanan istekler için bir süre histogramı istiyorsanız. |
+| `LogBrewLoggingHandler` | Ekli değil | Seçilen Python log kayıtlarının LogBrew loglarına dönüşmesini istiyorsanız. |
+| `flush_on_response` | `False` | Arka planda gönderim için bu varsayılanı koruyun. Yalnızca yanıt yolundaki gönderimi görünür kılması gereken kontrollü bir tanılama için açın. |
+
+Varsayılanlarla başlayın. Gecikme görünümüne ihtiyacınız olduğunda istek
+metriklerini ekleyin. Loglama handler'ını yalnızca bir incelemeye yardım eden
+logger'lara ekleyin.
+
+Varsayılan olarak başlatıcı kendi HTTP taşıma katmanını yönetir. Her olayı
+kuyruğa alır ve kuyrukta bir olay olur olmaz bir arka plan çalışanı gönderimi
+başlatır. Gönderim yanıtı açık tutmaz. Taşıma hataları Flask yanıtını
+bozmaz.
+
+`flush_on_response=True`, kuyruktaki olayları bunun yerine yanıt yolunda
+gönderir. Bu seçenekle birlikte `raise_flush_errors=True` gönderim hatalarını
+yükseltir. İkisini de yalnızca kontrollü bir tanılama için kullanın.
+
+## Log içeriğini kontrol edin
+
+İhtiyacınız olan mesajların sahibi olan logger'a tek bir
+`LogBrewLoggingHandler` ekleyin. Handler, uygulamanın konsol veya dosya
+handler'larının yerini almaz. Flask'ı veya Python loglama modülünü yamalamaz.
+Aynı handler'ı iki kez eklemek logları çoğaltır. Uygulama kök logger'ı da
+kullanıyorsa ikinci bir handler eklemeden önce yayılımı kontrol edin.
+
+İstek içindeki bir log etkin izi ve span'i devralır. İstek dışındaki bir
+logun istek izi yoktur.
+
+Handler; biçimlendirilmiş mesajı, logger adını ve LogBrew düzeyini gönderir.
+Ayrıca kaynak dosya adını, modülü, fonksiyonu, satırı, iş parçacığı ve süreç
+adlarını gönderir, ancak tam kaynak yolunu göndermez. `extra={...}` içindeki
+basit değerler meta veriye dönüşür. Kullanıcıya açık bir istekten log yazmadan
+önce bu değerleri gözden geçirin.
+
+Python `DEBUG` kayıtları LogBrew'de `info` olur. `WARNING`, `warning`;
+`CRITICAL`, `critical` olur. Özgün Python düzey adı ve numarası meta veride
+kalır. Daha az kayıt göndermek için handler'a kendi düzeyini verin, örneğin
+`LogBrewLoggingHandler(logbrew.client, level=logging.WARNING)`.
+
+Konsol ve LogBrew aynı kaydı alabilir. Örneğin konsolu Flask uygulamasını
+oluşturmadan önce yapılandırın:
+
+```python
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+)
+```
+
+Konsol biçimlendirilmiş metni alır. LogBrew mesajı, düzeyi, logger'ı ve meta
+veriyi ayrı alanlar olarak saklar.
+
+`exc_info` içeren bir log kaydı istisna türünü ve mesajını içerir. İstisna
+metninin tamamı yalnızca handler'da `include_exception_text=True` olduğunda
+gönderilir. Bu, istisna mesajını hiçbir zaman göndermeyen otomatik istisna
+yakalamadan ayrıdır. Log veya istisna mesajlarına kimlik bilgisi, kişisel
+veri veya istek gövdesi koymayın.
+
+## Entegrasyonun yakaladıkları
+
+| Sinyal | Varsayılan davranış |
+| --- | --- |
+| İstek izi | Yöntem, Flask rota şablonu, durum kodu ve süreyi içeren bir sunucu span'i. |
+| İstisna sorunu | `<METHOD> <route template> failed` başlığı, ele alınmamış istisna türü, sabit `Unhandled exception` özeti, `flask.middleware` mekanizması, ele alınma durumu ve en fazla 32 temizlenmiş çerçeve. |
+| Uygulama logu | `LogBrewLoggingHandler` ile açılır; istek içindeki log etkin izi ve span'i devralır. |
+| İstek metriği | `capture_request_metrics=True` ile açılır; `Duration of one completed server request.` açıklamasıyla `http.server.duration` delta histogramını gönderir. |
+| Gelen iz | Geçerli bir W3C `traceparent` değerini yeni bir alt span ile sürdürür. |
+
+Span adları HTTP yöntemini ve eşleşen rota şablonunu kullanır. Örneğin
+`/orders/100` ve `/orders/200` aynı `GET /orders/<int:order_id>` adını
+paylaşır. Eşleşmeyen bir istek sabit `<unmatched>` etiketini kullanır.
+`traceparent` eksik veya geçersizse yeni bir iz başlar.
+
+Span meta verisi yöntemi, rota şablonunu, endpoint'i, durum kodunu ve süreyi
+içerir. Somut yolu veya sorgu dizesini içermez.
+
+0.1.6 ve sonraki sürümlerde istek span'i, Flask'ın isteği işleme sürecinin
+tamamını kapsar. İstek öncesi hook'lar, hata handler'ları ve teardown aynı istek izini
+paylaşır. Akış hâlinde gönderilen bir yanıt, gövde bittiğinde veya
+kapandığında span'ini sonlandırır.
+
+### İstisna yakalamayı test edin
+
+`4xx` veya `5xx` durum kodu istek span'inde görünür. Durum kodu tek başına
+bir istisna oluştuğunu kanıtlamaz. Bir hatayı teşhis etmeden önce hem izleri
+hem sorunları okuyun. LogBrew, Flask hata handler'larının yerini almaz ve
+yanıt durum kodunu değiştirmez.
+
+Bir geliştirme projesinde geçici bir rota ekleyin. Rotayı bir kez çağırın.
+Dağıtmadan önce kaldırın:
+
+```python
+@app.get("/logbrew-test-error")
+def handle_test_error() -> None:
+    raise RuntimeError("local capture check")
+```
+
+İstek `500` durum kodu döndürür. Yeni sorunu ve istek metriğini bulun:
+
+```bash
+logbrew read issues --project "<project_id>" --since 1h --json
+logbrew explain issue "<issue_id>" --json
+
+logbrew explain metric http.server.duration \
+  --project "<project_id>" \
+  --service my-flask-app \
+  --environment development \
+  --release my-flask-app@1.0.0 \
+  --since 1h \
+  --json
+```
+
+Sorunun hizmetini, ortamını, sürümünü, istisna türünü ve istek izini kontrol
+edin. Sorun `local capture check` metnini içermemelidir.
+
+### Giden işleri isteğe bağlayın
+
+Python SDK'sı `requests`, `urllib`, `httpx`, `aiohttp`, veritabanı, önbellek
+ve kuyruk işleri için uygulamanın kendisinin çağırdığı yardımcılar sunar. Her
+yardımcı, etkin istek izinin altında bir alt span oluşturur. SDK bu
+kütüphaneleri genel olarak yamalamaz.
+[`logbrew-flask` paketi](https://pypi.org/project/logbrew-flask/) örnekleri
+gösterir.
+
+Her yardımcıya kararlı bir işlem adı ve bir rota veya ifade şablonu verin. Bu
+adlara kayıt kimliklerini, müşteri değerlerini, SQL bağlama değerlerini veya
+mesaj yüklerini koymayın. Alt span'leri yalnızca bağımlılığın istek için
+önemli olduğu yerlere ekleyin. Her küçük çağrı için bir span, izi okumayı
+zorlaştırır. Giden HTTP yardımcıları tek bir W3C `traceparent` başlığı ekler.
+Tam URL'leri, sorgu dizelerini, gövdeleri, çerezleri veya rastgele başlıkları
+yakalamaz. Veritabanı, önbellek ve kuyruk yardımcıları bağlama değerlerini,
+sonuçları, önbellek değerlerini veya kuyruk yüklerini yakalamaz.
+
+## Gizlilik ve süreç yaşam döngüsü
+
+Otomatik Flask yakalama; somut istek yollarını, sorgu dizelerini, istek ve
+yanıt gövdelerini, çerezleri, rastgele başlıkları, ham `traceparent`
+değerlerini, baggage ve tracestate değerlerini dışarıda bırakır.
+
+Otomatik istisna yakalama `str(error)` değerini hiçbir zaman okumaz veya
+göndermez. Sabit `Unhandled exception` özetini kullanır ve istisna
+zincirindeki her mesajı gizlenmiş olarak işaretler. Çerçeveler bir dosya
+temel adı ve sınırlı bir kod kimliği içerir. Ham traceback metni, kaynak kod,
+yerel değişkenler veya mutlak yollar içermez.
+
+Uygulamayı ve LogBrew istemcisini her çalışan sürecin içinde oluşturun.
+Gunicorn'un varsayılan çalışan başına uygulama yükleme davranışı çalışır.
+Üst süreçte oluşturulmuş bir istemciyle Gunicorn `--preload` kullanmayın.
+uWSGI için `--lazy-apps` gibi çalışan başına uygulama yüklemeyi kullanın.
+Python istemcisi, süreç fork edildikten sonra yeniden kullanılmayı reddeder.
+
+`logbrew.client.shutdown()` fonksiyonunu süreç yöneticisinin çalışan başına
+kapanma hook'undan çağırın. Kuyrukta kalan olayları gönderir ve istemciyi
+kapatır. Her istekten sonra çağırmayın. Kapanmadan sonra istemci o
+çalışandan gelen yeni olayları reddeder.
+
+Bir yanıt, çalışan son kuyruk olaylarını göndermeden önce bitebilir. Bir
+dağıtım veya ölçek küçültme sırasında düzgün bir kapanış bu olaylara son bir
+gönderim şansı verir.
+
+## Kurulum sorunlarını giderin
+
+| Belirti | Kontrol | Sonraki adım |
+| --- | --- | --- |
+| `LOGBREW_SERVER_API_KEY is required` | Başlatıcı boş olmayan bir proje anahtarı almadı. | Proje kapsamlı sunucu anahtarını Flask yapılandırmasıyla, açık bir argümanla veya ortam değişkeniyle verin. |
+| Hiç iz görünmüyor | Proje, hizmet, ortam, sürüm veya zaman filtreleri eşleşmiyor. | `logbrew doctor --project "<project_id>" --json` komutunu çalıştırın, ardından kapsamlı iz okumasını tekrarlayın. |
+| İzler görünüyor ama loglar görünmüyor | İstek enstrümantasyonu bir Python loglama handler'ını otomatik olarak eklemez. | Uygulamanın kendi logger'ına tek bir `LogBrewLoggingHandler` ekleyin. |
+| İstekler çalışıyor ama kapanış sırasında son olaylar eksik | Süreç, arka plan çalışanı kalan olayları göndermeden önce kapanıyor. | `logbrew.client.shutdown()` fonksiyonunu çalışan kapanma hook'undan çağırın. |
+| Çalışan `process_ownership_error` bildiriyor | İstemci, çalışan süreç fork edilmeden önce oluşturuldu. | Uygulamayı çalışan başına yükleyin ve o süreçte yeni bir istemci oluşturun. |
+
+Hesap erişimi, anahtar ve geri okuma hataları için
+[Sorun giderme](/tr/guides/troubleshooting) sayfasına bakın. Diğer çalışma
+ortamları için [SDK entegrasyonu](/tr/guides/sdk-ingestion) sayfasına
+bakın.

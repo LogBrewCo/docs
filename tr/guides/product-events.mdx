@@ -1,0 +1,264 @@
+---
+title: "Node.js için olay takibi kurulum rehberi"
+sidebarTitle: "Ürün olaylarını yakalama"
+description: "Node.js'ten türü belli kullanıcılar ve oturumlarla sınıflandırılmış ürün olayları gönderin. Yerel bir yakalama testi çalıştırın, sonuçları CLI ile okuyun."
+---
+
+Uygulamanızdaki adlandırılmış kullanıcı aksiyonlarını kaydetmek için ürün
+olaylarını kullanın. Ödeme sayfasını açmak veya bir satın almayı tamamlamak
+buna örnektir. SDK tıklama dinleyicileri kurmaz ve form içeriklerini toplamaz.
+Her olayı kendi kodunuz kaydeder.
+
+Sayma kuralları ve rapor türleri için
+[Ürün analizleri](/tr/concepts/product-analytics) sayfasına bakın.
+
+## Testi hazırlayın
+
+Node.js 18 veya daha yeni bir uygulama ve okuyabildiğiniz bir LogBrew projesi
+kullanın. Daha önce telemetri göndermediyseniz
+[hızlı başlangıç](/tr/quickstart) ile başlayın. Bu testi müşteri
+etkinliğinden ayrı tutun.
+
+Paketleri uygulama dizinine kurun:
+
+```bash
+npm install @logbrew/sdk@0.1.28 @logbrew/node@0.1.12
+```
+
+Proje için bir sunucu alım anahtarı (ingest key) kullanın. Anahtarı kaynak
+kontrolünün dışında, `LOGBREW_SERVER_API_KEY` içinde tutun. Sunucu anahtarını
+asla bir tarayıcı paketine koymayın. Hesap erişim tokenı sonuçları okur. SDK'yı
+yapılandırmaz.
+
+## Bir olayın ne anlama geldiğine karar verin
+
+Bir ürün sorusuyla başlayın. Örneğin: Kullanıcılar ödeme sayfasını açtıktan
+sonra formu gönderiyor mu? Her olaya sabit bir ad, kesin bir tetikleyici ve
+uygulamada onu kaydeden tek bir yer verin.
+
+| Olay adı | Tetikleyici |
+| --- | --- |
+| `checkout.opened` | Uygulama ödeme sayfasını açar. Bu bir satın alma değildir. |
+| `checkout.submitted` | Uygulama gönderme aksiyonunu kabul eder. Bu başarılı bir ödeme değildir. |
+| `checkout.completed` | Uygulama tamamlanmayı onaylar. Her tıklama veya ağ yeniden denemesi için kaydetmeyin. |
+
+Olay adlarını sürümler ve diller arasında sabit tutun. Adları e-posta
+adresinden, sipariş numarasından, URL'den veya kullanıcının girdiği metinden
+oluşturmayın.
+
+Özel özellikleri az sayıda onaylı değerle kullanın. Örneğin `checkout_mode`
+değeri `guest` veya `signed_in` olabilir. Her değer için yeni bir olay adı
+eklemeyin. Form içeriklerini göndermeyin.
+
+Her iş aksiyonunu yalnızca tek bir yerde kaydedin. Tarayıcı ve sunucu aynı
+aksiyonu kaydederse toplamlar iki katına çıkar.
+
+## Doğru etkinlik türünü kullanın
+
+| Tür | Anlamı | Yakalama yolu |
+| --- | --- | --- |
+| `interaction` | Uygulamanın tanımladığı bir ürün aksiyonu. | Aşağıdaki gibi `createProductActionAttributes`. |
+| `page_view` | Tarayıcıda bir sayfa görüntüleme. | Tarayıcı SDK'sının sayfa görüntüleme yakalaması. |
+| `screen_view` | Uygulamada bir ekran görüntüleme. | Bir mobil ekran görüntüleme yardımcısı. |
+
+`createProductActionAttributes`, olay meta verilerinde
+`analyticsSchemaVersion: 1` ve `analyticsKind: "interaction"` değerlerini
+ayarlar. Rota şablonu veya ekran adı `analyticsSurface` değerini belirler.
+Somut bir URL değil, `/orders/:id` gibi bir rota şablonu kullanın.
+
+Olay adı türü belirlemez. `page_view` adlı bir etkileşim yine de bir
+etkileşimdir. Loglar, sorunlar ve span'ler ürün olayı değildir. Diğer çalışma
+ortamları için [SDK entegrasyonu](/tr/guides/sdk-ingestion) sayfasına
+bakın.
+
+## <span id="set-users-and-sessions-on-each-event">Her olayda kullanıcıyı ve oturumu ayarlayın</span>
+
+- Giriş yapmış bir kullanıcı için `context.subject` alanına
+  `kind: "user"` ile sabit bir kimlik verin.
+- Anonim bir ziyaretçi için `kind: "anonymous"` ile ayrı bir kimlik kullanın.
+- Uygulamanın oturum kimliğini `context.session.id` alanına koyun. Bu kimliği
+  oturum boyunca kullanın.
+
+Adları, e-posta adreslerini, IP adreslerini veya erişim tokenlarını asla
+kimlik olarak kullanmayın. Sabit bir kimlik bir kullanıcının aksiyonlarını
+birbirine bağlar. Veriyi anonim yapmaz.
+
+Paylaşılan bir sunucu istemcisinde varsayılan kullanıcı veya oturum
+ayarlamayın. Her olayı üreten isteğin öznesini ve oturumunu iletin. SDK bu
+kimlikleri oluşturmaz. Girişi, çıkışı veya hesap değişikliklerini de algılamaz.
+LogBrew, girişten sonra anonim bir özneyi bir kullanıcıyla birleştirmez.
+
+## Örneği yerelde çalıştırın
+
+Bu örneği `product-events.mjs` olarak kaydedin. Örnek, anonim ziyaretler,
+girişler ve iki kullanıcı üzerinden beş test aksiyonu kaydeder. İstemci
+yalnızca paylaşılan hizmet ve dağıtım bağlamını tutar. Bu testte otomatik
+gönderim kapalıdır.
+
+```js
+import { randomUUID } from "node:crypto";
+import { createProductActionAttributes, SdkError } from "@logbrew/sdk";
+import { createLogBrewNodeClient } from "@logbrew/node";
+
+try {
+  const client = createLogBrewNodeClient({
+    automaticDelivery: false,
+    context: {
+      schemaVersion: 1,
+      resource: {
+        service: { name: "analytics-check", version: "analytics@1" },
+        deployment: { environment: "development", release: "analytics@1" }
+      }
+    }
+  });
+  const startedAt = new Date().toISOString();
+  client.release(randomUUID(), startedAt, { version: "analytics@1" });
+  client.environment(randomUUID(), startedAt, { name: "development" });
+
+  function record(name, subject, sessionId) {
+    client.action(randomUUID(), new Date().toISOString(), {
+      ...createProductActionAttributes({
+        name,
+        routeTemplate: "/checkout",
+        metadata: { checkout_mode: subject.kind === "user" ? "signed_in" : "guest" }
+      }),
+      context: { schemaVersion: 1, subject, session: { id: sessionId } }
+    });
+  }
+
+  record("checkout.opened", { id: "anon_demo_a", kind: "anonymous" }, randomUUID());
+  const userSession = randomUUID();
+  record("checkout.submitted", { id: "user_demo_a", kind: "user" }, userSession);
+  record("checkout.completed", { id: "user_demo_a", kind: "user" }, userSession);
+  record("checkout.opened", { id: "anon_demo_b", kind: "anonymous" }, randomUUID());
+  record("checkout.submitted", { id: "user_demo_b", kind: "user" }, randomUUID());
+
+  if (process.argv.includes("--send")) {
+    const response = await client.shutdown();
+    console.log(JSON.stringify({
+      mode: "sent",
+      status_code: response.statusCode,
+      attempts: response.attempts
+    }));
+  } else {
+    const batch = JSON.parse(client.previewJson());
+    const actions = batch.events.filter(event => event.type === "action");
+    console.log(JSON.stringify({
+      mode: "local_preview",
+      actions: actions.length,
+      kinds: [...new Set(actions.map(event => event.attributes.metadata.analyticsKind))],
+      dropped: client.droppedEvents()
+    }));
+  }
+} catch (error) {
+  console.error(JSON.stringify({
+    ok: false,
+    error: error instanceof SdkError ? error.code : "capture_failed"
+  }));
+  process.exitCode = 1;
+}
+```
+
+Betiği `--send` olmadan çalıştırın. Bu komut istek göndermez:
+
+```bash
+LOGBREW_SERVER_API_KEY=local-preview-only node product-events.mjs
+```
+
+Beklenen çıktı:
+
+```json
+{"mode":"local_preview","actions":5,"kinds":["interaction"],"dropped":0}
+```
+
+Sürüm ve ortam işaretleri ürün aksiyonu değildir. Bu sonuç yalnızca yerel
+kuyruğu gösterir. LogBrew'ün olayları aldığını göstermez. Gerçek müşteri
+bağlamı olan bir uygulamada `previewJson()` çıktısını yazdırmayın.
+
+## Giriş ve çıkışı ele alın
+
+- Girişten önce her olayla güncel anonim özneyi gönderin.
+- Girişten sonra kullanıcının sabit kimliğini `user` türüyle gönderin.
+- Çıkışta o kullanıcının bağlamını kullanmayı bırakın. Gizlilik politikanıza
+  göre yeni bir anonim özne oluşturun.
+- Hesap değiştiğinde yeni kullanıcının kimliğini kullanın.
+
+Örnek, kimlik değiştiğinde yeni bir oturum başlatır. Kendi oturum kuralınızı
+seçin ve her olaya uygulayın. Olay bağlamı, o olay için istemcinin öznesinin
+ve oturumunun yerini alır. Olay bunlardan birini içermezse istemcideki değeri
+kullanır. Bu yüzden örnek istemcide özne veya oturum ayarlamaz. Daha sonra
+çalışan işlerde, işi başlatan kullanıcının kimliğini koruyun.
+
+## Bir kez gönderin ve sonuçları okuyun
+
+Test projesinin sunucu anahtarını işlem ortamında ayarlayın. Bu komutu bir kez
+çalıştırın:
+
+```bash
+node product-events.mjs --send
+```
+
+Her çalıştırma yeni olay kimlikleri oluşturur. Bu yüzden ikinci bir
+çalıştırma beş olay daha ekler. İşlem başarısız olursa çıktı SDK hata kodunu
+içerir. Reddedilen bir anahtar şu çıktıyı verir:
+
+```json
+{"ok":false,"error":"unauthenticated"}
+```
+
+Alım anahtarının etkin olduğundan ve test projesine ait olduğundan emin olun.
+Hesabınıza giriş yapmak bir SDK anahtarını düzeltmez. Diğer hatalar için
+[API hataları](/tr/reference/api-errors) ve
+[Sorun giderme](/tr/guides/troubleshooting) sayfalarına bakın.
+
+LogBrew toplu gönderimi kabul ettikten sonra olayları panelde bulun:
+
+1. **Analizler** sayfasını açın.
+2. **Proje** altında test projesini seçin.
+3. **Zaman aralığı** altında **24 saat** seçin.
+4. 3 olay adını **En sık olaylar** altında, `/checkout` değerini ise
+   **En sık yüzeyler** altında bulun.
+
+Projedeki diğer etkinlikler bu toplamları değiştirir. Tam hizmet, sürüm ve
+ortam kontrolü için genel bakışı giriş yapılmış [CLI](/tr/guides/cli) ile
+okuyun:
+
+```bash
+logbrew analytics overview --project "<project_id>" --since 1h \
+  --service analytics-check --release analytics@1 \
+  --environment development --json
+```
+
+Başka etkinlik olmayan bir aralıktaki tek çalıştırma için şunu bekleyin:
+
+- `/checkout` yüzeyinde, hepsi oturum bağlamı taşıyan 5 etkileşim.
+- Kullanıcılardan 3, anonim öznelerden 2 olay.
+- 2 kullanıcı, 2 anonim özne ve 4 oturum.
+
+Benzersiz kullanıcı, özne ve oturum sayıları yaklaşıktır. Olay toplamları
+seçilen aralıkta kesindir. Bu test dönüşümü veya elde tutmayı ölçmez.
+
+| Sonuç | Sonraki kontrol |
+| --- | --- |
+| Ürün etkinliği yok | Gönderim sonucunu, projeyi, zaman aralığını, hizmeti, sürümü ve ortamı kontrol edin. |
+| Etkinlik sınıflandırılmamış | `createProductActionAttributes` kullanın. Olay adı tek başına türü belirlemez. |
+| Kullanıcı sayıları farklı | Her olaydaki `context.subject` değerini kontrol edin. Anonim özneler kullanıcı olarak sayılmaz. |
+| Oturum sayıları farklı | Her olaydaki `context.session.id` değerini ve oturum kuralınızı kontrol edin. |
+| Beklenenden fazla olay | Tekrarlanan çalıştırmaları ve iki yerde kaydedilen aksiyonları kontrol edin. |
+
+## Olayları uygulamanızda test edin
+
+Yakalama çağrılarını uygulamanın işleyicilerine taşıyın. Her olayın anlamını,
+türünü ve kimlik kuralını koruyun. Önce sentetik hesaplarla test edin.
+
+| Uygulama testi | Beklenen yakalama |
+| --- | --- |
+| Ödeme sayfasını açın, formu göndermeyin | Yalnızca `checkout.opened`. |
+| Doğrulamadan geçemeyen bir form gönderin | `checkout.submitted` yok. Form içeriklerini asla göndermeyin. |
+| Bir gönderimi kabul edin, ardından ödemeyi başarısız yapın | `checkout.submitted` var, `checkout.completed` yok. |
+| Onaylanmış bir tamamlanmadan sonra bir isteği yeniden deneyin | İkinci bir `checkout.completed` yok. |
+| Çıkış yapın, ardından başka bir hesap kullanın | Sonraki olaylar yeni özneyi ve oturumu kullanır. |
+
+Yerel önizleme yakalamayı test eder. Kabul edilen bir toplu gönderim, iletimi test eder.
+İkisi de yakalama çağrısının uygulamanızda doğru noktada çalıştığını
+göstermez.

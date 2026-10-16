@@ -1,0 +1,263 @@
+---
+title: "LogBrew ile React Native loglama"
+sidebarTitle: "React Native"
+description: "React Native SDK'yı kurun, bir test logu gönderin ve logu doğru LogBrew projesinde bulun. Expo'yu güvenle yapılandırın ve gönderim hatalarını ele alın."
+---
+
+Bir React Native uygulamasından LogBrew'e log gönderin. Tek bir test loguyla
+başlayın, ardından logu doğru projede bulmak için CLI'ı kullanın. Bu rehber
+Expo kullanır. Expo'suz (bare) bir React Native uygulaması anahtarı kendi
+yapılandırmasından alır.
+
+Başlamadan önce şunlar gerekir:
+
+- Yerelde çalıştırabildiğiniz bir React Native uygulaması.
+- Bir LogBrew projesi. [Projeler](/tr/concepts/projects) sayfasına bakın.
+- Giriş yapılmış bir CLI. [CLI kurulumu](/tr/guides/cli) sayfasına bakın.
+
+## SDK'yı kurun
+
+İki paketi de uygulama dizinine kurun. Uygulamanın React ve React Native
+bağımlılıklarını koruyun:
+
+```bash
+npm install @logbrew/sdk@0.1.28 @logbrew/react-native@0.1.35
+```
+
+## Bir proje SDK anahtarı oluşturun
+
+Uygulamaya proje kapsamlı, yalnızca yazma yetkili bir SDK anahtarı verin. Expo
+her `EXPO_PUBLIC_*` değerini uygulama paketine koyar. Bu değişkene asla hesap
+veya sunucu kimlik bilgisi koymayın.
+
+CLI v0.1.32 veya daha yeni bir sürüm, var olan bir proje için anahtar
+oluşturur. Yeni proje oluşturmaz. Proje kimliğini bulun:
+
+```bash
+logbrew projects --json
+```
+
+Anahtarı oluşturun. Yalnızca sahibinin erişebildiği bir dizinde yeni bir dosya
+yolu kullanın:
+
+```bash
+install -d -m 700 "$HOME/.logbrew" &&
+logbrew projects keys create "<project_id>" \
+  --ingest-key-file "$HOME/.logbrew/my-mobile-app.ingest" \
+  --label "My mobile app" \
+  --kind sdk \
+  --json
+```
+
+Yalnızca komut başarılı olduktan sonra devam edin. Sonuç belirsizse aynı
+komutu aynı argümanlarla yeniden çalıştırın. `--abandon-retry` kullanmayın.
+
+Anahtar dosyasını kaynak kontrolünün dışında tutun. CLI'ı yetkilendiren hesap
+kimlik bilgisini kullanmayın. Yerel Expo geliştirmesi için anahtarı uygulama
+kökünde, yok sayılan bir `.env.local` dosyasına koyun:
+
+```dotenv
+EXPO_PUBLIC_LOGBREW_CLIENT_KEY=<your_project_sdk_key>
+```
+
+Aşağıdaki kurulum modülünde doğrudan
+`process.env.EXPO_PUBLIC_LOGBREW_CLIENT_KEY` başvurusunu koruyun. Değeri
+değiştirdikten sonra uygulamayı tamamen yeniden yükleyin. Derleme zamanı
+yapılandırması için
+[Expo ortam değişkenleri](https://docs.expo.dev/guides/environment-variables/)
+sayfasına bakın. Expo'suz bir React Native uygulaması ise anahtarı kendi
+yapılandırmasından alır.
+
+## İstemciyi oluşturun
+
+Bu kurulumu uygulamanın açılışta yüklediği tek bir modüle koyun. Her render'da
+yeni istemci oluşturmayın. Hizmeti, ortamı ve sürümü `context` içine koyun:
+
+```js
+import { AppState } from "react-native";
+import {
+  createAppStateListener,
+  createLogBrewReactNativeClient,
+  createReactNativeFetchTransport
+} from "@logbrew/react-native";
+
+const clientKey = process.env.EXPO_PUBLIC_LOGBREW_CLIENT_KEY;
+if (!clientKey) {
+  throw new Error("Set EXPO_PUBLIC_LOGBREW_CLIENT_KEY");
+}
+
+const client = createLogBrewReactNativeClient({
+  clientKey,
+  context: {
+    schemaVersion: 1,
+    resource: {
+      service: { name: "my-mobile-app" },
+      deployment: {
+        environment: __DEV__ ? "development" : "production",
+        release: "mobile@1.0.0"
+      }
+    }
+  },
+  transport: createReactNativeFetchTransport()
+});
+
+const stopAppStateListener = createAppStateListener(client, AppState, {
+  flushOnBackground: true
+});
+
+export async function verifyLogBrewSetup() {
+  client.log(`evt_react_native_setup_${Date.now()}`, new Date().toISOString(), {
+    level: "info",
+    message: "React Native setup check"
+  });
+
+  const receipt = await client.flush();
+  if (receipt.statusCode < 200 || receipt.statusCode >= 300) {
+    throw new Error("LogBrew did not accept the setup event");
+  }
+  return {
+    status_code: receipt.statusCode,
+    attempts: receipt.attempts,
+    batches: receipt.batches
+  };
+}
+```
+
+Fetch aktarımı, sınırlı yeniden denemeler ve bir kuyrukla otomatik gönderimi
+açar. İkinci bir flush zamanlayıcısı eklemeyin. AppState dinleyicisi, uygulama
+etkin olmaktan çıktığında veya arka plana geçtiğinde son bir flush ister.
+Uygulama kapanırken `stopAppStateListener()` çağırın.
+
+Native kuyrukta bir anahtarı yalnızca bir etkin istemci kullanabilir.
+Aynı anahtar için ikinci bir istemci `configuration_error` ile başarısız olur.
+Bu da istemciyi bir kez oluşturmanın bir başka nedenidir.
+
+## Test logunu gönderin ve bulun
+
+`verifyLogBrewSetup()` fonksiyonunu yalnızca geliştirmede kullanılan bir test
+aksiyonundan bir kez çağırın. Sonucu bekleyin ve reddedilen promise'i ele alın.
+Anahtarı veya olayların toplu gönderimini yazdırmayın.
+
+`batches` değeri 0'dan büyük olan bir `2xx` sonucu, LogBrew'ün toplu gönderimi kabul
+ettiğini gösterir. Boş bir flush 0 deneme ve 0 toplu gönderimle `204` döndürür, çünkü
+otomatik gönderim olayı daha önce göndermiş olabilir. İki durumda da kaydedilen
+logu CLI ile okuyun:
+
+```bash
+logbrew read logs --project "<project_id>" \
+  --search "React Native setup check" --since 1h --json
+```
+
+Sonuçtaki olay zamanını ve hizmeti kontrol edin. Boş bir sonuç nedeni
+göstermez. Projeyi, anahtarı ve zaman aralığını kontrol edin.
+
+`RecordingTransport.alwaysAccept()` yalnızca yerel testler içindir. Sentetik
+bir `202` döndürür ve istek göndermez.
+
+## Çevrimdışı ve yeniden başlatma sonrası gönderim
+
+Çalışan uygulamada `client.deliveryHealth().storage` değerini okuyun:
+
+- `persistent`: İstemci native kuyruğu kullanır. Bekleyen olaylar uygulama
+  yeniden başladıktan sonra tekrar yüklenir.
+- `memory`: JavaScript çalışma ortamı yeniden başladığında bekleyen olaylar
+  kaybolur.
+
+Varsayılan `persistentQueue: "auto"`, uygulama ikili dosyası LogBrew native
+modülünü içeriyorsa native kuyruğu kullanır. Expo Go ve eski ikili dosyalar
+belleği kullanır. Yalnızca JavaScript içeren bir güncelleme native modülü
+ekleyemez.
+
+Canlıdaki bir uygulamanın yeniden başlatma sonrası gönderime ihtiyacı varsa
+`persistentQueue: "required"` ayarlayın. Bu durumda native kuyruk yoksa
+istemci oluşturma `configuration_error` ile başarısız olur. Uygulamayı native
+modülle yeniden derleyin. `persistentQueue: "disabled"` ayarını yalnızca bir
+bellek kuyruğu istediğinizde kullanın.
+
+Native kuyruk en fazla 1.000 olay ve 4 MiB olay verisi tutar. Daha küçük
+istemci sınırları da geçerlidir. Native kuyruktaki olaylar yeniden başlatmadan
+sonra olay kimliklerini korur.
+
+Gönderim en az bir kez yapılır. Bu yüzden bir yeniden deneme bir olayı iki kez
+gönderebilir. Olay kimliği ve içeriği LogBrew'ün daha önce kabul ettiği bir
+olayla eşleşirse LogBrew onu yeniden saklamaz. Arka plandaki bir flush bir
+denemedir, gönderimin kanıtı değildir. Çevrimdışı yakalamayı ve uygulamanın
+yeniden başlatılmasını test edin. Ardından kaydedilen olayı projede bulun.
+
+### Gönderim durumunu okuyun
+
+`client.deliveryHealth()`, olay içeriği olmadan kuyruk ve gönderim durumunu
+döndürür. Önce şu alanları okuyun:
+
+| Alan | Anlamı |
+| --- | --- |
+| `storage` | `persistent` veya `memory`. |
+| `deliveryState` | Otomatik gönderimin güncel durumu. |
+| `lastOutcome` | Son gönderim denemesinin sonucu. |
+| `lastStatusClass` | Son yanıt durumunun sınıfı veya bir ağ hatası. |
+| `pausedReason` | `401` sonrasında `authentication`. `429` sonrasında `rate_limit`. |
+| `queueEvents` | Gönderilmeyi bekleyen olay sayısı. |
+| `acceptedEvents` | LogBrew'ün kabul ettiği olay sayısı. |
+| `droppedByReason` | İstemcinin düşürdüğü olayların nedene göre sayıları. |
+
+## Log içeriğini seçin
+
+Her mesajı kısa ve belirli tutun. Başarısız bir istek veya planlanmış bir
+yeniden deneme gibi uygulamadaki sonucu anlatın. Adları, e-posta adreslerini,
+erişim tokenlarını, form değerlerini veya istek gövdelerini eklemeyin.
+
+Olaya uyan önem düzeyini kullanın: `info`, `warning`, `error` veya `critical`.
+İlgili kayıtları bulabilmek için hizmeti, ortamı ve sürümü tutarlı tutun.
+
+`npx react-native log-ios` ve `npx react-native log-android` yerel cihaz
+loglarını gösterir. LogBrew'ü sorgulamaz.
+[React Native native kod hata ayıklama](https://reactnative.dev/docs/debugging-native-code)
+sayfasına bakın.
+
+## Başarısız bir kontrolden kurtulun
+
+Başarısız bir `flush()` bir SDK hata koduyla reddedilir. Anahtarları ve olay
+gövdelerini hata raporlarının dışında tutun.
+
+| Sonuç | Sonraki adım |
+| --- | --- |
+| İstemci anahtarı eksik | Kurulum göndermeden önce durur. Proje SDK anahtarını uygulama yapılandırmasından alın. |
+| `401`, `unauthenticated` | LogBrew anahtarı reddetti. Otomatik gönderim `pausedReason: "authentication"` ile duraklar. Yeni bir istemci oluşturmadan önce proje SDK anahtarını düzeltin veya değiştirin. Asla hesap kimlik bilgisi kullanmayın. |
+| `429`, `rate_limited` | SDK grubu tutar ve otomatik gönderimi `pausedReason: "rate_limit"` ile duraklatır. Yeniden deneme döngüsü eklemeyin. |
+| `400`, `transport_error` | LogBrew isteği reddetti. Olay alanlarını ve paket sürümlerini kontrol edin. |
+| `network_failure` | SDK'da gönderim sonucu yok. LogBrew olayı kabul etmiş olabilir. Bağlantıyı ve `deliveryHealth()` değerini kontrol edin. |
+| `5xx`, `transport_error` | SDK zaten yeniden denedi. Elle yeniden denemeden önce kaydedilen logları okuyun. |
+| Boş CLI sonucu | Projeyi, anahtarı, olay zamanını ve filtreleri kontrol edin. |
+
+Daha fazla kontrol için [Sorun giderme](/tr/guides/troubleshooting) sayfasına
+bakın.
+
+## Expo Debug ID'lerini sürüm paketlerinde koruyun
+
+Expo Metro yapılandırmasını LogBrew ile oluşturun. Böylece çalışma zamanı
+paketi, source map'iyle aynı Debug ID'yi alır:
+
+```js
+// metro.config.js
+const { getLogBrewExpoConfig } = require("@logbrew/react-native/metro");
+
+module.exports = getLogBrewExpoConfig(__dirname);
+```
+
+Uygulama React Native Worklets paket kipini kullanıyorsa bu dönüşümü LogBrew
+yardımcısından sonra uygulayın:
+
+```js
+// metro.config.js
+const { getLogBrewExpoConfig } = require("@logbrew/react-native/metro");
+const { getBundleModeMetroConfig } = require("react-native-worklets/bundleMode");
+
+module.exports = getBundleModeMetroConfig(getLogBrewExpoConfig(__dirname));
+```
+
+Yardımcı, mevcut Expo serileştirme öncesi eklentilerini korur.
+
+Expo'suz bir React Native uygulaması ise bitmiş Metro yapılandırmasını
+`withLogBrewMetroConfig()` ile sarar. Bu sarmalayıcıyı Expo ile kullanmayın.
+Kullanırsanız canlı ortam derlemesi `getLogBrewExpoConfig()` fonksiyonunu
+gösteren bir mesajla durur.

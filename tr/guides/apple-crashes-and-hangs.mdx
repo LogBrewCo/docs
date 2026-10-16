@@ -1,0 +1,390 @@
+---
+title: "Apple çökmeleri ve donmaları için iOS çökme raporlama"
+sidebarTitle: "Apple çökmeleri ve donmaları"
+description: "iOS uygulamasında çökme raporlamayı kurun, eşleşen dSYM'leri yükleyin ve sembolleştirilmiş iOS çökme loglarını LogBrew'den okuyun."
+---
+
+Bir iOS uygulamasındaki native çökmeleri ve ana iş parçacığı donmalarını
+yakalamak için bu iş akışını kullanın. Donma yakalama UIKit gerektirir. Yığın
+çerçevelerinde kaynak konumlarını görmek için eşleşen dSYM'yi yükleyin.
+
+Uygulama çöktüğünde yerel bir rapor kaydeder. Daha sonraki bir açılışta
+uygulamanız, çökme kanıtını LogBrew'e göndermek için yeniden gönderimi
+(replay) çağırır. LogBrew ham Apple raporunu göndermez.
+
+<Note>
+  LogBrew Swift 0.1.6 veya daha yeni bir sürüm kullanın. Hata ayıklama derleme
+  dosyalarını yüklemek için native LogBrew CLI 0.1.24 veya daha yeni bir sürüm
+  kullanın.
+</Note>
+
+<Warning>
+  Uygulamanın içinde proje kapsamlı alım (ingest) yapılandırması kullanın.
+  Derleme dosyası yüklemeleri ve sorun okumaları için hesap girişi kullanın.
+  Bir proje derleme dosyası anahtarı da derleme makinesinden yükleme yapabilir.
+  Uygulamaya asla hesap erişim tokenı veya derleme dosyası anahtarı koymayın.
+</Warning>
+
+## Yakalama sınırını planlayın
+
+Uygulamanızın her hata türünü ne zaman yeniden gönderebileceğini kontrol edin.
+
+| Hata | Yakalama sonucu | Gönderim zamanı |
+| --- | --- | --- |
+| Ölümcül Apple çökmesi | Ele alınmamış bir native çökme olayı | Daha sonraki bir uygulama açılışı |
+| Düzelen ana iş parçacığı donması | Ele alınmış bir donma olayı | Düzeldikten sonra yeniden gönderimde |
+| Sonlandırmayla biten donma | Ele alınmamış bir donma olayı | Daha sonraki bir uygulama açılışı |
+
+Sürüm değerini derlemeden önce ayarlayın. Bu değer uygulama sürümünü ve
+derlemeyi tanımlamalıdır. Aynı değeri SDK'da, dSYM yüklemesinde ve sorun
+filtresinde kullanın.
+
+Çökme meta verilerine kullanıcı verisi, istek gövdesi veya başlık eklemeyin.
+
+## Çökme ürününü ekleyin
+
+Önce uygulamanız için [SDK telemetrisini kurun](/tr/guides/sdk-ingestion).
+Yeniden gönderim bu `client` ve `transport` değerlerini kullanır.
+
+Herkese açık SDK'yı Swift Package Manager ile ekleyin.
+
+```swift
+.package(
+    url: "https://github.com/LogBrewCo/sdk.git",
+    from: "0.1.6"
+)
+```
+
+Telemetri göndermek için `LogBrew` ürününü ekleyin. `LogBrewCrash` ürününü
+yalnızca uygulama native çökme veya donma yakalamayı açıkça etkinleştirdiğinde
+ekleyin.
+
+Yakalama entegrasyonu iOS 15 veya daha yeni sürümleri destekler. Native ölümcül
+hata işleyicileri tüm süreci kapsadığı için uygulamaya ait tek bir yakalama
+nesnesi tutun.
+
+## Tek ve tam bir kimlik yapılandırın
+
+Çalışma zamanı kurulumunda ve derleme dosyası yüklemesinde aynı projeyi,
+sürümü, ortamı ve hizmeti kullanın. LogBrew bu değerleri türetmez veya
+değiştirmez.
+
+```swift
+import Foundation
+import LogBrew
+import LogBrewCrash
+
+let applicationSupport = try FileManager.default.url(
+    for: .applicationSupportDirectory,
+    in: .userDomainMask,
+    appropriateFor: nil,
+    create: true
+)
+
+let identity = try NativeArtifactIdentity(
+    projectId: "550e8400-e29b-41d4-a716-446655440000",
+    release: "com.example.app@1.2.3+45",
+    environment: "production",
+    service: "ios-app"
+)
+
+let watchdog: NativeHangWatchdogConfiguration? = nil
+
+let crashCapture = NativeCrashCapture(
+    configuration: try NativeCrashConfiguration(
+        storageDirectory: applicationSupport.appendingPathComponent(
+            "LogBrewCrash",
+            isDirectory: true
+        ),
+        artifactIdentity: identity,
+        hangWatchdog: watchdog
+    )
+)
+
+try crashCapture.install()
+```
+
+Kök arayüzü oluşturmadan önce yakalama nesnesini ana iş parçacığında kurun.
+Önce üst dizinini oluşturun. Depolama dizinini uygulamaya ait ve özel tutun.
+
+Yakalama nesnesi Mach istisnalarını, sinyalleri, C++ istisnalarını ve
+Objective-C istisnalarını kaydeder. Yerel rapor bellek içeriklerini, kuyruk
+adlarını veya konsol loglarını içermez.
+
+Yerel çökme raporu hassas uygulama ve cihaz ayrıntıları içerebilir. Raporu bulut
+yedeklerinin ve paylaşılan dizinlerin dışında tutun. LogBrew ham rapor yerine
+çerçeve UUID'lerini, mimarileri ve ofsetleri gönderir.
+
+`NativeCrashConfiguration` isteğe bağlı iki sınıra sahiptir:
+
+| Parametre | Varsayılan | Aralık | Etkisi |
+| --- | --- | --- | --- |
+| `maxStoredReports` | `5` | 1 ile 32 arası | Uygulamanın tuttuğu yerel rapor sayısı. |
+| `maxReplayBytes` | 4 MiB | 1 KiB ile 16 MiB arası | Yeniden gönderim, bu boyuttan büyük bir raporu atar. |
+
+Aralığın dışındaki bir değer, yapılandırmanın
+`crash_invalid_configuration` hatası fırlatmasına neden olur.
+
+## Donma yakalamayı etkinleştirin
+
+`watchdog` değeri `nil` olduğunda donma yakalama kapalıdır. Etkinleştirmek için
+`install()` çağırmadan önce yukarıdaki `watchdog` bildirimini değiştirin:
+
+```swift
+let watchdog = try NativeHangWatchdogConfiguration(
+    threshold: 2
+)
+```
+
+Eşik saniye cinsindendir ve 1 ile 30 arasındadır. Donma yakalama
+`artifactIdentity` de gerektirir. Bu değer yoksa yapılandırma
+`crash_invalid_configuration` fırlatır.
+
+Süreç boyunca tek bir `crashCapture` nesnesi tutun. İkinci bir yakalama nesnesi
+kurulamaz. Onun `install()` çağrısı `crash_capture_owned` fırlatır. Eşiği
+değiştirmek için yeni değeri sonraki uygulama açılışında kullanın.
+
+Düzelen bir donma, `crash.handled` değeri `true` olarak yeniden gönderilir.
+Süreç sonlandırıldığında hâlâ süren bir donma, `crash.handled` değeri `false`
+olarak yeniden gönderilir.
+
+İki biçim de sayısal `durationMs` meta verisini içerir. Ölümcül çökme
+çerçevelerinin kullandığı derleme dosyası kimliğini korurlar.
+
+Watchdog, uygulama etkin değilken veya hata ayıklayıcı altındayken duraklar.
+Ciddi termal baskı sırasında da yakalamayı bastırır.
+
+Kısa bir eşik, ana iş parçacığındaki normal işleri donma olarak bildirebilir.
+Eşiği yayımladığınız derleme yapılandırmasıyla test edin. Ele alınmış durum
+düzelmeyi anlatır. Sorunu çözülmüş olarak işaretlemez. Ele alınmış bir donma da
+arayüzü engellemiştir. Bu yüzden onu da inceleyin.
+
+## Açılıştan sonra yeniden gönderin
+
+Yakalama kurulduktan sonra bekleyen raporları SDK istemciniz üzerinden yeniden
+gönderin.
+
+```swift
+let replay = try crashCapture.replayPendingReports(
+    in: client,
+    transport: transport
+)
+
+print(
+    "acknowledged=\(replay.acknowledged) " +
+    "discarded=\(replay.discarded) " +
+    "pending=\(replay.pending)"
+)
+```
+
+Yeniden gönderimi uygulamanız çağırmalıdır. Donmanın düzelmesi tek başına olay
+göndermez. Aynı yöntemi düzelmeden sonra veya sonraki açılışta çağırın.
+
+Yeniden gönderim geçerli raporları en eskiden başlayarak işler ve sabit olay
+kimliklerini korur. Başarısız bir gönderim raporunu bekleyen durumda bırakır.
+Kabul edilen gönderim raporu kaldırır.
+
+Yeniden gönderim okuyamadığı raporları ve `maxReplayBytes` değerinden büyük
+raporları atar. Üç sayının hepsini kontrol edin. Bekleyen sayının sıfır olması
+tek başına gönderimi kanıtlamaz.
+
+Başarısız bir isteğin bir sonraki yeniden başlatmadan da sağ çıkması
+gerekiyorsa yeniden gönderimden önce kalıcı gönderimi etkinleştirin. Olağan ağ
+veya kimlik doğrulama kurtarması sırasında `purge()` çağırmayın.
+
+## Eşleşen dSYM'yi yükleyin
+
+Uygulamayı hata ayıklama bilgisi etkinken arşivleyin. Kullanıcıların
+çalıştırdığı derlemenin tam dSYM dosyasını saklayın.
+
+Görüntü (image) UUID'lerini inceleyin.
+
+```bash
+xcrun dwarfdump --uuid "path/to/App.app.dSYM"
+```
+
+Derleme dosyasını yüklemeden önce yerelde doğrulayın.
+
+```bash
+logbrew debug-artifacts upload "path/to/App.app.dSYM" \
+  --project "<project UUID>" \
+  --release "com.example.app@1.2.3+45" \
+  --environment "production" \
+  --service "ios-app" \
+  --expect-image-uuid "<Mach-O UUID>" \
+  --dry-run \
+  --json
+```
+
+Gereken her mimari için `--expect-image-uuid` seçeneğini tekrarlayın. Bulunan
+UUID kümesi beklenen kümeden farklıysa komut başarısız olur.
+
+Hesap erişimini kontrol edin. Ardından aynı komutu `--dry-run` olmadan
+çalıştırın.
+
+```bash
+logbrew status --json
+
+logbrew debug-artifacts upload "path/to/App.app.dSYM" \
+  --project "<project UUID>" \
+  --release "com.example.app@1.2.3+45" \
+  --environment "production" \
+  --service "ios-app" \
+  --expect-image-uuid "<Mach-O UUID>" \
+  --json
+```
+
+Yükleme komutu desteklenen Apple nesnelerini doğrular ve yüklenen her kimliği
+denetler. API meta verilerine yerel yolları veya dosya adlarını eklemez.
+
+JSON `status` değeri sonucu gösterir:
+
+| `status` | Anlamı |
+| --- | --- |
+| `validated` | Deneme çalıştırması beklenen nesneleri buldu. Hiçbir şey yüklenmedi. |
+| `verified` | Hesap erişimi her kimliği yükledi ve doğruladı. |
+| `already_present` | LogBrew'de her kimlik zaten var. |
+| `uploaded` | Bir proje derleme dosyası anahtarı dosyaları yükledi. CLI bunları doğrulayamadı. |
+
+Derleme makinesi, hesap erişimi yerine `LOGBREW_TOKEN` içindeki bir proje
+derleme dosyası anahtarıyla yükleme yapabilir. Anahtarı
+[Derleme dosyası anahtarı oluşturun](/tr/guides/source-maps#create-an-artifact-key)
+bölümündeki gibi oluşturun. Bu yükleme `uploaded` bildirir. Her kimliği daha
+sonra hesap erişimiyle doğrulayın:
+
+```bash
+logbrew debug-artifacts lookup \
+  --project "<project UUID>" \
+  --release "com.example.app@1.2.3+45" \
+  --environment "production" \
+  --service "ios-app" \
+  --image-uuid "<Mach-O UUID>" \
+  --architecture arm64 \
+  --json
+```
+
+`status: "found"` derleme dosyasını doğrular. `status: "missing"`, LogBrew'de
+o kimlik için derleme dosyası olmadığı anlamına gelir.
+
+Çözümleme kaynak dosya adını değil, görüntü UUID'sini ve derleme dosyasının tam
+kimliğini eşleştirir. Aynı kaynağın yeniden derlenmesi farklı UUID'lere sahip
+olabilir. Tüm derleme dizinini değil, tam dSYM paketini yükleyin.
+
+## LogBrew'den geri okumayı doğrulayın
+
+Sorun listesini aynı çalışma zamanı kapsamıyla filtreleyin. Bu örnek
+`unresolved` sorunları seçer. Çözülmüş veya arşivlenmiş bir sorun görünmez.
+
+```bash
+logbrew read issues \
+  --project "<project UUID>" \
+  --release "com.example.app@1.2.3+45" \
+  --environment "production" \
+  --service "ios-app" \
+  --status "unresolved" \
+  --since "24h" \
+  --json
+```
+
+Liste yanıtı gruplanmış sorunu tanımlar. LogBrew'de çerçeve çözümlemesi istemek
+için sorunun ayrıntısını okuyun.
+
+```bash
+logbrew read issue "<issue UUID>" --json
+```
+
+Eşleşen bir derleme dosyası bir `symbolication` nesnesi ekler. Bu örnek,
+çözümlenmiş bir çerçevesi olan bir sorundan seçilmiş alanları gösterir.
+Yanıtın tamamı değildir.
+
+```json
+{
+  "severity": "critical",
+  "attributes": {
+    "metadata": {
+      "crash.replayed": true
+    }
+  },
+  "symbolication": {
+    "status": "resolved",
+    "frames": [
+      {
+        "index": 0,
+        "status": "resolved",
+        "resolved": {
+          "source": "AppRuntime.swift",
+          "line": 42,
+          "column": 1,
+          "name": "terminateForCrash()"
+        }
+      }
+    ]
+  }
+}
+```
+
+## Çökme kanıtını okuyun
+
+Her çerçevenin kendi `status` değeri vardır. `symbolication.status` alanı aynı
+değerleri kullanır:
+
+| `status` | Anlamı |
+| --- | --- |
+| `resolved` | Eşleşen bir derleme dosyası çerçeveyi çözümledi. `resolved`, derleme dosyasının sağladığı kaynak, satır, sütun veya fonksiyon adını içerir. |
+| `artifact_not_found` | Olay kimliği ve görüntü UUID'siyle eşleşen yüklenmiş bir derleme dosyası yok. |
+| `source_not_resolved` | Eşleşen bir derleme dosyası var, ama bu çerçeveyi çözümlemedi. |
+| `invalid_metadata` | Olayın derleme dosyası meta verileri eksik veya tutarsız. |
+| `unavailable` | Çerçeve çözümleme okuması tamamlanamadı. |
+
+Çözümlenmemiş bir çerçeveyi notlarınızda çözümlenmemiş olarak tutun. Onu boş
+bir yığın olarak bildirmeyin.
+
+LogBrew çerçeveleri sorunu okuduğunuzda çözümler. Daha sonra yüklenen bir dSYM,
+daha önceki bir olayın çerçevelerini çözümleyebilir. Olayın yakalamadığı
+çerçeveleri ekleyemez.
+
+Bir uygulama çerçevesi kod aramasını daraltır ama nedeni kanıtlamaz. Önceki
+adımlar (breadcrumbs), istisna zinciri ve iz kanıtı için sorun incelemesini
+okuyun:
+
+```bash
+logbrew investigate issue "<issue UUID>" --json
+```
+
+Bu yanıtta `source: "symbolicated"` içeren bir çerçeve yüklenmiş bir derleme
+dosyasından gelir. `source: "captured"` içeren bir çerçeve, uygulamanın
+gönderdiği konumdur. Yanıt alanları için
+[Bir sorunu inceleyin](/tr/guides/investigate-an-issue) rehberine bakın.
+
+Her okumada proje, sürüm, ortam ve hizmet kapsamını eksiksiz koruyun. Başarısız
+bir aramayı projeler arasında genişletmeyin.
+
+## Canlı ortam kurulumunu doğrulayın
+
+Dağıtılan derlemede onaylı bir test hatası kullanın. Tetikleyici olarak asla
+bir müşteri aksiyonu kullanmayın. Her maddeyi sırayla kontrol edin ve ilk
+başarısızlıkta durun:
+
+1. Çalışma zamanı kimliği yüklenen derleme dosyasının kimliğiyle eşleşir.
+2. Daha sonraki bir açılış, sıfır atılmış ve sıfır bekleyen raporla onaylanmış
+   tek bir olayı yeniden gönderir.
+3. Kapsamlı sorun listesi test sorununu beklenen ele alınma durumuyla döndürür.
+4. Beklenen uygulama çerçevesi çözümlenir.
+5. Daha sonraki temiz bir açılış yeni bir oluşum eklemez.
+
+## Güvenle kurtarın
+
+| Sonuç | Kurtarma |
+| --- | --- |
+| Yükleme kimlik doğrulaması başarısız | `logbrew login` çalıştırın, `logbrew status --json` ile doğrulayın ve aynı yüklemeyi tekrarlayın. |
+| Yükleme UUID doğrulaması başarısız | Dağıtılan derlemenin dSYM dosyasını seçin ve deneme çalıştırmasını tekrarlayın. |
+| `artifact_not_found` | Olay kimliğini doğrulayın ve eşleşen dSYM'yi aynı kapsamla yükleyin. |
+| `source_not_resolved` | Derlemenin tam hata ayıklama bilgisini koruyun ve dağıtılan derleme ayarlarını inceleyin. |
+| `invalid_metadata` | LogBrew Swift 0.1.6 veya daha yeni bir sürüm kullandığınızı doğrulayın. Tam kimlikle yeni bir olay yakalayın. |
+| `unavailable` | Sorunu görünür tutun ve aynı kapsamlı ayrıntı okumasını daha sonra yeniden deneyin. |
+| Yeniden gönderim beklemede kalıyor | Aktarım veya kimlik doğrulama durumunu düzeltin, ardından raporu silmeden uygulamayı yeniden açın. |
+| Yeniden gönderim atılmış girdiler bildiriyor | Bunları gönderilmiş saymayın. Yakalama yapılandırmasını kontrol edin ve yeni bir onaylı test olayıyla yeniden üretin. |
+
+Genel sorun incelemesi için
+[API ile sorunu inceleyin](/tr/guides/investigate-an-issue) rehberini
+kullanın.

@@ -1,0 +1,328 @@
+---
+title: "LogBrew'de sorunları önceliklendirme ve çözme"
+sidebarTitle: "Sorunları yönetin"
+description: "LogBrew'de sorunları yönetin. Oluşum kanıtını okuyun, ardından sorunları tek tek veya toplu olarak çözün, arşivleyin, yeniden açın, önceliklendirin ya da atayın."
+---
+
+Sorun, aynı parmak izini paylaşan hata oluşumlarını gruplar. Durumu, önceliği
+veya sorumluyu değiştirmeden önce grup özetini ve bir oluşumu okuyun. Durum,
+öncelik veya sorumlu değişikliği bir ekip kararını kaydeder. Yazılımı onarmaz
+ve yakalanan olayları yeniden yazmaz.
+
+Başlamadan önce [LogBrew CLI'ı](/tr/guides/cli) kurun ve `logbrew login`
+komutunu çalıştırın.
+
+## Sorunlar ve oluşumlar
+
+Sorun listesi tam bir olay değil, bir grup özeti döndürür. Ayrıntıyı açmadan
+önce şu alanları okuyun:
+
+| Alan | Anlamı |
+| --- | --- |
+| `title` | Yakalanan hatanın başlığı. |
+| `severity` | Yakalanan önem düzeyi. |
+| `triage.effective_severity` | LogBrew'ün sorun kurallarından sonra kullandığı önem düzeyi. `severity` yakalanan değeri korur. Bir kural uygulandığında `triage.rule_applied` değeri `true` olur. |
+| `occurrence_count` | Gruptaki saklanan oluşum sayısı. |
+| `first_seen_at` | Saklanan en eski oluşumun zamanı. |
+| `last_seen_at` | Saklanan en yeni oluşumun zamanı. |
+| `project_id` | Sorunu içeren proje. |
+| `service_name` | En son oluşumun hizmeti. |
+| `release` | En son oluşumun sürümü. |
+| `environment` | En son oluşumun ortamı. |
+| `status` | Sorunun iş akışı durumu. Bkz. [Durum değerleri](#status-values). |
+| `priority` | Sorunun önceliklendirme sırası. Bkz. [Öncelik](#priority). |
+| `priority_source` | Önceliği bir kişi ayarladıysa `manual`. Öncelik önem düzeyini izliyorsa `derived`. |
+| `assignee` | Sonraki adımın sorumlusu olan hesap veya `null`. Bkz. [Sorunları atayın](#assign-issues). |
+
+Oluşum sayısı, etkilenen kullanıcı sayısı değildir. Sayılar ve zamanlar hata
+geçmişinin tamamına değil, dönen kapsama aittir. `--since` veya `--until`
+filtresi LogBrew'ün saydığı oluşumları sınırlar. Bir sayıyı bildirirken onu
+üreten filtreleri de bildirin.
+
+## <span id="status-values">Durum değerleri</span>
+
+| Durum | Anlamı |
+| --- | --- |
+| `unresolved` | Sorun bir karar bekliyor. |
+| `resolved` | Ekip sorunu düzeltildi olarak işaretledi. Durum düzeltmeyi kanıtlamaz. |
+| `archived` | Ekip sorunu etkin önceliklendirmeden çıkardı. |
+
+`archived` değerinin eski adı `ignored` idi. İki ad aynı sorunları seçer ve
+ikisi de giriş olarak kabul edilir. `logbrew read`, `logbrew issues` ve API
+sürüm 2 ile 3 `archived` gösterir. API sürüm 1 (varsayılan), canlı izleme
+akışı ve sorun inceleme yanıtı `ignored` gösterir. Panel bu durumları
+Çözülmemiş, Çözülmüş ve Arşivlendi olarak gösterir.
+
+Durum tek bir oluşuma değil, sorunun tamamına uygulanır. Önem düzeyi aciliyeti
+gösterir, durum ise kararı kaydeder. İkisini ayrı tutun. `critical` bir sorun,
+doğrulanmış bir düzeltmeden sonra `resolved` olabilir. `archived` bir sorun
+yakalanan önem düzeyini korur.
+
+LogBrew çözülmüş bir sorunu otomatik olarak yeniden açmaz. Çözümden sonra yeni
+bir oluşum gelirse inceleme `lifecycle.effective_status` değerini `regressed`
+olarak bildirir. Bir kişi sorunu yeniden açana kadar `status` değeri
+`resolved` kalır.
+
+## <span id="priority">Öncelik</span>
+
+Öncelik, ekibin sorunları hangi sırayla önceliklendireceğini belirler:
+
+| Öncelik | Anlamı |
+| --- | --- |
+| `high` | Sorunu önce inceleyin. |
+| `medium` | Sorunu `high` sorunlardan sonra inceleyin. |
+| `low` | Sorun bekleyebilir. |
+
+Her sorunun bir önceliği vardır. Kimse ayarlamazsa öncelik sorunun önem
+düzeyini izler: `error` ve `critical`, `high`; `warning`, `medium`; `info`
+ise `low` olur. Bir sorun kuralı önem düzeyini değiştirdiğinde öncelik
+`triage.effective_severity` değerini izler. Bu durumda `priority_source`
+değeri `derived` olur. Bir kişi önceliği ayarladığında öncelik sabit kalır ve
+`priority_source` değeri `manual` olur.
+
+Önce incelenecek sorunları listelemek için:
+
+```bash
+logbrew read issues --project "<project_id>" --status unresolved \
+  --priority high --since 24h --json
+```
+
+## <span id="assign-issues">Sorunları atayın</span>
+
+Sonraki adımın sorumlusunu göstermek için sorunu birine atayın. Bir sorunun 0
+veya 1 sorumlusu olur.
+
+<Steps>
+  <Step title="Kimlerin atanabileceğini bulun">
+    ```bash
+    logbrew issues assignees --project "<project_id>" --json
+    ```
+
+    Liste, projeyi okuyabilen her hesabı içerir. Her girdide `user_id`,
+    `name` ve `email` bulunur. `user_id` değerini kopyalayın. Projeyi
+    okuyamayan bir hesaba sorun atayamazsınız.
+  </Step>
+
+  <Step title="Sorunu atayın">
+    ```bash
+    logbrew issues assign "<user_id>" "<issue_id>" --json
+    ```
+
+    Sorunu kendinize atamak için kullanıcı kimliği yerine `me` kullanın.
+    Sorumluyu kaldırmak için
+    `logbrew issues unassign "<issue_id>" --json` komutunu kullanın. Bir
+    projenin en fazla 100 sorununu değiştirmek için `--project` ekleyin.
+  </Step>
+
+  <Step title="Sorunlarınızı okuyun">
+    ```bash
+    logbrew read issues --project "<project_id>" --assignee me \
+      --status unresolved --json
+    ```
+
+    Kimsenin sorumlu olmadığı sorunları bulmak için `--assignee none`
+    kullanın.
+  </Step>
+</Steps>
+
+Sorun atamak için projede sorunları yönetme izniniz olmalıdır. Aynı izinle
+durumu, önceliği, sorun ve log kurallarını da değiştirebilirsiniz. Projeyi
+okuyabilen her hesap sorumlu olabilir.
+
+Bir üye projeye erişimini kaybettiğinde o üyeye atanmış sorunlarda sorumlu
+görünmez. Bu sorunlar `--assignee none` okumalarında çıkar. Üye erişimi
+yeniden alırsa sorunlar o üyeyi yeniden gösterir. Bu arada biri sorumluyu
+değiştirdiyse veya kaldırdıysa bu olmaz.
+
+## Önerilen iş akışı
+
+<Steps>
+  <Step title="Tek bir kapsamdaki çözülmemiş sorunları listeleyin">
+    ```bash
+    logbrew read issues --project "<project_id>" --environment production \
+      --release api@1.2.3 --status unresolved --since 24h --json
+    ```
+
+    Sonraki liste okumalarında aynı filtreleri kullanın. Boş bir sonuç, bu
+    kapsamla eşleşen sorun olmadığı anlamına gelir. Projede hata olmadığını
+    kanıtlamaz. Başlığı değil, tam sorun kimliğini kopyalayın.
+  </Step>
+
+  <Step title="Sorun ayrıntısını okuyun">
+    ```bash
+    logbrew read issue "<issue_id>" --json
+    ```
+
+    Devam etmeden önce dönen projenin doğru olduğunu doğrulayın. Okumalar
+    anlık bir görüntü döndürür. Durumu değiştirmeden önce sorunu yeniden
+    okuyun.
+  </Step>
+
+  <Step title="Bir oluşumu inceleyin">
+    ```bash
+    logbrew investigate issue "<issue_id>" --occurrence recommended --json
+    ```
+
+    Ayrıntı ve inceleme okumaları liste filtrelerini kullanmaz.
+    `subject.project_id`, `event.occurred_at`, sürüm ve ortam değerlerini
+    kendi kapsamınızla karşılaştırın. Önerilen oluşum en sonuncusundan daha
+    eski olabilir. Kanıtın tamamını incelemek için
+    [Bir sorunu inceleyin](/tr/guides/investigate-an-issue) rehberini izleyin.
+  </Step>
+
+  <Step title="İz kanıtını yalnızca mevcutsa izleyin">
+    İzi yalnızca `correlations.trace.status` değeri `available` olduğunda
+    okuyun. Yanıttaki iz kimliğini kullanın. Hiçbir zaman kendiniz bir
+    kimlik uydurmayın.
+
+    ```bash
+    logbrew read trace "<trace_id>" --project "<project_id>" --json
+    logbrew read logs --trace "<trace_id>" --project "<project_id>" \
+      --since 24h --json
+    ```
+
+    İz okumasının zaman filtresi yoktur. Durum `not_linked` ise sorun
+    kanıtıyla devam edin.
+  </Step>
+
+  <Step title="Aday dağıtımı doğrulayın">
+    İncelediğiniz oluşumu temel oluşum olarak kullanın. Dağıtım kimliğini
+    dağıtım kanıtından veya sürüm sürecinizden alın.
+
+    ```bash
+    logbrew investigate issue "<issue_id>" verify \
+      --baseline-occurrence "<occurrence_id>" \
+      --candidate-deployment "<deployment_id>" \
+      --json
+    ```
+
+    Gözlem aralığında tekrarlama olmaması kalıcı bir düzeltmeyi kanıtlamaz.
+    `status` değeri `insufficient_traffic` veya `unavailable` ise sorunu
+    `unresolved` olarak tutun. Dönen sonraki adımı izleyin.
+  </Step>
+
+  <Step title="Durumu, önceliği veya sorumluyu değiştirin">
+    Tek bir komut çalıştırın. Bu komutlar onay istemez. Bu yüzden önce
+    sorun kimliğini kontrol edin.
+
+    ```bash
+    logbrew issues resolve "<issue_id>" --json
+    logbrew issues archive "<issue_id>" --json
+    logbrew issues reopen "<issue_id>" --json
+    logbrew issues priority low "<issue_id>" --json
+    logbrew issues assign me "<issue_id>" --json
+    ```
+
+    `--project` olmadan her komut 1 sorun kimliği alır. Çıkış kodunu ve
+    dönen `status`, `priority` ve `assignee` değerlerini kontrol edin. Sonuç
+    eksikse sonraki değişiklikten önce sorunu yeniden okuyun.
+
+    Eski betikler `logbrew set issue "<issue_id>" resolved` komutunu ve
+    `resolve`, `ignore` ve `reopen` kısayollarını kullanabilir. `ignore`,
+    `archived` değerini ayarlar.
+  </Step>
+</Steps>
+
+## Birçok sorunu aynı anda değiştirin
+
+Tek bir komutla bir projenin en fazla 100 sorununu değiştirmek için
+`--project` ekleyin:
+
+```bash
+logbrew issues archive "<issue_id_1>" "<issue_id_2>" "<issue_id_3>" \
+  --project "<project_id>" --json
+```
+
+Komut her soruna aynı değişikliği uygular. Her sorun kimliği yalnızca bir kez
+yer alabilir. CLI, 100'den fazla kimliği veya tekrarlanan bir kimliği istek
+göndermeden önce reddeder. Sonuçta her sorun için komuttaki sırayla 1 girdi
+bulunur:
+
+| Sonuç | Anlamı |
+| --- | --- |
+| `updated` | LogBrew değişikliği uyguladı. |
+| `unchanged` | Sorun zaten istenen değere sahipti. |
+| `not_found` | Projede bu kimlikte bir sorun yok. LogBrew bu kimlik için hiçbir şeyi değiştirmedi. |
+
+Her girdide `issue_id`, `outcome` ve `issue` bulunur. `issue`, sorunun güncel
+hâlidir; `not_found` için `null` olur. Bir ağ hatasından sonra aynı komutu
+yeniden çalıştırabilirsiniz. Zaten değişmiş sorunlar `unchanged` gösterir. 100
+sorundan fazlası için birden fazla komut çalıştırın. `not_found` sonucunda
+kimliği o projenin sorun listesinden yeniden kopyalayın. API isteği için
+[Sorunları toplu güncelleyin](/tr/reference/telemetry-api#update-issues-in-bulk)
+bölümüne bakın.
+
+## Sonraki durumu seçin
+
+- Hata hâlâ etkinse veya düzeltme doğrulanmadıysa **`unresolved` olarak
+  tutun**. Eksik bir iz, sorunu arşivlemek için bir neden değildir.
+- Ekip düzeltme kanıtını kabul ettikten sonra **`resolved` olarak ayarlayın**.
+  Önerilen bir düzeltme kanıt değildir.
+- Kabul edilmiş bir durum veya yalnızca testten gelen bir sinyal için
+  **`archived` olarak ayarlayın**. Karar sorunun her oluşumuna uygulanır.
+  Komutun gerekçe alanı yoktur. Bu yüzden gerekçeyi ekibinizin iş kaydına
+  yazın.
+- Çözümden sonra yeni bir oluşum gelirse **`unresolved` ile yeniden açın**.
+  `lifecycle.regression.first_reappeared_occurrence` bu oluşumu tanımlar.
+  Onu çözüm için kullanılan oluşumla karşılaştırın. Ayrı bir sorun
+  oluşturmayın.
+
+## İncelemeyi devredin
+
+Sonraki kişiye ham olay dökümü değil, referanslar verin:
+
+- Sorun kimliği, durum, öncelik, sorumlu ve önem düzeyi.
+- Proje, hizmet, ortam ve sürüm.
+- İlk görülme zamanı, son görülme zamanı ve oluşum sayısı.
+- Seçilen oluşum kimliği ve `occurrence_selection.reason`.
+- `fix.status`, `cause.status` ve bunların `provenance` değeri.
+- Varsa iz durumu ve iz kimliği.
+- Yeniden üretme durumu ve eksik kanıt.
+- Aday dağıtım doğrulamasının sonucu.
+- Yanıtın döndürdüğü sonraki adım.
+
+Önerilen nedenleri ve düzeltmeleri öneri olarak etiketleyin.
+
+## CLI hatalarından kurtulun
+
+Çıktıyı ayrıştırmadan önce sürecin çıkış kodunu kontrol edin. Başarılı
+olduğunda JSON standart çıktıya yazılır. Ayrıştırma hatası `2` koduyla çıkar.
+Çalışma zamanı hatası `1` koduyla çıkar. JSON hataları standart hataya
+yazılır ve `ok: false`, `error`, `message` ve `next` içerir. `next` değerini
+yönlendirme olarak gösterin. Otomatik olarak çalıştırmayın.
+
+Örneğin `logbrew issues archive "<issue_id_1>" "<issue_id_2>" --json`
+komutunda `--project` yoktur. Komut istek göndermeden `2` koduyla ve
+`invalid_issue_command` hatasıyla çıkar.
+
+API bir isteği reddettiğinde `error` değeri `api_error` olur. HTTP durumu
+için `status`, API hata kodu için `api_code` değerini okuyun.
+
+| Sonuç | Kurtarma |
+| --- | --- |
+| `not_logged_in` | Bir kişiden `logbrew login` komutunu çalıştırmasını isteyin, ardından okumayı yeniden deneyin. |
+| `invalid_issue_command` | Komutu düzeltin. 1'den fazla sorun için `--project` kullanın; en fazla 100 kimlik verin ve her kimliği bir kez yazın. |
+| Geçersiz sorun kimliği | Tam kimliği bir sorun listesinden veya ayrıntı yanıtından kopyalayın. |
+| Sorun bulunamadı | Giriş yapılmış hesabı ve projeyi doğrulayın. |
+| Bir değişiklik `status` `403` ile başarısız oluyor | Hesap bu projede sorunları yönetemiyor. Erişimi olan bir kişiden isteyin. |
+| `invalid_assignee` | `--assignee` filtresi `me`, `none` veya bir kullanıcı kimliği alır. |
+| Bir atama `status` `422` ve `api_code` `validation_failed` ile başarısız oluyor | Sorumlu projeyi okuyamıyor. `logbrew issues assignees` listesinden bir hesap seçin veya önce o üyeye projeye erişim verin. |
+| `investigation_response_invalid` | Yanıt CLI doğrulamasından geçemedi. Bir kez yeniden deneyin. Tekrarlarsa CLI'ı güncelleyin veya sorunu bildirin. Doğrulamayı atlatmayın. |
+| İz durumu `not_linked` | Sorun kanıtıyla devam edin. İz okumayın. |
+| İz durumu `unavailable` | İnceleme okumasını daha sonra yeniden deneyin. |
+| Doğrulama `insufficient_traffic` | Sorunu `unresolved` olarak tutun. Aday sürümün trafik almasını bekleyin, ardından yeniden doğrulayın. |
+
+Başarısız bir yanıt, durum, öncelik veya sorumlu değişikliğinin etkisiz
+kaldığını kanıtlamaz. Yeniden denemeden önce sorunu okuyun.
+
+## Yararlı bir sorunun özellikleri
+
+- Net bir başlık ve okunabilir bir mesaj.
+- Kararlı bir parmak izi.
+- Mevcutsa yığın çerçeveleri.
+- Sürüm, ortam ve hizmet bağlamı.
+- Oluşumla birlikte yakalandıysa iz bağlamı.
+- Tam yük dökümleri değil, küçük ve ilgili öznitelikler.
+
+Liste filtreleri ve yanıt sözleşmeleri için
+[Telemetri API'si](/tr/reference/telemetry-api) sayfasına bakın.

@@ -1,0 +1,255 @@
+---
+title: "Vite ile JavaScript source map'leri"
+sidebarTitle: "JavaScript source map'leri"
+description: "Vite derlemesinden JavaScript source map'lerini yükleyin. Kimlik bilgilerini uygulamanın dışında tutun. Küçültülmüş yığın çerçevelerini özgün kaynağa eşleyin."
+---
+
+Küçültülmüş (minified) bir JavaScript dosyası birçok kaynak satırını tek bir
+satıra koyabilir. Bu dosyadan gelen bir yığın çerçevesi, üretilmiş bir satırı
+ve sütunu gösterir. Bir
+[source map](https://ecma-international.org/publications-and-standards/standards/ecma-426/)
+(kaynak eşlemesi) bu konumu özgün dosyaya, satıra ve sütuna bağlar.
+
+Bu rehber `@logbrew/sdk` 0.1.28 içindeki Vite eklentisini kullanır. Bir Vite
+uygulamasına, derleme çıktısına erişime ve proje anahtarı oluşturma iznine
+ihtiyacınız var. Apple hata ayıklama dosyaları için
+[Apple çökmeleri ve donmaları](/tr/guides/apple-crashes-and-hangs) sayfasına
+bakın.
+
+## Derlemeyi ve olayları birlikte tutun
+
+Yükleme ve uygulamanın çalışma zamanı olayları için aynı projeyi, sürümü,
+ortamı ve hizmeti kullanın. Sürüm adları için [Sürümler](/tr/concepts/releases)
+sayfasına bakın. Bu rehber `web@1.2.3`, `staging` ve `checkout-web`
+değerlerini kullanır.
+
+Derlenen kod değiştiğinde sürümü değiştirin. Hazırlanan derlemeyi yükleyin,
+ardından aynı derlemeyi dağıtın. Yüklemeden sonra derlemeyi yeniden
+oluşturmayın ve JavaScript'ini değiştirmeyin.
+
+## Vite eklentisini ekleyin
+
+SDK'yı uygulama dizininde kurun:
+
+```bash
+npm install @logbrew/sdk@0.1.28
+```
+
+Eklentiyi `vite.config.js` dosyasına ekleyin. Diğer eklentilerinizi ve
+derleme ayarlarınızı koruyun. Proje kimliğini değiştirin:
+
+```js
+import { createLogBrewViteReleaseArtifactsPlugin } from "@logbrew/sdk/vite-release-artifacts";
+
+export default {
+  plugins: [
+    createLogBrewViteReleaseArtifactsPlugin({
+      projectId: "<project_id>",
+      release: "web@1.2.3",
+      environment: "staging",
+      service: "checkout-web",
+      minifiedPathPrefix: "https://app.example.com"
+    })
+  ]
+};
+```
+
+`minifiedPathPrefix`, derleme dizininin dağıtıldığı URL'dir. Eklenti her
+dosyanın bu dizindeki yolunu ekler. Örneğin `dist/assets/app.js`,
+`https://app.example.com/assets/app.js` olur. Derlemeyi `/web` altında
+sunuyorsanız önekte `/web` bulunsun. Öneke `/assets` eklemeyin.
+
+`upload` seçeneği olmadan eklenti LogBrew'e hiçbir şey göndermez. Ayrıca:
+
+- Siz ayarlamadıysanız `build.sourcemap` değerini `"hidden"` yapar. Bu değeri
+  `false` olarak ayarladıysanız `"hidden"` olarak değiştirin.
+- Küçültücü seçeneklerini ayarlamadıysanız fonksiyon adlarını korur. Kendi
+  seçeneklerinizi ayarladıysanız adları orada koruyun.
+
+Gizli source map'ler derleme çıktısında normal dosyalar olarak kalır. Erişim
+denetimleri yoktur. Satır içi source map kullanmayın. Eklenti JavaScript
+dosyasının içindeki bir map'i kabul etmez.
+
+## Derleyin ve yerelde kontrol edin
+
+Production derlemesini çalıştırın:
+
+```bash
+npm run build
+```
+
+Eklenti her JavaScript dosyasına ve onun source map'ine aynı Debug ID'yi
+verir. Gömülü `sourcesContent` alanını ve yerel uygulama kök yolunu kaldırır.
+`dist/logbrew-release-artifacts.json` dosyasını yazar.
+
+Manifest dosyasını açın. `validation.status` değerinin `ready` olduğundan ve
+manifestin bu derlemenin dosyalarını ve dağıtılmış URL'lerini listelediğinden
+emin olun. Gizli map'ler `sourceMappingURL comment missing` uyarısına yol
+açar. Bu uyarı beklenen bir durumdur.
+
+Özel bir yol veya paylaşmak istemediğiniz kaynak metin içeren bir map'i
+yüklemeyin. Yükleme derlenmiş JavaScript'i de içerir. Bu yüzden gizli
+bilgileri uygulama paketinin dışında tutun.
+
+Yüklemeyi yerelde kontrol edin. Bu komut istek göndermez ve anahtar
+gerektirmez:
+
+```bash
+npx --no-install logbrew-release-artifacts upload-js \
+  --build-dir dist \
+  --manifest dist/logbrew-release-artifacts.json \
+  --endpoint https://api.logbrew.co/api/release-artifacts \
+  --allow-hosted \
+  --dry-run
+```
+
+Yalnızca komut `0` koduyla çıkar ve `"status": "dry_run"` yazdırırsa devam
+edin. Bu, yerel dosyaları ve manifesti kontrol eder. Sunucuyu test etmez.
+Derlemeniz başka bir çıktı dizini kullanıyorsa iki yolu da değiştirin.
+
+Bir eşlemeyi kontrol etmek için derlenmiş uygulamayı çalıştırın ve üretilmiş
+bir yığın çerçevesini dosyası, satırı ve sütunuyla kopyalayın:
+
+```bash
+npx --no-install logbrew-release-artifacts symbolicate-js \
+  --build-dir dist \
+  --manifest dist/logbrew-release-artifacts.json \
+  --stack-frame "at checkoutTotal (https://app.example.com/assets/index-a1b2c3.js:2:780)"
+```
+
+Sonucun `"status": "resolved"` içerdiğinden emin olun. `original` nesnesi
+kaynak dosyayı, satırı ve sütunu gösterir. Bu komut yerelde çalışır ve hiçbir
+şey yüklemez.
+
+## <span id="create-an-artifact-key">Derleme dosyası anahtarı oluşturun</span>
+
+[LogBrew CLI](/tr/guides/cli) ile giriş yapın. Proje kimliğini bulun:
+
+```bash
+logbrew projects --json
+```
+
+Proje için bir derleme dosyası anahtarı oluşturun. Yalnızca sahibinin
+erişebildiği bir dizinde yeni bir dosya yolu kullanın:
+
+```bash
+install -d -m 700 "$HOME/.logbrew" &&
+logbrew projects keys create "<project_id>" \
+  --ingest-key-file "$HOME/.logbrew/checkout-web.artifact" \
+  --label "Checkout web build" \
+  --kind artifact \
+  --json
+```
+
+Yalnızca komut başarılı olduktan sonra devam edin. Sonuç belirsizse aynı
+komutu aynı argümanlarla yeniden çalıştırın. `--abandon-retry` kullanmayın.
+
+Derleme dosyası anahtarı proje kapsamlıdır ve yalnızca yazma yetkisi verir.
+Source map'leri ve hata ayıklama dosyalarını yükler. Telemetri gönderemez ve
+derleme dosyası meta verisini okuyamaz. Bunun yerine hesap kimlik bilgisi
+veya çalışma zamanı SDK anahtarı kullanmayın.
+
+Anahtarı derleme ortamınızın gizli ayarlarında
+`LOGBREW_RELEASE_ARTIFACT_TOKEN` olarak saklayın. Yazdırmayın veya commit
+etmeyin. `VITE_*` veya `EXPO_PUBLIC_*` gibi istemcinin görebildiği bir
+değişkene koymayın.
+
+Değişkeni yüklemeyi çalıştıran süreçte ayarlayın. Yardımcı araç `.env`
+dosyalarını okumaz. Vite de
+[yapılandırma değerlendirilirken](https://vite.dev/config/#using-environment-variables-in-config)
+bu dosyaları `process.env` içine yüklemez.
+
+## Hazırlanan derlemeyi yükleyin
+
+Kontrol ettiğiniz aynı dosyaları ve manifesti kullanın. Bu komut yüklemeyi
+LogBrew'e gönderir:
+
+```bash
+npx --no-install logbrew-release-artifacts upload-js \
+  --build-dir dist \
+  --manifest dist/logbrew-release-artifacts.json \
+  --endpoint https://api.logbrew.co/api/release-artifacts \
+  --allow-hosted
+```
+
+`"status": "uploaded"`, LogBrew'ün yüklemeyi kabul ettiğini gösterir. Komut
+hatayla çıkarsa durun ve aşağıdaki tabloyu kullanın.
+
+Yardımcı araç bir ağ hatasını, `408`, `429` veya `5xx` yanıtını en fazla 2
+kez yeniden dener. Her seferinde aynı hazırlanmış dosyaları gönderir. Sayıyı
+değiştirmek için `--max-retries` kullanın.
+
+Elle yükleme çalıştıktan sonra yüklemeyi Vite derlemesi sırasında da
+yapabilirsiniz. Bu seçeneği eklenti yapılandırmasına ekleyin:
+
+```js
+upload: {
+  endpoint: "https://api.logbrew.co/api/release-artifacts",
+  allowHostedUpload: true,
+  tokenEnv: "LOGBREW_RELEASE_ARTIFACT_TOKEN"
+}
+```
+
+Tek bir yükleme yöntemi kullanın. Eklenti, hazırlama veya yükleme hatasında
+derlemeyi durdurur. Yükleme yapmadan test etmek için `dryRun: true` ekleyin.
+
+Eklenti source map'leri çıktı dizininden silmez. `.map` dosyalarını veya
+manifesti herkese açık web sitesine ya da CDN'e dağıtmayın.
+
+Yakalanan bir sorundaki çerçeveyi eşlemek için `symbolicate-js` komutunu bu
+çerçeveyle aynı hazırlanmış derleme üzerinde çalıştırın.
+
+## <span id="verify-a-new-issue">Yeni bir sorunu okuyun</span>
+
+Aynı hazırlanmış derlemeyi test ortamına dağıtın. Sorun yakalama yolunuz
+üzerinden güvenli bir test hatası oluşturun. Bu test için kullanıcı girdisi,
+kimlik bilgisi veya ham yığın göndermeyin.
+
+Yeni sorunu aynı proje ve derleme bağlamıyla bulun:
+
+```bash
+logbrew read issues --project "<project_id>" \
+  --release "web@1.2.3" --environment staging \
+  --service checkout-web --since 1h --json
+```
+
+Sonuçtaki sorun kimliğini kopyalayın. Sorunun en son oluşumunu okuyun:
+
+```bash
+logbrew investigate issue "<issue_id>" --occurrence latest --json
+```
+
+Önce olay zamanını, projeyi, hizmeti, ortamı ve sürümü okuyun. Ardından
+`event.stack_frames` değerini okuyun. `source: "symbolicated"` olan bir
+çerçeve, yüklemenizden gelen özgün dosyayı, satırı ve sütunu içerir.
+`source: "captured"` olan bir çerçeve, uygulamanın gönderdiği konumu içerir.
+
+`logbrew read issue "<issue_id>" --json` bir `symbolication` nesnesi de
+döndürür. Bu nesnedeki her çerçevenin bir `status` değeri vardır:
+`resolved`, `artifact_not_found`, `source_not_resolved`, `invalid_metadata`
+veya `unavailable`. Yalnızca `resolved` bir çerçevede özgün konum bulunur.
+
+LogBrew çerçeveleri siz sorunu okurken eşler. Hatadan sonra yapılan bir
+yükleme, aynı Debug ID'ye sahip daha önceki bir olayı da eşleyebilir. Eşlenen
+bir çerçeve incelenecek kodu gösterir. Hataya neyin neden olduğunu göstermez.
+Diğer alanlar için [Bir sorunu inceleyin](/tr/guides/investigate-an-issue)
+sayfasına bakın.
+
+## Başarısız bir kontrolden sonra kurtarma
+
+| Sonuç | Sonraki adım |
+| --- | --- |
+| Manifest durumu `ready` değil | `validation.errors` değerini okuyun. Derleme ayarlarını düzeltin ve yeniden derleyin. Manifesti düzenlemeyin. |
+| Source map eksik veya satır içi olduğu için derleme duruyor | `build.sourcemap` değerini `"hidden"` veya `true` yapın. Yeniden derleyin. |
+| `auth_missing` | Yükleme sürecinde `LOGBREW_RELEASE_ARTIFACT_TOKEN` değişkenini ayarlayın. Deneme çalıştırması anahtarı test etmez. |
+| `auth_failed` (`401` veya `403`) | Aynı projenin derleme dosyası anahtarını kullanın. Çalışma zamanı veya hesap anahtarı kullanmayın. |
+| `validation_failed` (`400` veya `413`) | Hazırlanan dosyaları ve boyutlarını kontrol edin. Aynı yüklemeyi yeniden göndermeyin. |
+| Yerel hatayla `validation_failed` | `validation.errors` değerini okuyun. Derlemeden sonra bir dosya değiştiyse yeniden derleyin ve kontrol edin. |
+| `retryable_error` | Ağ hatası, `408`, `429` veya sunucu hatasından sonra tüm yeniden denemeler başarısız oldu. Aynı hazırlanmış dosyalarla daha sonra yeniden deneyin. |
+| `upload_failed` | Sunucu başka bir durum kodu döndürdü. `--endpoint` değerini kontrol edin. |
+| Çerçeve çözümlenmiyor | Debug ID'yi, dağıtılmış URL önekini ve derlemeyi kontrol edin. Başka bir derlemeden veya sürümden gelen map kullanmayın. |
+| Yeni sorun görünmüyor | Source map'leri test etmeden önce sorun yakalamayı, çalışma zamanı anahtarını ve zaman filtresini kontrol edin. |
+
+Kaynak dosyaları, anahtarları ve özel yolları destek mesajlarının dışında
+tutun. Bkz. [Sorun giderme](/tr/guides/troubleshooting) ve
+[API hataları](/tr/reference/api-errors).

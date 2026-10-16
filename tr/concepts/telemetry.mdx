@@ -1,0 +1,226 @@
+---
+title: "Uygulama telemetrisi: loglar, izler ve metrikler"
+sidebarTitle: "Telemetri"
+description: "Logları, izleri, metrikleri, sorunları ve ürün aksiyonlarını karşılaştırın. İncelemeniz için doğru LogBrew sinyalini seçin."
+---
+
+Telemetri, bir uygulamanın kendi davranışı hakkında gönderdiği yapılandırılmış
+kanıttır. Loglar bildirilen olayları kaydeder. İzler işlemleri birbirine
+bağlar. Metrikler değerleri ölçer. Sorunlar hataları gruplar. Aksiyonlar ürün
+etkinliğini kaydeder.
+
+Proje, hizmet, ortam, sürüm ve zaman alanları her sonucun kapsamını verir.
+SDK'nızın yakaladığı sinyaller için
+[SDK entegrasyonu](/tr/guides/sdk-ingestion) rehberini okuyun.
+
+## <span id="choose-the-correct-telemetry-data-type">Bir sinyal seçin</span>
+
+| Sinyal | Ne için kullanılır |
+| --- | --- |
+| Sorunlar | Tekrar eden hatalar, örneğin 18 oluşumu olan bir ödeme istisnası. |
+| Loglar | Uygulamanın bildirdiği tek bir olay, örneğin başarısız bir ödeme. |
+| İzler | Bir isteğin enstrümante edilmiş hizmetlerdeki işlemleri ve süresi. |
+| Metrikler | Zaman içinde ölçülen bir değer, örneğin istek süresi veya tamamlanan işler. |
+| Aksiyonlar | Ürün etkinliği, örneğin sayfa görüntüleme, ekran görüntüleme veya etkileşim. |
+
+Bir hata incelemesine sorunlarla veya loglarla başlayın. Tek bir yürütmeyi
+incelemek için mevcut bir izi kullanın. Daha geniş dönemi incelemek için bir
+metrik eğilimi kullanın. Etkinlik ve elde tutma için
+[Ürün analizleri](/tr/concepts/product-analytics) sayfasını okuyun.
+
+Yalnızca bir incelemenin ihtiyaç duyduğu alanları yakalayın. Kararlı hizmet,
+işlem ve metrik adları kullanın. Kimlik bilgilerini, ödeme verilerini veya ham
+istek gövdelerini göndermeyin. Gerekli kontrolleri
+[Yakalanan verileri denetleyin](/tr/guides/safe-capture) rehberi verir.
+
+## Loglar
+
+Log, uygulamanın belirli bir andaki kaydıdır. Yararlı bir log şunları
+içerir:
+
+- Olayın kaynaktaki zamanı.
+- Standart bir önem düzeyi.
+- Proje ve hizmet kapsamı.
+- Ortam ve sürüm.
+- Logun etkin iz bağlamı varsa iz ve span kimlikleri.
+- Olayın bağlamını taşıyan küçük, adlandırılmış öznitelikler.
+
+Log yanıtı bu değerleri `occurred_at`, `severity`, `project_id`,
+`service_name`, `environment`, `release`, `trace_id`, `span_id` ve
+`attributes` alanlarında verir. Bağlamı mesaj metnine değil, adlandırılmış
+özniteliklere koyun.
+
+Tek bir görünümdeki farklı hizmetlerden gelen loglar arasında iz ilişkisi
+yoktur. Bu ilişkiyi yalnızca iz bağlamı kurar.
+
+## İzler
+
+Bir iz, tek bir isteğin veya işlemin span'lerini içerir. Kök span'in üst
+span'i yoktur. Alt span kendi üst span'ini belirtir. Bir izdeki tüm
+span'lerin iz kimliği aynı, span kimlikleri farklıdır. Bkz.
+[Dağıtık izleme](/tr/concepts/distributed-tracing).
+
+Etkin iz bağlamı olmadan gönderilen bir log, sorun, aksiyon veya metrik bir
+yakalama izi alır. Bu iz yalnızca yakalama span'leri içerir. Bir istek yolunu
+göstermez. Bkz.
+[Yakalama span'leri](/tr/concepts/distributed-tracing#capture-spans).
+
+## <span id="read-the-metric-value">Metrikler</span>
+
+Metrik, zaman içinde ölçülen bir değeri kaydeder. Her metriği adı, birimi,
+boyutları, projesi, zaman aralığı ve aralık genişliğiyle birlikte okuyun.
+LogBrew her noktanın `value` değerini metriğin `kind` ve `temporality`
+alanlarına göre seçer:
+
+| Metrik sözleşmesi | `aggregation.code` | Noktanın `value` değeri |
+| --- | --- | --- |
+| `gauge` ve `instant` | `gauge_last` | Aralıktaki son durum, örneğin kuyruk derinliği. |
+| `counter` ve `delta` | `delta_sum` | Aralıktaki değişimlerin toplamı, örneğin tamamlanan işler. |
+| `histogram` ve `delta` | `distribution_p95` | Yaklaşık 95. yüzdelik, örneğin istek süresi. |
+| Bir `cumulative` akış | `raw_cumulative_last` | Son ham toplam. Bir oran değildir. |
+| Başka bir eşleşme | `raw_last` | Son ham örnek. |
+
+Örneğin, bir aralıkta değerleri `2`, `3` ve `5` olan üç delta sayaç örneği,
+`10` değerinde bir nokta `value` ve `3` değerinde bir `sample_count` verir.
+Aynı değerlere sahip üç gauge örneği bu sırayla geldiğinde nokta `value`
+değeri `5` olur. p95 değeri bir ortalama değildir. Kaydedilen gözlemlerin
+yaklaşık %95'i bu değerde veya altındadır.
+
+`status: "ready"` için türetilmiş toplama kullanılabilir.
+`status: "limited"` için `aggregation.limitation` alanını okuyun ve yalnızca
+ham değerleri kullanın. Bir gauge'u veya kümülatif bir akışı toplamayın.
+Noktası olmayan bir aralık, ölçülmüş bir sıfır değildir. Sorgu alanları için
+[Sorgu filtreleri](/tr/reference/telemetry-api-filters) sayfasını
+okuyun.
+
+`GET /api/telemetry/metrics/series` bu noktaları döndürür. `project_id`,
+`name` ve `since` gerektirir. Her serinin `kind`, `unit` ve `temporality`
+içeren tek bir `identity` değeri vardır. Kimlikleri farklı seriler ayrı
+kalır. Her nokta şunları da içerebilir:
+
+| Alan | Anlamı |
+| --- | --- |
+| `min`, `max`, `average` | Aralıktaki örneklerin değer aralığı ve ortalaması. |
+| `p50`, `p95`, `p99` | Histogram için yaklaşık yüzdelikler. |
+| `rate_per_second` | Delta sayaç toplamının aralık genişliğine bölümü. |
+| `trace_exemplars` | Aralıktan örneklenmiş iz kimlikleri. O aralıktan bir isteği incelemek için birini açın. |
+
+`series_limit` daha düşük hacimli serileri dışarıda bıraktığında
+`coverage.truncated` değeri `true` olur. Bir metrik penceresini aynı
+uzunluktaki önceki pencereyle karşılaştırmak için şunu çalıştırın:
+
+```bash
+logbrew explain metric '<metric-name>' --project '<project-id>' --since 24h --json
+```
+
+## Sorunlar
+
+Sorun, tekrar eden hataları kararlı bir parmak iziyle gruplar. Önem düzeyi,
+durumu, oluşum sayısı, ilk görülme zamanı ve son görülme zamanı vardır. Sorun
+ayrıntıları istisna zincirleri, yığın çerçeveleri, önceki adımlar
+(breadcrumbs), ilişkili loglar ve bir iz ilişkisi ekleyebilir.
+
+`last_seen_at`, gruptaki en yeni oluşumdur. Seçtiğiniz oluşum daha eski
+olabilir. İki zamanı da okuyun.
+
+Sorunun `status` değeri `unresolved`, `resolved` veya `archived` olur. API
+yanıt sürümü 1, `archived` değerini `ignored` olarak gösterir. Yanıt
+sürümleri 2 ve 3, `priority` (`high`, `medium` veya `low`) ve
+`priority_source` alanlarını ekler. Sürüm 3 ayrıca `assignee` alanını ekler.
+Bkz. [Durum değerleri](/tr/guides/issue-workflow#status-values) ve
+[Öncelik](/tr/guides/issue-workflow#priority).
+
+## Aksiyonlar
+
+Aksiyon, ürün etkinliğini kaydeder. Desteklenen sınıflandırma onu sayfa
+görüntüleme, ekran görüntüleme veya etkileşim olarak işaretler. Olay adı tek
+başına sınıflandırmayı belirlemez. Bu bağlamı eklemek için
+[Ürün olaylarını yakalama](/tr/guides/product-events) rehberini kullanın.
+
+Oturumlar kullanıcı değildir. Anonim özneler tanımlı kullanıcı değildir.
+
+## <span id="shared-fields">Ortak alanlar</span>
+
+| Alan | Kullanımı |
+| --- | --- |
+| `project_id` | Telemetrinin sahibidir ve okuma sınırını belirler. |
+| `service_name` | Sinyali gönderen uygulamayı veya hizmeti tanımlar. |
+| `environment` | Production, staging, preview ve local verilerini ayırır. |
+| `release` | Dağıtılan kod sürümünü tanımlar. |
+| `occurred_at` | Bir log veya aksiyonun kaynaktaki zamanını verir. Span'ler `started_at` kullanır. |
+| `trace_id` | Aynı iz bağlamında yakalanan sinyalleri bağlar. |
+| `span_id` | Bir sinyalin izinde ait olduğu span'i tanımlar. |
+
+## <span id="severity-values">Önem düzeyi değerleri</span>
+
+| Standart değer | Kabul edilen giriş eş adları |
+| --- | --- |
+| `info` | `trace`, `debug`, `info` |
+| `warning` | `warn`, `warning` |
+| `error` | `error` |
+| `critical` | `fatal`, `critical` |
+
+LogBrew eş adları büyük veya küçük harfle yazılmış olsa da giriş olarak kabul
+eder. API, CLI ve canlı olaylar standart değerleri kullanır. Bilinmeyen önem
+düzeyi değerleri reddedilir. Önem düzeyi, kaydedilen aciliyettir. İş etkisini
+veya kök nedeni göstermez.
+
+Bir kullanıcı, bir sorunun veya logun gösterilen önem düzeyini
+değiştirebilir. Bu durumda yanıt `effective_severity` içeren bir `triage`
+nesnesi taşır. `severity` alanı yakalanan değeri korur.
+
+## Canlı ve anlık görüntü okumaları
+
+`logbrew read`, seçilen proje, zaman aralığı ve filtreler için bir anlık
+görüntü döndürür. Yeni olayları okumak için komutu yeniden çalıştırın.
+`logbrew watch`, bağlantı açık kaldığı sürece yeni logları, sorunları ve
+aksiyonları akış olarak verir. İzleri veya metrikleri akış olarak vermez.
+Bağlantı hatası, projenin boş olduğunu göstermez.
+
+## <span id="evidence-quality-and-trace-lifecycle">Kanıt durumları</span>
+
+Yanıtlar şu durumları ayrı tutar: yakalandı, eksik, gizlendi, kısaltıldı ve
+kullanılamıyor. İz kanıtının dört durumu vardır: `available`, `not_linked`,
+`not_found` ve `unavailable`. Anlamları için
+[giriş sayfasına](/tr/introduction#follow-exact-relationships), kapsama oranı
+alanları için
+[Kanıt sınırları](/tr/introduction#read-evidence-states-before-drawing-a-conclusion)
+bölümüne bakın. Daha yeni bir SDK, daha önce gönderdiği olaylara alan
+eklemez.
+
+## <span id="a-practical-investigation">Tek bir projeyi inceleyin</span>
+
+<Steps>
+  <Step title="Çözülmemiş sorunları bulun">
+    ```bash
+    logbrew read issues --project '<project-id>' --status unresolved --since 24h --json
+    ```
+  </Step>
+
+  <Step title="Bir sorunu okuyun">
+    Bu komut saklanan sorun geçmişini okur. Listedeki `--since` filtresi
+    burada geçerli değildir.
+
+    ```bash
+    logbrew investigate issue '<issue-id>' --json
+    ```
+  </Step>
+
+  <Step title="Mevcut bir izi açın">
+    İz kimliğini yalnızca seçilen oluşum bir iz kimliği döndürdüğünde
+    kullanın.
+
+    ```bash
+    logbrew read trace '<trace-id>' --project '<project-id>' --json
+    ```
+  </Step>
+
+  <Step title="İlişkili kanıtı okuyun">
+    Logları, aksiyonları ve metrikleri aynı proje, hizmet, ortam ve sürümle
+    filtreleyin. Sinyalleri yalnızca zamana bakarak ilişkilendirmeyin.
+  </Step>
+</Steps>
+
+Yanıt alanları için [Telemetri API'si](/tr/reference/telemetry-api) ve
+[Yanıt biçimleri](/tr/reference/telemetry-response-shapes) sayfalarını
+okuyun.
