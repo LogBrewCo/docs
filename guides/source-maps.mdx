@@ -9,7 +9,7 @@ frame from that file points to a generated line and column. A
 [source map](https://ecma-international.org/publications-and-standards/standards/ecma-426/)
 connects that position to the original file, line, and column.
 
-This guide uses the Vite plugin in `@logbrew/sdk` 0.1.27. You need a Vite app,
+This guide uses the Vite plugin in `@logbrew/sdk` 0.1.28. You need a Vite app,
 access to its build output, and permission to create a project key. For Apple
 debug files, see [Apple crashes and hangs](/guides/apple-crashes-and-hangs).
 
@@ -28,7 +28,7 @@ upload.
 Install the SDK in the app directory:
 
 ```bash
-npm install @logbrew/sdk@0.1.27
+npm install @logbrew/sdk@0.1.28
 ```
 
 Add the plugin to `vite.config.js`. Keep your other plugins and build
@@ -53,7 +53,8 @@ export default {
 `minifiedPathPrefix` is the deployed URL of the build directory. The plugin
 adds each file's path in that directory. For example,
 `dist/assets/app.js` becomes `https://app.example.com/assets/app.js`. If you
-serve the build at `/web`, include `/web` in the prefix.
+serve the build at `/web`, include `/web` in the prefix. Do not add `/assets`
+to the prefix.
 
 Without an `upload` option, the plugin sends nothing to LogBrew. It also:
 
@@ -63,7 +64,8 @@ Without an `upload` option, the plugin sends nothing to LogBrew. It also:
   own, keep names there.
 
 Hidden source maps stay in the build output as normal files. They are not
-access-controlled.
+access-controlled. Do not use inline source maps. The plugin does not accept
+a map inside the JavaScript file.
 
 ## Build and check locally
 
@@ -166,6 +168,10 @@ npx --no-install logbrew-release-artifacts upload-js \
 `"status": "uploaded"` shows that LogBrew accepted the upload. If the command
 exits with an error, stop and use the table below.
 
+The helper retries a network error, `408`, `429`, or a `5xx` response up to 2
+times. It sends the same prepared files each time. Use `--max-retries` to
+change the count.
+
 After the manual upload works, you can upload during the Vite build instead.
 Add this option to the plugin configuration:
 
@@ -184,19 +190,57 @@ The plugin does not delete source maps from the output directory. Do not
 deploy `.map` files or the manifest to the public website or CDN.
 
 To map a frame from a captured issue, run `symbolicate-js` with that frame
-against the same prepared build. See
-[Investigate an issue](/guides/investigate-an-issue) to read a captured issue.
+against the same prepared build.
+
+## <span id="verify-a-new-issue">Read a new issue</span>
+
+Deploy the same prepared build to the test environment. Cause one safe test
+error through your issue capture path. Do not send user input, credentials,
+or a raw stack for this test.
+
+Find the new issue with the same project and build context:
+
+```bash
+logbrew read issues --project "<project_id>" \
+  --release "web@1.2.3" --environment staging \
+  --service checkout-web --since 1h --json
+```
+
+Copy the issue ID from the result. Read its latest occurrence:
+
+```bash
+logbrew investigate issue "<issue_id>" --occurrence latest --json
+```
+
+Read the event time, project, service, environment, and release first. Then
+read `event.stack_frames`. A frame with `source: "symbolicated"` has the
+original file, line, and column from your upload. A frame with
+`source: "captured"` has the location that the app sent.
+
+`logbrew read issue "<issue_id>" --json` also returns a `symbolication`
+object. Each frame in it has a `status`: `resolved`, `artifact_not_found`,
+`source_not_resolved`, `invalid_metadata`, or `unavailable`. Only a
+`resolved` frame has an original location.
+
+LogBrew maps frames when you read the issue. An upload after the error can
+map an earlier event that has the same Debug ID. A mapped frame points to
+code to examine. It does not show what caused the error. See
+[Investigate an issue](/guides/investigate-an-issue) for the other fields.
 
 ## Recover from a failed check
 
 | Result | Next step |
 | --- | --- |
 | Manifest status is not `ready` | Read `validation.errors`. Fix the build settings and build again. Do not edit the manifest. |
+| Build stops because a source map is missing or inline | Set `build.sourcemap` to `"hidden"` or `true`. Build again. |
 | `auth_missing` | Set `LOGBREW_RELEASE_ARTIFACT_TOKEN` in the upload process. A dry run does not test the key. |
 | `auth_failed` (`401` or `403`) | Use an artifact key for the same project. Do not use a runtime or account key. |
 | `validation_failed` (`400` or `413`) | Check the prepared files and their size. Do not send the same upload again. |
+| `validation_failed` with a local error | Read `validation.errors`. If a file changed after the build, build and check again. |
 | `retryable_error` | All retries failed after a network error, `408`, `429`, or server error. Retry later with the same prepared files. |
+| `upload_failed` | The server returned another status. Check the `--endpoint` value. |
 | Frame does not resolve | Check the Debug ID, the deployed URL prefix, and the build. Do not use a map from another build or release. |
+| No new issue appears | Check issue capture, the runtime key, and the time filter before you test source maps. |
 
 Keep source files, keys, and private paths out of support messages. See
 [Troubleshooting](/guides/troubleshooting) and

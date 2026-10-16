@@ -19,8 +19,9 @@ raw Apple report.
 
 <Warning>
   Use project-scoped ingest configuration inside the app. Use an account login
-  for artifact uploads and issue reads.
-  Never include an account access token in the app.
+  for artifact uploads and issue reads. A project artifact key can also upload
+  from a build machine.
+  Never include an account access token or an artifact key in the app.
 </Warning>
 
 ## Plan the capture boundary
@@ -102,9 +103,23 @@ Install the capture object on the main thread before you create the root UI.
 Create its parent directory first. Keep the storage directory app-owned and
 private.
 
+The capture object records Mach exceptions, signals, C++ exceptions, and
+Objective-C exceptions. The local report does not include memory contents,
+queue names, or console logs.
+
 The local crash report can contain sensitive app and device details. Keep it
 out of cloud backups and shared directories. LogBrew sends frame UUIDs,
 architectures, and offsets instead of the raw report.
+
+`NativeCrashConfiguration` has two optional limits:
+
+| Parameter | Default | Range | Effect |
+| --- | --- | --- | --- |
+| `maxStoredReports` | `5` | 1 to 32 | The number of local reports that the app keeps. |
+| `maxReplayBytes` | 4 MiB | 1 KiB to 16 MiB | Replay discards a report that is larger than this size. |
+
+A value outside its range makes the configuration throw
+`crash_invalid_configuration`.
 
 ## Enable hang capture
 
@@ -117,8 +132,13 @@ let watchdog = try NativeHangWatchdogConfiguration(
 )
 ```
 
-The threshold is in seconds, from 1 to 30. Keep one `crashCapture` object.
-Do not install a second one.
+The threshold is in seconds, from 1 to 30. Hang capture also requires
+`artifactIdentity`. Without it, the configuration throws
+`crash_invalid_configuration`.
+
+Keep one `crashCapture` object for the life of the process. A second capture
+object cannot install. Its `install()` call throws `crash_capture_owned`. To
+change the threshold, use the new value at the next app launch.
 
 A recovered hang replays with `crash.handled` set to `true`. An ongoing hang
 left by process termination replays with `crash.handled` set to `false`.
@@ -130,8 +150,9 @@ The watchdog pauses while the app is inactive or under a debugger. It also
 suppresses capture during serious thermal pressure.
 
 A short threshold can report normal main-thread work as hangs. Test the
-threshold with the build configuration that you ship. A handled hang still
-blocked the interface, so review it too.
+threshold with the build configuration that you ship. The handled state
+describes recovery. It does not mark the issue as solved. A handled hang
+still blocked the interface, so review it too.
 
 ## Replay after launch
 
@@ -156,8 +177,9 @@ the same method after recovery or at the next launch.
 Replay processes valid reports oldest first and keeps their stable event IDs.
 A failed delivery leaves its report pending. Accepted delivery removes it.
 
-Replay discards reports that it cannot read. Check all three counts. A zero
-pending count alone does not prove delivery.
+Replay discards reports that it cannot read and reports larger than
+`maxReplayBytes`. Check all three counts. A zero pending count alone does not
+prove delivery.
 
 Enable durable delivery before replay when a failed request must survive
 another restart. Do not call `purge()` during routine network or authentication
@@ -207,6 +229,34 @@ logbrew debug-artifacts upload "path/to/App.app.dSYM" \
 The upload command validates supported Apple objects and verifies every
 uploaded identity. It does not include local paths or filenames in API
 metadata.
+
+The JSON `status` shows the result:
+
+| `status` | Meaning |
+| --- | --- |
+| `validated` | The dry run found the expected objects. Nothing was uploaded. |
+| `verified` | Account access uploaded and verified every identity. |
+| `already_present` | LogBrew already has every identity. |
+| `uploaded` | A project artifact key uploaded the files. The CLI could not verify them. |
+
+A build machine can upload with a project artifact key in `LOGBREW_TOKEN`
+instead of account access. Create the key as shown in
+[Create an artifact key](/guides/source-maps#create-an-artifact-key). That
+upload reports `uploaded`. Verify each identity later with account access:
+
+```bash
+logbrew debug-artifacts lookup \
+  --project "<project UUID>" \
+  --release "com.example.app@1.2.3+45" \
+  --environment "production" \
+  --service "ios-app" \
+  --image-uuid "<Mach-O UUID>" \
+  --architecture arm64 \
+  --json
+```
+
+`status: "found"` confirms the artifact. `status: "missing"` means that
+LogBrew has no artifact for that identity.
 
 Resolution matches the image UUID and the full artifact identity, not the
 source file name. A rebuild of the same source can have different UUIDs.
@@ -264,10 +314,38 @@ fields from an issue with a resolved frame, not the complete response.
 }
 ```
 
-Each frame has its own `status`. An application frame narrows the code
-search, but it does not prove the cause. A dSYM uploaded later can resolve
-frames of an earlier event. It cannot add frames that the event did not
-capture.
+## Read crash evidence
+
+Each frame has its own `status`. The `symbolication.status` field uses the
+same values:
+
+| `status` | Meaning |
+| --- | --- |
+| `resolved` | A matching artifact resolved the frame. `resolved` has the source, line, column, or function name that the artifact provides. |
+| `artifact_not_found` | No uploaded artifact matches the event identity and image UUID. |
+| `source_not_resolved` | A matching artifact exists, but it did not resolve this frame. |
+| `invalid_metadata` | The event has incomplete or inconsistent artifact metadata. |
+| `unavailable` | The frame resolution read could not complete. |
+
+Keep an unresolved frame unresolved in your notes. Do not report it as an
+empty stack.
+
+LogBrew resolves frames when you read the issue. A dSYM uploaded later can
+resolve frames of an earlier event. It cannot add frames that the event did
+not capture.
+
+An application frame narrows the code search, but it does not prove the
+cause. For breadcrumbs, the exception chain, and trace evidence, read the
+issue investigation:
+
+```bash
+logbrew investigate issue "<issue UUID>" --json
+```
+
+In that response, a frame with `source: "symbolicated"` came from an uploaded
+artifact. A frame with `source: "captured"` is the location that the app sent.
+See [Investigate an issue](/guides/investigate-an-issue) for the response
+fields.
 
 Keep the full project, release, environment, and service scope during every
 read. Do not broaden a failed lookup across projects.

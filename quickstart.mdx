@@ -96,6 +96,10 @@ runtime, use the [SDK ingestion guide](/guides/sdk-ingestion).
     The key is set only for this Node.js process. Application identity goes
     in `context`.
 
+    Each run creates new event IDs. If the SDK retries delivery in the same
+    run, it sends the same body with the same IDs. LogBrew does not store an
+    accepted event a second time when a retry sends it again.
+
     ```bash
     LOGBREW_SERVER_API_KEY="$(< "$HOME/.logbrew/quickstart-node.ingest")" \
       node --input-type=module <<'JS'
@@ -139,13 +143,17 @@ runtime, use the [SDK ingestion guide](/guides/sdk-ingestion).
     JS
     ```
 
+    Do not put credentials, headers, request bodies, customer data, or local
+    paths in the event.
+
     **Checkpoint:** the script prints `"ok":true` with a `2xx`
     `status_code`. `attempts` is higher than `1` after a retry. A successful
     send is not the last check.
 
     If delivery fails, the script exits with code `1` and prints a short JSON
     error, such as `{"ok":false,"error":"unauthenticated"}`. It does not print
-    the request body or the key.
+    the request body or the key. A rejected project key causes
+    `unauthenticated`. A new CLI login does not fix it.
   </Step>
 
   <Step title="Read the project doctor report" id="verify-readiness-with-the-project-doctor">
@@ -160,7 +168,9 @@ runtime, use the [SDK ingestion guide](/guides/sdk-ingestion).
 
     **Checkpoint:** the report has `status: "ready"`. Also read each item in
     `checks`. Exit code `0` does not show that all checks passed. For another
-    status, follow `next` and the [CLI reference](/reference/cli).
+    status, follow `next` and the
+    [doctor report reference](/reference/cli#read-a-project-doctor-report).
+    A `ready` project does not show that this test log arrived.
   </Step>
 
   <Step title="Read the test log">
@@ -184,9 +194,28 @@ runtime, use the [SDK ingestion guide](/guides/sdk-ingestion).
 The sample sends three events. Only one is a log. The release and environment
 markers give context to the log.
 
+| Field in the sample | Recorded data |
+| --- | --- |
+| `message` | The operation that the test records, `LogBrew quickstart check`. |
+| `level: "info"` | A normal test event, not a failure. |
+| `logger` | The application logger that created the record. |
+| `occurredAt` | When this run created the event, as a UTC timestamp. |
+| `context.resource.service` | The application service and its version, not the SDK identity. |
+
+Keep the test at `info`. Do not change it to `error` to make it easier to
+find. Use the project and time filters instead. See
+[Severity values](/concepts/telemetry#severity-values).
+
 The `console.log` line prints the delivery result to your terminal. The
-`client.log` call sends the log to LogBrew. The ingest key selects the
-project that receives the log. A CLI `--project` filter does not move events.
+`client.log` call sends the log to LogBrew. A successful first delivery
+prints:
+
+```json
+{ "ok": true, "status_code": 200, "attempts": 1 }
+```
+
+The ingest key selects the project that receives the log. A CLI `--project`
+filter does not move events.
 
 This log has no trace context because the sample does not create a request
 span. That does not show that the log failed. The CLI read is a snapshot.
@@ -204,7 +233,7 @@ live stream.
 | `rate_limited` | Wait before you send again. Do not loop or create a new key. |
 | `transport_error` or `network_failure` | Examine connectivity. A failed response does not show that the earlier request had no effect. |
 | `delivery_failed` | Stop and examine the failure. Do not print secrets or the request body. |
-| Doctor `status` is not `ready` | Read `checks` and `next`. Keep the same project. |
+| Doctor `status` is not `ready` | Read `checks` and `next` in the [doctor report](/reference/cli#read-a-project-doctor-report). Keep the same project. |
 | The log read is empty | Compare the project, environment, release, and time range with the sent batch. |
 
 If telemetry is still missing, use the
@@ -216,14 +245,24 @@ source code.
 ## Move to your application
 
 - Create the client once in your app's setup code.
-- Load the ingest key from your existing secret configuration.
+- Pin the SDK versions in your package files. Test upgrades outside
+  production.
+- Load the ingest key from your existing secret configuration. Rotate it
+  after a possible exposure. See [Rotate an ingest key](/guides/rotate-ingest-key).
 - Use stable service, environment, and release names from your deployment
   configuration. See [Releases](/concepts/releases).
 - Write log messages that name the operation and its result, such as
   `Report generation completed`. Keep private values out of the message.
+  Do not copy a whole request or user record into a log.
 - Keep one sender for each application log to prevent duplicate records.
+  Find the integration that already sends each record before you add
+  LogBrew.
 - Before a production rollout, send one safe event through the real code path
-  and read it back.
+  and read it back. Check its message, service, release, and environment. A
+  standalone sample does not test your application's code path.
+
+This sample does not set up browser capture, source maps, or mobile capture.
+For those, start from the [SDK ingestion guide](/guides/sdk-ingestion).
 
 <CardGroup cols={2}>
   <Card title="Projects" icon="folder-kanban" href="/concepts/projects">
