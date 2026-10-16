@@ -15,8 +15,8 @@ Account login is necessary for account reads. Before you start a login, run
 `logbrew status --json`. A person must complete browser authorization.
 Project ingest keys send telemetry. They cannot replace account login.
 
-Project creation, key creation, issue status changes, deployments, and support
-updates change account data. Before you run one, make sure that the action and
+Project creation, key creation, issue status and priority changes,
+deployments, and support updates change account data. Before you run one, make sure that the action and
 the target are correct.
 
 Run `logbrew --help` to see all commands. Add `--help` to a command, such as
@@ -34,11 +34,13 @@ JSON rules.
 | `projects setup` | Record observed setup for an existing project. |
 | `projects archive`, `projects delete` | Archive a project, or delete it permanently after confirmation. |
 | `usage`, `account usage` | Read usage, limits, quota state, and reset dates. |
-| `mcp grants`, `mcp revoke` | List the MCP clients connected to your account, or revoke one connection. |
+| `mcp grants`, `mcp revoke` | List the MCP clients connected to your account by name, or revoke one connection. |
 | `read` | Read logs, issues, actions, releases, metrics, traces, or one item. |
 | `explain` | Read bounded evidence for an issue, log, action, trace, span, metric, or release. |
 | `investigate issue` | Read issue investigation evidence, or verify a candidate deployment. |
-| `set issue`, `resolve`, `ignore`, `reopen` | Set issue status to `unresolved`, `resolved`, or `ignored`. |
+| `issues archive`, `issues resolve`, `issues reopen` | Set the status of 1 issue, or of up to 100 issues in one project. |
+| `issues priority` | Set the priority of 1 issue, or of up to 100 issues in one project. |
+| `set issue`, `resolve`, `ignore`, `reopen` | Set the status of 1 issue. `ignore` and `ignored` mean `archived`. |
 | `deploy` | Record one completed deployment. |
 | `debug-artifacts` | Upload Apple or Android native debug files, or look up one image identity. |
 | `analytics` | Read the overview, properties, comparisons, paths, funnels, retention, or lifecycle. |
@@ -117,18 +119,31 @@ API fields `state`, `setup_status`, or `next_action`.
 | `--environment <environment>` | logs, issues, actions, releases, metrics, traces, trace |
 | `--service <service_name>` | logs, issues, actions, releases, metrics, traces |
 | `--since 24h` | logs, issues, actions, releases, metrics, traces, analytics |
+| `--until <RFC3339>` | logs, issues, actions, releases, metrics, traces, analytics |
 | `--limit 100` | logs, issues, actions, releases, metrics, traces |
 | `--severity error` | logs, watch |
 | `--search checkout` | logs |
 | `--trace <trace_id>` | logs |
-| `--status unresolved` | issues (`unresolved`, `resolved`, `ignored`) |
+| `--status unresolved` | issues (`unresolved`, `resolved`, `archived`) |
+| `--priority high` | issues (`high`, `medium`, `low`) |
 | `--status error` | traces (`error`, `ok`) |
 | `--name <name>` | actions, metrics |
 | `--user <distinct_id>` | actions |
 
 `--since` accepts a duration such as `24h` or `7d`, or an RFC 3339 timestamp.
+`--until` accepts an RFC 3339 timestamp. It is an exclusive end time and must
+be later than `--since`. One issue by ID does not accept `--until`.
+
 Log severity is `info`, `warning`, `error`, or `critical`. Issue status is the
-workflow state of the issue, not its severity.
+workflow state of the issue, not its severity. `--status ignored` is an older
+name for `--status archived`.
+
+This command reads the errors of 1 day:
+
+```bash
+logbrew read logs --severity error \
+  --since 2026-10-01T00:00:00Z --until 2026-10-02T00:00:00Z --json
+```
 
 The project ID selects the project. The service name selects a component in
 that project. Put quotation marks around values that contain spaces:
@@ -168,6 +183,36 @@ filters. Before you compare evidence, read the timestamp of the selected
 occurrence. See [Investigate an issue](/guides/investigate-an-issue) for the
 evidence fields.
 
+## Change issue status and priority
+
+Use 1 issue ID to change 1 issue:
+
+```bash
+logbrew issues archive "<issue_id>" --json
+logbrew issues priority high "<issue_id>" --json
+```
+
+`archive` sets `archived`, `resolve` sets `resolved`, and `reopen` sets
+`unresolved`. Priority is `high`, `medium`, or `low`. A priority that you set
+stays fixed. Otherwise, the priority follows the issue severity.
+
+To change more than 1 issue, add `--project`. All issues must be in that
+project. One command changes up to 100 issues:
+
+```bash
+logbrew issues resolve "<issue_id_1>" "<issue_id_2>" \
+  --project "<project_id>" --json
+```
+
+The result has 1 entry for each issue. Each entry is `updated`, `unchanged`,
+or `not_found`. An `unchanged` issue already had the requested value. You can
+run the same command again after a network failure.
+
+These commands do not ask for confirmation. Check the issue IDs first. Issue
+reads and changes show `archived` instead of `ignored`, and the `priority` and
+`priority_source` of each issue. See the
+[issue response](/reference/telemetry-response-shapes#issue-response).
+
 ## Read the next page
 
 Logs, issues, actions, metrics, and traces accept cursor pagination. Releases
@@ -196,6 +241,9 @@ Keep the same filters and limit on every page. Stop when `next_cursor` is
 `logbrew watch --json` streams live logs, issues, and actions. Add `logs`,
 `issues`, or `actions` to stream one type. Watch needs `--json`. It does not
 support traces or spans.
+
+Watch issue events show an archived issue as `ignored`, without a priority.
+Read the issue to get its current status and priority.
 
 Watch accepts only `--severity`, such as `--severity error,critical`. The CLI
 applies this filter after it receives events. It does not reduce what the
