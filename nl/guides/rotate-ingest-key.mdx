@@ -1,0 +1,181 @@
+---
+title: "API-sleutel roteren: een ingest-sleutel van LogBrew vervangen"
+sidebarTitle: "Een ingest-sleutel roteren"
+description: "Roteer een ingest-sleutel van LogBrew. Test de nieuwe sleutel vóór de geplande intrekking. Herstel fouten zonder toegangsgegevens prijs te geven."
+---
+
+Bij rotatie vervang je de ingest-sleutel van een project door een nieuwe
+sleutel. Het project en de opgeslagen telemetrie veranderen niet. Beheer
+sleutels met accountauthenticatie. Een ingest-sleutel kan alleen telemetrie
+versturen. Je kunt er geen sleutels mee beheren.
+
+Voordat je begint: [installeer de CLI en log in](/nl/guides/cli). Zet
+`LOGBREW_PROJECT_ID` op de UUID van het project. Zet `LOGBREW_API_URL` op
+`https://api.logbrew.co`. De voorbeelden gebruiken Bash, curl 7.76.0 of
+nieuwer en jq.
+
+Maak, deploy en test bij een geplande rotatie eerst de nieuwe sleutel, en
+trek daarna pas de oude in. Leg het rotatie-interval vast in je
+beveiligingsbeleid. Heeft een sleutel een vervaldatum, vervang hem dan vóór
+die datum.
+
+<Warning>
+  Een uitgelekte sleutel is een beveiligingsincident. Trek hem meteen in, ook
+  als de nieuwe sleutel nog niet is gedeployd. Applicaties die nog een
+  ingetrokken sleutel gebruiken, kunnen geen telemetrie versturen.
+</Warning>
+
+<Steps>
+  <Step title="De nieuwe sleutel maken">
+    `POST /api/projects/{project_id}/ingest-keys` accepteert een niet-leeg
+    `label` van maximaal 120 tekens. `kind` is `cli`, `sdk`, `browser`,
+    `server` of `artifact`. Een `artifact`-sleutel kan geen telemetrie
+    versturen. Een optionele `expires_at` moet een RFC3339-tijd in de toekomst
+    zijn.
+
+    Gebruik dezelfde `kind` als bij de oude sleutel. De CLI gebruikt `sdk` als
+    je `--kind` weglaat, en `CLI-created SDK key` als je `--label` weglaat. De
+    CLI heeft geen optie voor een vervaldatum. Gebruik de API om `expires_at`
+    in te stellen.
+
+    De CLI slaat het eenmalige token op in een nieuw bestand buiten
+    versiebeheer, dat alleen de eigenaar kan lezen. De CLI print metadata,
+    niet het token:
+
+    ```bash
+    : "${LOGBREW_PROJECT_ID:?set LOGBREW_PROJECT_ID}" &&
+    : "${LOGBREW_REPLACEMENT_KEY_FILE:?choose a new private key file}" &&
+    logbrew projects keys create "$LOGBREW_PROJECT_ID" \
+      --ingest-key-file "$LOGBREW_REPLACEMENT_KEY_FILE" \
+      --label "checkout production rotation" --kind server --json
+    ```
+
+    Ga pas verder als de opdracht slaagt. Zet `NEW_KEY_ID` op de teruggegeven
+    `ingest_key.id`.
+
+    Is het resultaat onzeker, voer dan precies dezelfde opdracht opnieuw uit.
+    De CLI hergebruikt zijn openstaande retrysleutel. Gebruik
+    `--abandon-retry` niet voor deze nieuwe poging.
+
+    Een client die de API direct aanroept, krijgt het token één keer in de
+    response. Stuur voor een nieuwe poging dezelfde `Idempotency-Key`-header
+    met dezelfde body. Gedurende 24 uur geeft die nieuwe poging dezelfde
+    sleutel terug. Print, commit of deel het token nooit.
+  </Step>
+
+  <Step title="De nieuwe sleutel deployen terwijl de oude actief blijft">
+    Zet het nieuwe token in de beveiligde deployment-instelling. Deploy de app.
+    Laat de oude sleutel actief. Houd beide tokens buiten de broncode, de
+    build-uitvoer en logs.
+  </Step>
+
+  <Step title="Eén synthetisch event versturen">
+    Laad het nieuwe token in de shellvariabele `new_ingest_key`. Print het
+    niet. Verstuur één synthetische log met de nieuwe sleutel en lees die
+    daarna terug:
+
+    ```bash
+    occurred_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+
+    curl --fail-with-body -sS "$LOGBREW_API_URL/api/telemetry/ingest" \
+      -H "Authorization: Bearer $new_ingest_key" \
+      -H "Content-Type: application/json" \
+      --data @- <<JSON &&
+    {
+      "project_id": "$LOGBREW_PROJECT_ID",
+      "environment": "production",
+      "release": "ingest-key-rotation@1",
+      "service_name": "checkout-api",
+      "sdk_name": "native-api",
+      "sdk_version": "0.1.0",
+      "items": [
+        {
+          "type": "log",
+          "data": {
+            "level": "info",
+            "message": "ingest key rotation check",
+            "source": "setup",
+            "attributes": {},
+            "occurred_at": "$occurred_at"
+          }
+        }
+      ]
+    }
+    JSON
+
+    logbrew read logs --project "$LOGBREW_PROJECT_ID" \
+      --release ingest-key-rotation@1 \
+      --environment production \
+      --since "$occurred_at" \
+      --json
+    ```
+
+    Ga pas verder als de leesactie deze log teruggeeft met dezelfde
+    `occurred_at`. Een oudere controlelog van een rotatie bewijst niet dat de
+    nieuwe sleutel werkt. Controleer ook of de gedeployde app telemetrie
+    verstuurt. Mislukt een opdracht, stop dan en lees de response. Laat de oude
+    sleutel actief, tenzij hij is uitgelekt.
+  </Step>
+
+  <Step title="Sleutelmetadata zonder geheimen opvragen">
+    Zet `LOGBREW_ACCOUNT_BEARER` op basis van je accountauthenticatie. Zoek
+    het ID van de oude sleutel. Controleer of `NEW_KEY_ID` `active` is:
+
+    ```bash
+    (
+      set -o pipefail
+      curl --fail-with-body -sS "$LOGBREW_API_URL/api/projects/$LOGBREW_PROJECT_ID/ingest-keys" \
+        -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+        | jq -e 'select(type == "array") | map({id, label, kind, token_prefix, status, created_at, expires_at, revoked_at})'
+    )
+    ```
+
+    De response is een array met sleutelmetadata zonder tokens. De status is
+    `active`, `expired` of `revoked`. Een sleutel is `expired` als de tijd in
+    `expires_at` voorbij is.
+  </Step>
+
+  <Step title="Alleen de oude sleutel intrekken">
+    Zet `OLD_KEY_ID` op basis van de lijst. De opdracht trekt de oude sleutel
+    alleen in als de twee ID's verschillen:
+
+    ```bash
+    if [ -n "${OLD_KEY_ID:-}" ] && [ -n "${NEW_KEY_ID:-}" ] \
+      && [ "$OLD_KEY_ID" != "$NEW_KEY_ID" ]; then
+      (
+        set -o pipefail
+        curl --fail-with-body -sS -X DELETE \
+          "$LOGBREW_API_URL/api/projects/$LOGBREW_PROJECT_ID/ingest-keys/$OLD_KEY_ID" \
+          -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+          | jq -e --arg id "$OLD_KEY_ID" \
+            'select(.id == $id and .status == "revoked") | {id, label, kind, token_prefix, status, created_at, expires_at, revoked_at}'
+      )
+    else
+      printf '%s\n' 'Set different old and replacement key IDs before revocation.' >&2
+      false
+    fi
+    ```
+
+    `DELETE` is idempotent. Het geeft de sleutelmetadata terug met
+    `status: "revoked"` en een ingevulde `revoked_at`. Na een onzekere response
+    kun je het veilig herhalen.
+
+    Voer `unset new_ingest_key` uit. Behandel het sleutelbestand volgens je
+    beleid voor geheimen.
+  </Step>
+</Steps>
+
+## Veilig herstellen
+
+| Response | Volgende stap |
+| --- | --- |
+| `404`, `code: "not_found"` | Controleer of het account eigenaar is van het project en de sleutel-ID's. Volg `next_action.code: "check_resource"`. Probeer geen andere ID's. |
+| `code: "validation_failed"` | Corrigeer het genoemde veld, de waarde of de tijdstempel. Volg `next` en `next_action`. |
+| `401` of `403` bij sleutelbeheer | Gebruik accountauthenticatie, geen ingest-sleutel. |
+| `401`, `code: "ingest_key_invalid"` bij het ingest-request | De sleutel is ingetrokken, verlopen of niet geldig voor telemetrie. Gebruik de nieuwe actieve sleutel voor het gekozen project. Volg `next_action.code: "configure_ingest_key"`. |
+| `401` of `403` bij het ingest-request | Gebruik de nieuwe ingest-sleutel voor het gekozen project. Gebruik geen toegangsgegevens van een account. |
+
+Mislukt de rotatie nog steeds,
+[meld dan een probleem](/nl/guides/report-a-problem). Deel alleen
+sleutelmetadata. Neem geen toegangsgegevens, headers, ruwe telemetrie,
+klantgegevens, lokale paden of broncode op.

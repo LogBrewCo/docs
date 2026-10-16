@@ -1,0 +1,291 @@
+---
+title: "Node.js-logging met de observability-snelstart van LogBrew"
+sidebarTitle: "Snelstart"
+description: "Maak een project aan, stel Node.js-logging in, verzend één veilig SDK-event en lees de opgeslagen log zonder toegangsgegevens te tonen."
+---
+
+Maak een ontwikkelproject aan. Verzend één Node.js-log. Lees die terug uit
+LogBrew. De CLI maakt het project aan en slaat de ingest-sleutel op. Inloggen
+via de browser is alleen nodig als de CLI geen geldige accounttoegang heeft.
+
+<Note>
+  Gebruik `--json` voor workflows met agents. Bewaar toegangsgegevens in een
+  beveiligde lokale configuratie. Geef tussen mensen, tools en agents alleen
+  namen van variabelen door.
+</Note>
+
+## <span id="first-project-success-path">Voordat je begint</span>
+
+Zorg dat je dit hebt:
+
+- Node.js 18 of nieuwer.
+- LogBrew CLI v0.1.30 of nieuwer.
+- `jq`.
+- Bash of Zsh.
+- Een pakketmap voor een Node.js-app aan de serverkant.
+
+Het voorbeeld gebruikt project `quickstart-node`, omgeving `development` en
+release `quickstart@1`. Houd deze test gescheiden van productie. Gebruik voor
+een andere runtime de [handleiding voor SDK-integratie](/nl/guides/sdk-ingestion).
+
+<Warning>
+  Bewaar het bestand met de ingest-sleutel buiten de repository, zodat alleen
+  jij het kunt lezen. Zet deze serversleutel niet in browsercode, een openbare
+  bundle of een prompt.
+</Warning>
+
+## <span id="send-and-read-your-first-log">Je eerste log verzenden en lezen</span>
+
+<Steps>
+  <Step title="Lees de accountstatus" id="confirm-account-access">
+    Installeer de CLI met de opdracht uit de [CLI-handleiding](/nl/guides/cli).
+    Lees daarna de accountstatus.
+
+    ```bash
+    logbrew status --json
+    ```
+
+    **Controlepunt:** status meldt geauthenticeerde accounttoegang. Is dat
+    niet zo? Dan voert een mens één keer `logbrew login` uit. Voer daarna
+    opnieuw `logbrew status --json` uit. Een agent mag geen nieuwe login
+    starten als de huidige authenticatie werkt.
+  </Step>
+
+  <Step title="Maak één project aan met de CLI">
+    Kies een nieuw bestand in een map die alleen voor de eigenaar toegankelijk
+    is. De CLI schrijft de ingest-sleutel van het project naar dat bestand
+    voordat de CLI succes meldt. De CLI toont nooit de sleutel of het
+    bestandspad.
+
+    ```bash
+    install -d -m 700 "$HOME/.logbrew"
+
+    project_result="$(
+      logbrew projects create quickstart-node \
+        --runtime node \
+        --environment development \
+        --ingest-key-file "$HOME/.logbrew/quickstart-node.ingest" \
+        --json
+    )"
+    export LOGBREW_PROJECT_ID="$(jq -er '.project.id' <<<"$project_result")"
+    jq '{status, setup_status: .setup.status, ingest_key_kind: .ingest_key.kind, next}' \
+      <<<"$project_result"
+    unset project_result
+    ```
+
+    Een project aanmaken verandert je account. Het doelbestand mag nog niet
+    bestaan. Is het resultaat niet duidelijk? Voer dan exact dezelfde opdracht
+    opnieuw uit. De CLI hergebruikt de identiteit van het openstaande request.
+    Gebruik `--abandon-retry` alleen om een andere poging te starten.
+
+    **Controlepunt:** de uitvoer meldt `status: "created"`, installatiestatus
+    `created` en een soort ingest-sleutel. Het project bestaat en de sleutel is
+    opgeslagen. Dit toont niet dat telemetrie wordt afgeleverd. Zie
+    [Projecten](/nl/concepts/projects).
+  </Step>
+
+  <Step title="Installeer de Node.js-SDK">
+    ```bash
+    npm install @logbrew/sdk @logbrew/node
+    ```
+
+    Gebruik nooit toegangsgegevens van je account als SDK-configuratie. Houd
+    de projectsleutel uit de uitvoer van opdrachten, prompts, tickets,
+    bronbestanden en pakketconfiguratie.
+  </Step>
+
+  <Step title="Verzend één veilige SDK-log">
+    Verzend markeringen voor release en omgeving samen met één `info`-log die
+    alleen placeholders bevat. De sleutel geldt alleen voor dit
+    Node.js-proces. De identiteit van de applicatie staat in `context`.
+
+    Elke uitvoering maakt nieuwe event-ID's aan. Probeert de SDK de aflevering
+    binnen dezelfde uitvoering opnieuw? Dan verzendt de SDK dezelfde body met
+    dezelfde ID's. LogBrew slaat een geaccepteerd event geen tweede keer op als
+    een nieuwe poging het opnieuw verzendt.
+
+    ```bash
+    LOGBREW_SERVER_API_KEY="$(< "$HOME/.logbrew/quickstart-node.ingest")" \
+      node --input-type=module <<'JS'
+    import { randomUUID } from "node:crypto";
+    import { SdkError } from "@logbrew/sdk";
+    import { createLogBrewNodeClient } from "@logbrew/node";
+
+    const client = createLogBrewNodeClient({
+      context: {
+        schemaVersion: 1,
+        resource: { service: { name: "quickstart-node", version: "quickstart@1" } }
+      }
+    });
+    const occurredAt = new Date().toISOString();
+
+    client.release(randomUUID(), occurredAt, {
+      version: "quickstart@1",
+      metadata: { service: "quickstart-node" }
+    });
+    client.environment(randomUUID(), occurredAt, { name: "development" });
+    client.log(randomUUID(), occurredAt, {
+      message: "LogBrew quickstart check",
+      level: "info",
+      logger: "quickstart-node"
+    });
+
+    try {
+      const response = await client.shutdown();
+      console.log(JSON.stringify({
+        ok: true,
+        status_code: response.statusCode,
+        attempts: response.attempts
+      }));
+    } catch (error) {
+      console.error(JSON.stringify({
+        ok: false,
+        error: error instanceof SdkError ? error.code : "delivery_failed"
+      }));
+      process.exitCode = 1;
+    }
+    JS
+    ```
+
+    Zet geen toegangsgegevens, headers, requestbody's, klantgegevens of
+    lokale paden in het event.
+
+    **Controlepunt:** het script toont `"ok":true` met een `status_code` in de
+    `2xx`-reeks. Na een nieuwe poging is `attempts` hoger dan `1`. Een
+    geslaagde verzending is niet de laatste controle.
+
+    Mislukt de aflevering? Dan stopt het script met code `1` en toont het een
+    korte JSON-fout, zoals `{"ok":false,"error":"unauthenticated"}`. Het script
+    toont niet de body van het request of de sleutel. Een geweigerde
+    projectsleutel geeft `unauthenticated`. Opnieuw inloggen met de CLI lost
+    dat niet op.
+  </Step>
+
+  <Step title="Lees het doctor-rapport van het project" id="verify-readiness-with-the-project-doctor">
+    De CLI gebruikt hiervoor de opgeslagen accounttoegang. Gebruik niet de
+    ingest-sleutel van het project.
+
+    ```bash
+    : "${LOGBREW_PROJECT_ID:?set the project UUID}"
+
+    logbrew doctor --project "$LOGBREW_PROJECT_ID" --json
+    ```
+
+    **Controlepunt:** het rapport heeft `status: "ready"`. Lees ook elk item
+    in `checks`. Exitcode `0` toont niet dat alle controles zijn geslaagd.
+    Volg bij een andere status `next` en de
+    [referentie voor het doctor-rapport](/nl/reference/cli#read-a-project-doctor-report).
+    Een project met `ready` toont niet dat deze testlog is aangekomen.
+  </Step>
+
+  <Step title="Lees de testlog">
+    Gebruik het project, de release en de omgeving uit de SDK-batch.
+
+    ```bash
+    logbrew read logs --project "$LOGBREW_PROJECT_ID" \
+      --release quickstart@1 \
+      --environment development \
+      --since 1h \
+      --json
+    ```
+
+    **Controlepunt:** `LogBrew quickstart check` verschijnt voor dat project,
+    die release en die omgeving. Dit toont alleen dat de testlog is
+    afgeleverd.
+  </Step>
+</Steps>
+
+## <span id="understand-the-test-result">Het testresultaat lezen</span>
+
+Het voorbeeld verzendt drie events. Slechts één daarvan is een log. De
+markeringen voor release en omgeving geven context aan de log.
+
+| Veld in het voorbeeld | Vastgelegde gegevens |
+| --- | --- |
+| `message` | De bewerking die de test vastlegt, `LogBrew quickstart check`. |
+| `level: "info"` | Een normaal testevent, geen fout. |
+| `logger` | De logger van de applicatie die het record heeft gemaakt. |
+| `occurredAt` | Wanneer deze uitvoering het event heeft gemaakt, als UTC-tijdstempel. |
+| `context.resource.service` | De service van de applicatie en de versie ervan, niet de identiteit van de SDK. |
+
+Houd de test op `info`. Verander het niveau niet in `error` om de log
+makkelijker te vinden. Gebruik in plaats daarvan de filters voor project en
+tijd. Zie [Ernstwaarden](/nl/concepts/telemetry#severity-values).
+
+De regel met `console.log` toont het afleverresultaat in je terminal. De
+aanroep `client.log` verzendt de log naar LogBrew. Een geslaagde eerste
+aflevering toont:
+
+```json
+{ "ok": true, "status_code": 200, "attempts": 1 }
+```
+
+De ingest-sleutel bepaalt welk project de log ontvangt. Een `--project`-filter
+in de CLI verplaatst geen events.
+
+Deze log heeft geen tracecontext, omdat het voorbeeld geen request-span
+aanmaakt. Dat betekent niet dat de log is mislukt. Wat de CLI leest, is een
+momentopname. Voer de opdracht opnieuw uit om latere events te lezen, of
+gebruik `logbrew watch logs --json` voor een livestream.
+
+## <span id="common-recovery-decisions">Veelvoorkomende herstelbeslissingen</span>
+
+| Resultaat | Volgende stap |
+| --- | --- |
+| De CLI-status is niet geauthenticeerd | Een mens voert `logbrew login` uit. Voer daarna de statusopdracht opnieuw uit. |
+| Het bestand voor de ingest-sleutel bestaat al | Kies een ongebruikt pad. Overschrijf geen onbekende toegangsgegevens. |
+| Het resultaat van het aanmaken is niet duidelijk | Voer exact dezelfde opdracht om het project aan te maken opnieuw uit. |
+| `unauthenticated` | Controleer de ingest-sleutel van het project, niet de toegangsgegevens van je CLI-account. Opnieuw inloggen lost dit niet op. |
+| `rate_limited` | Wacht voordat je opnieuw verzendt. Verzend niet in een lus en maak geen nieuwe sleutel aan. |
+| `transport_error` of `network_failure` | Controleer de netwerkverbinding. Een mislukte response toont niet dat het eerdere request geen effect had. |
+| `delivery_failed` | Stop en onderzoek de fout. Toon geen geheimen of de body van het request. |
+| De `status` in het doctor-rapport is niet `ready` | Lees `checks` en `next` in het [doctor-rapport](/nl/reference/cli#read-a-project-doctor-report). Houd hetzelfde project aan. |
+| Het lezen van logs geeft een leeg resultaat | Vergelijk het project, de omgeving, de release en het tijdsbereik met de verzonden batch. |
+
+Ontbreekt de telemetrie nog steeds? Gebruik dan de
+[controles voor de eerste telemetrie](/nl/guides/troubleshooting#recover-missing-first-telemetry).
+Helpen die controles niet? [Meld dan een probleem](/nl/guides/report-a-problem).
+Voeg geen toegangsgegevens, ruwe telemetrie, klantgegevens, lokale paden of
+broncode toe.
+
+## <span id="move-to-your-application">Overstappen naar je eigen applicatie</span>
+
+- Maak de client één keer aan in de initialisatiecode van je app.
+- Zet de SDK-versies vast in je pakketbestanden. Test upgrades buiten
+  productie.
+- Laad de ingest-sleutel uit je bestaande configuratie voor geheimen. Roteer
+  de sleutel na een mogelijk lek. Zie
+  [Een ingest-sleutel roteren](/nl/guides/rotate-ingest-key).
+- Gebruik vaste namen voor service, omgeving en release uit je
+  deploymentconfiguratie. Zie [Releases](/nl/concepts/releases).
+- Schrijf logberichten die de bewerking en het resultaat noemen, zoals
+  `Report generation completed`. Houd privéwaarden uit het bericht. Kopieer
+  geen volledig request of gebruikersrecord naar een log.
+- Gebruik per applicatielog één verzender, zodat er geen dubbele records
+  ontstaan. Zoek uit welke integratie elk record al verzendt voordat je
+  LogBrew toevoegt.
+- Verzend vóór een uitrol naar productie één veilig event via het echte
+  codepad en lees het terug. Controleer het bericht, de service, de release en
+  de omgeving. Een los voorbeeld test het codepad van je applicatie niet.
+
+Dit voorbeeld stelt geen source maps in, en ook geen vastlegging in de browser
+of op mobiel. Begin daarvoor bij de
+[handleiding voor SDK-integratie](/nl/guides/sdk-ingestion).
+
+<CardGroup cols={2}>
+  <Card title="Projecten" icon="folder-kanban" href="/nl/concepts/projects">
+    Lees de installatiestatus en beheer de ingest-sleutels van projecten.
+  </Card>
+
+  <Card title="SDK-integratie" icon="cloud-upload" href="/nl/guides/sdk-ingestion">
+    Kies het SDK-pakket voor je runtime.
+  </Card>
+
+  <Card title="Een issue onderzoeken" icon="bug" href="/nl/guides/investigate-an-issue">
+    Volg het bewijs uit de trace en gerelateerde logs voor één issue.
+  </Card>
+
+  <Card title="Een probleem melden" icon="life-buoy" href="/nl/guides/report-a-problem">
+    Verzend een veilige, privé supportmelding.
+  </Card>
+</CardGroup>

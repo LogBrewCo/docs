@@ -1,0 +1,537 @@
+---
+title: "Foutafhandeling en foutcodes van de API"
+sidebarTitle: "API-fouten"
+description: "Lees foutcodes, HTTP-statussen en JSON-voorbeelden van de LogBrew API. Corrigeer requests met de herstelinstructies en probeer veilig opnieuw."
+---
+
+Fouten van de LogBrew API gebruiken één JSON-envelop. Gebruik `code` en
+`next_action` om het gedrag van je programma te sturen. Toon `error` en `next`
+als platte tekst. Baseer je code niet op de tekst van `error` of `next`.
+
+```json
+{
+  "error": "invalid since value",
+  "code": "validation_failed",
+  "next": "use since=24h, since=7d, or an RFC3339 timestamp",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+| Veld | Betekenis |
+| --- | --- |
+| `error` | Korte beschrijving van het probleem, leesbaar voor mensen. |
+| `code` | Stabiele foutcode. Kies hiermee de juiste tak in je client. |
+| `next` | Herstelstap, leesbaar voor mensen. De tekst verschilt per route. |
+| `next_action.code` | Stabiele herstelactie voor de routering in je programma. |
+| `next_action.target` | Het object waarop de herstelactie betrekking heeft, zoals `auth` of `request`. |
+
+Sommige responses voegen velden toe, zoals `limit`, `reset_at` of
+`retry_after_seconds`. De tabel met [foutcodes](#error-codes) noemt ze.
+
+## <span id="handle-an-error-response">Een foutresponse afhandelen</span>
+
+1. Lees de HTTP-status.
+2. Controleer of de body JSON is voordat je `code` leest.
+3. Kies met de status en `code` samen de juiste tak in je client.
+4. Toon `error` en `next` als platte tekst. Geef ze niet weer als HTML en voer ze niet uit als opdracht.
+5. Gebruik `next_action` voor automatisch herstel. Herkent de client de actie niet? Stop dan en toon de fout.
+6. Bewaar de teruggegeven waarden van `limit`, `reset_at` en `retry_after_seconds` bij het mislukte request.
+7. Gebruik de [regels voor nieuwe pogingen](#retry-rules) voordat je het opnieuw probeert.
+
+Heeft de response geen JSON-envelop? Bewaar dan de HTTP-status en noteer de
+code als niet beschikbaar. Verzin geen LogBrew-`code`. Een proxy of
+netwerkfout kan dit resultaat geven.
+
+Vervang een `code` van LogBrew niet door de naam van de HTTP-status. Een
+response met `400` kan bijvoorbeeld `invalid_json` of `invalid_path` bevatten.
+Elke code vraagt om een andere correctie.
+
+Noteer in logs de HTTP-status en `code`. Log niet de volledige body,
+toegangsgegevens of hersteltokens.
+
+## <span id="error-codes">Foutcodes</span>
+
+Dezelfde `code` kan op meer dan één route voorkomen. De tekst van `next` en de
+waarden van `next_action` kunnen per route verschillen. Gebruik de
+teruggegeven waarden. Een endpoint geeft alleen de codes terug die gelden voor de
+authenticatie, methode, body en limieten van dat endpoint.
+
+| HTTP | `code` | Betekenis | Actie in de client |
+| --- | --- | --- | --- |
+| `400`, `413`, `415` of `422` | `invalid_json` | De body is geen geldige JSON, is te groot, heeft het verkeerde contenttype of past niet bij de JSON-vorm van de route. | Verzend geldige JSON met `Content-Type: application/json` en de velden die de route nodig heeft. |
+| `400`, `413` of `500` | `invalid_multipart` | De server kan een upload met `multipart/form-data` niet lezen. | Corrigeer bij `400` of `413` het formulier of de grootte ervan. Gebruik bij `500` de [regels voor nieuwe pogingen](#retry-rules). |
+| `400` of `500` | `invalid_path` | De server kan een waarde in het URL-pad niet lezen, zoals een project- of issue-ID. | Corrigeer bij `400` het ID en het type ervan. Gebruik bij `500` de [regels voor nieuwe pogingen](#retry-rules). |
+| `400`, `405` of `426` | `invalid_websocket_upgrade` | Een verbinding met de livefeed is geen geldige WebSocket-upgrade. | Maak verbinding met `GET` en de headers voor een WebSocket-upgrade. Zie het [formaat voor live-events](/nl/reference/telemetry-response-shapes#live-event-response-format). |
+| `401` | `unauthorized` | Accountauthenticatie ontbreekt, is ongeldig of is verlopen. | Log opnieuw in. Voer voor de CLI `logbrew login` uit. |
+| `401` | `ingest_key_invalid` | Bij de opname van telemetrie ontbreekt een geldige projectgebonden ingest-sleutel. | Stel een actuele ingest-sleutel voor dat project in. |
+| `402` | `subscription_required` | De actie vereist een betaald abonnement. | Volg `next`. Daarin staat de stap voor het abonnement of het advies om contact op te nemen met support. |
+| `403` | `forbidden` | Het account heeft geen toegang tot de resource of actie. | Gebruik een account met toegang. Probeer geen andere ID's. |
+| `403` | `role_forbidden` | Het account mag deze rolwijziging in de organisatie niet doen. | Vraag een eigenaar of beheerder van de organisatie om de wijziging te doen. |
+| `404` | `not_found` | De resource of API-route is niet beschikbaar voor het account. | Vraag opnieuw een lijst op met resources van je account. Controleer daarna het ID, het pad en de filters. |
+| `405` | `method_not_allowed` | De route bestaat, maar de HTTP-methode wordt niet ondersteund. | Gebruik de methode die `next` noemt. |
+| `408` | `request_timeout` | Het request is niet op tijd afgerond. | Maak het bereik kleiner, of wacht en verzend het request opnieuw. |
+| `409` | `idempotency_conflict` | Een `Idempotency-Key` of `deployment_id` is opnieuw gebruikt voor een ander request. | Probeer het oorspronkelijke request ongewijzigd opnieuw, of gebruik een nieuwe sleutel voor nieuw werk. |
+| `409` | `account_link_conflict` | De inlogidentiteit hoort bij een ander account. | Los de accountkoppeling op in de accountinstellingen. Maak geen tweede account aan voor dezelfde identiteit. |
+| `409` | `account_recovery_available` | Het account zit in de herstelperiode. | Volg de teruggegeven herstelactie. Houd het hersteltoken privé. |
+| `410` | `account_recovery_expired` | De herstelperiode van het account is voorbij. | Log in om een nieuw account aan te maken. |
+| `422` | `validation_failed` | Een querywaarde, veld, filter, cursor, header of tijdsbereik is ongeldig. | Corrigeer de genoemde waarde. Verzend het request daarna opnieuw. |
+| `422` | `invite_invalid` | Een uitnodiging voor de organisatie heeft een ongeldig e-mailadres of een ongeldige rol. | Corrigeer de uitnodiging. Verzend die daarna opnieuw. |
+| `422` | `member_limit_exceeded` | De organisatie heeft het maximale aantal leden. | Vraag de eigenaar van de organisatie om een lid te verwijderen of het abonnement te wijzigen. |
+| `422` | `organization_limit_exceeded` | Het account heeft het maximale aantal organisaties. | Verwijder een organisatie, wijzig het abonnement of neem contact op met support. |
+| `423` | `organization_paused` | De organisatie is gepauzeerd, omdat het betaalde abonnement niet actief is. | Hervat een actief betaald abonnement. |
+| `429` | `rate_limited` | De aanroeper heeft te veel requests verzonden. Voegt `retry_after_seconds` toe. | Wacht `retry_after_seconds`. Probeer het daarna opnieuw met backoff. |
+| `429` | `usage_limit_exceeded` | De opname heeft het toegestane gebruik van het account voor de factureringsperiode bereikt. Voegt `limit` en `reset_at` toe. | Stop de opname tot `reset_at`, of wijzig het abonnement. |
+| `429` | `artifact_storage_limit_exceeded` | Een upload van een releaseartefact of debugbestand heeft een opslaglimiet bereikt. Voegt `limit` toe. | Wacht voordat je opnieuw uploadt. Blijft de limiet bestaan? Neem dan contact op met support. |
+| `429` | `invitation_limit_exceeded` | De organisatie heeft het maximale aantal uitnodigingen per dag bereikt. Voegt `limit` en `reset_at` toe. | Wacht tot `reset_at` of wijzig het abonnement. |
+| `500` | `storage_error`, `json_error` of `internal_error` | De server heeft het request niet afgerond. | Gebruik de [regels voor nieuwe pogingen](#retry-rules). Blijft de fout optreden? [Meld dan een probleem](/nl/guides/report-a-problem). |
+| `503` | `service_unavailable` | De API kan het request op dit moment niet accepteren. | Wacht. Verzend het request daarna opnieuw. |
+| `503` | `artifact_storage_unavailable` | Uploads van releaseartefacten en debugbestanden zijn tijdelijk niet beschikbaar. | Wacht voordat je opnieuw uploadt. Start geen parallelle uploads. |
+| `503` | `billing_unavailable` | Afrekenen of abonnementsbeheer is tijdelijk niet beschikbaar. | Wacht. Probeer de factureringsactie daarna opnieuw. |
+
+Een onbekend ID en een ID waartoe je geen toegang hebt, kunnen dezelfde
+response geven. Gebruik foutteksten niet om uit te zoeken bij welk account een
+ID hoort. Een onbekend API-pad geeft `404` met `not_found`.
+
+### <span id="limit-fields">Limietvelden</span>
+
+| `code` | Waarden van `limit` | Andere velden |
+| --- | --- | --- |
+| `usage_limit_exceeded` | `issue_events`, `log_bytes`, `metric_bytes` of `trace_spans` | `reset_at`: het einde van de factureringsperiode (RFC3339). |
+| `invitation_limit_exceeded` | `invitations_per_day` | `reset_at`: het begin van de volgende UTC-dag (RFC3339). |
+| `artifact_storage_limit_exceeded` | De naam van een opslaggrens, zoals `artifact_completed_project_bytes` | Geen. |
+| `rate_limited` | Geen | `retry_after_seconds`: het aantal hele seconden om te wachten, minstens `1`. |
+
+Lees het huidige toegestane gebruik en het werkelijke gebruik uit de
+[Account-API](/nl/reference/account-api#account-usage).
+
+## <span id="retry-rules">Regels voor nieuwe pogingen</span>
+
+Beslis op basis van de code en de bewerking of je het opnieuw probeert. De
+status alleen is niet genoeg.
+
+| Response | Regel voor een nieuwe poging |
+| --- | --- |
+| `validation_failed`, `invalid_json`, `invalid_path` (`400`), `invalid_multipart` (`400` of `413`) of `invalid_websocket_upgrade` | Corrigeer eerst de genoemde waarde in het request. Verzend hetzelfde request niet opnieuw. |
+| `unauthorized` of `ingest_key_invalid` | Vervang of vernieuw eerst de juiste toegangsgegevens. |
+| `forbidden`, `role_forbidden` of `not_found` | Probeer het niet opnieuw met andere ID's. Vraag opnieuw een lijst op met resources van je account, of vraag toegang aan de eigenaar. |
+| `method_not_allowed` | Gebruik de methode uit `next`. Verzend de geweigerde methode niet opnieuw. |
+| `idempotency_conflict` | Probeer het oorspronkelijke request ongewijzigd opnieuw, of gebruik een nieuwe sleutel voor nieuw werk. |
+| `rate_limited` | Wacht `retry_after_seconds`. Gebruik daarna exponentiële backoff met jitter. |
+| `usage_limit_exceeded` of `invitation_limit_exceeded` | Wacht tot `reset_at`, of wijzig het abonnement. |
+| `artifact_storage_limit_exceeded` | Wacht voordat je opnieuw uploadt. Blijft de limiet bestaan? Neem dan contact op met support. |
+| `subscription_required`, `organization_paused`, `member_limit_exceeded` of `organization_limit_exceeded` | Volg `next`. Een nieuwe poging zonder wijziging van abonnement of lidmaatschap mislukt opnieuw. |
+| `request_timeout`, `service_unavailable`, `artifact_storage_unavailable` of `billing_unavailable` | Wacht. Voer een leesactie daarna opnieuw uit met hetzelfde bereik. Gebruik voor een schrijfactie de [regels voor schrijfacties](#writes). |
+| `storage_error`, `json_error`, `internal_error` of een andere `5xx` | Wacht. Voer een leesactie daarna opnieuw uit. Gebruik voor een schrijfactie de [regels voor schrijfacties](#writes). Blijft de fout optreden? [Meld dan een probleem](/nl/guides/report-a-problem). |
+
+- Start geen parallelle nieuwe pogingen voor één mislukt request.
+- Bij `rate_limited` heeft de response ook de headers `Retry-After` en
+  `X-RateLimit-After`. Beide bevatten hetzelfde aantal seconden als
+  `retry_after_seconds`.
+- Een time-out bewijst niet dat het resultaat leeg is.
+
+Een rate limit bepaalt hoeveel requests je per periode mag verzenden. Een
+gebruikslimiet bepaalt het toegestane gebruik van het account per
+factureringsperiode. Beide gebruiken `429`. Houd hun velden uit elkaar. Laat
+tijdens beide limieten zien dat het verzamelen of lezen vertraagd is. Toon
+geen oude gegevens als resultaat van een nieuwe leesactie.
+
+### <span id="writes">Schrijfacties</span>
+
+Een time-out, een `5xx`-response of een netwerkfout bewijst niet dat een
+schrijfactie is mislukt. Doe dit voordat je een schrijfactie opnieuw
+verzendt:
+
+1. Ondersteunt de route een idempotentiesleutel? Verzend dan dezelfde sleutel
+   en dezelfde body opnieuw. Gebruik alleen een nieuwe sleutel voor nieuw werk.
+2. Heeft de route geen idempotentiesleutel? Lees dan eerst de resource.
+   Verzend de schrijfactie alleen opnieuw als de wijziging er nog niet is.
+3. Kun je het resultaat niet vinden? Stop dan met automatische nieuwe pogingen
+   en vertel het de gebruiker.
+
+Deze routes accepteren een retrysleutel:
+
+| Route | Retrysleutel |
+| --- | --- |
+| `POST /api/projects` | Optionele header `Idempotency-Key`. |
+| `POST /api/projects/{project_id}/ingest-keys` | Optionele header `Idempotency-Key`. |
+| `POST /api/support/tickets` | Optionele header `Idempotency-Key`. |
+| `POST /api/support/tickets/{ticket_id}/context` | Verplichte header `Idempotency-Key`. |
+| `PUT /api/telemetry/deployments/{deployment_id}` | De `deployment_id` in het pad. |
+
+Een waarde voor `Idempotency-Key` heeft 1 tot 128 zichtbare ASCII-tekens.
+Andere waarden geven `422` met `validation_failed`.
+
+`idempotency_conflict` betekent dat de sleutel bij een ander request hoort.
+Wijzig de body niet bij een nieuwe poging met de oorspronkelijke sleutel.
+
+## <span id="request-shape-errors">Fouten in de vorm van het request</span>
+
+`invalid_json` betekent dat de server de body niet kan accepteren als de
+JSON-vorm van de route. Controleer het contenttype, de grootte van de body, de
+JSON-syntaxis, de verplichte velden en de veldtypen. De HTTP-status laat zien
+welk deel is mislukt:
+
+| HTTP | Oorzaak |
+| --- | --- |
+| `400` | De body is geen geldige JSON. |
+| `413` | De body is te groot. |
+| `415` | De header `Content-Type` is niet `application/json`. |
+| `422` | De JSON is geldig, maar een veld ontbreekt of heeft het verkeerde type. |
+
+`validation_failed` met de fout `invalid query parameters` betekent dat de
+server de querystring niet kan lezen. Controleer de namen van de parameters en
+de typen van de waarden. Verzend geen onbekende queryparameters. De
+[referentie voor queryfilters](/nl/reference/telemetry-api-filters) noemt de
+parameters per route.
+
+`invalid_path` met status `400` betekent dat een waarde in het pad, zoals een
+project-ID, het verkeerde formaat heeft. Verplaats een padwaarde niet naar een
+queryparameter.
+
+Een `500`-response met `invalid_path` of `invalid_multipart` bewijst niet dat
+het request fout was. Gebruik de [regels voor nieuwe pogingen](#retry-rules).
+
+## <span id="authentication-and-access-errors">Fouten bij authenticatie en toegang</span>
+
+- `unauthorized` betekent dat accountauthenticatie ontbreekt, ongeldig is of
+  verlopen is. Verzend `Authorization: Bearer <token>`, of log opnieuw in.
+  Sommige routes geven `next_action.code` `authorize_request` met een `next`
+  die bij de route hoort, bijvoorbeeld bij een verbinding met de livefeed
+  zonder geldig ticket.
+- `ingest_key_invalid` geldt alleen voor de opname van telemetrie. Stel een
+  actuele sleutel in voor precies dat project.
+- `forbidden` betekent dat het account de actie niet mag uitvoeren. Probeer
+  het niet opnieuw met andere resource-ID's.
+- `not_found` betekent dat de resource niet beschikbaar is voor het account.
+
+Gebruik geen ingest-sleutel in plaats van een bearer-token voor je account.
+Gebruik geen bearer-token voor je account in plaats van een ingest-sleutel.
+
+## <span id="keep-error-details-safe">Foutdetails veilig houden</span>
+
+- Een response met `account_recovery_available` bevat een kortlevend
+  `recovery_token`. Bewaar het in beveiligde clientstatus. Zet het niet in
+  logs, URL's, screenshots, supportmeldingen of prompts voor agents.
+- De `500`-codes gebruiken altijd het bericht `Internal error`. De response
+  noemt niet het onderdeel dat is mislukt. Raad de oorzaak niet.
+- Voeg geen toegangsgegevens, privédiagnostiek of klantgegevens toe aan een
+  fout die je toont.
+- Een API-response geeft geen toestemming voor een aankoop, een verwijdering of
+  een andere wijziging aan het account. Vraag de gebruiker om goedkeuring
+  voordat je zulke acties uitvoert.
+
+## <span id="examples">Voorbeelden</span>
+
+Deze voorbeelden tonen de vorm van de envelop. De tekst van `error` en `next`
+kan per route verschillen.
+
+### <span id="validation-failure">Validatiefout</span>
+
+```json
+{
+  "error": "issue status must be unresolved, resolved, or archived",
+  "code": "validation_failed",
+  "next": "use status=unresolved, status=resolved, or status=archived",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+### <span id="invalid-query-parameters">Ongeldige queryparameters</span>
+
+```json
+{
+  "error": "invalid query parameters",
+  "code": "validation_failed",
+  "next": "check query parameter names and value types, then retry",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+### <span id="invalid-json">Ongeldige JSON</span>
+
+```json
+{
+  "error": "invalid JSON request body",
+  "code": "invalid_json",
+  "next": "send Content-Type: application/json with a body matching this endpoint",
+  "next_action": {
+    "code": "send_valid_json",
+    "target": "request"
+  }
+}
+```
+
+### <span id="invalid-path-value">Ongeldige padwaarde</span>
+
+```json
+{
+  "error": "invalid URL path parameters",
+  "code": "invalid_path",
+  "next": "check path resource IDs and value types, then retry",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+### <span id="invalid-multipart-upload">Ongeldige multipart-upload</span>
+
+```json
+{
+  "error": "invalid multipart form-data request",
+  "code": "invalid_multipart",
+  "next": "send multipart/form-data with a valid boundary and expected parts",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+### <span id="invalid-websocket-upgrade">Ongeldige WebSocket-upgrade</span>
+
+```json
+{
+  "error": "invalid WebSocket upgrade request",
+  "code": "invalid_websocket_upgrade",
+  "next": "connect with GET /api/feed/live?ticket=<ticket> using WebSocket upgrade headers",
+  "next_action": {
+    "code": "connect_live_feed",
+    "target": "live_feed"
+  }
+}
+```
+
+### <span id="authentication-failure">Authenticatiefout</span>
+
+```json
+{
+  "error": "Invalid or expired token",
+  "code": "unauthorized",
+  "next": "send Authorization: Bearer <token>, include the logbrew_session cookie, or sign in again",
+  "next_action": {
+    "code": "sign_in",
+    "target": "auth"
+  }
+}
+```
+
+### <span id="invalid-ingest-key">Ongeldige ingest-sleutel</span>
+
+Deze response geldt voor de opname van telemetrie, niet voor leesacties met je
+account. De sleutel moet horen bij het project in het request.
+
+```json
+{
+  "error": "Invalid ingest key",
+  "code": "ingest_key_invalid",
+  "next": "create a project-scoped ingest key, then retry ingestion with that key",
+  "next_action": {
+    "code": "configure_ingest_key",
+    "target": "project_ingest_key"
+  }
+}
+```
+
+### <span id="resource-not-found">Resource niet gevonden</span>
+
+```json
+{
+  "error": "issue not found",
+  "code": "not_found",
+  "next": "check the resource id or filters and retry",
+  "next_action": {
+    "code": "check_resource",
+    "target": "resource"
+  }
+}
+```
+
+### <span id="access-denied">Toegang geweigerd</span>
+
+```json
+{
+  "error": "Insufficient permissions",
+  "code": "forbidden",
+  "next": "use an account with access to this resource",
+  "next_action": {
+    "code": "request_access",
+    "target": "auth"
+  }
+}
+```
+
+### <span id="unsupported-method">Niet-ondersteunde methode</span>
+
+```json
+{
+  "error": "Method not allowed",
+  "code": "method_not_allowed",
+  "next": "send GET /api/account/usage with Authorization or the logbrew_session cookie",
+  "next_action": {
+    "code": "use_supported_method",
+    "target": "api_method"
+  }
+}
+```
+
+### <span id="request-timeout">Time-out van het request</span>
+
+```json
+{
+  "error": "Request timed out",
+  "code": "request_timeout",
+  "next": "retry read-only requests later or narrow the request scope. Before repeating a write, check whether it succeeded and follow this endpoint's idempotency guidance",
+  "next_action": {
+    "code": "retry_or_narrow_scope",
+    "target": "request"
+  }
+}
+```
+
+### <span id="idempotency-conflict">Idempotentieconflict</span>
+
+```json
+{
+  "error": "Idempotency key was already used",
+  "code": "idempotency_conflict",
+  "next": "retry the original support request or use a new Idempotency-Key",
+  "next_action": {
+    "code": "use_new_idempotency_key",
+    "target": "request"
+  }
+}
+```
+
+### <span id="rate-limit">Rate limit</span>
+
+```json
+{
+  "error": "Rate limit exceeded",
+  "code": "rate_limited",
+  "next": "wait for retry_after_seconds, then retry with exponential backoff and jitter",
+  "next_action": {
+    "code": "retry_with_backoff",
+    "target": "request"
+  },
+  "retry_after_seconds": 1
+}
+```
+
+### <span id="usage-limit">Gebruikslimiet</span>
+
+De tekst van `next` en `next_action` hangen ervan af of je het abonnement kunt
+wijzigen. Kan dat niet? Dan is `next_action.code` `wait_or_contact_support` en
+is het target `support`.
+
+```json
+{
+  "error": "Usage limit exceeded",
+  "code": "usage_limit_exceeded",
+  "next": "wait until reset_at or upgrade your plan before retrying ingestion",
+  "next_action": {
+    "code": "wait_or_upgrade",
+    "target": "billing"
+  },
+  "limit": "log_bytes",
+  "reset_at": "2026-11-01T00:00:00+00:00"
+}
+```
+
+### <span id="artifact-storage-limit">Opslaglimiet voor artefacten</span>
+
+```json
+{
+  "error": "Release artifact storage limit exceeded",
+  "code": "artifact_storage_limit_exceeded",
+  "next": "wait before retrying the upload, or contact LogBrew support if the limit persists",
+  "next_action": {
+    "code": "wait_or_contact_support",
+    "target": "support"
+  },
+  "limit": "artifact_completed_project_bytes"
+}
+```
+
+### <span id="account-recovery-available">Accountherstel beschikbaar</span>
+
+Deze response voegt `deleted_at` en een kortlevend `recovery_token` toe.
+Bewaar het token in beveiligde clientstatus.
+
+```json
+{
+  "error": "Account recovery available",
+  "code": "account_recovery_available",
+  "next": "restore account with POST /api/auth/restore",
+  "next_action": {
+    "code": "restore_account",
+    "target": "account_recovery"
+  },
+  "deleted_at": "2026-09-04T09:00:00Z",
+  "recovery_token": "<recovery token>"
+}
+```
+
+### <span id="account-recovery-expired">Accountherstel verlopen</span>
+
+```json
+{
+  "error": "Account recovery window expired",
+  "code": "account_recovery_expired",
+  "next": "create a new account after deletion completes",
+  "next_action": {
+    "code": "create_account",
+    "target": "auth"
+  }
+}
+```
+
+### <span id="organization-paused">Organisatie gepauzeerd</span>
+
+```json
+{
+  "error": "Organization paused",
+  "code": "organization_paused",
+  "next": "resume an active paid subscription before using this organization",
+  "next_action": {
+    "code": "resume_subscription",
+    "target": "billing"
+  }
+}
+```
+
+### <span id="server-error">Serverfout</span>
+
+`storage_error`, `json_error` en `internal_error` gebruiken hetzelfde bericht
+in `error`. De waarden van `code`, `next` en `next_action` verschillen.
+
+```json
+{
+  "error": "Internal error",
+  "code": "internal_error",
+  "next": "retry read-only requests later. Before repeating a write, check whether it succeeded and follow this endpoint's idempotency guidance. Contact LogBrew support if the problem persists",
+  "next_action": {
+    "code": "retry_or_contact_support",
+    "target": "support"
+  }
+}
+```
+
+| `code` | `next_action.code` | `next_action.target` |
+| --- | --- | --- |
+| `storage_error` | `retry_or_check_storage` | `backend_status` |
+| `json_error` | `send_valid_json` | `request` |
+| `internal_error` | `retry_or_contact_support` | `support` |
+
+Lees de [Telemetrie-API](/nl/reference/telemetry-api) voor endpoints,
+authenticatie en filters.

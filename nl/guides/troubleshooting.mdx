@@ -1,0 +1,230 @@
+---
+title: "Problemen oplossen bij ontbrekende applicatielogs"
+sidebarTitle: "Problemen oplossen"
+description: "Zoek uit waarom applicatielogs ontbreken. Controleer projectinstallatie, filters, issuebewijs en tracelinks veilig met LogBrew."
+---
+
+Gebruik deze pagina als telemetrie ontbreekt, onvolledig is of te breed is.
+Controleer eerst de toegang. Houd daarna het project, de service, de release,
+de omgeving en het tijdsbereik vast terwijl je de oorzaak zoekt.
+
+<Note>
+  Voeg `--json` toe voor workflows met agents. Een mislukte controle geeft een
+  stabiel `next`-veld terug.
+</Note>
+
+## Met de snelle controles beginnen
+
+| Symptoom | Eerste controle | Volgende stap |
+| --- | --- | --- |
+| De CLI is niet ingelogd | `logbrew status --json` | Een persoon voert `logbrew login` uit. |
+| Een project ontbreekt | `logbrew projects --json` | Gebruik een ID uit de projectlijst. |
+| De installatiestatus is onduidelijk | `logbrew doctor --project "<project_id>" --json` | Volg de teruggegeven waarde van `next`. |
+| Logs zijn leeg | Lees de logs voor precies het project en het tijdsbereik | Controleer andere signaaltypen apart. |
+| Resultaten zijn te breed | Voeg filters toe voor project, service, release en omgeving | Houd bij elke leesactie dezelfde scope aan. |
+| Een trace ontbreekt | Lees de details van het issue | Lees een trace alleen als de response een trace-ID bevat. |
+| JavaScript-frames tonen gebouwde code | Controleer of build en source map bij elkaar horen | Volg [Source maps voor JavaScript](/nl/guides/source-maps). |
+| Een MCP-agent kan een project niet lezen | Controleer de goedgekeurde projecten | Volg [Verbindingsproblemen met MCP](/nl/guides/mcp#fix-connection-problems). |
+
+## <span id="recover-missing-first-telemetry">Ontbrekende eerste telemetrie herstellen</span>
+
+Voer deze opdrachten uit voordat je de SDK-configuratie wijzigt. Ze lezen
+alleen:
+
+```bash
+logbrew version --json
+logbrew status --json
+logbrew projects --json
+logbrew doctor --project "<project_id>" --json
+```
+
+`logbrew doctor` controleert API-toegang, authenticatie, het project, de
+ingest-sleutel, de installatie, telemetrie en de zichtbaarheid van logs. Het
+wijzigt het project niet. Lees de algemene `status` en elke controle in het
+[doctor-rapport](/nl/reference/cli#read-a-project-doctor-report). Exitcode
+`0` betekent niet dat elke controle is geslaagd.
+
+| Doctor-status | Volgende stap |
+| --- | --- |
+| `needs_ingest_key` | Maak een projectgebonden ingest-sleutel. Zie [Een ingest-sleutel roteren](/nl/guides/rotate-ingest-key). |
+| `needs_setup` | Rond de SDK-installatie af. Zie [SDK-integratie](/nl/guides/sdk-ingestion). |
+| `needs_telemetry` | Verstuur één veilig testevent vanuit de app en voer de doctor daarna opnieuw uit. |
+| `ready` | Lees recente logs, issues, releases of traces. |
+
+Het rapport kan ook de status `auth_invalid`, `project_missing`,
+`api_unreachable` of `check_failed` hebben. Het
+[doctor-rapport](/nl/reference/cli#read-a-project-doctor-report) geeft voor
+elk daarvan de volgende stap.
+
+Een project dat `ready` is, kan toch geen logs hebben, omdat elk signaaltype
+apart staat. De controle `logs` kan `empty` of `unavailable` zijn. Een
+mislukte leesactie is geen leeg resultaat.
+
+### Eén veilig testevent versturen
+
+Verstuur vanuit de geïnstalleerde SDK één testlog met een uniek bericht. Neem
+geen token, gebruikersgegevens of request-body op. Noteer het project-ID, de
+service, de omgeving, de release, de UTC-starttijd en de SDK-versie. Wacht op
+de aflevering en lees daarna een kort tijdsbereik in hetzelfde project.
+Verstuur geen extra testevents zolang de aflevering nog loopt.
+
+## Ontbrekende logs vinden
+
+Lees eerst een kleine, exacte scope:
+
+```bash
+logbrew read releases --project "<project_id>" --environment production --json
+logbrew read logs --project "<project_id>" --environment production \
+  --release checkout@1 --since 1h --limit 20 --json
+```
+
+Controleer deze punten op volgorde:
+
+1. Het project-ID hoort bij de app die het event verstuurde.
+2. Service, release en omgeving komen exact overeen, inclusief hoofdletters
+   en spaties.
+3. Het tijdsbereik bevat de eventtijd. LogBrew geeft eventtijden terug in
+   UTC. `--until` is een exclusieve bovengrens.
+4. Geen zoek- of ernstfilter verbergt het event.
+5. De app heeft het signaaltype verstuurd dat je leest. Een log maakt geen
+   issue of trace aan.
+
+Ontbreekt het event nog steeds, verwijder dan één filter tegelijk:
+
+1. Houd het project aan en verbreed het tijdsbereik.
+2. Verwijder het releasefilter.
+3. Verwijder het omgevingsfilter.
+4. Verwijder het servicefilter.
+5. Verwijder zoek- en ernstfilters.
+
+Stop zodra het event verschijnt. Het laatste filter dat je verwijderde, komt
+niet overeen met de appconfiguratie. Lees niet alle projecten in plaats van
+het geconfigureerde project.
+
+| Resultaat | Wat het laat zien | Volgende controle |
+| --- | --- | --- |
+| Geen rijen in één project | Geen match in die scope | Controleer tijd en filters. |
+| Logs, maar geen issues | Geen gegroepeerde fout past bij de filters | Controleer of de app een fout heeft verstuurd. |
+| Issue zonder trace | Het voorval heeft geen bruikbare tracelink | Lees de tracestatus in het issueonderzoek. |
+| Een release, maar geen logs | De release heeft andere signalen, maar geen logs in die scope | Vergelijk de aantallen in `logbrew read releases`. Lees elk signaaltype in hetzelfde project. |
+| Event verschijnt nadat je een filter verwijdert | Dat filter sloot het event uit | Corrigeer het filter of de waarde in de app. |
+
+Een resultaatpagina is geen totaal. Ga met `--pagination cursor` verder met de
+teruggegeven `next_cursor` en houd dezelfde filters aan. Zie
+[Cursorpaginering](/nl/reference/telemetry-api-filters#cursor-pagination).
+
+### De dashboardweergave controleren
+
+Het dashboard toont van elke lijst een momentopname. Zet in de logweergave
+**Live** aan om nieuwe logs toe te voegen zodra ze binnenkomen. Andere
+weergaven worden niet live bijgewerkt. Laad de pagina opnieuw voor een nieuwe
+momentopname. Een verouderde momentopname is iets anders dan een leeg
+resultaat.
+
+LogBrew bewaart alleen de telemetrie die de app verstuurt. Verwijder
+toegangsgegevens, request-body's, querywaarden en persoonsgegevens vóór de
+aflevering. Gebruik [Vastgelegde gegevens beheren](/nl/guides/safe-capture) om je
+veldselectie te controleren.
+
+## Issues en traces controleren
+
+Gebruik een issue-ID of trace-ID dat LogBrew heeft teruggegeven. Verzin er
+nooit een.
+
+```bash
+logbrew read issues --project "<project_id>" --environment production \
+  --status unresolved --since 24h --json
+logbrew read issue "<issue_id>" --json
+logbrew read trace "<trace_id>" --project "<project_id>" --json
+logbrew read logs --trace "<trace_id>" --project "<project_id>" --json
+```
+
+`--status` accepteert `unresolved`, `resolved` en `archived`. `ignored`
+selecteert dezelfde issues als `archived`.
+
+Issuestatus en tracestatus zijn verschillende dingen. De tracestatussen
+`not_linked`, `not_found` en `unavailable` betekenen elk iets anders. Zie
+[Een issue onderzoeken](/nl/guides/investigate-an-issue) voor elke waarde.
+Lees het issue en de bijbehorende logs voordat je het oplost, archiveert of
+heropent.
+
+## CLI- en API-fouten afhandelen
+
+In JSON-modus bevat een CLI-fout `ok`, `error`, `message` en `next`:
+
+```json
+{
+  "ok": false,
+  "error": "not_logged_in",
+  "message": "not logged in: run logbrew login",
+  "next": "run logbrew login"
+}
+```
+
+Geeft de API een fout terug, dan is `error` gelijk aan `api_error`. De fout
+heeft dan ook `status` (de HTTP-status), `api_code` (de API-`code`),
+`api_error` en `api_next`. Bij een `rate_limited`-fout heeft hij ook
+`retry_after_seconds`. De CLI probeert het niet automatisch opnieuw.
+
+| Status of fout | Herstel |
+| --- | --- |
+| `not_logged_in` of HTTP `401` | Een persoon voert `logbrew login` uit. Probeer daarna de leesactie opnieuw. |
+| HTTP `403` | Gebruik de juiste toegangsgegevens voor het project. Voor een wijziging aan een issue heb je ook toestemming nodig om issues in het project te beheren. Toon de waarde van de toegangsgegevens niet. |
+| HTTP `404` | Gebruik een actueel project-, issue- of trace-ID uit een response. |
+| HTTP `422` | Corrigeer het genoemde veld. |
+| HTTP `429` met `rate_limited` | Wacht `retry_after_seconds` en probeer het daarna één keer opnieuw. |
+| HTTP `429` met een andere code | Stop automatische nieuwe pogingen. Volg `api_next`. |
+| HTTP `5xx` | Wacht, probeer één leesactie opnieuw en meld het probleem als het blijft. |
+
+Zie [API-fouten](/nl/reference/api-errors) voor elke foutcode.
+
+## <span id="secure-a-compromised-account">Een gecompromitteerd account beveiligen</span>
+
+Heeft iemand anders mogelijk een toegangstoken, vernieuwingstoken of
+sessiecookie van je account, log dan alle LogBrew-clients uit. Volg de
+procedure voor
+[accountbreed uitloggen](/nl/reference/account-api#every-logbrew-login). Een
+persoon moet deze actie goedkeuren. `logbrew logout` en uitloggen in de
+browser beëindigen maar één client, dus dat is niet genoeg.
+
+Accountbreed uitloggen stopt ook elke MCP-verbinding die daarvoor is
+goedgekeurd. Is het uitloggen gelukt, wis dan de lokale LogBrew-toegangsgegevens
+op elke client en log opnieuw in vanaf een vertrouwde client. Keur MCP-clients
+pas opnieuw goed als je ze vertrouwt. Gaat de response verloren, meld dan niet
+dat alle clients zijn uitgelogd en herhaal het request niet automatisch.
+
+Accountbreed uitloggen roteert de ingest-sleutels van projecten niet. Is een
+ingest-sleutel uitgelekt, [roteer dan de ingest-sleutel](/nl/guides/rotate-ingest-key).
+
+## Veilig problemen oplossen
+
+Gebruik toegangsgegevens van je account voor leesacties met de CLI. Gebruik
+projectgebonden ingest-toegangsgegevens alleen voor schrijfacties van de SDK.
+Zet geen tokens, autorisatieheaders, ruwe logs, klantgegevens, request-body's,
+lokale paden of broncode in een opdracht, chat of supportticket.
+
+Herhaal één leesactie met de kleinste scope die nog steeds mislukt, voordat
+je een probleem meldt. Noteer de opdracht zonder de waarden van
+toegangsgegevens, de foutcode, het project-ID en de filterwaarden. Lossen de
+controles het probleem niet op,
+[meld dan een probleem](/nl/guides/report-a-problem).
+
+## Gerelateerde pagina's
+
+<CardGroup cols={2}>
+  <Card title="Snelstart" icon="rocket" href="/nl/quickstart">
+    Verstuur en lees het eerste veilige event.
+  </Card>
+
+  <Card title="CLI-handleiding" icon="square-terminal" href="/nl/guides/cli">
+    Gebruik exacte filters en JSON-uitvoer.
+  </Card>
+
+  <Card title="Een issue onderzoeken" icon="search" href="/nl/guides/investigate-an-issue">
+    Lees het issuebewijs voordat je de status wijzigt.
+  </Card>
+
+  <Card title="API-fouten" icon="triangle-alert" href="/nl/reference/api-errors">
+    Herstel na elke foutcode.
+  </Card>
+</CardGroup>

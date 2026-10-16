@@ -1,0 +1,228 @@
+---
+title: "Support-API: een ticket aanmaken en volgen"
+sidebarTitle: "Een probleem melden"
+description: "Maak een supportticket voor LogBrew aan via de CLI of de Support-API. Voeg veilige diagnostiek toe, volg de status en stuur extra context."
+---
+
+Maak een supportticket aan als een probleem opvolging nodig heeft. Een persoon of
+een AI-agent kan het ticket daarna volgen en gevraagde context toevoegen. Alleen
+het account dat het ticket heeft aangemaakt en het supportteam van LogBrew
+kunnen het lezen.
+
+<Warning>
+  Gebruik een bearer-token voor accounttoegang, zoals `$LOGBREW_TOKEN`.
+  Gebruik nooit een ingest-sleutel van een project. Verwijder privégegevens
+  voordat je de titel, de beschrijving of de diagnostiek schrijft. Automatisch
+  afschermen vervangt deze controle niet.
+</Warning>
+
+## <span id="create-a-ticket">Een ticket aanmaken</span>
+
+Voer in de CLI deze opdracht uit:
+
+```bash
+logbrew support create --category docs_confusion \
+  --title "First event is not visible" \
+  --description "Steps: send one info event, then read logs in the same project. Expected: one row. Observed: no rows." \
+  --project "<project_id>" --json
+```
+
+De CLI zet `source` op `cli`. `--diagnostics` voegt alleen de naam van de
+binary, de CLI-versie, het besturingssysteem en de architectuur toe. Voer
+`logbrew support --help` uit voor alle opties.
+
+De CLI verzendt geen retrysleutel bij het aanmaken van een ticket. Is het
+resultaat onzeker? Voer dan `logbrew support list --json` uit voordat je de
+opdracht opnieuw uitvoert. Anders maak je misschien een tweede ticket aan.
+
+Verzend via de API `POST /api/support/tickets` met `source`, `category`,
+`title` en `description`. Maak voor de melding één keer een retrysleutel aan en
+verzend die in de header `Idempotency-Key`. Zo kun je veilig opnieuw proberen.
+Dit voorbeeld gebruikt fictieve waarden:
+
+```bash
+LOGBREW_SUPPORT_RETRY_KEY="$(uuidgen)"
+
+curl -sS "https://api.logbrew.co/api/support/tickets" \
+  -H "Authorization: Bearer ${LOGBREW_TOKEN:?Set an account access bearer}" \
+  -H "Idempotency-Key: ${LOGBREW_SUPPORT_RETRY_KEY:?Create a retry key for this report}" \
+  -H "Content-Type: application/json" \
+  --data '{
+    "source": "docs",
+    "category": "docs_confusion",
+    "title": "First event is not visible",
+    "description": "Steps: send one info event, then read logs in the same project. Expected: one row. Observed: no rows.",
+    "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    "diagnostics": {
+      "steps": 2,
+      "expected": "one matching row",
+      "observed": "no matching rows"
+    }
+  }'
+```
+
+De retrysleutel bestaat uit 1 tot 128 zichtbare ASCII-tekens, zonder spaties.
+Verzend voor een nieuwe poging dezelfde sleutel met dezelfde body. De response
+geeft dan hetzelfde ticket. Gebruik een nieuwe sleutel voor een andere
+melding. Een time-out bewijst niet dat het aanmaken is mislukt. De header
+`Idempotency-Key` is optioneel. Zonder deze header kan een herhaald request nog
+een ticket aanmaken.
+
+Optionele velden zijn `project_id`, `environment`, `runtime`, `framework`,
+`sdk_package`, `sdk_version`, `release`, `trace_id`, `event_id` en
+`diagnostics`. Laat `project_id` weg als het probleem niet bij één project
+hoort. Een `project_id` moet een actief project van je account aanduiden.
+
+| Veld | Toegestane waarden |
+| --- | --- |
+| `source` | `cli`, `sdk`, `website`, `docs`, `mobile` |
+| `category` | `sdk_install_failure`, `ingest_failure`, `auth_failure`, `project_setup`, `dashboard_issue`, `docs_confusion`, `cli_issue`, `mobile_issue`, `billing_question`, `other` |
+| `title` | 1 tot 160 tekens nadat LogBrew de spaties aan het begin en eind heeft verwijderd. |
+| `description` | 1 tot 4.000 tekens nadat LogBrew de spaties aan het begin en eind heeft verwijderd. |
+| Andere tekstvelden | Elk maximaal 256 tekens. |
+
+Een geslaagd request geeft HTTP `200`:
+
+```json
+{
+  "ticket_id": "sup_11111111111141118111111111111111",
+  "status": "open",
+  "created_at": "2026-10-01T09:30:00Z",
+  "next": "Support ticket created. LogBrew will review the attached diagnostics.",
+  "next_action": {
+    "code": "review_ticket",
+    "target": "support_ticket"
+  }
+}
+```
+
+Ticket-ID's beginnen met `sup_`. Gebruik `next` als advies voor een persoon en
+`next_action` om je programma te sturen.
+
+Gebruik de projectinstellingen of `logbrew projects delete` om een project te
+verwijderen. Vraag niet in een supportticket om een project te verwijderen.
+
+## <span id="write-a-useful-report">Een bruikbare melding schrijven</span>
+
+- Meld één probleem per ticket.
+- Kies de `category` die het best past. Gebruik `other` alleen als geen enkele
+  categorie past.
+- Noem in de `title` één symptoom en één onderdeel van het product.
+- Schrijf de `description` als stappen, gevolgd door het verwachte en het
+  waargenomen resultaat.
+- Voeg project-, release-, trace- of event-ID's alleen toe als ze bij dezelfde
+  fout horen.
+
+Gebruik deze sleutels in `diagnostics`:
+
+| Sleutel | Inhoud |
+| --- | --- |
+| `steps` | Aantal stappen om het probleem te reproduceren. |
+| `expected` | Kort verwacht resultaat. |
+| `observed` | Kort waargenomen resultaat. |
+| `command_name` | Naam van de opdracht en subopdracht, zonder argumenten. |
+| `exit_code` | Numerieke exitcode van het proces. |
+| `error_code` | Stabiele foutcode. |
+| `error_summary` | Korte, afgeschermde samenvatting van de fout. |
+| `retry_count` | Aantal gelijke nieuwe pogingen. |
+| `last_delivery_status` | HTTP-status van de laatste afleverpoging, zoals `401`. |
+
+`diagnostics` is een JSON-object van maximaal 16 KB na het afschermen. LogBrew
+vervangt een waarde door `[redacted]` als de sleutel toegangsgegevens, een
+sessie of een e-mailadres noemt. LogBrew vervangt ook tekst die eruitziet als
+toegangsgegevens, een URL of een lokaal pad. Verder kort LogBrew lange strings
+in en beperkt het de nestingdiepte, het aantal sleutels en het aantal
+lijstitems. Vertrouw niet op dit afschermen. Verwijder privégegevens voordat
+je het request verzendt.
+
+## <span id="track-the-ticket">Het ticket volgen</span>
+
+| CLI-opdracht | API-route | Resultaat |
+| --- | --- | --- |
+| `logbrew support list` | `GET /api/support/tickets` | Toon de tickets van het account. |
+| `logbrew support show <ticket_id>` | `GET /api/support/tickets/{ticket_id}` | Lees één ticket en de volgende stap. |
+| `logbrew support context <ticket_id>` | `GET /api/support/tickets/{ticket_id}/context` | Lees de context die aan het ticket is toegevoegd. |
+| `logbrew support reply <ticket_id>` | `POST /api/support/tickets/{ticket_id}/context` | Voeg gevraagde context toe. |
+| `logbrew support close <ticket_id>` | `PATCH /api/support/tickets/{ticket_id}` | Zet de status op `closed`. |
+| `logbrew support reopen <ticket_id>` | `PATCH /api/support/tickets/{ticket_id}` | Zet de status op `open`. |
+
+De lijst accepteert `project_id`, `status`, `source`, `category`, `release` en
+`limit`. De standaardwaarde van `limit` is 100 en het maximum is 500. Verzend
+`pagination=cursor` voor cursorpaginering. Herhaal op volgende pagina's
+dezelfde filters en verzend `cursor_time` en `cursor_id` uit `next_cursor`. Het
+cursor-ID is een ticket-ID dat met `sup_` begint. Stop als `next_cursor`
+`null` is. De CLI gebruikt de opties `--project`, `--status`, `--source`,
+`--category`, `--release`, `--limit`, `--pagination`, `--cursor-time` en
+`--cursor-id`.
+
+De statuswaarden zijn `open`, `routed`, `in_progress`, `waiting_on_user`,
+`resolved` en `closed`. Je kunt alleen `open` of `closed` instellen. Een
+herhaald request om te sluiten of te heropenen slaagt zonder iets te
+veranderen. Je kunt exact hetzelfde request dus opnieuw proberen. Volg de
+teruggegeven status en `next_action`:
+
+| Status | `next_action.code` | Volgende stap |
+| --- | --- | --- |
+| `open`, `routed`, `in_progress` | `await_owner_update` | Wacht op een update. Lees het ticket later opnieuw. |
+| `waiting_on_user` | `provide_context` | Verzend de gevraagde context. |
+| `resolved`, `closed` | `open_new_ticket_if_needed` | Maak een nieuw ticket aan als het probleem opnieuw optreedt. |
+
+## <span id="add-requested-context">Gevraagde context toevoegen</span>
+
+Antwoord als het ticket om context vraagt. Zo'n ticket heeft de status
+`waiting_on_user` en `next_action.code` `provide_context`.
+
+```bash
+logbrew support reply sup_11111111111141118111111111111111 \
+  --context "The same project and time filters still return no logs." \
+  --retry-key "<retry_key>" --json
+```
+
+De API-body bevat `context` en optioneel `diagnostics`. De tekst in `context`
+moet 1 tot 4.000 tekens bevatten. Zet geen toegangsgegevens, URL's, hostnamen
+of lokale paden in `context`. De API weigert zulke tekst met `422`. Verzend een
+retrysleutel in de header `Idempotency-Key`. De contextroute vereist deze
+header. De sleutel bestaat uit 1 tot 128 zichtbare ASCII-tekens, zonder
+spaties. Gebruik voor elk antwoord een nieuwe sleutel. Hergebruik een sleutel
+alleen om hetzelfde antwoord opnieuw te verzenden.
+
+De API accepteert context zolang het ticket `open`, `routed`, `in_progress` of
+`waiting_on_user` is. De API accepteert 1 antwoord per ticketstatus. Wacht na
+een antwoord op een statuswijziging voordat je meer context verzendt. Een
+antwoord op een ticket met `waiting_on_user` zet het ticket op `open`. Lees de
+teruggegeven `status` in plaats van uit te gaan van deze wijziging.
+
+Een geslaagd antwoord geeft `ticket_id`, `context_id`, `status`, `created_at`,
+`next` en `next_action` terug. De `context_id` begint met `ctx_`. Lees het
+ticket opnieuw voordat je op een later verzoek antwoordt.
+
+`GET /api/support/tickets/{ticket_id}/context` geeft de 20 meest recente
+contextitems terug, oudste eerst. Elk item heeft `context_id`, `context`,
+`diagnostics` en `created_at`. Deze lijst heeft geen cursor.
+
+Een antwoord op een ticket met `resolved` of `closed` geeft `422` met
+`code: "validation_failed"`. Heropen het ticket alleen als de gebruiker die
+supportvraag wil voortzetten. Een `next_action` geeft een agent geen
+toestemming om de accountstatus te wijzigen.
+
+## <span id="recover-from-errors">Herstellen na fouten</span>
+
+| HTTP-status | `code` | Herstel |
+| --- | --- | --- |
+| `401` | `unauthorized` | Verzend een geldig bearer-token voor accounttoegang. |
+| `404` | `not_found` | Toon de tickets van het account en gebruik een teruggegeven `sup_`-ID. Controleer bij een projectfout `project_id` of laat het veld weg. |
+| `405` | `method_not_allowed` | Gebruik een methode uit de tabel in [Het ticket volgen](#track-the-ticket). |
+| `409` | `idempotency_conflict` | De retrysleutel is gebruikt met een ander request. Probeer het oorspronkelijke request opnieuw, of lees het ticket en gebruik een nieuwe sleutel. |
+| `422` | `validation_failed` | Corrigeer het genoemde veld. Verzend bij PATCH alleen `status: "open"` of `status: "closed"`. |
+| `429` | `rate_limited` | Wacht en probeer het daarna opnieuw. |
+
+Foutresponses bevatten `error`, `code`, `next` en `next_action`. Zie
+[API-fouten](/nl/reference/api-errors).
+
+## <span id="keep-the-report-safe">De melding veilig houden</span>
+
+Verzend nooit geheimen, tokens, autorisatieheaders, ingest-sleutels, ruwe logs,
+klantgegevens, lokale paden, hosts of broncode die er niets mee te maken heeft.
+Verzend een korte, afgeschermde samenvatting. Zie
+[Problemen oplossen](/nl/guides/troubleshooting) voor controles die je zelf kunt
+doen.

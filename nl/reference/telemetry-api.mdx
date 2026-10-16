@@ -1,0 +1,287 @@
+---
+title: "Telemetrie-API: requests, responses en foutcodes"
+sidebarTitle: "Telemetrie-API"
+description: "Gebruik de observability-API van LogBrew voor telemetrieopname, afgebakende leesacties, productanalyse, issue-updates en machineleesbare fouten."
+---
+
+De telemetrie-API is JSON over HTTP op `https://api.logbrew.co`. Openbare
+SDK's sturen hun beheerde batches naar `POST /v1/events`. Eigen native
+clients sturen native enveloppen naar `POST /api/telemetry/ingest`. Beide
+ingest-routes vereisen een projectgebonden ingest-bearer.
+
+Leesacties en wijzigingen die bij het account horen, gebruiken een
+account-bearer. Gebruik nooit een account-bearer of een browsersessie als SDK-
+of ingest-configuratie. Stuur nooit een ingest-bearer naar een leesroute.
+
+## Een afgebakend request versturen
+
+Gebruik deze checklist voordat een client een request verstuurt:
+
+1. Kies de route en de HTTP-methode uit de endpointtabel.
+2. Gebruik de juiste bearer: een ingest-bearer voor opname, een
+   account-bearer voor al het andere.
+3. Kies de projectscope die de route ondersteunt. Verbreed de scope niet na
+   een lege response.
+4. Voeg alleen queryparameters toe die de route accepteert. Zie
+   [Queryfilters van de Telemetrie-API](/nl/reference/telemetry-api-filters).
+5. Stuur `Content-Type: application/json` mee als de route een JSON-body
+   heeft.
+6. Lees de HTTP-status en de response-body voordat je het opnieuw probeert.
+7. Houd bearers, feedtickets en volledige response-body's uit logs en uit
+   prompts voor agents.
+
+## Endpoints
+
+### Opname
+
+| Methode | Pad | Doel |
+| --- | --- | --- |
+| `POST` | `/v1/events` | Batches opnemen die openbare LogBrew-SDK's bouwen en versturen. |
+| `POST` | `/api/telemetry/ingest` | Native telemetrie-enveloppen van een eigen client opnemen. |
+
+Laat de SDK de `/v1/events`-batches bouwen. Stel ze niet met de hand samen.
+Zie [SDK-integratie](/nl/guides/sdk-ingestion) voor de native envelop.
+
+### Telemetrie lezen
+
+| Methode | Pad | Doel |
+| --- | --- | --- |
+| `GET` | `/api/logs` | Gestructureerde logs opvragen. |
+| `GET` | `/api/logs/{log_id}` | Eén log lezen. |
+| `GET` | `/api/logs/attributes` | De paden en typen van logattributen opvragen die een filter kan doorzoeken. |
+| `GET` | `/api/telemetry/issues` | Gegroepeerde issues opvragen. |
+| `GET` | `/api/telemetry/issues/{issue_id}` | Eén gegroepeerd issue lezen. |
+| `GET` | `/api/telemetry/issues/{issue_id}/events` | De voorvallen van één gegroepeerd issue opvragen. |
+| `PATCH` | `/api/telemetry/issues/{issue_id}` | De status, prioriteit of toewijzing van één issue bijwerken. |
+| `POST` | `/api/telemetry/issues/bulk` | De status, prioriteit of toewijzing van 1 tot 100 issues in één project bijwerken. |
+| `GET` | `/api/telemetry/issues/assignees` | De accounts opvragen aan wie je issues in één project kunt toewijzen. |
+| `PUT` | `/api/telemetry/issues/{issue_id}/triage-rule` | De ernstregel voor een issue instellen. |
+| `PUT` | `/api/logs/{log_id}/triage-rule` | De ernstregel en de status Genegeerd instellen voor logs die overeenkomen met een log. |
+| `GET` | `/api/telemetry/traces` | Traces vinden binnen een projectscope. |
+| `GET` | `/api/telemetry/traces/{trace_id}` | De spans van één trace opvragen. |
+| `GET` | `/api/telemetry/traces/{trace_id}/summary` | Een begrensde samenvatting van één trace lezen. |
+| `GET` | `/api/telemetry/actions` | Productacties opvragen. |
+| `GET` | `/api/telemetry/metrics` | Metingen van metrics opvragen. |
+| `GET` | `/api/telemetry/metrics/series` | Eén metric lezen als tijdsintervallen. |
+| `GET` | `/api/telemetry/releases` | Samenvattingen van releases opvragen. |
+| `GET` | `/api/telemetry/summary/volume` | Aantallen per signaal voor één project lezen als tijdsintervallen. |
+
+### Deployments
+
+| Methode | Pad | CLI-opdracht |
+| --- | --- | --- |
+| `PUT` | `/api/telemetry/deployments/{deployment_id}` | `logbrew deploy` |
+| `GET` | `/api/telemetry/deployments/{deployment_id}?project_id=<project-uuid>` | Geen |
+| `GET` | `/api/telemetry/deployments?project_id=<project-uuid>` | Geen |
+
+Registreer een deployment vanuit je release-automatisering nadat die is
+geslaagd of mislukt. De `PUT`-body heeft `project_id`, `release`,
+`environment`, `service_name`, `status` (`succeeded` of `failed`),
+`started_at`, `finished_at` en een optionele `commit_sha`. Gebruik dezelfde
+waarden voor `release`, `environment` en `service_name` die je SDK verstuurt.
+Het account moet eigenaar zijn van het project.
+
+`deployment_id` is je eigen ID voor de deployment. Een nieuwe poging met
+hetzelfde ID en dezelfde body geeft de opgeslagen deployment terug. Hetzelfde
+ID met een andere body mislukt met `409` en `idempotency_conflict`. Gebruik
+een nieuw ID voor een andere deployment.
+
+### Onderzoeken
+
+Elke onderzoeksroute geeft een begrensde bewijsbundel terug voor één item. De
+opdracht `logbrew explain` van de [CLI](/nl/reference/cli) leest deze routes
+en valideert de response.
+
+| Methode | Pad | CLI-opdracht |
+| --- | --- | --- |
+| `GET` | `/api/logs/{log_id}/investigation` | `logbrew explain log` |
+| `GET` | `/api/telemetry/issues/{issue_id}/investigation` | `logbrew explain issue` |
+| `GET` | `/api/telemetry/issues/{issue_id}/correction-verification` | `logbrew investigate issue <issue_id> verify` |
+| `GET` | `/api/telemetry/traces/{trace_id}/investigation` | `logbrew explain trace` |
+| `GET` | `/api/telemetry/traces/{trace_id}/spans/{span_id}/investigation` | `logbrew explain span` |
+| `GET` | `/api/telemetry/actions/{action_id}/investigation` | `logbrew explain action` |
+| `GET` | `/api/telemetry/metrics/investigation` | `logbrew explain metric` |
+| `GET` | `/api/telemetry/releases/investigation` | `logbrew explain release` |
+
+### Productanalyse
+
+| Methode | Pad | CLI-opdracht |
+| --- | --- | --- |
+| `GET` | `/api/telemetry/analytics/overview` | `logbrew analytics overview` |
+| `GET` | `/api/telemetry/analytics/properties` | `logbrew analytics properties` |
+| `POST` | `/api/telemetry/analytics/funnel` | `logbrew analytics funnel` |
+| `POST` | `/api/telemetry/analytics/retention` | `logbrew analytics retention` |
+| `POST` | `/api/telemetry/analytics/lifecycle` | `logbrew analytics lifecycle` |
+| `POST` | `/api/telemetry/analytics/paths` | `logbrew analytics paths` |
+| `POST` | `/api/telemetry/analytics/segments/compare` | `logbrew analytics compare` |
+
+De `POST`-routes voor productanalyse verwachten een JSON-body, geen
+queryparameters. Zie [Productanalyse](/nl/concepts/product-analytics).
+
+### Livefeed
+
+| Methode | Pad | Doel |
+| --- | --- | --- |
+| `POST` | `/api/feed/ticket` | Een kortlevend livefeedticket maken met een account-bearer. |
+| `GET` | `/api/feed/live?ticket=<ticket>` | Een WebSocket-verbinding openen met dat ticket. |
+
+### Account en inloggen
+
+Routes voor gebruik, quota, abonnement en uitloggen staan in de
+[Account-API](/nl/reference/account-api).
+
+## Statuscodes bij succes
+
+| Bewerking | Successtatus |
+| --- | --- |
+| Opname, leesacties, issue-updates, regels, deployments, productanalyse en feedtickets | `200 OK` |
+| Livefeedverbinding | `101 Switching Protocols`, daarna WebSocket-berichten |
+
+Een `200`-response bewijst niet dat het bewijs volledig is. Lees de velden
+voor dekking, afkapping en status in de response.
+
+## Queryfilters en paginering
+
+Elke leesroute accepteert eigen queryparameters. Handige aliassen zoals
+`project`, `trace` en `user` zijn geen queryparameters. Lijstroutes geven
+standaard een gewone array terug, en een cursorenvelop met
+`pagination=cursor`. De lijst met deployments geeft altijd een pagina-object
+terug. Zie
+[Queryfilters van de Telemetrie-API](/nl/reference/telemetry-api-filters).
+
+## Responses en fouten
+
+- [Responseformaten](/nl/reference/telemetry-response-shapes) toont één
+  voorbeeld voor elke responsefamilie.
+- [API-fouten](/nl/reference/api-errors) beschrijft foutcodes en
+  herstelacties.
+
+Lees `code` vóór het bericht voor mensen. Gebruik `next_action` voor het
+gedrag van je programma en `next` voor uitleg aan mensen. Parse de formulering
+van `error` of `next` niet.
+
+## Issues bijwerken
+
+Deze requests gebruiken een account-bearer. Die is bewust iets anders dan
+`LOGBREW_INGEST_BEARER`. Het account moet toestemming hebben om issues te
+beheren in het project van het issue. Zo niet, dan mislukt het request met
+`403` en `forbidden`. Dezelfde toestemming geldt voor wijzigingen van status,
+prioriteit en toewijzing, en voor regels voor issues en logs.
+
+Elk request stelt 1 of meer van deze velden in:
+
+| Veld | Waarden |
+| --- | --- |
+| `status` | `unresolved`, `resolved` of `archived`. `ignored` is een oudere naam voor `archived`. |
+| `priority` | `high`, `medium` of `low`. |
+| `assignee` | Een gebruikers-ID, `me` voor het ingelogde account, of `none` om de toewijzing op te heffen. |
+
+Een request zonder een van deze velden mislukt met `422` en
+`validation_failed`.
+
+Een issue is aan 0 of 1 persoon toegewezen. Wie je toewijst, moet het project
+kunnen lezen. Zo niet, dan mislukt het request met `422` en
+`validation_failed`, en wijzigt LogBrew niets. Haal de accounts die je kunt
+toewijzen op via [Toewijsbare accounts opvragen](#list-assignees). Elke andere
+waarde voor `assignee` mislukt ook met `422` en `validation_failed`.
+
+Een prioriteit die je zelf instelt, blijft vast. Zonder zelf ingestelde
+prioriteit volgt de prioriteit de ernst van het issue: `error` en `critical`
+worden `high`, `warning` wordt `medium` en `info` wordt `low`.
+
+Een veld dat al de gevraagde waarde heeft, verandert niet. Na een time-out kun
+je hetzelfde request opnieuw versturen. Een time-out bewijst niet dat de
+wijziging niet is doorgevoerd. Lees het issue opnieuw voordat je een andere
+wijziging verstuurt.
+
+### <span id="update-one-issue">Eén issue bijwerken</span>
+
+Voeg `response_version=3` toe om `archived`, de prioriteit en de toewijzing in
+de response te krijgen:
+
+```bash
+curl -X PATCH "$LOGBREW_API_URL/api/telemetry/issues/$ISSUE_ID?response_version=3" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  -H "Content-Type: application/json" \
+  --data '{ "status": "archived", "priority": "low", "assignee": "me" }'
+```
+
+De response is het bijgewerkte issue. Zie
+[voorbeelden van responses voor issuestatus](/nl/reference/telemetry-response-shapes#issue-status-response-examples).
+
+### <span id="update-issues-in-bulk">Issues in bulk bijwerken</span>
+
+Stuur `project_id` en 1 tot 100 verschillende issue-ID's uit dat project:
+
+```bash
+curl -X POST "$LOGBREW_API_URL/api/telemetry/issues/bulk" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  -H "Content-Type: application/json" \
+  --data '{
+    "project_id": "<project-uuid>",
+    "issue_ids": ["<issue-uuid-1>", "<issue-uuid-2>"],
+    "assignee": "<user-uuid>"
+  }'
+```
+
+Het request past dezelfde wijziging toe op elk issue. De response heeft
+`project_id` en `results`, met 1 resultaat per issue-ID, in de volgorde van
+het request. Elk resultaat heeft `issue_id`, `outcome` en `issue`. `issue` is
+het huidige issue in responseversie 3, of `null` bij `not_found`.
+
+| `outcome` | Betekenis |
+| --- | --- |
+| `updated` | LogBrew heeft de wijziging doorgevoerd. |
+| `unchanged` | Het issue had de gevraagde waarden al. |
+| `not_found` | Het project heeft geen issue met dit ID. LogBrew heeft er niets aan gewijzigd. |
+
+Een lege lijst, meer dan 100 ID's of een herhaald ID mislukt met `422` en
+`validation_failed`. Verdeel een grotere set over meer requests. Kan het
+account het project niet lezen, dan mislukt het request met `404` en
+`not_found`.
+
+### <span id="list-assignees">Toewijsbare accounts opvragen</span>
+
+Stuur het project-ID mee om elk account te krijgen aan wie je issues in dat
+project kunt toewijzen:
+
+```bash
+curl "$LOGBREW_API_URL/api/telemetry/issues/assignees?project_id=$PROJECT_ID" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER"
+```
+
+De lijst bevat elk account dat het project kan lezen. Elk item heeft
+`user_id`, `name` en `email`. `name` is `null` als het account geen naam
+heeft. Zie de
+[response met toewijsbare accounts](/nl/reference/telemetry-response-shapes#assignee-list-response).
+Elk account dat het project kan lezen, kan deze lijst ophalen. Kan het
+account het project niet lezen, dan mislukt het request met `404` en
+`not_found`.
+
+Verliest een lid de toegang tot het project, dan tonen de issues die aan dat
+lid waren toegewezen geen toewijzing meer. Krijgt het lid weer toegang, dan
+tonen de issues dat lid opnieuw, tenzij iemand de toewijzing intussen heeft
+gewijzigd of opgeheven.
+
+### Regels voor issues en logs instellen
+
+Een regel verandert hoe LogBrew overeenkomende signalen toont. Hij verwijdert
+geen gegevens. De vastgelegde `severity` blijft ongewijzigd, en de response
+toont de regel in `triage`.
+
+| Request | JSON-body |
+| --- | --- |
+| `PUT /api/telemetry/issues/{issue_id}/triage-rule` | `{ "severity": "<value>" }` |
+| `PUT /api/logs/{log_id}/triage-rule` | `{ "severity": "<value>", "ignored": true }` |
+
+`severity` is `info`, `warning`, `error`, `critical` of `source`. `source`
+verwijdert de overschrijving en toont weer de vastgelegde ernst. Bij een
+logregel verbergt `ignored: true` overeenkomende logs in de standaardlijst met
+logs. Lees ze met `status=ignored` of `status=all`. De regel geldt voor
+bewaarde en toekomstige overeenkomende signalen. Een andere waarde mislukt met
+`422` en `validation_failed`.
+
+<Warning>
+  Stuur geen lege releasewaarden. LogBrew weigert ze, zodat het volgen van releases
+  betrouwbaar blijft.
+</Warning>

@@ -1,0 +1,251 @@
+---
+title: "Releases volgen en deployments monitoren"
+sidebarTitle: "Releases"
+description: "Zoek met LogBrew de issues, logs, traces, acties en metrics van één codeversie. Lees foutpercentages en de context van een deployment."
+---
+
+Een release is de codeversie die telemetrie heeft verzonden, zoals `api@1.2.3`
+of een Git-commit. LogBrew maakt geen release aan op basis van een tag in je
+repository of een deployment. Elke native telemetrie-envelop moet een niet-lege
+`release` en `environment` bevatten. LogBrew weigert een request zonder deze
+waarden.
+
+## <span id="release-project-service-and-environment">Release, project, service en omgeving</span>
+
+| Veld | Voorbeeld | Vraag die het beantwoordt |
+| --- | --- | --- |
+| Project | `checkout-platform` | Van wie is deze telemetrie en wie mag ze lezen? |
+| Service | `checkout-api` | Welke app of welk proces heeft ze verzonden? |
+| Omgeving | `production` | Waar draaide de code? |
+| Release | `api@1.2.3` | Welke codeversie heeft ze verzonden? |
+
+## <span id="naming-releases">Releasenamen kiezen</span>
+
+Gebruik een onveranderlijke versie, een buildnummer of een Git-commit. Voeg in
+een monorepo een kort prefix met de servicenaam toe, zoals `web@b7f4d91` en
+`worker@3a9c120`. Gebruik dezelfde waarde voor de issues, logs, traces, acties
+en metrics van één artefact.
+
+<CardGroup cols={2}>
+  <Card title="Goed" icon="check">
+    `api@1.2.3`, `web@b7f4d91`, `ios@2026.06.01` en
+    `worker@2026-06-01.1` wijzen elk precies één artefact aan.
+  </Card>
+
+  <Card title="Vermijden" icon="x">
+    `latest`, `prod`, `new` en `build` wijzen geen codeversie aan. Een lege
+    string wordt geweigerd.
+  </Card>
+</CardGroup>
+
+LogBrew weigert ook deze waarden:
+
+| Veld | Geweigerde waarden |
+| --- | --- |
+| `release` | Langer dan 200 bytes, `.` of `..`, of bevat `/`, een backslash, een tab of een regeleinde. |
+| `environment` | Langer dan 64 bytes, `None`, of bevat een spatie, een ander witruimteteken, `/` of een backslash. |
+
+Een Git-branchnaam zoals `feature/login` is geen geldige release. Gebruik in
+plaats daarvan de commit.
+
+Gebruik vaste omgevingsnamen zoals `production`, `staging`, `preview` en
+`local`. Eén release kan in meer dan één omgeving draaien.
+
+Stel beide waarden in je deploymentconfiguratie in, zodat je CI/CD-pipeline ze
+aan de SDK doorgeeft. Zet alleen een versielabel in de releasewaarde. Zet er
+geen geheimen, klantnamen of URL's in. Verzend na een deployment één veilig
+event en lees het terug met het releasefilter.
+
+## <span id="release-summary">Releaseoverzichten lezen</span>
+
+```bash
+logbrew read releases --project "<project_id>" --environment production --since 24h --json
+```
+
+Elk overzicht geldt voor één combinatie van project, release, omgeving en
+service:
+
+| Veld | Betekenis |
+| --- | --- |
+| `issue_count` | Issue-events van deze release. |
+| `log_count` | Logs van deze release. |
+| `trace_span_count` | Trace-spans van deze release. |
+| `action_count` | Productacties van deze release. |
+| `metric_count` | Metingen van metrics van deze release. |
+| `first_seen_at` | Eerste activiteit van de release binnen het gekozen bereik. |
+| `last_seen_at` | Laatste activiteit van de release binnen het gekozen bereik. |
+| `trace_health` | Aantal traces, aantal fouttraces, foutpercentage en status. Zie [Foutpercentages van traces lezen](#interpret-trace-error-rates). |
+| `next_action` | Het signaal dat je hierna leest, als `code` en `target`. |
+
+De aantallen meten verschillende signalen. Tel ze niet bij elkaar op.
+`first_seen_at` en `last_seen_at` zijn geen deploymenttijden. Een service kan
+later nog meer telemetrie met dezelfde release verzenden. Overzichten staan
+gesorteerd op `last_seen_at`, nieuwste eerst.
+
+`next_action` wijst naar het eerste signaaltype met gegevens, in deze
+volgorde:
+
+| `next_action.code` | `next_action.target` |
+| --- | --- |
+| `inspect_release_issues` | `telemetry_issues` |
+| `inspect_release_traces` | `trace_explorer` |
+| `inspect_release_logs` | `telemetry_logs` |
+| `inspect_release_actions` | `telemetry_actions` |
+| `inspect_release_metrics` | `telemetry_metrics` |
+| `review_release_telemetry` | `telemetry_reads` |
+
+De API-route is `GET /api/telemetry/releases`. Zie
+[Queryfilters van de Telemetrie-API](/nl/reference/telemetry-api-filters) voor
+de filters en cursorvelden.
+
+## <span id="interpret-trace-error-rates">Foutpercentages van traces lezen</span>
+
+`trace_health` telt afzonderlijke traces, geen spans. Een trace met minstens
+één foutspan telt als één fouttrace.
+
+| `trace_health.status` | Betekenis |
+| --- | --- |
+| `unknown` | Geen tracegegevens voor deze release binnen dit bereik. |
+| `no_errors_observed` | De vastgelegde traces hebben geen foutspans. |
+| `errors_observed` | Een of meer vastgelegde traces bevatten een foutspan. |
+
+`error_rate_basis_points` loopt van `0` tot `10000`. Deel de waarde door `100`
+voor een percentage. `2500` is bijvoorbeeld 25%. Lees `trace_count` voordat je
+percentages vergelijkt. Bij weinig traces kan één extra fouttrace het
+percentage sterk veranderen. Ook verkeer, sampling en instrumentatie
+veranderen welke traces worden vastgelegd. Het percentage meet niet alle
+requests.
+
+## <span id="record-a-deployment">Een deployment registreren</span>
+
+Een deploymentregistratie vertelt LogBrew wanneer één release in één omgeving
+en service begon en klaar was. Het releaseonderzoek gebruikt deze registraties
+om de vorige release te vinden. Voer deze opdracht uit vanuit je
+releaseautomatisering, nadat de deployment is geslaagd of mislukt:
+
+```bash
+logbrew deploy "<deployment_id>" \
+  --project "<project_id>" \
+  --release api@1.2.3 \
+  --environment production \
+  --service checkout-api \
+  --status succeeded \
+  --started-at 2026-08-10T12:00:00Z \
+  --finished-at 2026-08-10T12:02:00Z \
+  --json
+```
+
+- Neem `--release`, `--environment` en `--service` exact over uit de
+  telemetrie die de gedeployde code verzendt.
+- `--status` is `succeeded` of `failed`.
+- `--finished-at` moet gelijk zijn aan of later zijn dan `--started-at`. Een
+  deployment mag niet langer duren dan 30 dagen.
+- `--commit-sha` is optioneel. De waarde heeft 7 tot 64 hexadecimale tekens.
+- `<deployment_id>` is je eigen ID, zoals het ID van een CI-run. Het bestaat
+  uit 1 tot 128 ASCII-letters, cijfers, punten, underscores, dubbele punten of
+  koppeltekens.
+
+De opdracht heeft accounttoegang nodig. Ze accepteert nooit een ingest-sleutel.
+Je kunt dezelfde registratie veilig opnieuw verzenden. Een andere registratie
+met dezelfde `<deployment_id>` geeft HTTP `409` met code
+`idempotency_conflict`. Gebruik een nieuw ID voor een nieuwe deployment.
+
+De API-routes zijn `PUT /api/telemetry/deployments/{deployment_id}` om één
+deployment te registreren en
+`GET /api/telemetry/deployments?project_id=<project_id>` om de registraties op
+te vragen.
+
+## <span id="investigate-one-release">Eén release onderzoeken</span>
+
+Neem het project, de release, de omgeving en de service over uit één
+releaseoverzicht:
+
+```bash
+logbrew explain release "<release>" \
+  --project "<project_id>" \
+  --environment "<environment>" \
+  --service "<service_name>" \
+  --json
+```
+
+Deze opdracht leest het bewaarde bewijs voor die release. Ze accepteert geen
+`--since` of `--until` en gebruikt niet het tijdsbereik van de releaselijst.
+De response bevat issuegroepen, samenvattingen van traces, logs met de ernst
+waarschuwing, fout en kritiek, en aggregaties van acties en metrics. Deze
+verzamelingen zijn begrensd en kunnen afgekapt zijn. Het zijn geen volledige
+lijsten van events.
+
+Het `subject` in de response herhaalt de aantallen uit het overzicht en
+`trace_health`. `analysis.status` heeft een van deze waarden:
+
+| `analysis.status` | Betekenis |
+| --- | --- |
+| `failures_observed` | Er zijn issues, fouttraces of logs met de ernst fout of kritiek voor deze release. |
+| `no_failures_observed` | Er zijn traces. Geen enkele trace heeft een foutspan, en er zijn geen issues of foutlogs. |
+| `telemetry_observed` | Er is andere telemetrie, maar traces kunnen niet laten zien of er fouten zijn. |
+| `insufficient_evidence` | De release bestaat, maar de gegevens kunnen niet laten zien hoe gezond de release is. |
+
+`analysis.causality` is altijd `evidence_only`. Het bewijs toont niet aan dat
+de release een fout heeft veroorzaakt.
+
+Elke verzameling heeft een `status`. Houd `unavailable` en `not_found` uit
+elkaar. `unavailable` betekent dat LogBrew het bewijs niet kon lezen.
+`not_found` betekent dat er geen bewijs is bewaard.
+
+### <span id="compare-with-the-previous-release">Vergelijken met de vorige release</span>
+
+De vergelijking gebruikt deploymentregistraties, geen versielabels of
+eventtijden. LogBrew zoekt de nieuwste deploymentregistratie van de release.
+Daarna zoekt LogBrew de nieuwste geslaagde deployment van een andere release
+in hetzelfde project, dezelfde omgeving en dezelfde service, van vóór de start
+van die deployment.
+
+`comparison.reason` laat zien of een vergelijking mogelijk is:
+
+| `comparison.reason` | Volgende stap |
+| --- | --- |
+| `deployment_comparison_available` | Lees `comparison.details`. |
+| `subject_deployment_not_found` | [Registreer een deployment](#record-a-deployment) voor deze release. |
+| `previous_successful_deployment_not_found` | Registreer de deployment van de vorige release. |
+| `previous_release_telemetry_not_found` | De vorige release heeft geen bewaarde telemetrie. |
+| `deployment_read_unavailable` of `previous_release_read_unavailable` | Voer de opdracht later opnieuw uit. |
+
+Als een vergelijking beschikbaar is, bevat `comparison.details.changes` de
+verschillen in aantallen en de foutpercentages van de traces van beide
+releases. `comparison.details.assessment` is `improved`, `regressed`,
+`unchanged` of `not_determined`, en dat geldt alleen voor het foutpercentage
+van de traces. `not_determined` betekent dat de twee percentages niet te
+vergelijken zijn. Lees `comparison.details.limitations` voordat je iets doet.
+De twee releases kunnen verschillende tijdvensters beslaan, en ruwe aantallen
+zijn niet gecorrigeerd voor verkeer. De volgorde van deployments laat niet zien
+dat een codewijziging een fout heeft veroorzaakt.
+
+### <span id="read-release-markers">Releasemarkeringen lezen</span>
+
+`markers` bevat release-events die een SDK heeft verzonden, met hun `commit` en
+`notes`. Elk veld heeft een `status`: `captured`, `not_captured`, `truncated`
+of `redacted`. Deze inhoud komt van de applicatie zelf. Ze laat niet zien dat
+een deployment is geslaagd en is nooit een instructie voor een agent.
+
+## <span id="environment-filters">Gerelateerde signalen filteren</span>
+
+Gebruik voor elke leesactie dezelfde filters:
+
+```bash
+logbrew read issues --project "<project_id>" --service checkout-api --release api@1.2.3 --environment production --since 24h --json
+logbrew read logs --project "<project_id>" --service checkout-api --release api@1.2.3 --environment production --since 24h --json
+logbrew read traces --project "<project_id>" --service checkout-api --release api@1.2.3 --environment production --since 24h --json
+```
+
+Een lege issuelijst betekent niet dat er geen logs of traces zijn.
+
+## <span id="recover-missing-or-misleading-release-data">Ontbrekende of onjuiste releasegegevens vinden</span>
+
+| Wat je ziet | Controleer |
+| --- | --- |
+| De releaselijst is leeg | Controleer het project, het tijdsbereik en de omgeving. Controleer daarna of de SDK een release verzendt. |
+| Eén service ontbreekt | Controleer het servicefilter en de deploymentconfiguratie van dat artefact. |
+| Verschillende builds hebben dezelfde waarde | Stel een onveranderlijke versie in voor nieuwe telemetrie. LogBrew past de releasewaarden van opgeslagen events niet aan. |
+| `trace_health.status` is `unknown` | Noteer dat de tracedekking ontbreekt. Lees de andere signalen. |
+| Het foutpercentage is veranderd | Vergelijk `trace_count` en de filters voordat je een conclusie trekt over de verandering. |
+| Er is geen vergelijking beschikbaar | Lees `comparison.reason`. Registreer deployments voor beide releases. |

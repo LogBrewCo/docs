@@ -1,0 +1,267 @@
+---
+title: "Logging in React Native met LogBrew"
+sidebarTitle: "React Native"
+description: "Installeer de React Native-SDK, verstuur een testlog en vind die in het juiste LogBrew-project. Configureer Expo veilig en handel afleverfouten af."
+---
+
+Verstuur logs vanuit een React Native-app naar LogBrew. Begin met één testlog
+en zoek die daarna met de CLI op in het juiste project. Deze handleiding
+gebruikt Expo. Een React Native-app zonder Expo laadt de sleutel via een eigen
+configuratie.
+
+Voordat je begint, heb je dit nodig:
+
+- Een React Native-app die je lokaal kunt draaien.
+- Een LogBrew-project. Zie [Projecten](/nl/concepts/projects).
+- Een ingelogde CLI. Zie [De CLI instellen](/nl/guides/cli).
+
+## De SDK installeren
+
+Installeer beide pakketten in de map van de app. Laat de React- en React
+Native-dependencies van de app staan:
+
+```bash
+npm install @logbrew/sdk@0.1.28 @logbrew/react-native@0.1.35
+```
+
+## Een SDK-sleutel voor het project maken
+
+Geef de app een projectgebonden SDK-sleutel die alleen kan schrijven. Expo
+zet elke `EXPO_PUBLIC_*`-waarde in de appbundel. Zet nooit toegangsgegevens
+van een account of server in die variabele.
+
+CLI v0.1.32 of nieuwer maakt een sleutel voor een bestaand project. De
+opdracht maakt geen nieuw project. Zoek het project-ID op:
+
+```bash
+logbrew projects --json
+```
+
+Maak de sleutel. Gebruik een nieuw bestandspad in een map waar alleen de
+eigenaar bij kan:
+
+```bash
+install -d -m 700 "$HOME/.logbrew" &&
+logbrew projects keys create "<project_id>" \
+  --ingest-key-file "$HOME/.logbrew/my-mobile-app.ingest" \
+  --label "My mobile app" \
+  --kind sdk \
+  --json
+```
+
+Ga pas verder als de opdracht slaagt. Is het resultaat onduidelijk, voer dan
+dezelfde opdracht opnieuw uit met dezelfde argumenten. Gebruik
+`--abandon-retry` niet.
+
+Houd het sleutelbestand buiten versiebeheer. Gebruik niet de toegangsgegevens
+van het account waarmee je de CLI hebt geautoriseerd. Zet de sleutel voor
+lokale ontwikkeling met Expo in een `.env.local`-bestand in de hoofdmap van de
+app, dat buiten versiebeheer blijft:
+
+```dotenv
+EXPO_PUBLIC_LOGBREW_CLIENT_KEY=<your_project_sdk_key>
+```
+
+Laat de directe verwijzing `process.env.EXPO_PUBLIC_LOGBREW_CLIENT_KEY` staan
+in de setupmodule hieronder. Laad de app volledig opnieuw nadat je de waarde
+hebt gewijzigd. Zie
+[Expo-omgevingsvariabelen](https://docs.expo.dev/guides/environment-variables/)
+voor configuratie tijdens de build. Een React Native-app zonder Expo laadt de
+sleutel in plaats daarvan via een eigen configuratie.
+
+## De client maken
+
+Zet deze setup in één module die de app bij het opstarten laadt. Maak niet
+bij elke render een client. Zet de service, de omgeving en de release in
+`context`:
+
+```js
+import { AppState } from "react-native";
+import {
+  createAppStateListener,
+  createLogBrewReactNativeClient,
+  createReactNativeFetchTransport
+} from "@logbrew/react-native";
+
+const clientKey = process.env.EXPO_PUBLIC_LOGBREW_CLIENT_KEY;
+if (!clientKey) {
+  throw new Error("Set EXPO_PUBLIC_LOGBREW_CLIENT_KEY");
+}
+
+const client = createLogBrewReactNativeClient({
+  clientKey,
+  context: {
+    schemaVersion: 1,
+    resource: {
+      service: { name: "my-mobile-app" },
+      deployment: {
+        environment: __DEV__ ? "development" : "production",
+        release: "mobile@1.0.0"
+      }
+    }
+  },
+  transport: createReactNativeFetchTransport()
+});
+
+const stopAppStateListener = createAppStateListener(client, AppState, {
+  flushOnBackground: true
+});
+
+export async function verifyLogBrewSetup() {
+  client.log(`evt_react_native_setup_${Date.now()}`, new Date().toISOString(), {
+    level: "info",
+    message: "React Native setup check"
+  });
+
+  const receipt = await client.flush();
+  if (receipt.statusCode < 200 || receipt.statusCode >= 300) {
+    throw new Error("LogBrew did not accept the setup event");
+  }
+  return {
+    status_code: receipt.statusCode,
+    attempts: receipt.attempts,
+    batches: receipt.batches
+  };
+}
+```
+
+Het fetch-transport schakelt automatische aflevering in, met een begrensd
+aantal nieuwe pogingen en een wachtrij. Voeg geen tweede flush-timer toe. De
+AppState-listener vraagt een laatste flush aan als de app inactief wordt of
+naar de achtergrond gaat. Roep `stopAppStateListener()` aan als de app wordt
+afgesloten.
+
+Met de native wachtrij kan maar één actieve client een sleutel gebruiken. Een
+tweede client voor dezelfde sleutel mislukt met `configuration_error`. Dat is
+nog een reden om de client maar één keer te maken.
+
+## De testlog versturen en vinden
+
+Roep `verifyLogBrewSetup()` één keer aan vanuit een testactie die alleen in
+ontwikkeling bestaat. Wacht het resultaat af en handel een afgewezen promise
+af. Print de sleutel en de eventbatch niet.
+
+Een `2xx`-resultaat met `batches` boven 0 laat zien dat LogBrew de batch heeft
+geaccepteerd. Een lege flush geeft `204` terug met 0 pogingen en 0 batches,
+omdat automatische aflevering het event al eerder kan versturen. Lees in
+beide gevallen de opgeslagen log met de CLI:
+
+```bash
+logbrew read logs --project "<project_id>" \
+  --search "React Native setup check" --since 1h --json
+```
+
+Controleer de eventtijd en de service in het resultaat. Een leeg resultaat
+laat de oorzaak niet zien. Controleer het project, de sleutel en het
+tijdsbereik.
+
+`RecordingTransport.alwaysAccept()` is alleen voor lokale tests. Het geeft een
+synthetische `202` terug en verstuurt geen request.
+
+## Aflevering offline en na een herstart
+
+Lees `client.deliveryHealth().storage` in de draaiende app:
+
+- `persistent`: de client gebruikt de native wachtrij. Openstaande events
+  worden na een herstart van de app opnieuw geladen.
+- `memory`: openstaande events gaan verloren als de JavaScript-runtime
+  opnieuw start.
+
+De standaardwaarde `persistentQueue: "auto"` gebruikt de native wachtrij als
+de app-binary de native module van LogBrew bevat. Expo Go en oudere binary's
+gebruiken het geheugen. Een update met alleen JavaScript kan de native module
+niet toevoegen.
+
+Heeft een productie-app aflevering na een herstart nodig, zet dan
+`persistentQueue: "required"`. Het maken van de client mislukt dan met
+`configuration_error` als de native wachtrij ontbreekt. Bouw de app opnieuw
+met de native module. Gebruik `persistentQueue: "disabled"` alleen als je een
+wachtrij in het geheugen wilt.
+
+De native wachtrij bevat maximaal 1.000 events en 4 MiB aan eventgegevens.
+Kleinere limieten van de client gelden ook. Events in de native wachtrij
+behouden hun event-ID's na een herstart.
+
+Elk event wordt minstens één keer afgeleverd. Door een nieuwe poging kan een
+event dus twee keer worden verstuurd. Komen het event-ID en de inhoud overeen met een
+event dat LogBrew al heeft geaccepteerd, dan slaat LogBrew het niet opnieuw
+op. Een flush op de achtergrond is een poging, geen bewijs van aflevering.
+Test het vastleggen zonder verbinding en test een herstart van de app. Zoek daarna
+het opgeslagen event in het project.
+
+### De afleverstatus lezen
+
+`client.deliveryHealth()` geeft de status van de wachtrij en de aflevering
+terug, zonder eventinhoud. Lees eerst deze velden:
+
+| Veld | Betekenis |
+| --- | --- |
+| `storage` | `persistent` of `memory`. |
+| `deliveryState` | De huidige status van de automatische aflevering. |
+| `lastOutcome` | Het resultaat van de laatste afleverpoging. |
+| `lastStatusClass` | De klasse van de laatste responsestatus, of een netwerkfout. |
+| `pausedReason` | `authentication` na een `401`. `rate_limit` na een `429`. |
+| `queueEvents` | Het aantal events dat op aflevering wacht. |
+| `acceptedEvents` | Het aantal events dat LogBrew heeft geaccepteerd. |
+| `droppedByReason` | Het aantal events dat de client heeft weggegooid, per reden. |
+
+## De inhoud van de log kiezen
+
+Houd elk bericht kort en specifiek. Beschrijf de uitkomst in de app, zoals een
+mislukt request of een geplande nieuwe poging. Neem geen namen,
+e-mailadressen, toegangstokens, formulierwaarden of request-body's op.
+
+Gebruik de ernst die bij het event past: `info`, `warning`, `error` of
+`critical`. Houd de service, de omgeving en de release consistent, zodat je
+verwante records kunt vinden.
+
+`npx react-native log-ios` en `npx react-native log-android` tonen lokale
+apparaatlogs. Ze doorzoeken LogBrew niet. Zie
+[Native debuggen in React Native](https://reactnative.dev/docs/debugging-native-code).
+
+## Herstellen na een mislukte controle
+
+Een mislukte `flush()` wordt afgewezen met een SDK-foutcode. Houd sleutels en
+eventbody's buiten foutrapporten.
+
+| Resultaat | Volgende stap |
+| --- | --- |
+| Clientsleutel ontbreekt | De setup stopt voordat er iets wordt verstuurd. Laad de SDK-sleutel van het project via de appconfiguratie. |
+| `401`, `unauthenticated` | LogBrew heeft de sleutel geweigerd. Automatische aflevering pauzeert met `pausedReason: "authentication"`. Corrigeer of vervang de SDK-sleutel van het project voordat je een nieuwe client maakt. Gebruik nooit toegangsgegevens van een account. |
+| `429`, `rate_limited` | De SDK bewaart de batch en pauzeert automatische aflevering met `pausedReason: "rate_limit"`. Voeg geen lus voor nieuwe pogingen toe. |
+| `400`, `transport_error` | LogBrew heeft het request geweigerd. Controleer de eventvelden en de pakketversies. |
+| `network_failure` | De SDK heeft geen afleverresultaat. LogBrew kan het event wel hebben geaccepteerd. Controleer de verbinding en `deliveryHealth()`. |
+| `5xx`, `transport_error` | De SDK heeft het al opnieuw geprobeerd. Lees de opgeslagen logs voordat je het zelf opnieuw probeert. |
+| Leeg CLI-resultaat | Controleer het project, de sleutel, de eventtijd en de filters. |
+
+Zie [Problemen oplossen](/nl/guides/troubleshooting) voor meer controles.
+
+## Debug ID's van Expo in releasebundels behouden
+
+Maak de Metro-configuratie van Expo via LogBrew. De runtimebundel krijgt dan
+hetzelfde Debug ID als de bijbehorende source map:
+
+```js
+// metro.config.js
+const { getLogBrewExpoConfig } = require("@logbrew/react-native/metro");
+
+module.exports = getLogBrewExpoConfig(__dirname);
+```
+
+Gebruikt de app de bundle mode van React Native Worklets, pas die
+transformatie dan toe na de helper van LogBrew:
+
+```js
+// metro.config.js
+const { getLogBrewExpoConfig } = require("@logbrew/react-native/metro");
+const { getBundleModeMetroConfig } = require("react-native-worklets/bundleMode");
+
+module.exports = getBundleModeMetroConfig(getLogBrewExpoConfig(__dirname));
+```
+
+De helper behoudt bestaande pre-serialisatieplug-ins van Expo.
+
+Een React Native-app zonder Expo verpakt de volledige Metro-configuratie in
+plaats daarvan met `withLogBrewMetroConfig()`. Gebruik die wrapper niet met
+Expo. Doe je dat toch, dan stopt de productiebuild met een bericht dat naar
+`getLogBrewExpoConfig()` verwijst.

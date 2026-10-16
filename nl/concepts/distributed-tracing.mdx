@@ -1,0 +1,234 @@
+---
+title: "Distributed tracing: traces, spans en context"
+sidebarTitle: "Distributed tracing"
+description: "Lees hoe distributed traces en spans in LogBrew requests, logs, issues, acties en metrics met elkaar verbinden."
+---
+
+Distributed tracing volgt één request of bewerking door geïnstrumenteerde
+services. Een trace groepeert de spans voor dat werk. Elke span is één
+bewerking met een gemeten duur, zoals een HTTP-request, een databaseaanroep,
+een queuebewerking of een achtergrondjob. Ontbreekt er een span, dan blijft een
+deel van het pad onbekend.
+
+Gebruik een trace als een log een fout meldt, maar niet het pad van de
+bewerking. Een trace kan laten zien:
+
+- Welke bewerking het request heeft gestart.
+- Waar het request tijd heeft besteed.
+- Welke onderliggende bewerking een fout heeft teruggegeven.
+- Welke logs, issues, acties en metrics hetzelfde trace-ID hebben.
+- Welke service, omgeving en release elke span heeft verzonden.
+
+## Velden van traces en spans
+
+| Veld | Betekenis |
+| --- | --- |
+| `trace_id` | Identificeert de trace waartoe de span behoort. |
+| `span_id` | Identificeert één bewerking in de trace. |
+| `parent_span_id` | Verbindt een onderliggende bewerking met de bewerking die haar heeft gestart. Een rootspan heeft er geen. |
+| `name` | Geeft de bewerking een naam, zoals een routetemplate. |
+| `operation` | Het soort werk, zoals `http.server` of `db.query`. |
+| `status` | Het gemelde resultaat, zoals `ok`, `error` of `cancelled`. |
+| `started_at` | Wanneer de bewerking is gestart. |
+| `duration_ms` | Hoelang de bewerking duurde, in milliseconden. |
+| `service_name`, `environment`, `release` | Het bereik van de service die de span heeft verzonden. |
+
+Een rootspan start een trace en heeft geen bovenliggende span. Onderliggende
+spans hebben hetzelfde trace-ID, een eigen span-ID en het ID van hun
+bovenliggende span. Alleen deze ID's verbinden bewerkingen. Tijdstempels alleen
+doen dat niet. LogBrew telt een span alleen als foutspan als de `status`
+`error` is.
+
+## Een request over meerdere services
+
+1. De webservice start een serverspan voor de checkoutroute.
+2. Een betaalclient maakt een onderliggende span voor zijn uitgaande HTTP-request.
+3. De betaalservice zet de trace voort met een eigen serverspan.
+4. Een databasehelper legt een onderliggende span vast voor de schrijfactie.
+5. De app verzendt een veilige foutlog binnen de actieve betaalspan.
+
+Alle vijf records hebben hetzelfde trace-ID. Krijgt een service geen
+tracecontext, dan hoort het werk van die service niet bij de trace, ook niet als
+de tijden overlappen.
+
+## Context doorgeven
+
+De SDK's van LogBrew gebruiken W3C-tracecontext. De Node.js-SDK zet
+bijvoorbeeld een geldige inkomende header `traceparent` voort met een nieuwe
+request-span. Ontbreekt de header of is hij ongeldig? Dan start de SDK een
+nieuwe root. Logs, issues, acties en metrics die binnen dat request worden
+vastgelegd, krijgen de trace van het request mee.
+
+Uitgaande instrumentatie schrijft een header `traceparent` alleen naar de doelen
+die je instelt, zoals in `tracePropagationTargets`. Verzend tracecontext alleen
+naar vertrouwde, geïnstrumenteerde services. Een trace-ID correleert
+bewerkingen. Het is geen authenticatie.
+
+Ook een queuebericht kan tracecontext bevatten. Roep in Node.js
+`createLogBrewQueueTraceHeaders()` aan in de bewerking van de producer. Die
+voegt een header `traceparent` aan het bericht toe. Geef die header in de
+consumer als `traceparent` door aan `queueOperationWithLogBrewSpan()`. Zie
+[Queue-tracing in JavaScript](/nl/guides/sdk-ingestion#javascript-queue-tracing).
+
+De integraties voor requests en uitgaande aanroepen in Node.js en Python leggen
+in spans geen request- of responsebody's, querystrings, willekeurige headers of
+de ruwe waarde van `traceparent` vast. Geef spans de naam van een
+routetemplate, niet van een concrete URL. Lees de
+[handleiding voor SDK-integratie](/nl/guides/sdk-ingestion) voor de
+integraties van jouw runtime.
+
+## <span id="capture-spans">Vastleggingsspans</span>
+
+LogBrew slaat elke nieuwe log, elk nieuw issue, elke nieuwe actie en elke
+nieuwe metric op met een trace-ID. Verwijst een signaal niet naar een span in
+dezelfde aflevering? Dan voegt LogBrew er één vastleggingsspan voor toe:
+
+| Veld | Waarde |
+| --- | --- |
+| `name` | `log capture`, `issue capture`, `action capture` of `metric capture` |
+| `operation` | `logbrew.log`, `logbrew.issue`, `logbrew.action` of `logbrew.metric` |
+| `duration_ms` | `0` |
+| `parent_span_id` | De span die actief was toen de app het signaal vastlegde. Leeg als er geen span actief was. |
+| `status` | `error` voor een issue, een log met `error` of `critical`, of een mislukte actie. Anders leeg. |
+| `attributes.logbrew.evidence` | `signal_capture` |
+
+De `span_id` van het signaal identificeert dan de vastleggingsspan. Had het
+signaal geen tracecontext? Dan maakt LogBrew er een nieuw trace-ID voor. Die
+trace toont dat LogBrew het signaal heeft opgeslagen. Een requestpad toont hij
+niet. Lees de vastleggingsspans in één trace niet als één request.
+
+Vastleggingsspans tellen mee in `span_count` en `error_span_count`. Daardoor kan
+een foutlog ervoor zorgen dat `--status error` een trace selecteert waarin geen
+enkele applicatiebewerking is mislukt. Lees de `operation` van elke foutspan
+voordat je een conclusie trekt.
+
+## Een trace lezen
+
+Gebruik een exact trace-ID uit een log, een issue of een lijst met traces:
+
+```bash
+logbrew read traces --project "<project_id>" --status error --since 24h --json
+logbrew read trace "<trace_id>" --project "<project_id>" --json
+```
+
+`--status error` selecteert traces met minstens één foutspan. `--status ok`
+selecteert traces zonder foutspan. `--min-duration-ms 500` selecteert traces
+die 500 milliseconden of langer duurden.
+
+Lees eerst de duur van de rootspan. Onderzoek daarna de langste onderliggende
+spans en de foutstatussen. Houd het project, de service, de omgeving en de
+release in beeld, zodat een trace uit staging geen bewijs over productie wordt.
+
+Eén trace toont één uitvoering, geen referentiepunt voor de prestaties.
+Vergelijk meerdere traces met de bijbehorende trend in de metric voordat je een
+prestatiewijziging voorstelt.
+
+### Samenvatting van een trace
+
+`GET /api/telemetry/traces/{trace_id}/summary` geeft een samenvatting zonder
+span-attributen terug:
+
+| Veld | Betekenis |
+| --- | --- |
+| `root_span` | De vroegste span waarvan de bovenliggende span niet in de trace zit. Heeft elke span een bovenliggende span in de trace? Dan de vroegste span. |
+| `slowest_child_span` | De langste span die een bovenliggende span heeft. |
+| `slowest_path` | De bekende keten van bovenliggende spans van een root naar de traagste onderliggende span. |
+| `error_spans` | Maximaal 5 van de langste spans met status `error`. |
+| `services` | Per service het aantal spans, het aantal foutspans en de duur van de langste span. |
+| `duration_ms` | De tijd van de vroegste start van een span tot het laatste einde van een span. |
+
+Heeft `root_span.parent_span_id` een waarde? Dan zit de echte rootspan niet in
+de trace. Lees `root_span` in dat geval niet als het begin van het request.
+
+### Een trace uitleggen
+
+`logbrew explain trace` geeft een onderzoek van een trace terug:
+
+```bash
+logbrew explain trace "<trace_id>" --json
+```
+
+| Veld | Betekenis |
+| --- | --- |
+| `analysis.status` | `errors_observed`, `latency_focus` of `no_error_observed`. |
+| `analysis.first_error_span`, `analysis.first_error_path` | De vroegste foutspan en de bekende keten van bovenliggende spans. |
+| `analysis.bottleneck_span`, `analysis.bottleneck_path` | De langste span met een bovenliggende span, en de bekende keten van bovenliggende spans. |
+| `correlations` | De issues, logs, acties en metrics met hetzelfde trace-ID. Elke lijst heeft een `status` en `truncated`. |
+| `evidence` | De vastgelegde, ontbrekende, afgeschermde en afgekapte velden. |
+| `next_actions` | De volgende leesacties, op volgorde van prioriteit. |
+
+`analysis.causality` is `evidence_only`. De analyse bewijst geen grondoorzaak.
+De CLI vraagt responseversie 3 op. Daarin heeft elk gerelateerd issue, elke
+gerelateerde actie en elke gerelateerde metric ook een exacte `span_id`.
+
+Voer dit uit om één span te onderzoeken met de bovenliggende span, de
+onderliggende spans en de servicegrenzen:
+
+```bash
+logbrew explain span "<trace_id>" "<span_id>" --project "<project_id>" \
+  --environment production --release "<release>" --json
+```
+
+`topology.parent_chain_status` vertelt of de keten van bovenliggende spans
+compleet is:
+
+| Waarde | Betekenis |
+| --- | --- |
+| `root` | De span heeft geen ID van een bovenliggende span. |
+| `complete` | Elke bovenliggende span tot aan een rootspan zit in de trace. |
+| `missing` | Het ID van een bovenliggende span verwijst naar een span die niet in de trace zit. |
+| `cycle` | De ID's van de bovenliggende spans vormen een lus. |
+| `truncated` | Een responselimiet verhindert een complete keten. |
+| `unavailable` | De trace kon niet worden gelezen. |
+
+## Ontbrekende tracecontext
+
+Niet elk event heeft een trace van zijn request. Lees de status van de trace:
+
+| Status | Betekenis |
+| --- | --- |
+| `available` | Exact tracebewijs kan worden gelezen. |
+| `not_linked` | Het event heeft geen trace-ID. Sommige oudere events hebben geen trace-ID. |
+| `not_found` | Het event heeft een trace-ID, maar geen trace past bij het gekozen bereik. |
+| `unavailable` | Het tracebewijs kon op dat moment niet worden gelezen. |
+
+`not_linked` is geen fout. Ook een trace met `available` kan laten zien dat het
+event geen requestcontext had. Heeft de vastleggingsspan van het event geen
+`parent_span_id`? Dan was er geen span actief toen de app het event vastlegde.
+Achtergrondwerk buiten een request geeft vaak dit resultaat. Zo vind je een
+ontbrekende relatie:
+
+1. Lees het project, de service, de omgeving, de release en het tijdstip van
+   het event.
+2. Controleer of het werk binnen een geïnstrumenteerd request of een
+   geïnstrumenteerde bewerking liep.
+3. Controleer of de client- en serverintegraties de context over die grens
+   doorgeven.
+4. Leg na het corrigeren van de instrumentatie een nieuw event vast en lees het.
+
+Een nieuwe SDK-versie voegt geen tracecontext toe aan events die eerder zijn
+verzonden. Koppel een event niet aan een trace op basis van tijdstempel, route,
+bericht of release.
+
+## Tracing plannen voor één project
+
+Begin met één belangrijk request of één belangrijke job, zoals de checkout.
+Instrumenteer één grens tegelijk:
+
+1. Maak een span voor het inkomende request of de achtergrondbewerking.
+2. Voeg onderliggende spans toe voor belangrijke uitgaande aanroepen.
+3. Zet de W3C-tracecontext voort over vertrouwde servicegrenzen.
+4. Verzend een veilige log binnen de actieve span.
+5. Lees die log, open het trace-ID ervan en controleer de root, de
+   onderliggende spans, de service, de omgeving, de release, de status en de
+   duur.
+
+Voeg de volgende grens pas toe als deze controle slaagt. Een gedeelde trace
+toont correlatie. Hij bewijst niet dat één span een issue heeft veroorzaakt.
+
+Voer `logbrew traces --project "<project_id>" --pagination cursor --json` uit
+om de namen van spans te controleren. Het object `naming_quality` telt de
+traces op die pagina met een generieke rootnaam (`generic_name_traces`) of een
+niet-herkende route (`unmatched_route_traces`). Heeft de naamgeving aandacht
+nodig? Dan is `naming_quality.next_action.code` gelijk aan
+`improve_trace_naming`.

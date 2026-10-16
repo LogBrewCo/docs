@@ -1,0 +1,259 @@
+---
+title: "Source maps voor JavaScript met Vite"
+sidebarTitle: "Source maps voor JavaScript"
+description: "Upload source maps voor JavaScript vanuit een Vite-build. Houd toegangsgegevens buiten je app. Zet geminificeerde stackframes om naar de broncode."
+---
+
+Een geminificeerd JavaScript-bestand kan veel regels broncode op één regel
+zetten. Een stackframe uit dat bestand wijst naar een gegenereerde regel en
+kolom. Een
+[source map](https://ecma-international.org/publications-and-standards/standards/ecma-426/)
+verbindt die positie met het oorspronkelijke bestand, de regel en de kolom.
+
+Deze handleiding gebruikt de Vite-plug-in in `@logbrew/sdk` 0.1.28. Je hebt een
+Vite-app nodig, toegang tot de build-uitvoer ervan en het recht om een
+projectsleutel te maken. Zie
+[Apple-crashes en vastlopers](/nl/guides/apple-crashes-and-hangs) voor
+debugbestanden van Apple.
+
+## De build en de events bij elkaar houden
+
+Gebruik hetzelfde project en dezelfde release, omgeving en service voor de
+upload en voor de runtime-events van de app. Zie
+[Releases](/nl/concepts/releases) voor versienamen. Deze handleiding gebruikt
+`web@1.2.3`, `staging` en `checkout-web`.
+
+Wijzig de release als de gebouwde code verandert. Upload de voorbereide build
+en deploy daarna precies die build. Bouw niet opnieuw en wijzig het JavaScript
+niet na de upload.
+
+## De Vite-plug-in toevoegen
+
+Installeer de SDK in de map van de app:
+
+```bash
+npm install @logbrew/sdk@0.1.28
+```
+
+Voeg de plug-in toe aan `vite.config.js`. Laat je andere plug-ins en
+build-instellingen staan. Vervang het project-ID:
+
+```js
+import { createLogBrewViteReleaseArtifactsPlugin } from "@logbrew/sdk/vite-release-artifacts";
+
+export default {
+  plugins: [
+    createLogBrewViteReleaseArtifactsPlugin({
+      projectId: "<project_id>",
+      release: "web@1.2.3",
+      environment: "staging",
+      service: "checkout-web",
+      minifiedPathPrefix: "https://app.example.com"
+    })
+  ]
+};
+```
+
+`minifiedPathPrefix` is de gedeployde URL van de buildmap. De plug-in voegt
+daar het pad van elk bestand in die map aan toe. `dist/assets/app.js` wordt
+bijvoorbeeld `https://app.example.com/assets/app.js`. Serveer je de build onder
+`/web`? Neem `/web` dan op in het voorvoegsel. Voeg `/assets` niet toe aan het
+voorvoegsel.
+
+Zonder optie `upload` verzendt de plug-in niets naar LogBrew. De plug-in doet
+ook dit:
+
+- Zet `build.sourcemap` op `"hidden"` als je dat niet zelf instelt. Heb je het
+  op `false` gezet? Wijzig het dan in `"hidden"`.
+- Behoudt functienamen als je geen opties voor de minifier instelt. Stel je die
+  wel zelf in? Behoud de namen dan daar.
+
+Verborgen source maps blijven als gewone bestanden in de build-uitvoer staan.
+Er geldt geen toegangscontrole voor. Gebruik geen inline source maps. De
+plug-in accepteert geen map in het JavaScript-bestand zelf.
+
+## Lokaal bouwen en controleren
+
+Voer de productiebuild uit:
+
+```bash
+npm run build
+```
+
+De plug-in geeft elk JavaScript-bestand en de bijbehorende source map hetzelfde
+Debug ID. De plug-in verwijdert ingebedde `sourcesContent` en het lokale pad
+van de app-root. Daarna schrijft de plug-in
+`dist/logbrew-release-artifacts.json`.
+
+Open het manifest. Controleer of `validation.status` gelijk is aan `ready` en
+of het manifest de bestanden en gedeployde URL's van deze build bevat.
+Verborgen maps geven de waarschuwing `sourceMappingURL comment missing`. Die
+waarschuwing is normaal.
+
+Upload geen map met een privépad of met broncode die je niet wilt delen. De
+upload bevat ook het gecompileerde JavaScript, dus houd geheimen buiten de
+app-bundel.
+
+Controleer de upload lokaal. Deze opdracht verzendt geen request en heeft geen
+sleutel nodig:
+
+```bash
+npx --no-install logbrew-release-artifacts upload-js \
+  --build-dir dist \
+  --manifest dist/logbrew-release-artifacts.json \
+  --endpoint https://api.logbrew.co/api/release-artifacts \
+  --allow-hosted \
+  --dry-run
+```
+
+Ga alleen verder als de opdracht stopt met code `0` en `"status": "dry_run"`
+toont. Dit controleert de lokale bestanden en het manifest. De server wordt
+niet getest. Gebruikt je build een andere uitvoermap? Wijzig dan beide paden.
+
+Wil je controleren of de omzetting werkt? Start de gebouwde app en kopieer één
+gegenereerd stackframe met het bestand, de regel en de kolom:
+
+```bash
+npx --no-install logbrew-release-artifacts symbolicate-js \
+  --build-dir dist \
+  --manifest dist/logbrew-release-artifacts.json \
+  --stack-frame "at checkoutTotal (https://app.example.com/assets/index-a1b2c3.js:2:780)"
+```
+
+Controleer of het resultaat `"status": "resolved"` bevat. Het object
+`original` toont het bronbestand, de regel en de kolom. Deze opdracht draait
+lokaal en uploadt niets.
+
+## <span id="create-an-artifact-key">Een artefactsleutel maken</span>
+
+Log in met de [LogBrew CLI](/nl/guides/cli). Zoek het project-ID op:
+
+```bash
+logbrew projects --json
+```
+
+Maak een artefactsleutel voor het project. Gebruik een nieuw bestandspad in een
+map die alleen de eigenaar kan openen:
+
+```bash
+install -d -m 700 "$HOME/.logbrew" &&
+logbrew projects keys create "<project_id>" \
+  --ingest-key-file "$HOME/.logbrew/checkout-web.artifact" \
+  --label "Checkout web build" \
+  --kind artifact \
+  --json
+```
+
+Ga pas verder als de opdracht is geslaagd. Is het resultaat onduidelijk? Voer
+dan dezelfde opdracht opnieuw uit met dezelfde argumenten. Gebruik
+`--abandon-retry` niet.
+
+Een artefactsleutel is projectgebonden en kan alleen schrijven. De sleutel
+uploadt source maps en debugbestanden. Hij kan geen telemetrie verzenden en
+geen metadata van artefacten lezen. Gebruik geen toegangsgegevens van een
+account of een runtime-SDK-sleutel in plaats van deze sleutel.
+
+Sla de sleutel op als `LOGBREW_RELEASE_ARTIFACT_TOKEN` bij de secrets
+van je buildomgeving. Toon of commit de sleutel niet. Zet hem niet
+in een variabele die zichtbaar is voor de client, zoals `VITE_*` of
+`EXPO_PUBLIC_*`.
+
+Stel de variabele in binnen het proces dat de upload uitvoert. De helper leest
+geen `.env`-bestanden. Vite laadt ze niet in `process.env` tijdens het
+[evalueren van de configuratie](https://vite.dev/config/#using-environment-variables-in-config).
+
+## De voorbereide build uploaden
+
+Gebruik dezelfde gecontroleerde bestanden en hetzelfde manifest. Deze opdracht
+verzendt de upload naar LogBrew:
+
+```bash
+npx --no-install logbrew-release-artifacts upload-js \
+  --build-dir dist \
+  --manifest dist/logbrew-release-artifacts.json \
+  --endpoint https://api.logbrew.co/api/release-artifacts \
+  --allow-hosted
+```
+
+`"status": "uploaded"` toont dat LogBrew de upload heeft geaccepteerd. Stopt de
+opdracht met een fout? Stop dan en gebruik de tabel hieronder.
+
+Bij een netwerkfout, `408`, `429` of een response met `5xx` probeert de helper
+het maximaal 2 keer opnieuw. Elke keer verzendt de helper dezelfde voorbereide
+bestanden. Gebruik `--max-retries` om het aantal te wijzigen.
+
+Werkt de handmatige upload? Dan kun je in plaats daarvan tijdens de Vite-build
+uploaden. Voeg deze optie toe aan de configuratie van de plug-in:
+
+```js
+upload: {
+  endpoint: "https://api.logbrew.co/api/release-artifacts",
+  allowHostedUpload: true,
+  tokenEnv: "LOGBREW_RELEASE_ARTIFACT_TOKEN"
+}
+```
+
+Gebruik één uploadmethode. De plug-in stopt de build bij een fout tijdens het
+voorbereiden of uploaden. Voeg `dryRun: true` toe om te testen zonder upload.
+
+De plug-in verwijdert geen source maps uit de uitvoermap. Deploy geen
+`.map`-bestanden of het manifest naar de openbare website of het CDN.
+
+Wil je een frame uit een vastgelegd issue omzetten? Voer `symbolicate-js` met
+dat frame uit op dezelfde voorbereide build.
+
+## <span id="verify-a-new-issue">Een nieuw issue lezen</span>
+
+Deploy dezelfde voorbereide build naar de testomgeving. Veroorzaak één veilige
+testfout via de weg waarlangs je app issues vastlegt. Verzend voor deze test
+geen gebruikersinvoer, toegangsgegevens of ruwe stack.
+
+Zoek het nieuwe issue op met dezelfde project- en buildcontext:
+
+```bash
+logbrew read issues --project "<project_id>" \
+  --release "web@1.2.3" --environment staging \
+  --service checkout-web --since 1h --json
+```
+
+Kopieer het issue-ID uit het resultaat. Lees het laatste voorval:
+
+```bash
+logbrew investigate issue "<issue_id>" --occurrence latest --json
+```
+
+Lees eerst het tijdstip van het event, het project, de service, de omgeving en
+de release. Lees daarna `event.stack_frames`. Een frame met
+`source: "symbolicated"` heeft het oorspronkelijke bestand, de regel en de
+kolom uit je upload. Een frame met `source: "captured"` heeft de locatie die de
+app heeft verzonden.
+
+`logbrew read issue "<issue_id>" --json` geeft ook een object `symbolication`
+terug. Elk frame daarin heeft een `status`: `resolved`, `artifact_not_found`,
+`source_not_resolved`, `invalid_metadata` of `unavailable`. Alleen een frame
+met `resolved` heeft een oorspronkelijke locatie.
+
+LogBrew zet frames om op het moment dat je het issue leest. Een upload na de
+fout kan ook een eerder event met hetzelfde Debug ID omzetten. Een omgezet
+frame wijst naar code om te onderzoeken. Het toont niet wat de fout heeft
+veroorzaakt. Zie [Een issue onderzoeken](/nl/guides/investigate-an-issue) voor
+de andere velden.
+
+## Herstellen na een mislukte controle
+
+| Resultaat | Volgende stap |
+| --- | --- |
+| Status van het manifest is niet `ready` | Lees `validation.errors`. Corrigeer de build-instellingen en bouw opnieuw. Bewerk het manifest niet. |
+| Build stopt omdat een source map ontbreekt of inline is | Zet `build.sourcemap` op `"hidden"` of `true`. Bouw opnieuw. |
+| `auth_missing` | Stel `LOGBREW_RELEASE_ARTIFACT_TOKEN` in binnen het uploadproces. Een proefrun test de sleutel niet. |
+| `auth_failed` (`401` of `403`) | Gebruik een artefactsleutel voor hetzelfde project. Gebruik geen runtime- of accountsleutel. |
+| `validation_failed` (`400` of `413`) | Controleer de voorbereide bestanden en hun grootte. Verzend dezelfde upload niet opnieuw. |
+| `validation_failed` met een lokale fout | Lees `validation.errors`. Is een bestand na de build gewijzigd? Bouw en controleer dan opnieuw. |
+| `retryable_error` | Alle nieuwe pogingen zijn mislukt na een netwerkfout, `408`, `429` of serverfout. Probeer het later opnieuw met dezelfde voorbereide bestanden. |
+| `upload_failed` | De server gaf een andere status terug. Controleer de waarde van `--endpoint`. |
+| Frame wordt niet omgezet | Controleer het Debug ID, het voorvoegsel van de gedeployde URL en de build. Gebruik geen map uit een andere build of release. |
+| Er verschijnt geen nieuw issue | Controleer het vastleggen van issues, de runtimesleutel en de tijdfilter voordat je source maps test. |
+
+Houd bronbestanden, sleutels en privépaden buiten supportberichten. Zie
+[Problemen oplossen](/nl/guides/troubleshooting) en
+[API-fouten](/nl/reference/api-errors).

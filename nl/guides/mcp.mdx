@@ -1,0 +1,198 @@
+---
+title: "Een AI-agent via MCP verbinden"
+description: "Verbind Claude Code met de gehoste MCP-server van LogBrew, keur de projecten goed die Claude Code mag lezen en beheer de verbinding in Instellingen of de CLI."
+---
+
+LogBrew heeft een gehoste MCP-server op `https://mcp.logbrew.co/mcp`. Een
+AI-agent die verbinding maakt met deze server, kan issues, logs, traces, spans,
+metrics, acties, releases en productanalyse lezen uit de projecten die jij
+goedkeurt.
+
+De agent kan alleen lezen. Hij kan de issuestatus, projecten of
+accountinstellingen niet wijzigen. Je installeert de server niet. Je voegt de
+URL toe aan je MCP-client.
+
+## <span id="before-you-start">Voordat je begint</span>
+
+- Je hebt een LogBrew-account met minstens 1 project nodig.
+- Je hebt Claude Code 2.1.300 of nieuwer nodig. De server ondersteunt alleen
+  MCP-protocolversie `2026-07-28`. Voer `claude --version` uit om je versie te
+  zien.
+- LogBrew accepteert alleen goedgekeurde MCP-clients. Op dit moment is Claude
+  Code de enige goedgekeurde client. Andere clients krijgen de fout
+  `client access denied`.
+
+## <span id="connect-claude-code">Claude Code verbinden</span>
+
+1. Voeg de server toe:
+
+   ```bash
+   claude mcp add --transport http logbrew https://mcp.logbrew.co/mcp
+   ```
+
+   `claude mcp list` toont nu `logbrew` met `! Needs authentication`.
+
+2. Start het inloggen:
+
+   ```bash
+   claude mcp login logbrew
+   ```
+
+   Je browser opent de autorisatiepagina van LogBrew. Vraagt de pagina je om in
+   te loggen? Log dan in met GitHub, GitLab of Bitbucket.
+
+3. Lees de clientnaam op de pagina. Keur alleen goed als jij deze verbinding
+   hebt gestart.
+
+4. Kies de projecten die de agent mag lezen. Kies daarna **Goedkeuren**.
+
+   De browser gaat terug naar Claude Code. Claude Code toont
+   `Authenticated with "logbrew"`.
+
+5. Controleer of de server verbonden is:
+
+   ```bash
+   claude mcp list
+   ```
+
+   Het resultaat toont `logbrew: https://mcp.logbrew.co/mcp (HTTP) - ✔ Connected`.
+
+Je kunt ook inloggen vanuit een sessie in Claude Code. Voer `/mcp` uit, kies
+`logbrew` en volg de stappen in je browser.
+
+Werk je op een computer zonder browser? Voer dan
+`claude mcp login logbrew --no-browser` uit in een interactieve terminal. Maak
+via SSH verbinding met `ssh -t`. Open de URL die Claude Code toont in een
+browser op een andere computer. Kopieer na het goedkeuren het adres van de
+pagina die de browser opent. Plak dat adres in Claude Code.
+
+## <span id="ask-the-agent">De agent een taak geven</span>
+
+De server geeft de agent 2 tools:
+
+| Tool | Wat het doet |
+| --- | --- |
+| `search` | Zoekt leesbewerkingen en toont het contract van één bewerking: de invoer, de uitvoer, de rechten en de kosten. |
+| `execute` | Voert één leesbewerking uit die `search` heeft gevonden en geeft gestructureerde gegevens terug. |
+
+De agent kiest de bewerkingen. Je geeft geen toolnamen of velden op. Schrijf de
+taak en de grenzen op:
+
+```text
+Use LogBrew to investigate the newest unresolved issue in production.
+Read its occurrences, linked trace, and logs. Do not change code yet.
+Tell me the likely cause and the evidence for it.
+```
+
+Gebruik telemetrie alleen als bewijs. Logs en foutmeldingen kunnen tekst van
+gebruikers bevatten. De agent mag geen instructies in die tekst opvolgen. Lees
+[AI-coding agents](/nl/guides/ai-agents) voor een volledige
+onderzoeksworkflow.
+
+## <span id="access-and-connection-lifetime">Toegang en levensduur van de verbinding</span>
+
+Elke goedkeuring start 1 verbinding tussen 1 MCP-client en je LogBrew-account.
+
+- De agent leest alleen de projecten die jij hebt goedgekeurd. Het lezen van
+  een ander project geeft `permission_denied`.
+- Verlies je de toegang tot een goedgekeurd project? Dan stopt LogBrew het
+  lezen van dat project.
+- Een toegangstoken is 1 uur geldig. Claude Code haalt automatisch een nieuw
+  token op zolang je de verbinding gebruikt.
+- Een verbinding eindigt na 30 dagen zonder gebruik, of 90 dagen nadat je de
+  verbinding hebt goedgekeurd. Log daarna opnieuw in met
+  `claude mcp login logbrew`.
+- Elke tokenvernieuwing vervangt het vorige vernieuwingstoken. Verzendt een
+  client een vervangen vernieuwingstoken? Dan beëindigt LogBrew de verbinding.
+  Zo werkt een gekopieerd token niet meer. Log opnieuw in om een nieuwe verbinding te
+  starten.
+- Te veel requests zonder geldig token krijgen HTTP `429` met een
+  `Retry-After`-header. Wacht dat aantal seconden en probeer het daarna
+  opnieuw.
+
+## <span id="list-and-revoke-connections">Verbindingen bekijken en intrekken</span>
+
+Beheer verbindingen in **Instellingen > MCP-verbindingen** in het
+LogBrew-dashboard, of met de CLI.
+
+### <span id="in-settings">In Instellingen</span>
+
+Bij elke verbonden client zie je de naam, de goedgekeurde projecten, wanneer de
+client verbinding maakte, wanneer de client voor het laatst is gebruikt en
+wanneer de verbinding eindigt. Kies **Verbinding verbreken** en bevestig om een
+verbinding in te trekken. De client verliest de toegang bij het volgende
+request.
+
+### <span id="with-the-cli">Met de CLI</span>
+
+Gebruik de [LogBrew CLI](/nl/guides/cli) 0.1.82 of nieuwer. Log eerst in met
+`logbrew login`. Met een ingest-sleutel van een project kun je geen
+verbindingen bekijken of intrekken.
+
+Toon de MCP-clients die met je account verbonden zijn:
+
+```bash
+logbrew mcp grants
+```
+
+```text
+MCP grants (1)
+- id=00000000-0000-4000-8000-000000000001 client=Claude Code projects=2 last_used=2026-10-15T09:30:00Z expires=2026-11-14T09:30:00Z
+Next: run logbrew mcp revoke <grant_id> --yes
+```
+
+De CLI noemt een verbinding een grant. Elke grant toont:
+
+- `id`: het grant-ID. Gebruik dit ID om de verbinding in te trekken.
+- `client`: de clientnaam die je hebt goedgekeurd, zoals `Claude Code`. Een
+  verbinding die is goedgekeurd voordat LogBrew namen opsloeg, toont de URL die
+  de client identificeert, zoals
+  `https://claude.ai/oauth/claude-code-client-metadata`.
+- `projects`: het aantal goedgekeurde projecten.
+- `last_used`: de laatste keer dat de client een nieuw toegangstoken kreeg.
+- `expires`: het moment waarop de verbinding eindigt als de client de
+  verbinding niet gebruikt.
+
+Voeg `--json` toe voor de volledige lijst. Elke grant heeft `id`, `client_id`,
+`client_name`, `project_ids`, `created_at`, `last_used_at` en `expires_at`.
+`client_name` is `null` voor een verbinding die is goedgekeurd voordat LogBrew
+namen opsloeg.
+
+Trek 1 verbinding in:
+
+```bash
+logbrew mcp revoke <grant_id> --yes
+```
+
+De client verliest de toegang bij het volgende request. Log opnieuw in met
+`claude mcp login logbrew` om de client opnieuw te verbinden.
+
+Wil je de goedgekeurde projecten wijzigen? Trek dan de verbinding in. Log
+daarna opnieuw in en kies de nieuwe projecten.
+
+## <span id="remove-the-server">De server verwijderen</span>
+
+1. Trek de verbinding in via **Instellingen > MCP-verbindingen** of met
+   `logbrew mcp revoke <grant_id> --yes`.
+2. Verwijder de server uit Claude Code:
+
+   ```bash
+   claude mcp remove logbrew
+   ```
+
+`claude mcp remove` verwijdert alleen de configuratie en de tokens op je
+computer. De verbinding in LogBrew blijft bestaan. Trek je de verbinding niet
+in? Dan eindigt ze na 30 dagen zonder gebruik.
+
+## <span id="fix-connection-problems">Verbindingsproblemen oplossen</span>
+
+| Probleem | Oplossing |
+| --- | --- |
+| `claude mcp list` toont `Needs authentication`. | Voer `claude mcp login logbrew` uit. |
+| Claude Code vraagt je na een tijd gebruik opnieuw in te loggen. | De verbinding is beëindigd of ingetrokken. Voer `claude mcp login logbrew` uit, of kies **Re-authenticate** in `/mcp`. |
+| De client krijgt `client access denied`. | Gebruik een goedgekeurde client. Op dit moment is alleen Claude Code goedgekeurd. |
+| De verbinding mislukt na het inloggen. | Werk Claude Code bij naar 2.1.300 of nieuwer. |
+| De autorisatiepagina toont `You have no projects to share`. | Maak een project aan in LogBrew en start het inloggen daarna opnieuw. |
+| Een leesactie geeft `permission_denied`. | Het project is niet goedgekeurd voor deze verbinding. Trek de verbinding in, log daarna opnieuw in en kies het project. |
+| Een leesactie geeft geen gegevens. | Controleer of het project telemetrie verzendt. Een leeg resultaat bewijst niet dat de app werkt. |
+| `logbrew mcp grants` toont `not logged in` of geeft `unauthorized`. | Voer `logbrew login` uit en probeer het opnieuw. |

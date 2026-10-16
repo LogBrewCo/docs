@@ -1,0 +1,202 @@
+---
+title: "Logs afschermen: houd gevoelige gegevens uit je logs"
+sidebarTitle: "Vastgelegde gegevens beheren"
+description: "Kies goedgekeurde logvelden. Test lokaal op gevoelige gegevens. Lees de grenzen van de vastleginstellingen van LogBrew voor JavaScript, Node.js en de browser."
+---
+
+Bepaal wat je app verstuurt voordat je het vastleggen inschakelt. Houd
+wachtwoorden, toegangstokens, formulierinhoud en privégegevens van gebruikers
+uit events.
+
+Bouw elk event op uit goedgekeurde velden. Kopieer geen volledig request-,
+response- of foutobject naar de metadata. Afscherming vervangt een gevoelige
+waarde. Een filter laat een heel event weg. Een geldig SDK-event kan nog
+steeds gegevens bevatten die je app niet mag versturen.
+
+Deze handleiding geldt voor deze pakketversies:
+
+- `@logbrew/sdk` 0.1.28
+- `@logbrew/node` 0.1.12
+- `@logbrew/browser` 0.1.11
+
+Lees voor andere runtimes de handleiding van het pakket via
+[SDK-integratie](/nl/guides/sdk-ingestion).
+
+## Velden voor de vastlegging kiezen
+
+Leg bij een mislukte checkout een vast bericht, een routetemplate en een
+statuscode vast. Leg geen namen, e-mailadressen of betaalgegevens vast.
+
+| Veld | Regel voor vastleggen |
+| --- | --- |
+| Bericht | Gebruik een vaste tekst zoals `checkout.failed`. Voeg geen formuliertekst of toegangsgegevens in. |
+| Route | Gebruik een template zoals `/orders/:id`. Een URL-pad, query of fragment kan privéwaarden bevatten. |
+| Status | Accepteer alleen een geldige statuscode, geen tekenreeks uit gebruikersinvoer. |
+| Metadata | Kies benoemde velden. Kopieer niet alle eigenschappen van een request, response of fout. |
+| Subject en sessie | Gebruik goedgekeurde telemetrie-ID's, geen logintoken of sessiecookie. |
+
+Zie
+[Productevents vastleggen](/nl/guides/product-events#set-users-and-sessions-on-each-event)
+voor gebruikers- en sessiecontext. Een ID kan een persoon identificeren, ook
+als er geen naam in staat.
+
+## De veldselectie lokaal testen
+
+Gebruik Node.js 18 of nieuwer. Installeer het pakket in een lege map:
+
+```bash
+npm install --save-exact @logbrew/sdk@0.1.28
+```
+
+Deze test gebruikt geen echte sleutel en verstuurt geen request. Sla hem op
+als `safe-capture.mjs`:
+
+```js
+import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import { LogBrewClient, SdkError } from "@logbrew/sdk";
+
+try {
+  const client = LogBrewClient.create({
+    apiKey: "local-preview-only",
+    sdkName: "privacy-check",
+    sdkVersion: "0.1.28",
+    automaticDelivery: false
+  });
+
+  function recordCheckoutFailure(input) {
+    const status = input?.status;
+    if (!Number.isInteger(status) || status < 400 || status > 599) {
+      return false;
+    }
+    client.log(randomUUID(), new Date().toISOString(), {
+      message: "checkout.failed",
+      level: "error",
+      metadata: { route: "/checkout", status }
+    });
+    return true;
+  }
+
+  const excludedValue = "SYNTHETIC_PRIVATE_VALUE";
+  assert.equal(recordCheckoutFailure({
+    status: 503,
+    authorization: excludedValue,
+    body: excludedValue
+  }), true);
+  assert.equal(recordCheckoutFailure({ status: excludedValue }), false);
+
+  const preview = client.previewJson();
+  const batch = JSON.parse(preview);
+  assert.equal(batch.events.length, 1);
+  assert.equal(preview.includes(excludedValue), false);
+  assert.deepEqual(batch.events[0].attributes.metadata, {
+    route: "/checkout",
+    status: 503
+  });
+  client.purgePendingEvents();
+  console.log(JSON.stringify({
+    ok: true,
+    checked_events: 1,
+    excluded_value_found: false
+  }));
+} catch (error) {
+  console.error(JSON.stringify({
+    ok: false,
+    error: error instanceof SdkError ? error.code : "privacy_check_failed"
+  }));
+  process.exitCode = 1;
+}
+```
+
+
+Voer de test uit:
+
+```bash
+node safe-capture.mjs
+```
+
+Verwachte uitvoer:
+
+```json
+{"ok":true,"checked_events":1,"excluded_value_found":false}
+```
+
+Een mislukte assertion print `"ok":false` en stopt met exitcode 1. Een
+validatiefout van de SDK print de SDK-foutcode. Print of upload geen preview
+die echte gegevens bevat.
+
+Gebruik hetzelfde patroon in je vastlegcode en houd de assertions in je
+tests. Voeg een controle toe voor elk veld en elke waarde die je app niet mag
+versturen. Gebruik je afscherming op basis van patronen, voer de controles dan
+opnieuw uit na elke wijziging van een regel. Deze test controleert één log in
+de wachtrij. Hij vervangt geen privacyreview.
+
+## Foutmeldingen en stacks
+
+| Manier van vastleggen | Gedrag |
+| --- | --- |
+| `createIssueAttributesFromError` (core) | Houdt de fouttekst in het issuebericht en in `metadata.errorMessage`. Voegt `metadata.errorStack` alleen toe met `includeErrorStack: true`. Items in de exceptionketen markeren elk bericht als `redacted` en bevatten de tekst niet. |
+| Consoleconversie in core | Kan de fouttekst in het logbericht en de metadata houden. |
+| `createBrowserErrorEvent` (browser) | Gebruikt een vaste foutsamenvatting, verwijdert `metadata.errorMessage` en markeert berichten in de exceptionketen als afgeschermd. |
+
+Een eigen `options.message` verwijdert `metadata.errorMessage` niet.
+Controleer het volledige event, niet alleen de titel. Houd gevoelige waarden
+bij de bron uit foutmeldingen.
+
+## Elke instelling binnen haar scope gebruiken
+
+### JavaScript-core en Node.js
+
+`LogBrewClient.create` accepteert `eventFilter`. Geef `false` terug om een
+event weg te laten voordat het in de wachtrij komt. Bij elke andere
+returnwaarde blijft het event behouden. Het filter krijgt een kopie van het
+event, dus wijzigingen daaraan schermen niets af. `createLogBrewNodeClient` en
+`createLogBrewBrowserClient` passen `eventFilter` in deze versies niet toe.
+
+`droppedEvents()` telt events die zijn weggegooid door limieten voor grootte
+of wachtrij. Het telt geen events die `eventFilter` heeft weggelaten.
+
+De Node-client voegt runtimecontext toe, zoals de Node-versie, het
+besturingssysteem en de architectuur. Zet `captureRuntimeContext: false` om
+die weg te laten. Deze instelling verwijdert geen context die je app zelf
+meegeeft en stopt het vastleggen niet.
+
+### Browser
+
+De browserclient legt standaard globale fouten, onafgehandelde rejections
+en een eerste paginaweergave vast. Zet `captureGlobalErrors`,
+`captureUnhandledRejections` of `capturePageViews` op `false` om er een uit te
+zetten.
+
+Paginaweergaven bevatten de padnaam. Ze laten de querystring, het fragment, de
+documenttitel en de volledige user-agent weg, tenzij je `includeQueryString`,
+`includeHash`, `includeDocumentTitle` of `includeUserAgent` instelt. Kan een
+padnaam privéwaarden bevatten, zet dan automatische paginaweergaven uit en
+verstuur zelf een paginaweergave met een veilige routenaam.
+
+`sanitizeMetadata` wijzigt alleen metadata. Het wijzigt geen namen van
+paginaweergaven of acties. De naam van een paginaweergave bevat de concrete
+padnaam, zoals `page_view /orders/1234`. Een `routeTemplate` in de metadata
+bepaalt de pagina of het scherm in Analytics, maar wijzigt de naam niet.
+`shouldCaptureError` laat alleen browserissues weg. Het filtert geen logs of
+andere signalen.
+
+Zet `captureRuntimeContext: false` om merk, platform en apparaatfamilie van de
+browser weg te laten. Deze instelling heeft geen invloed op
+`includeUserAgent`.
+
+## Voordat je echte gegevens vastlegt
+
+Test elke ingeschakelde manier van vastleggen met synthetische gegevens, ook
+foutpaden en logintegraties.
+
+Wijzigingen in de vastlegging gelden alleen voor nieuwe events.
+`purgePendingEvents()` leegt een inactieve lokale wachtrij en mislukt terwijl
+er een aflevering loopt. Het stopt latere vastlegging niet en verwijdert geen
+events die LogBrew al heeft geaccepteerd. `uninstall()` in de browser
+verwijdert listeners, maar behoudt events in de wachtrij. Deze methoden zijn
+geen werkwijze voor toestemming of verwijdering.
+
+Verstuur daarna één synthetisch event met de [snelstart](/nl/quickstart).
+Ontbreekt het, zie dan [Problemen oplossen](/nl/guides/troubleshooting). Zie
+[API-fouten](/nl/reference/api-errors) voor HTTP-fouten.
