@@ -29,12 +29,21 @@ The CLI sets `source` to `cli`. `--diagnostics` adds only the binary name, CLI
 version, operating system, and architecture. Run `logbrew support --help` for
 all flags.
 
+The CLI does not send a retry key when it creates a ticket. If the result is
+uncertain, run `logbrew support list --json` before you run the command again.
+Otherwise you can create a second ticket.
+
 From the API, send `POST /api/support/tickets` with `source`, `category`,
-`title`, and `description`. This example uses synthetic values:
+`title`, and `description`. To make a retry safe, create a retry key once for
+the report and send it in the `Idempotency-Key` header. This example uses
+synthetic values:
 
 ```bash
+LOGBREW_SUPPORT_RETRY_KEY="$(uuidgen)"
+
 curl -sS "https://api.logbrew.co/api/support/tickets" \
   -H "Authorization: Bearer ${LOGBREW_TOKEN:?Set an account access bearer}" \
+  -H "Idempotency-Key: ${LOGBREW_SUPPORT_RETRY_KEY:?Create a retry key for this report}" \
   -H "Content-Type: application/json" \
   --data '{
     "source": "docs",
@@ -50,18 +59,45 @@ curl -sS "https://api.logbrew.co/api/support/tickets" \
   }'
 ```
 
+The retry key contains 1 to 128 visible ASCII characters, without spaces. To
+retry, send the same key with the same body. The response then gives the same
+ticket. Use a new key for a different report. A timeout does not prove that
+creation failed. The `Idempotency-Key` header is optional. Without it, a
+repeated request can create another ticket.
+
 Optional fields are `project_id`, `environment`, `runtime`, `framework`,
 `sdk_package`, `sdk_version`, `release`, `trace_id`, `event_id`, and
-`diagnostics`. Omit `project_id` when the problem is not project-specific.
+`diagnostics`. Omit `project_id` when the problem is not project-specific. A
+`project_id` must identify an active project of your account.
 
 | Field | Accepted values |
 | --- | --- |
 | `source` | `cli`, `sdk`, `website`, `docs`, `mobile` |
 | `category` | `sdk_install_failure`, `ingest_failure`, `auth_failure`, `project_setup`, `dashboard_issue`, `docs_confusion`, `cli_issue`, `mobile_issue`, `billing_question`, `other` |
+| `title` | 1 to 160 characters after LogBrew removes surrounding spaces. |
+| `description` | 1 to 4,000 characters after LogBrew removes surrounding spaces. |
+| Other text fields | Up to 256 characters each. |
 
-A successful request returns `ticket_id`, `status`, `created_at`, `next`, and
-`next_action`. Ticket IDs start with `sup_`. Use `next` as guidance for a
-person and `next_action` for program control.
+A successful request returns HTTP `200`:
+
+```json
+{
+  "ticket_id": "sup_11111111111141118111111111111111",
+  "status": "open",
+  "created_at": "2026-10-01T09:30:00Z",
+  "next": "Support ticket created. LogBrew will review the attached diagnostics.",
+  "next_action": {
+    "code": "review_ticket",
+    "target": "support_ticket"
+  }
+}
+```
+
+Ticket IDs start with `sup_`. Use `next` as guidance for a person and
+`next_action` for program control.
+
+To delete a project, use project settings or `logbrew projects delete`. Do not
+ask for project deletion in a support ticket.
 
 ## Write a useful report
 
@@ -72,7 +108,7 @@ person and `next_action` for program control.
 - Add project, release, trace, or event IDs only when they identify the same
   failure.
 
-Use only these `diagnostics` keys:
+Use these `diagnostics` keys:
 
 | Key | Content |
 | --- | --- |
@@ -84,6 +120,14 @@ Use only these `diagnostics` keys:
 | `error_code` | Stable error code. |
 | `error_summary` | Short, redacted error summary. |
 | `retry_count` | Number of equal retry attempts. |
+| `last_delivery_status` | HTTP status of the last delivery attempt, such as `401`. |
+
+`diagnostics` is a JSON object of up to 16 KB after redaction. LogBrew replaces
+a value with `[redacted]` when its key names a credential, a session, or an
+email address. It also replaces text that looks like a credential, a URL, or a
+local path. LogBrew also shortens long strings and limits nesting, keys, and
+list items. Do not depend on this redaction. Remove private
+data before you send the request.
 
 ## Track the ticket
 
@@ -97,18 +141,27 @@ Use only these `diagnostics` keys:
 | `logbrew support reopen <ticket_id>` | `PATCH /api/support/tickets/{ticket_id}` | Set `open`. |
 
 The list accepts `project_id`, `status`, `source`, `category`, `release`, and
-`limit`. For cursor pagination, send `pagination=cursor`. On later pages,
-repeat the same filters and send `cursor_time` and `cursor_id` from
-`next_cursor`.
+`limit`. The default `limit` is 100, and the maximum is 500. For cursor
+pagination, send `pagination=cursor`. On later pages, repeat the same filters
+and send `cursor_time` and `cursor_id` from `next_cursor`. The cursor ID is a
+`sup_` ticket ID. Stop when `next_cursor` is `null`. The CLI uses the
+`--project`, `--status`, `--source`, `--category`, `--release`, `--limit`,
+`--pagination`, `--cursor-time`, and `--cursor-id` flags.
 
 Status values are `open`, `routed`, `in_progress`, `waiting_on_user`,
 `resolved`, and `closed`. You can set only `open` or `closed`. A repeated close
 or reopen request is a successful no-op, so you can retry the exact request.
-Follow the returned status and `next_action`.
+Follow the returned status and `next_action`:
+
+| Status | `next_action.code` | Next step |
+| --- | --- | --- |
+| `open`, `routed`, `in_progress` | `await_owner_update` | Wait for an update. Read the ticket again later. |
+| `waiting_on_user` | `provide_context` | Send the requested context. |
+| `resolved`, `closed` | `open_new_ticket_if_needed` | Create a new ticket if the problem occurs again. |
 
 ## Add requested context
 
-Reply only when the ticket asks for context. That ticket has status
+Reply when the ticket asks for context. That ticket has status
 `waiting_on_user` and `next_action.code` `provide_context`.
 
 ```bash
@@ -118,22 +171,41 @@ logbrew support reply sup_11111111111141118111111111111111 \
 ```
 
 The API body has `context` and optional `diagnostics`. The `context` text must
-contain 1 to 4,000 characters. Send a retry key in the `Idempotency-Key`
-header. The key contains 1 to 128 visible ASCII characters, without spaces.
-Use a new key for each reply. Reuse a key only to retry the same reply.
+contain 1 to 4,000 characters. Do not put credentials, URLs, host names, or
+local paths in `context`. The API rejects that text with `422`. Send a retry
+key in the `Idempotency-Key` header. The context route requires this header.
+The key contains 1 to 128 visible ASCII characters, without spaces. Use a new
+key for each reply. Reuse a key only to retry the same reply.
 
-A successful reply returns a `context_id` that starts with `ctx_`. Read the
-ticket again before you answer a later request.
+The API accepts context while the ticket is `open`, `routed`, `in_progress`, or
+`waiting_on_user`. It accepts 1 reply for each ticket state. After a reply,
+wait for a status change before you send more context. A reply to a
+`waiting_on_user` ticket sets the ticket to `open`. Read the returned `status`
+instead of assuming this change.
+
+A successful reply returns `ticket_id`, `context_id`, `status`, `created_at`,
+`next`, and `next_action`. The `context_id` starts with `ctx_`. Read the ticket
+again before you answer a later request.
+
+`GET /api/support/tickets/{ticket_id}/context` returns the 20 most recent
+context entries, oldest first. Each entry has `context_id`, `context`,
+`diagnostics`, and `created_at`. This list has no cursor.
+
+A reply to a `resolved` or `closed` ticket returns `422` with
+`code: "validation_failed"`. Reopen the ticket only if the user wants to
+continue that support request. A `next_action` does not give an agent
+permission to change account state.
 
 ## Recover from errors
 
-| HTTP status | Recovery |
-| --- | --- |
-| `401` | Send a valid account access bearer. |
-| `404` | List the account's tickets and use a returned `sup_` ID. |
-| `409` | Read the ticket context. Reply only when context is requested. |
-| `422` | Correct the named field. For PATCH, send only `status: "open"` or `status: "closed"`. |
-| `429` | Wait, then retry. |
+| HTTP status | `code` | Recovery |
+| --- | --- | --- |
+| `401` | `unauthorized` | Send a valid account access bearer. |
+| `404` | `not_found` | List the account's tickets and use a returned `sup_` ID. For a project error, check `project_id` or omit it. |
+| `405` | `method_not_allowed` | Use a method from the table in [Track the ticket](#track-the-ticket). |
+| `409` | `idempotency_conflict` | The retry key was used with a different request. Retry the original request, or read the ticket and use a new key. |
+| `422` | `validation_failed` | Correct the named field. For PATCH, send only `status: "open"` or `status: "closed"`. |
+| `429` | `rate_limited` | Wait, then retry. |
 
 Error responses contain `error`, `code`, `next`, and `next_action`. See
 [API errors](/reference/api-errors).
