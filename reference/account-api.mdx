@@ -5,9 +5,9 @@ description: "Read LogBrew account usage limits, quota history, subscription rea
 ---
 
 Use the account API to read usage, quota state, usage history, and
-subscription readiness, and to sign out. Account reads use an account bearer.
-Never use a project ingest key for an account request. Never use an account
-credential as SDK or ingest configuration.
+subscription readiness, and to sign out. Account reads use an account bearer
+or the browser session. Never use a project ingest key for an account request.
+Never use an account credential as SDK or ingest configuration.
 
 | Task | Endpoint |
 | --- | --- |
@@ -24,10 +24,13 @@ Do not show that failure as zero usage, an empty graph, or a free plan. An
 unsupported method returns `405` with `code: "method_not_allowed"`, and `next`
 names the supported request.
 
+The account API reports telemetry usage, not money. It does not report
+charges, invoices, or payment state.
+
 ## Account usage
 
 `GET /api/account/usage` is the canonical usage and quota endpoint. Use it for
-usage totals, limits, reset time, quota state, and breakdowns by project and
+usage totals, reset time, quota state, and breakdowns by project and
 telemetry stream. Do not calculate usage from SDK files, CLI files, or client
 counters. The CLI command `logbrew usage` reads this endpoint. See the
 [CLI reference](/reference/cli).
@@ -37,7 +40,8 @@ curl "https://api.logbrew.co/api/account/usage" \
   -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER"
 ```
 
-Example response with synthetic values:
+Example response with synthetic values. This free account has 1 project and
+sent only logs in the current period:
 
 ```json
 {
@@ -49,7 +53,7 @@ Example response with synthetic values:
   "usage": { "events": 27000, "bytes": 10485760, "projects": 1 },
   "state": "ok",
   "warning_threshold": 0.8,
-  "percent_used": 0,
+  "percent_used": 0.2,
   "warning": false,
   "blocked": false,
   "limit": null,
@@ -73,36 +77,59 @@ Example response with synthetic values:
 | Field | Meaning |
 | --- | --- |
 | `period_start`, `period_end` | The current usage period. The end is exclusive. |
-| `reset_at` | When the usage allowance resets. |
-| `plan.tier` | Plan identifier, such as `free`. |
+| `reset_at` | When the usage allowance resets. It is the same as `period_end`. |
+| `plan.tier` | Plan identifier: `free`, `pro`, or `scale`. |
 | `plan.status` | `free`, `trial`, `active`, `past_due`, or `disabled`. |
-| `limits` | Configured limits for `events`, `bytes`, and `projects`, and `retention_days`. `null` means that no limit is configured. |
-| `usage` | Current totals for `events`, `bytes`, and `projects`. |
+| `limits.events`, `limits.bytes`, `limits.projects` | Compatibility fields. They are `null`. `null` does not mean unlimited. Use `state`, `limit`, and `percent_used` for quota state. |
+| `limits.retention_days` | Data retention for the plan, in days, or `null`. |
+| `usage.events`, `usage.bytes` | Totals for all telemetry streams in the period. |
+| `usage.projects` | The number of projects that the account owns. |
 | `state` | `ok`, `warning`, or `blocked`. |
-| `warning_threshold` | The usage share that starts the `warning` state. |
-| `percent_used` | Usage percentage, from 0 to 100. |
-| `warning`, `blocked` | Boolean forms of `state`. |
-| `limit` | The resource that caused the state: `events`, `bytes`, `projects`, or `null`. |
+| `warning_threshold` | The share of an allowance that starts the `warning` state, as a fraction. |
+| `percent_used` | The highest share of any allowance, as a percentage. For example, `80` means 80%. |
+| `warning`, `blocked` | Compatibility forms of `state`. |
+| `limit` | The allowance that caused the state: `events`, `bytes`, or `null`. |
 | `next`, `next_action` | Recovery text and the typed action for the current state. |
-| `by_project` | Usage per project. Match rows by `project_id`, not by array position. |
-| `by_stream` | Usage per telemetry stream `kind`. |
+| `by_project` | Usage per project. There is 1 row for each owned project, also when its usage is zero. Match rows by `project_id`, not by array position. |
+| `by_stream` | Usage per telemetry stream `kind`, such as `logs`, `issues`, `actions`, or `traces`. |
 
 ### Quota states
 
 Use `state` for the main branch. `limit` is `null` only when `state` is `ok`.
 
-| `state` | `warning` | `blocked` | `next_action.code` | `next_action.target` |
-| --- | --- | --- | --- | --- |
-| `ok` | `false` | `false` | `continue_sending_telemetry` or `check_usage_limits` | `telemetry_ingest` or `account_usage` |
-| `warning` | `true` | `false` | `reduce_usage_or_upgrade` (events or bytes) or `archive_project_or_upgrade` (projects) | `account_usage` or `projects` |
-| `blocked` | `true` | `true` | `wait_until_reset_or_upgrade` | `pricing` |
+| `state` | `warning` | `blocked` | `limit` | `next_action.code` | `next_action.target` |
+| --- | --- | --- | --- | --- | --- |
+| `ok` | `false` | `false` | `null` | `continue_sending_telemetry` | `telemetry_ingest` |
+| `warning` | `true` | `false` | `events` or `bytes` | `reduce_usage_or_upgrade` | `pricing` |
+| `blocked` | `false` | `true` | `events` or `bytes` | `wait_until_reset_or_upgrade` | `pricing` |
 
 `next_action.state`, `next_action.limit`, and `next_action.reset_at` repeat
-the top-level values.
+the top-level values. The `next_action.code` values also include
+`check_usage_limits` with the target `account_usage`. If a client gets that
+pair, read the usage again and show `next`.
 
-An account usage limit is not an API rate limit. When ingestion exceeds the
-allowance, ingestion returns `usage_limit_exceeded`. When a client sends too
-many requests, the API returns `rate_limited`. See
+LogBrew measures each telemetry type against its own allowance. `limit` groups
+them:
+
+- `events` covers issue events and trace spans.
+- `bytes` covers log bytes and metric bytes.
+
+If one allowance is blocked and another is in warning, `limit` names the
+blocked allowance. The `warning` state starts when usage reaches
+`warning_threshold` of an allowance. The `blocked` state starts when usage
+reaches the allowance.
+
+The `next` text can change, for example when plans are not for sale. The
+`next_action` values do not change. Localize from `next_action`. Do not
+parse `next`.
+
+An account usage limit is not an API rate limit. When ingestion exceeds an
+allowance, the ingest request returns `429` with `usage_limit_exceeded`, and
+the body adds `limit` and `reset_at`. In that error, `limit` names the exact
+allowance: `issue_events`, `log_bytes`, `metric_bytes`, or `trace_spans`.
+LogBrew rejects the complete request. Do not send that telemetry type again
+until `reset_at` or until the plan changes. When a
+client sends too many requests, the API returns `rate_limited`. See
 [API errors](/reference/api-errors#retry-rules).
 
 The response is a snapshot. Read it again after an account change.
@@ -116,7 +143,8 @@ The response is a snapshot. Read it again after an account change.
 ## Usage history
 
 `GET /api/account/usage/history` returns bounded, zero-filled usage buckets
-for graphs and reports. Set `interval` to one supported value:
+for graphs and reports. Set `interval` to one supported value. If you omit
+`interval`, the API uses `monthly`. The route accepts no other query key.
 
 ```bash
 curl --get "https://api.logbrew.co/api/account/usage/history" \
@@ -124,22 +152,83 @@ curl --get "https://api.logbrew.co/api/account/usage/history" \
   --data-urlencode "interval=daily"
 ```
 
-| `interval` | Buckets |
-| --- | ---: |
-| `daily` | 30 |
-| `weekly` | 12 |
-| `monthly` | 12 |
-| `yearly` | 5 |
+| `interval` | Buckets | Bucket start |
+| --- | ---: | --- |
+| `daily` | 30 | 00:00 UTC |
+| `weekly` | 12 | Monday, 00:00 UTC |
+| `monthly` | 12 | First day of the month, 00:00 UTC |
+| `yearly` | 5 | January 1, 00:00 UTC |
 
 | Field | Meaning |
 | --- | --- |
 | `interval` | The requested interval. |
-| `period_start`, `period_end` | The start and end of the history window. |
+| `period_start`, `period_end` | The start and the exclusive end of the history window. |
 | `current` | The complete `GET /api/account/usage` response for the current period. |
-| `buckets` | Ordered buckets. Each bucket has `period_start`, `period_end`, `usage`, `by_project`, and `by_stream`. |
+| `buckets` | Buckets in time order, oldest first. Each bucket has `period_start`, `period_end`, `usage`, `by_project`, and `by_stream`. |
+
+This `yearly` response uses synthetic data for a request in June 2026. All
+usage occurred in June:
+
+```json
+{
+  "interval": "yearly",
+  "period_start": "2022-01-01T00:00:00Z",
+  "period_end": "2027-01-01T00:00:00Z",
+  "current": {
+    "period_start": "2026-06-01T00:00:00Z",
+    "period_end": "2026-07-01T00:00:00Z",
+    "reset_at": "2026-07-01T00:00:00Z",
+    "plan": { "tier": "free", "status": "free" },
+    "limits": { "events": null, "bytes": null, "projects": null, "retention_days": 30 },
+    "usage": { "events": 27000, "bytes": 10485760, "projects": 1 },
+    "state": "ok",
+    "warning_threshold": 0.8,
+    "percent_used": 0.2,
+    "warning": false,
+    "blocked": false,
+    "limit": null,
+    "next": "continue sending telemetry",
+    "next_action": {
+      "code": "continue_sending_telemetry",
+      "target": "telemetry_ingest",
+      "state": "ok",
+      "limit": null,
+      "reset_at": "2026-07-01T00:00:00Z"
+    },
+    "by_project": [
+      { "project_id": "00000000-0000-4000-8000-000000000001", "events": 27000, "bytes": 10485760 }
+    ],
+    "by_stream": [{ "kind": "logs", "events": 27000, "bytes": 10485760 }]
+  },
+  "buckets": [
+    { "period_start": "2022-01-01T00:00:00Z", "period_end": "2023-01-01T00:00:00Z", "usage": { "events": 0, "bytes": 0, "projects": 0 }, "by_project": [], "by_stream": [] },
+    { "period_start": "2023-01-01T00:00:00Z", "period_end": "2024-01-01T00:00:00Z", "usage": { "events": 0, "bytes": 0, "projects": 0 }, "by_project": [], "by_stream": [] },
+    { "period_start": "2024-01-01T00:00:00Z", "period_end": "2025-01-01T00:00:00Z", "usage": { "events": 0, "bytes": 0, "projects": 0 }, "by_project": [], "by_stream": [] },
+    { "period_start": "2025-01-01T00:00:00Z", "period_end": "2026-01-01T00:00:00Z", "usage": { "events": 0, "bytes": 0, "projects": 0 }, "by_project": [], "by_stream": [] },
+    {
+      "period_start": "2026-01-01T00:00:00Z",
+      "period_end": "2027-01-01T00:00:00Z",
+      "usage": { "events": 27000, "bytes": 10485760, "projects": 1 },
+      "by_project": [
+        { "project_id": "00000000-0000-4000-8000-000000000001", "events": 27000, "bytes": 10485760 }
+      ],
+      "by_stream": [{ "kind": "logs", "events": 27000, "bytes": 10485760 }]
+    }
+  ]
+}
+```
 
 Use `current.reset_at` for the allowance reset. Do not use the end of the
-history window. The last bucket can contain a period that is not complete.
+history window. `current` is not the sum of the buckets, and its dates can be
+different from the window dates.
+
+The last bucket contains the current calendar period, which is not complete.
+Its future end time does not mean that LogBrew measured future usage. A bucket
+with zeros means that LogBrew counted no usage in that bucket.
+
+In a bucket, `usage.projects` counts the projects that have usage in that
+bucket. Do not add these counts to get the number of projects. Use
+`current.usage.projects` for the number of owned projects.
 
 Plot events and bytes as separate series because they use different units.
 The buckets contain usage, not cost. Do not label the graph as spending,
@@ -159,6 +248,8 @@ An unsupported interval returns `422`:
 }
 ```
 
+An unknown query key also returns `422` with `validation_failed`.
+
 ## Subscription readiness
 
 `GET /api/account/subscription` is read-only. Use it to decide whether to
@@ -170,19 +261,38 @@ curl "https://api.logbrew.co/api/account/subscription" \
   -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER"
 ```
 
-A free account returns these values:
+A free account returns this response. The `account_id` is synthetic:
 
-| Field | Value |
-| --- | --- |
-| `tier` | `free` |
-| `billing_interval` | `none` |
-| `state` | `free` |
-| `access_state` | `active` |
-| Period timestamps | `null` |
-| `organization_creation_allowed` | `false` |
-| `organization_creation_blocker` | `subscription_required` |
-| Organization, member, project, and invitation limits | `0` |
-| `next` | `choose Pro or Scale before creating an organization` |
+```json
+{
+  "account_id": "00000000-0000-4000-8000-0000000000aa",
+  "tier": "free",
+  "billing_interval": "none",
+  "state": "free",
+  "access_state": "active",
+  "current_period_start": null,
+  "current_period_end": null,
+  "renews_at": null,
+  "cancels_at": null,
+  "organization_creation_allowed": false,
+  "organization_creation_blocker": "subscription_required",
+  "limits": {
+    "organizations": 0,
+    "members_per_organization": 0,
+    "projects_per_organization": 0,
+    "invitations_per_day": 0
+  },
+  "next": "<display text>",
+  "next_action": {
+    "code": "choose_plan",
+    "target": "pricing"
+  }
+}
+```
+
+`next` is display text. It changes when paid plans are or are not for sale.
+Show the returned text, or localize from `next_action`. Do not hard-code a
+plan name from `next`.
 
 Enum values:
 
@@ -191,10 +301,21 @@ Enum values:
 | `tier` | `free`, `pro`, `scale` |
 | `billing_interval` | `none`, `monthly`, `yearly` |
 | `state` | `free`, `trialing`, `active`, `past_due`, `paused`, `canceled` |
+| `access_state` | `active` for `free`, `trialing`, and `active`. `paused` for `past_due`, `paused`, and `canceled`. |
+| `organization_creation_blocker` | `subscription_required`, `subscription_inactive`, `organization_limit_exceeded`, or `null` |
+
+Each blocker has one `next_action` pair:
+
+| `organization_creation_blocker` | `next_action.code` | `next_action.target` |
+| --- | --- | --- |
+| `null` | `create_or_manage_organization` | `organization` |
+| `subscription_required` | `choose_plan` | `pricing` |
+| `subscription_inactive` | `resume_subscription` | `billing` |
+| `organization_limit_exceeded` | `manage_organization_limit` | `organization` |
 
 Tier values are identifiers, not display names. Keep them unchanged in a
-localized client. Check `organization_creation_allowed` before you enable
-organization creation.
+localized client. A paid account can still be blocked. Check
+`organization_creation_allowed` before you enable organization creation.
 
 This endpoint does not create organizations, send invitations, change roles,
 or change billing.
@@ -208,12 +329,13 @@ provider's grant.
 | Scope | Endpoint | Credential |
 | --- | --- | --- |
 | One app or CLI login | `POST /api/auth/logout` | That client's refresh token in the JSON body. No bearer. |
-| Every LogBrew login | `POST /api/auth/logout-all` | Account authentication. No body. |
-| The current browser session | `POST /api/auth/web/logout` | The browser session. |
+| Every LogBrew login | `POST /api/auth/logout-all` | Account bearer or browser session. No body. |
+| The current browser session | `POST /api/auth/web/logout` | None. The response clears the browser cookie. |
 
 ### One app or CLI login
 
-Send the request from the client that holds the refresh token:
+Send the request from the client that holds the refresh token. Set
+`Content-Type: application/json`:
 
 ```json
 {
@@ -234,11 +356,16 @@ response is `200`:
 }
 ```
 
-This revokes one refresh-token family. Other logins on the account are not
-changed. After the response, the client removes its local credentials. If the
-token is invalid or expired, the response is `401` with
-`code: "unauthorized"`. Remove the local credentials in that case too.
-`logbrew logout` uses this endpoint.
+This revokes one refresh-token family. LogBrew rejects later refreshes for
+that login. Other logins on the account do not change. An access token that
+the client already has stays valid until it expires. If account credentials
+can be exposed, use [Every LogBrew login](#every-logbrew-login).
+
+After the response, the client removes its local credentials. If you send the
+same valid refresh token again, the response is the same `200`. If the token
+is invalid or expired, or is an access token, the response is `401` with
+`code: "unauthorized"` and `next_action.code: "authorize_request"`. Remove the
+local credentials in that case too. `logbrew logout` uses this endpoint.
 
 ### Every LogBrew login
 
@@ -252,7 +379,7 @@ A successful response is `200`:
 ```json
 {
   "revoked": true,
-  "revoked_before": "2026-09-07T12:00:00Z",
+  "revoked_before": "2026-09-07T12:00:00.123Z",
   "next_action": {
     "code": "clear_local_session",
     "target": "local_credentials"
@@ -260,12 +387,18 @@ A successful response is `200`:
 }
 ```
 
-`revoked_before` is inclusive. LogBrew rejects access, browser, and refresh
-credentials issued at or before that time. Current live-feed sessions end, and
-the browser session cookie is cleared. A sign-in after that time stays valid.
-Each client must remove its local LogBrew credentials and sign in again.
+`revoked_before` is inclusive and has millisecond precision. LogBrew rejects
+access tokens, browser sessions, and refresh tokens from a sign-in at or before
+that time. A token refreshed later from such a sign-in is also rejected.
+Current live-feed sessions end, and the response clears the browser session
+cookie. A sign-in after that time stays valid. Each client must remove its
+local LogBrew credentials and sign in again.
 
-If the response is lost, do not report that all logins were revoked. For more
+Do not sign in again and repeat this request automatically. A new request
+also revokes the new sign-in.
+
+If the response is lost, do not report that all logins were revoked. A later
+`401` from an old credential does not replace the success response. For more
 recovery steps, read
 [Secure a compromised account](/guides/troubleshooting#secure-a-compromised-account).
 
@@ -274,4 +407,18 @@ recovery steps, read
 `POST /api/auth/web/logout` clears the browser `logbrew_session` cookie and
 returns `204 No Content` with no body. Call it from the browser. Do not copy
 the session cookie into a command. This request does not sign out other
-clients.
+clients, and it does not revoke a copy of the cookie value. To revoke every
+session, use [Every LogBrew login](#every-logbrew-login).
+
+### Recover from a sign-out error
+
+| Result | Recovery |
+| --- | --- |
+| `401` from `POST /api/auth/logout` | Remove the client's local credentials. Do not send another credential type. |
+| `401` from `POST /api/auth/logout-all` | Sign in from a trusted client if the user still wants access. Get approval again before you repeat the request. |
+| `405` | Use the method that `next` names, and only for the scope that the user approved. |
+| `invalid_json` from `POST /api/auth/logout` | Send a JSON object with a string `refresh_token` and `Content-Type: application/json`. Do not print the token. |
+| A timeout or a `5xx` status | Do not report success. Do not start an automatic sign-in and sign-out loop. Follow the [write retry rules](/reference/api-errors#writes). |
+
+For telemetry routes, filters, and pagination, read the
+[Telemetry API](/reference/telemetry-api).
