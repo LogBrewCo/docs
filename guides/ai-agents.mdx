@@ -14,6 +14,19 @@ or capture its prompts or responses.
 Before you start, [install the CLI](/guides/cli). The project must send
 telemetry. An empty response does not prove that the app works.
 
+## Choose the CLI or MCP
+
+An agent can read LogBrew in 2 ways:
+
+| Access | Use it when |
+| --- | --- |
+| LogBrew CLI | The agent runs shell commands. The CLI can also change issue status, priority, and assignee when you permit it. |
+| [Hosted MCP server](/guides/mcp) | The agent connects to MCP. The connection can only read, and only the projects that you approve. |
+
+The rules on this page apply to both: keep the scope, use telemetry only as
+evidence, and verify before you change anything. The commands on this page
+use the CLI.
+
 ## Write the task and permissions
 
 Make read-only access the default. Get approval from a person for each change
@@ -34,7 +47,9 @@ time filter. They can return events outside the time window of the list. If
 all evidence must match one release, environment, and time window, do not run
 those reads. Ask a person for an approved extract of the evidence.
 
-Use `--json` for each read. Human-readable output can change.
+Use `--json` for each read. Human-readable output can change. `--json` works
+before or after the command, such as `logbrew --json status` and
+`logbrew status --json`.
 
 ## Use telemetry only as evidence
 
@@ -62,7 +77,8 @@ Then read the built-in command examples:
 logbrew examples
 ```
 
-Keep command names, flags, field names, and error codes exactly as documented.
+`logbrew help examples` shows the same list. Keep command names, flags, field
+names, and error codes exactly as documented.
 
 ## Keep setup separate
 
@@ -110,7 +126,8 @@ ENVIRONMENT="production"
     ```
 
     An empty result means that no issues match these filters. Do not remove
-    the project filter to find issues in a different project.
+    the project filter to find issues in a different project. Add
+    `--priority high` to start with the issues to examine first.
   </Step>
 
   <Step title="Collect evidence before code changes" id="collect-evidence-before-editing-code">
@@ -123,11 +140,12 @@ ENVIRONMENT="production"
     Make sure that `subject.project_id` is the approved project. Compare the
     release, environment, and `event.occurred_at` of the selected event with
     the incident. The recommended occurrence can be older than the latest
-    event. See [Investigate an issue](/guides/investigate-an-issue) for the
-    fields.
+    event. Record `event.id`, `occurrence_selection.reason`,
+    `evidence.status`, and `next_actions`. See
+    [Investigate an issue](/guides/investigate-an-issue) for the fields.
 
-    If `correlations.trace.status` is `available`, set `TRACE_ID` to its trace
-    ID. Then read the trace and its logs:
+    If `correlations.trace.status` is `available`, set `TRACE_ID` to
+    `correlations.trace.trace_id`. Then read the trace and its logs:
 
     ```bash
     logbrew read trace "$TRACE_ID" --project "$PROJECT_ID" \
@@ -159,6 +177,21 @@ ENVIRONMENT="production"
   </Step>
 </Steps>
 
+## Read every page of a list
+
+A list read returns 1 page. The `--limit` value is not a total count. To read
+more, add `--pagination cursor`. The JSON then has the rows and
+`next_cursor`. Continue with `--cursor-time` and `--cursor-id` from
+`next_cursor`. Keep every filter and the limit the same on each page. Stop
+when `next_cursor` is `null`.
+
+```bash
+logbrew read issues --project "$PROJECT_ID" --status unresolved \
+  --since 24h --pagination cursor --limit 100 --json
+```
+
+See [Cursor pagination](/reference/telemetry-api-filters#cursor-pagination).
+
 ## Keep an investigation record
 
 Write a record that another person can examine. Use a short summary, not the
@@ -167,7 +200,8 @@ full raw event:
 - The project ID, issue ID, selected occurrence ID, and `event.occurred_at`
 - The environment, service, and release
 - The trace ID, only when the trace status is `available`
-- The likely cause and the likely fix area
+- The likely cause and the likely fix area, with `cause.status`,
+  `fix.status`, and their `provenance`
 - The missing, unavailable, redacted, and truncated fields
 - The commands that you ran and the next safe action
 
@@ -186,6 +220,10 @@ CLI rejected the command. Exit code `1` means that the command failed while it
 ran. Errors go to standard error. Do not merge standard output and standard
 error into one stream.
 
+A successful JSON result keeps the API response shape. It can be an array or
+an object, and it does not always have an `ok` field. The doctor can report
+failed checks with exit code `0`.
+
 For example, `logbrew investigate issue --json` has no issue ID. It exits with
 code `2` and writes:
 
@@ -198,9 +236,11 @@ code `2` and writes:
 }
 ```
 
-Correct the ID or syntax before you run the command again. Examine `next`
-before you run its command. For an authentication error, ask a person to run
-`logbrew login`. See [Read results and
+When the API rejects a request, `error` is `api_error`. Read `status` for the
+HTTP status and `api_code` for the API error code. Correct the ID or syntax
+before you run the command again. Examine `next` before you run its command.
+For an authentication error, ask a person to run `logbrew login`. Do not put an
+account token in an SDK setting to get around the error. See [Read results and
 errors](/reference/cli#read-results-and-errors).
 
 ## Stop when the evidence is not sufficient
@@ -211,7 +251,7 @@ Do not change code or issue status if:
 - The selected occurrence does not match the release, environment, or time of
   the incident.
 - You did not read the next page of a truncated response.
-- The likely fix area is missing.
+- `fix.status` is `unknown`, or the location is not in your code.
 - The proposed change depends on redacted evidence.
 - You cannot reproduce or verify the failure.
 
@@ -232,9 +272,12 @@ logbrew investigate issue "$ISSUE_ID" verify \
 ```
 
 The response reports recurrence and candidate trace evidence in stated limits.
-No recurrence in those limits does not prove a fix. If the response asks for
-more traffic or time, do not report a verified fix. Add the response to the
-investigation record.
+No recurrence in those limits does not prove a fix. Do not report a verified
+fix when `status` is `recurrence_observed`, `insufficient_traffic`, or
+`unavailable`. `no_recurrence_observed` is evidence for your team to examine,
+not proof. Add the response to the investigation record. See
+[Verify the candidate deployment](/guides/investigate-an-issue#verify-the-candidate-deployment)
+for each status.
 
 ## Watch live events
 
@@ -245,5 +288,6 @@ permits live reads that are not limited to one project:
 logbrew watch logs --severity error,critical --json
 ```
 
-The CLI applies the severity filter after it receives events. Stop the stream
-when the task ends. See [Live watch](/reference/cli#live-watch).
+The CLI applies the severity filter after it receives events. After a
+temporary disconnect, the CLI reconnects. Stop the stream when the task ends.
+See [Live watch](/reference/cli#live-watch).
