@@ -69,6 +69,20 @@ owner. Run the drift check after changing a logo, favicon, or its configuration:
 python3 scripts/check_brand_assets.py
 ```
 
+## Translations
+
+Each translated page lives at `<locale>/<page>.mdx` and translates the English
+page at `<page>.mdx`. Code blocks, inline code, links, anchors, and components
+stay the same as English. Run the check after changing an English or
+translated page:
+
+```bash
+python3 scripts/check_locales.py
+```
+
+A locale goes into the `docs.json` language switcher only when all its pages
+exist. Until then, `.mintignore` keeps its folder out of the site.
+
 ## License
 
 MIT for the documentation source. See [LICENSE](LICENSE). The LogBrew product
