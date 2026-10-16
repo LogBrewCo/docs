@@ -1,0 +1,322 @@
+---
+title: "Triage và giải quyết vấn đề trong LogBrew"
+sidebarTitle: "Quản lý vấn đề"
+description: "Quản lý vấn đề trong LogBrew. Đọc bằng chứng của lần xảy ra, rồi giải quyết, lưu trữ, mở lại, đặt mức ưu tiên hoặc giao từng vấn đề hay hàng loạt."
+---
+
+Vấn đề gom các lần xảy ra lỗi có cùng fingerprint. Đọc bản tóm tắt của nhóm và
+một lần xảy ra trước khi đổi trạng thái, mức ưu tiên hoặc người phụ trách.
+Thay đổi trạng thái, mức ưu tiên hoặc người phụ trách là ghi lại một quyết định
+của nhóm. Thay đổi đó không sửa phần mềm và không viết lại các sự kiện đã ghi
+nhận.
+
+Trước khi bắt đầu, cài [LogBrew CLI](/vi/guides/cli) và chạy `logbrew login`.
+
+## Vấn đề và lần xảy ra
+
+Danh sách vấn đề trả về bản tóm tắt của nhóm, không phải sự kiện đầy đủ. Đọc
+các trường sau trước khi mở chi tiết:
+
+| Trường | Ý nghĩa |
+| --- | --- |
+| `title` | Tiêu đề lỗi đã ghi nhận. |
+| `severity` | Mức độ nghiêm trọng đã ghi nhận. |
+| `triage.effective_severity` | Mức độ nghiêm trọng mà LogBrew dùng sau khi áp dụng quy tắc vấn đề. `severity` giữ giá trị đã ghi nhận. `triage.rule_applied` là `true` khi có quy tắc được áp dụng. |
+| `occurrence_count` | Số lần xảy ra được giữ lại trong nhóm. |
+| `first_seen_at` | Thời điểm của lần xảy ra sớm nhất được giữ lại. |
+| `last_seen_at` | Thời điểm của lần xảy ra muộn nhất được giữ lại. |
+| `project_id` | Dự án chứa vấn đề. |
+| `service_name` | Dịch vụ của lần xảy ra mới nhất. |
+| `release` | Bản phát hành của lần xảy ra mới nhất. |
+| `environment` | Môi trường của lần xảy ra mới nhất. |
+| `status` | Trạng thái của vấn đề trong quy trình xử lý. Xem [Giá trị trạng thái](#status-values). |
+| `priority` | Thứ tự triage (xem xét và xếp thứ tự xử lý) của vấn đề. Xem [Mức ưu tiên](#priority). |
+| `priority_source` | `manual` khi một người đặt mức ưu tiên. `derived` khi mức ưu tiên đi theo mức độ nghiêm trọng. |
+| `assignee` | Tài khoản phụ trách bước tiếp theo, hoặc `null`. Xem [Giao vấn đề](#assign-issues). |
+
+Số lần xảy ra không phải là số người dùng bị ảnh hưởng. Số lượng và thời điểm áp
+dụng cho phạm vi được trả về, không phải cho toàn bộ lịch sử lỗi. Bộ lọc
+`--since` hoặc `--until` giới hạn các lần xảy ra mà LogBrew đếm. Khi báo cáo một
+con số, nêu kèm các bộ lọc đã tạo ra con số đó.
+
+## <span id="status-values">Giá trị trạng thái</span>
+
+| Trạng thái | Ý nghĩa |
+| --- | --- |
+| `unresolved` | Vấn đề cần một quyết định. |
+| `resolved` | Nhóm đã đánh dấu vấn đề là đã sửa. Trạng thái này không chứng minh bản sửa. |
+| `archived` | Nhóm đã đưa vấn đề ra khỏi danh sách triage đang hoạt động. |
+
+`archived` trước đây gọi là `ignored`. Hai tên này chọn cùng các vấn đề, và cả
+hai đều được chấp nhận làm đầu vào. `logbrew read`, `logbrew issues` và API
+phiên bản 2 và 3 hiển thị `archived`. API phiên bản 1 (mặc định), luồng theo dõi
+trực tiếp và phản hồi điều tra vấn đề hiển thị `ignored`. Bảng điều khiển hiển thị các trạng
+thái là Chưa giải quyết, Đã giải quyết và Đã lưu trữ.
+
+Trạng thái áp dụng cho cả vấn đề, không phải cho từng lần xảy ra. Mức độ nghiêm trọng
+cho biết mức khẩn cấp, còn trạng thái ghi lại quyết định. Giữ hai khái niệm này
+tách biệt. Một vấn đề `critical` có thể chuyển sang `resolved` sau khi bản sửa
+được xác minh. Vấn đề `archived` vẫn giữ mức độ nghiêm trọng đã ghi nhận.
+
+LogBrew không tự động mở lại vấn đề đã giải quyết. Khi có lần xảy ra mới sau khi
+giải quyết, kết quả điều tra báo `lifecycle.effective_status` là `regressed`.
+`status` vẫn là `resolved` cho đến khi có người mở lại vấn đề.
+
+## <span id="priority">Mức ưu tiên</span>
+
+Mức ưu tiên quyết định thứ tự nhóm triage các vấn đề:
+
+| Mức ưu tiên | Ý nghĩa |
+| --- | --- |
+| `high` | Xem xét vấn đề này trước. |
+| `medium` | Xem xét vấn đề sau các vấn đề `high`. |
+| `low` | Vấn đề có thể chờ. |
+
+Mỗi vấn đề có một mức ưu tiên. Nếu không ai đặt, mức ưu tiên đi theo mức độ
+nghiêm trọng của vấn đề: `error` và `critical` là `high`, `warning` là `medium`,
+và `info` là `low`. Khi một quy tắc vấn đề đổi mức độ nghiêm trọng, mức ưu tiên
+đi theo `triage.effective_severity`. Khi đó `priority_source` là `derived`. Khi
+một người đặt mức ưu tiên, giá trị đó được giữ cố định và `priority_source` là
+`manual`.
+
+Để liệt kê các vấn đề cần xem trước:
+
+```bash
+logbrew read issues --project "<project_id>" --status unresolved \
+  --priority high --since 24h --json
+```
+
+## <span id="assign-issues">Giao vấn đề</span>
+
+Giao vấn đề để cho biết ai phụ trách bước tiếp theo. Mỗi vấn đề có 0 hoặc 1
+người phụ trách.
+
+<Steps>
+  <Step title="Tìm người có thể được giao">
+    ```bash
+    logbrew issues assignees --project "<project_id>" --json
+    ```
+
+    Danh sách gồm mọi tài khoản có quyền đọc dự án. Mỗi mục có `user_id`,
+    `name` và `email`. Chép `user_id`. Bạn không thể giao cho tài khoản không
+    có quyền đọc dự án.
+  </Step>
+
+  <Step title="Giao vấn đề">
+    ```bash
+    logbrew issues assign "<user_id>" "<issue_id>" --json
+    ```
+
+    Dùng `me` thay cho user ID để giao vấn đề cho chính bạn. Dùng
+    `logbrew issues unassign "<issue_id>" --json` để bỏ giao. Thêm `--project`
+    để thay đổi tối đa 100 vấn đề của một dự án.
+  </Step>
+
+  <Step title="Đọc các vấn đề của bạn">
+    ```bash
+    logbrew read issues --project "<project_id>" --assignee me \
+      --status unresolved --json
+    ```
+
+    Dùng `--assignee none` để tìm các vấn đề chưa ai phụ trách.
+  </Step>
+</Steps>
+
+Để giao vấn đề, bạn cần quyền quản lý vấn đề trong dự án. Quyền này cũng cho
+phép bạn đổi trạng thái, mức ưu tiên, quy tắc vấn đề và quy tắc log. Mọi tài
+khoản có quyền đọc dự án đều có thể làm người phụ trách.
+
+Khi một thành viên mất quyền truy cập dự án, các vấn đề đã giao cho thành viên
+đó sẽ hiển thị là không có người phụ trách. Các vấn đề này xuất hiện trong kết
+quả đọc với `--assignee none`. Nếu thành viên đó được cấp lại quyền, các vấn đề
+sẽ hiển thị lại thành viên đó, trừ khi trong thời gian đó có người đã đổi hoặc
+bỏ giao.
+
+## Quy trình đề xuất
+
+<Steps>
+  <Step title="Liệt kê vấn đề chưa giải quyết trong một phạm vi">
+    ```bash
+    logbrew read issues --project "<project_id>" --environment production \
+      --release api@1.2.3 --status unresolved --since 24h --json
+    ```
+
+    Giữ nguyên các bộ lọc ở những lần đọc danh sách sau. Kết quả trống nghĩa là
+    không có vấn đề nào khớp với phạm vi này. Nó không chứng minh rằng dự án
+    không có lỗi. Chép chính xác ID vấn đề, không chép tiêu đề.
+  </Step>
+
+  <Step title="Đọc chi tiết vấn đề">
+    ```bash
+    logbrew read issue "<issue_id>" --json
+    ```
+
+    Xác nhận dự án trả về là đúng trước khi tiếp tục. Các lần đọc trả về
+    snapshot (dữ liệu tại thời điểm đọc). Đọc lại vấn đề trước khi đổi trạng
+    thái.
+  </Step>
+
+  <Step title="Điều tra một lần xảy ra">
+    ```bash
+    logbrew investigate issue "<issue_id>" --occurrence recommended --json
+    ```
+
+    Các lần đọc chi tiết và điều tra không dùng bộ lọc danh sách. So sánh
+    `subject.project_id`, `event.occurred_at`, bản phát hành và môi trường với
+    phạm vi của bạn. Lần xảy ra được đề xuất có thể cũ hơn lần mới nhất. Làm
+    theo [Điều tra một vấn đề](/vi/guides/investigate-an-issue) để xem xét đầy
+    đủ bằng chứng.
+  </Step>
+
+  <Step title="Chỉ theo bằng chứng trace khi khả dụng">
+    Chỉ đọc trace khi `correlations.trace.status` là `available`. Dùng trace ID
+    trong phản hồi. Không bao giờ tự đặt ra trace ID.
+
+    ```bash
+    logbrew read trace "<trace_id>" --project "<project_id>" --json
+    logbrew read logs --trace "<trace_id>" --project "<project_id>" \
+      --since 24h --json
+    ```
+
+    Lần đọc trace không có bộ lọc thời gian. Nếu trạng thái là `not_linked`,
+    tiếp tục với bằng chứng từ vấn đề.
+  </Step>
+
+  <Step title="Xác minh lần triển khai ứng viên">
+    Dùng lần xảy ra đã điều tra làm mốc. Lấy ID lần triển khai từ bằng chứng
+    triển khai hoặc từ quy trình phát hành của bạn.
+
+    ```bash
+    logbrew investigate issue "<issue_id>" verify \
+      --baseline-occurrence "<occurrence_id>" \
+      --candidate-deployment "<deployment_id>" \
+      --json
+    ```
+
+    Không thấy tái diễn trong khoảng thời gian quan sát không chứng minh rằng
+    lỗi đã được sửa vĩnh viễn. Nếu `status` là `insufficient_traffic` hoặc
+    `unavailable`, giữ vấn đề ở `unresolved`. Làm theo bước tiếp theo được trả
+    về.
+  </Step>
+
+  <Step title="Đổi trạng thái, mức ưu tiên hoặc người phụ trách">
+    Chạy một lệnh. Các lệnh này không hỏi xác nhận, nên kiểm tra ID vấn đề
+    trước.
+
+    ```bash
+    logbrew issues resolve "<issue_id>" --json
+    logbrew issues archive "<issue_id>" --json
+    logbrew issues reopen "<issue_id>" --json
+    logbrew issues priority low "<issue_id>" --json
+    logbrew issues assign me "<issue_id>" --json
+    ```
+
+    Khi không có `--project`, mỗi lệnh nhận 1 ID vấn đề. Kiểm tra mã thoát và
+    các giá trị `status`, `priority` và `assignee` được trả về. Nếu không có
+    kết quả, đọc lại vấn đề trước lần thay đổi tiếp theo.
+
+    Các script cũ có thể dùng `logbrew set issue "<issue_id>" resolved` và các
+    lệnh tắt `resolve`, `ignore` và `reopen`. `ignore` đặt trạng thái
+    `archived`.
+  </Step>
+</Steps>
+
+## Thay đổi nhiều vấn đề cùng lúc
+
+Thêm `--project` để thay đổi tối đa 100 vấn đề của một dự án trong một lệnh:
+
+```bash
+logbrew issues archive "<issue_id_1>" "<issue_id_2>" "<issue_id_3>" \
+  --project "<project_id>" --json
+```
+
+Lệnh áp dụng cùng một thay đổi cho mọi vấn đề. Mỗi ID vấn đề chỉ được xuất hiện
+một lần. CLI từ chối hơn 100 ID hoặc ID bị lặp trước khi gửi yêu cầu. Kết quả có
+1 mục cho mỗi vấn đề, theo thứ tự trong lệnh:
+
+| Kết quả | Ý nghĩa |
+| --- | --- |
+| `updated` | LogBrew đã áp dụng thay đổi. |
+| `unchanged` | Vấn đề đã có sẵn giá trị được yêu cầu. |
+| `not_found` | Dự án không có vấn đề nào với ID này. LogBrew không thay đổi gì cho ID đó. |
+
+Mỗi mục có `issue_id`, `outcome` và `issue`. `issue` là vấn đề ở trạng thái hiện
+tại, hoặc `null` với `not_found`. Bạn có thể chạy lại cùng lệnh sau khi gặp lỗi
+mạng. Các vấn đề đã thay đổi sẽ hiển thị `unchanged`. Với hơn 100 vấn đề, chạy
+thêm lệnh. Với kết quả `not_found`, chép lại ID từ danh sách vấn đề của dự án
+đó. Xem
+[Cập nhật hàng loạt vấn đề](/vi/reference/telemetry-api#update-issues-in-bulk) để
+biết yêu cầu API.
+
+## Chọn trạng thái tiếp theo
+
+- **Giữ `unresolved`** khi lỗi vẫn đang xảy ra hoặc bản sửa chưa được xác
+  minh. Thiếu trace không phải là lý do để lưu trữ vấn đề.
+- **Đặt `resolved`** sau khi nhóm chấp nhận bằng chứng của bản sửa. Bản sửa đề
+  xuất không phải là bằng chứng.
+- **Đặt `archived`** cho một tình trạng đã được chấp nhận hoặc một tín hiệu chỉ
+  dùng để thử nghiệm. Quyết định này áp dụng cho mọi lần xảy ra của vấn đề.
+  Lệnh không có trường lý do, nên ghi lý do vào hồ sơ công việc của nhóm.
+- **Mở lại bằng `unresolved`** khi có lần xảy ra mới sau khi đã giải quyết.
+  `lifecycle.regression.first_reappeared_occurrence` xác định lần xảy ra đó.
+  So sánh nó với lần xảy ra đã dùng khi giải quyết. Không tạo một vấn đề khác.
+
+## Bàn giao kết quả điều tra
+
+Đưa cho người tiếp theo các tham chiếu, không đưa toàn bộ sự kiện thô:
+
+- ID vấn đề, trạng thái, mức ưu tiên, người phụ trách và mức độ nghiêm trọng.
+- Dự án, dịch vụ, môi trường và bản phát hành.
+- Thời điểm lần đầu xuất hiện, thời điểm lần cuối xuất hiện và số lần xảy ra.
+- ID lần xảy ra đã chọn và `occurrence_selection.reason`.
+- `fix.status`, `cause.status` và `provenance` của chúng.
+- Trạng thái trace và trace ID, nếu có.
+- Trạng thái tái hiện và bằng chứng còn thiếu.
+- Kết quả xác minh lần triển khai ứng viên.
+- Bước tiếp theo mà phản hồi trả về.
+
+Ghi rõ rằng nguyên nhân và bản sửa được đề xuất chỉ là đề xuất.
+
+## Xử lý lỗi CLI
+
+Kiểm tra mã thoát của tiến trình trước khi phân tích kết quả. Khi thành công,
+JSON được ghi ra standard output. Lỗi phân tích cú pháp thoát với mã `2`. Lỗi khi
+chạy thoát với mã `1`. Lỗi JSON được ghi ra standard error và chứa `ok: false`,
+`error`, `message` và `next`. Hiển thị `next` như một gợi ý. Không tự động chạy
+nó.
+
+Ví dụ, `logbrew issues archive "<issue_id_1>" "<issue_id_2>" --json` thiếu
+`--project`. Lệnh thoát với mã `2` trước khi gửi yêu cầu, kèm lỗi
+`invalid_issue_command`.
+
+Khi API từ chối yêu cầu, `error` là `api_error`. Đọc `status` để biết mã trạng
+thái HTTP và `api_code` để biết mã lỗi API.
+
+| Kết quả | Cách khắc phục |
+| --- | --- |
+| `not_logged_in` | Nhờ một người chạy `logbrew login`, rồi thử đọc lại. |
+| `invalid_issue_command` | Sửa lệnh. Dùng `--project` khi có hơn 1 vấn đề, tối đa 100 ID, và mỗi ID chỉ một lần. |
+| ID vấn đề không hợp lệ | Chép chính xác ID từ danh sách vấn đề hoặc phản hồi chi tiết. |
+| Không tìm thấy vấn đề | Xác nhận tài khoản đã đăng nhập và dự án. |
+| Thay đổi thất bại với `status` `403` | Tài khoản không có quyền quản lý vấn đề trong dự án này. Nhờ một người có quyền. |
+| `invalid_assignee` | Bộ lọc `--assignee` nhận `me`, `none` hoặc một user ID. |
+| Giao thất bại với `status` `422` và `api_code` `validation_failed` | Người phụ trách không có quyền đọc dự án. Chọn một tài khoản từ `logbrew issues assignees`, hoặc cấp quyền truy cập dự án cho thành viên đó trước. |
+| `investigation_response_invalid` | Phản hồi không vượt qua bước kiểm tra của CLI. Thử lại một lần. Nếu lỗi lặp lại, cập nhật CLI hoặc báo cáo sự cố. Không bỏ qua bước kiểm tra. |
+| Trạng thái trace `not_linked` | Tiếp tục với bằng chứng từ vấn đề. Không đọc trace. |
+| Trạng thái trace `unavailable` | Thử lại lần đọc điều tra sau. |
+| Xác minh trả về `insufficient_traffic` | Giữ vấn đề ở `unresolved`. Chờ có lưu lượng trên bản phát hành ứng viên, rồi xác minh lại. |
+
+Phản hồi thất bại không chứng minh rằng thay đổi trạng thái, mức ưu tiên hoặc
+người phụ trách không có tác dụng. Đọc lại vấn đề trước khi thử lại.
+
+## Thế nào là một vấn đề hữu ích
+
+- Tiêu đề rõ ràng và thông điệp dễ đọc.
+- Fingerprint ổn định.
+- Khung ngăn xếp (stack frame), khi có.
+- Ngữ cảnh bản phát hành, môi trường và dịch vụ.
+- Ngữ cảnh trace, khi được ghi nhận cùng lần xảy ra.
+- Các thuộc tính nhỏ, liên quan, không phải toàn bộ payload.
+
+Xem tài liệu tham khảo [Telemetry API](/vi/reference/telemetry-api) để biết bộ
+lọc danh sách và đặc tả phản hồi.

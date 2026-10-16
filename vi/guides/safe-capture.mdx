@@ -1,0 +1,197 @@
+---
+title: "Che dữ liệu log: không để dữ liệu nhạy cảm lọt vào log"
+sidebarTitle: "Kiểm soát dữ liệu ghi nhận"
+description: "Chọn các trường log đã duyệt. Chạy thử cục bộ để tìm dữ liệu nhạy cảm. Xem giới hạn của tùy chọn kiểm soát ghi nhận LogBrew cho JavaScript, Node.js và trình duyệt."
+---
+
+Chọn những gì ứng dụng gửi trước khi bật ghi nhận. Không để mật khẩu, access
+token, nội dung biểu mẫu và dữ liệu riêng tư của người dùng lọt vào sự kiện.
+
+Tạo mỗi sự kiện từ các trường đã duyệt. Không sao chép toàn bộ đối tượng yêu
+cầu, phản hồi hoặc lỗi vào metadata. Che dữ liệu là thay thế một giá trị nhạy
+cảm. Bộ lọc loại bỏ cả một sự kiện. Một sự kiện SDK hợp lệ vẫn có thể chứa
+dữ liệu mà ứng dụng không được phép gửi.
+
+Hướng dẫn này áp dụng cho các phiên bản gói sau:
+
+- `@logbrew/sdk` 0.1.28
+- `@logbrew/node` 0.1.12
+- `@logbrew/browser` 0.1.11
+
+Với các runtime khác, đọc hướng dẫn của từng gói trong
+[Tích hợp SDK](/vi/guides/sdk-ingestion).
+
+## Chọn trường để ghi nhận
+
+Với một lần thanh toán thất bại, ghi lại một thông điệp cố định, một mẫu route và
+một mã trạng thái. Không ghi lại tên, địa chỉ email hoặc dữ liệu thanh toán.
+
+| Trường | Quy tắc ghi nhận |
+| --- | --- |
+| Thông điệp | Dùng văn bản cố định như `checkout.failed`. Không chèn văn bản từ biểu mẫu hoặc thông tin xác thực. |
+| Route | Dùng mẫu như `/orders/:id`. Đường dẫn URL, query hoặc fragment có thể chứa giá trị riêng tư. |
+| Trạng thái | Chỉ chấp nhận mã trạng thái hợp lệ, không nhận chuỗi lấy từ dữ liệu người dùng nhập. |
+| Metadata | Chọn các trường có tên cụ thể. Không sao chép mọi thuộc tính của yêu cầu, phản hồi hoặc lỗi. |
+| Chủ thể và phiên | Dùng định danh telemetry đã duyệt, không dùng token đăng nhập hoặc cookie phiên. |
+
+Về ngữ cảnh người dùng và phiên, xem
+[Ghi nhận sự kiện sản phẩm](/vi/guides/product-events#set-users-and-sessions-on-each-event).
+Một ID vẫn có thể nhận diện một người dù ID đó không chứa tên.
+
+## Kiểm tra việc chọn trường trên máy cục bộ
+
+Dùng Node.js 18 trở lên. Trong một thư mục trống, cài gói:
+
+```bash
+npm install --save-exact @logbrew/sdk@0.1.28
+```
+
+Bài kiểm tra này không dùng khóa thật và không gửi yêu cầu nào. Lưu bài kiểm tra
+thành `safe-capture.mjs`:
+
+```js
+import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import { LogBrewClient, SdkError } from "@logbrew/sdk";
+
+try {
+  const client = LogBrewClient.create({
+    apiKey: "local-preview-only",
+    sdkName: "privacy-check",
+    sdkVersion: "0.1.28",
+    automaticDelivery: false
+  });
+
+  function recordCheckoutFailure(input) {
+    const status = input?.status;
+    if (!Number.isInteger(status) || status < 400 || status > 599) {
+      return false;
+    }
+    client.log(randomUUID(), new Date().toISOString(), {
+      message: "checkout.failed",
+      level: "error",
+      metadata: { route: "/checkout", status }
+    });
+    return true;
+  }
+
+  const excludedValue = "SYNTHETIC_PRIVATE_VALUE";
+  assert.equal(recordCheckoutFailure({
+    status: 503,
+    authorization: excludedValue,
+    body: excludedValue
+  }), true);
+  assert.equal(recordCheckoutFailure({ status: excludedValue }), false);
+
+  const preview = client.previewJson();
+  const batch = JSON.parse(preview);
+  assert.equal(batch.events.length, 1);
+  assert.equal(preview.includes(excludedValue), false);
+  assert.deepEqual(batch.events[0].attributes.metadata, {
+    route: "/checkout",
+    status: 503
+  });
+  client.purgePendingEvents();
+  console.log(JSON.stringify({
+    ok: true,
+    checked_events: 1,
+    excluded_value_found: false
+  }));
+} catch (error) {
+  console.error(JSON.stringify({
+    ok: false,
+    error: error instanceof SdkError ? error.code : "privacy_check_failed"
+  }));
+  process.exitCode = 1;
+}
+```
+
+
+Chạy bài kiểm tra:
+
+```bash
+node safe-capture.mjs
+```
+
+Kết quả mong đợi:
+
+```json
+{"ok":true,"checked_events":1,"excluded_value_found":false}
+```
+
+Assertion thất bại sẽ in `"ok":false` và thoát với mã 1. Lỗi kiểm tra hợp lệ của
+SDK sẽ in mã lỗi SDK tương ứng. Không in hoặc tải lên bản xem trước có chứa dữ
+liệu thật.
+
+Dùng cùng cách làm này trong mã ghi nhận của bạn, và giữ các assertion trong bộ
+kiểm thử. Thêm một bước kiểm tra cho mỗi trường và giá trị mà ứng dụng không
+được gửi. Nếu bạn che dữ liệu dựa trên pattern, chạy lại các bước kiểm tra sau
+mỗi lần đổi quy tắc. Bài kiểm tra này chỉ kiểm tra một log trong hàng đợi. Nó
+không thay thế việc rà soát quyền riêng tư.
+
+## Thông điệp lỗi và dấu vết ngăn xếp (stack trace)
+
+| Cách ghi nhận | Hành vi |
+| --- | --- |
+| `createIssueAttributesFromError` (core) | Giữ văn bản lỗi trong thông điệp của vấn đề và trong `metadata.errorMessage`. Chỉ thêm `metadata.errorStack` khi có `includeErrorStack: true`. Các mục trong chuỗi ngoại lệ đánh dấu mỗi thông điệp là `redacted` và không mang văn bản của thông điệp đó. |
+| Chuyển đổi console trong core | Có thể giữ văn bản lỗi trong thông điệp log và metadata. |
+| `createBrowserErrorEvent` (browser) | Dùng bản tóm tắt lỗi cố định, xóa `metadata.errorMessage` và đánh dấu các thông điệp trong chuỗi ngoại lệ là đã che. |
+
+`options.message` tùy chỉnh không xóa `metadata.errorMessage`. Kiểm tra toàn bộ
+sự kiện, không chỉ tiêu đề. Loại bỏ giá trị nhạy cảm khỏi thông điệp lỗi ngay
+từ nơi tạo ra thông điệp.
+
+## Dùng mỗi tùy chọn kiểm soát trong đúng phạm vi của nó
+
+### JavaScript core và Node.js
+
+`LogBrewClient.create` nhận `eventFilter`. Trả về `false` để bỏ một sự kiện
+trước khi sự kiện vào hàng đợi. Mọi giá trị trả về khác đều giữ sự kiện. Bộ lọc
+nhận một bản sao của sự kiện, nên việc sửa bản sao không che được gì. `createLogBrewNodeClient` và
+`createLogBrewBrowserClient` không áp dụng `eventFilter` trong các phiên bản
+này.
+
+`droppedEvents()` đếm các sự kiện bị loại bỏ do giới hạn kích thước hoặc giới
+hạn hàng đợi. Hàm này không đếm các sự kiện mà `eventFilter` đã bỏ.
+
+Client Node thêm ngữ cảnh runtime, như phiên bản Node, hệ điều hành và kiến
+trúc. Đặt `captureRuntimeContext: false` để bỏ ngữ cảnh này. Cài đặt này không
+xóa ngữ cảnh do ứng dụng cung cấp và không dừng việc ghi nhận.
+
+### Trình duyệt
+
+Theo mặc định, client trình duyệt ghi nhận lỗi toàn cục, promise rejection chưa
+xử lý và một lượt xem trang ban đầu. Đặt `captureGlobalErrors`,
+`captureUnhandledRejections` hoặc `capturePageViews` thành `false` để tắt từng
+loại.
+
+Lượt xem trang có pathname. Lượt xem trang không có query string, fragment,
+tiêu đề tài liệu và toàn bộ user agent, trừ khi bạn đặt `includeQueryString`,
+`includeHash`, `includeDocumentTitle` hoặc `includeUserAgent`. Nếu pathname có
+thể chứa giá trị riêng tư, tắt lượt xem trang tự động và tự gửi lượt xem trang
+với tên route an toàn.
+
+`sanitizeMetadata` chỉ thay đổi metadata. Hàm này không đổi tên lượt xem trang
+hoặc tên hành động. Tên lượt xem trang chứa pathname cụ thể, như
+`page_view /orders/1234`. `routeTemplate` trong metadata đặt trang hoặc màn hình
+mà Phân tích hiển thị, nhưng không đổi tên sự kiện. `shouldCaptureError` chỉ bỏ các vấn đề của trình duyệt. Hàm này không
+lọc log hoặc các tín hiệu khác.
+
+Đặt `captureRuntimeContext: false` để bỏ thương hiệu trình duyệt, nền tảng và
+dòng thiết bị. Cài đặt này không điều khiển `includeUserAgent`.
+
+## Trước khi ghi nhận dữ liệu thật
+
+Kiểm tra từng cách ghi nhận đã bật bằng dữ liệu giả lập, kể cả các nhánh xử lý
+lỗi và các tích hợp ghi log.
+
+Thay đổi về ghi nhận chỉ áp dụng cho sự kiện mới. `purgePendingEvents()` xóa
+hàng đợi cục bộ đang rảnh và thất bại khi việc gửi đang diễn ra. Hàm này không
+dừng việc ghi nhận về sau và không xóa các sự kiện mà LogBrew đã chấp nhận. `uninstall()` của trình duyệt gỡ các listener nhưng vẫn giữ
+các sự kiện trong hàng đợi. Các phương thức này không phải là quy trình xin đồng
+ý hoặc xóa dữ liệu.
+
+Sau đó, gửi một sự kiện giả lập theo hướng dẫn
+[Bắt đầu nhanh](/vi/quickstart).
+Nếu không thấy sự kiện, xem [Khắc phục sự cố](/vi/guides/troubleshooting). Với
+lỗi HTTP, xem [Lỗi API](/vi/reference/api-errors).

@@ -1,0 +1,243 @@
+---
+title: "Theo dõi bản phát hành và giám sát triển khai phần mềm"
+sidebarTitle: "Bản phát hành"
+description: "Theo dõi bản phát hành trong LogBrew để tìm vấn đề, log, trace, hành động và chỉ số của một phiên bản mã. Đọc tỷ lệ lỗi và ngữ cảnh triển khai."
+---
+
+Bản phát hành là phiên bản mã đã gửi telemetry, chẳng hạn `api@1.2.3` hoặc
+một commit Git. LogBrew không tạo bản phát hành từ tag của repository hay từ
+một lần triển khai. Mọi envelope telemetry gốc phải có `release` và
+`environment` không rỗng. LogBrew từ chối yêu cầu thiếu hai giá trị này.
+
+## Bản phát hành, dự án, dịch vụ và môi trường
+
+| Trường | Ví dụ | Câu hỏi được trả lời |
+| --- | --- | --- |
+| Dự án | `checkout-platform` | Ai sở hữu telemetry này và ai được đọc nó? |
+| Dịch vụ | `checkout-api` | Ứng dụng hoặc tiến trình nào đã gửi nó? |
+| Môi trường | `production` | Mã đã chạy ở đâu? |
+| Bản phát hành | `api@1.2.3` | Phiên bản mã nào đã gửi nó? |
+
+## <span id="naming-releases">Đặt tên bản phát hành</span>
+
+Dùng một phiên bản bất biến, số bản dựng hoặc commit Git. Trong monorepo, thêm
+một tiền tố dịch vụ ngắn, chẳng hạn `web@b7f4d91` và `worker@3a9c120`. Dùng
+cùng một giá trị cho vấn đề, log, trace, hành động và chỉ số đến từ cùng một
+artifact (tệp bản dựng).
+
+<CardGroup cols={2}>
+  <Card title="Nên dùng" icon="check">
+    `api@1.2.3`, `web@b7f4d91`, `ios@2026.06.01` và
+    `worker@2026-06-01.1` đều xác định đúng một artifact.
+  </Card>
+
+  <Card title="Nên tránh" icon="x">
+    `latest`, `prod`, `new` và `build` không xác định phiên bản mã nào. Chuỗi
+    rỗng bị từ chối.
+  </Card>
+</CardGroup>
+
+LogBrew cũng từ chối các giá trị sau:
+
+| Trường | Giá trị bị từ chối |
+| --- | --- |
+| `release` | Dài hơn 200 byte, là `.` hoặc `..`, hoặc chứa `/`, dấu gạch chéo ngược, ký tự tab hoặc ký tự xuống dòng. |
+| `environment` | Dài hơn 64 byte, là `None`, hoặc chứa dấu cách, ký tự khoảng trắng khác, `/` hoặc dấu gạch chéo ngược. |
+
+Tên branch Git như `feature/login` không phải bản phát hành hợp lệ. Thay vào
+đó, dùng commit.
+
+Dùng tên môi trường ổn định như `production`, `staging`, `preview` và
+`local`. Một bản phát hành có thể chạy trong nhiều môi trường.
+
+Đặt cả hai giá trị trong cấu hình triển khai để pipeline CI/CD truyền chúng
+cho SDK. Giá trị bản phát hành chỉ chứa nhãn phiên bản. Không đưa thông tin bí
+mật, tên khách hàng hay URL vào đó. Sau khi triển khai, gửi một sự kiện an
+toàn rồi đọc lại bằng bộ lọc bản phát hành.
+
+## <span id="release-summary">Đọc tóm tắt bản phát hành</span>
+
+```bash
+logbrew read releases --project "<project_id>" --environment production --since 24h --json
+```
+
+Mỗi bản tóm tắt ứng với một dự án, một bản phát hành, một môi trường và một
+dịch vụ:
+
+| Trường | Ý nghĩa |
+| --- | --- |
+| `issue_count` | Sự kiện vấn đề của bản phát hành này. |
+| `log_count` | Log của bản phát hành này. |
+| `trace_span_count` | Span trace của bản phát hành này. |
+| `action_count` | Hành động sản phẩm của bản phát hành này. |
+| `metric_count` | Mẫu chỉ số của bản phát hành này. |
+| `first_seen_at` | Hoạt động đầu tiên của bản phát hành trong phạm vi đã chọn. |
+| `last_seen_at` | Hoạt động cuối cùng của bản phát hành trong phạm vi đã chọn. |
+| `trace_health` | Số trace, số trace lỗi, tỷ lệ lỗi và trạng thái. Xem [Đọc tỷ lệ lỗi trace](#interpret-trace-error-rates). |
+| `next_action` | Tín hiệu nên đọc tiếp theo, gồm một `code` và một `target`. |
+
+Mỗi số đếm đo một tín hiệu khác nhau. Không cộng chúng lại.
+`first_seen_at` và `last_seen_at` không phải thời điểm triển khai. Sau đó, một
+dịch vụ vẫn có thể gửi thêm telemetry với cùng bản phát hành. Các bản tóm tắt
+được sắp xếp theo `last_seen_at`, mới nhất trước.
+
+`next_action` trỏ đến loại tín hiệu đầu tiên có dữ liệu, theo thứ tự sau:
+
+| `next_action.code` | `next_action.target` |
+| --- | --- |
+| `inspect_release_issues` | `telemetry_issues` |
+| `inspect_release_traces` | `trace_explorer` |
+| `inspect_release_logs` | `telemetry_logs` |
+| `inspect_release_actions` | `telemetry_actions` |
+| `inspect_release_metrics` | `telemetry_metrics` |
+| `review_release_telemetry` | `telemetry_reads` |
+
+Route API là `GET /api/telemetry/releases`. Bộ lọc và các trường cursor của
+route này có trong [Bộ lọc truy vấn](/vi/reference/telemetry-api-filters).
+
+## <span id="interpret-trace-error-rates">Đọc tỷ lệ lỗi trace</span>
+
+`trace_health` đếm các trace riêng biệt, không đếm span. Một trace có ít nhất
+một span lỗi được tính là một trace lỗi.
+
+| `trace_health.status` | Ý nghĩa |
+| --- | --- |
+| `unknown` | Không có dữ liệu trace cho phạm vi bản phát hành này. |
+| `no_errors_observed` | Các trace đã ghi nhận không có span lỗi. |
+| `errors_observed` | Ít nhất một trace đã ghi nhận chứa span lỗi. |
+
+`error_rate_basis_points` nằm trong khoảng từ `0` đến `10000`. Chia cho `100`
+để ra phần trăm. Ví dụ, `2500` là 25%. Đọc `trace_count` trước khi so sánh
+các tỷ lệ. Khi có ít trace, chỉ thêm một trace lỗi cũng có thể làm tỷ lệ thay
+đổi nhiều. Lưu lượng, việc lấy mẫu và instrumentation cũng làm thay đổi các
+trace được ghi nhận. Tỷ lệ này không đo toàn bộ yêu cầu.
+
+## <span id="record-a-deployment">Ghi lại một lần triển khai</span>
+
+Bản ghi triển khai cho LogBrew biết khi nào một bản phát hành bắt đầu và kết
+thúc trong một môi trường và một dịch vụ. Tính năng điều tra bản phát hành dùng các
+bản ghi này để tìm bản phát hành trước đó. Chạy lệnh này từ quy trình phát hành tự
+động của bạn sau khi triển khai thành công hoặc thất bại:
+
+```bash
+logbrew deploy "<deployment_id>" \
+  --project "<project_id>" \
+  --release api@1.2.3 \
+  --environment production \
+  --service checkout-api \
+  --status succeeded \
+  --started-at 2026-08-10T12:00:00Z \
+  --finished-at 2026-08-10T12:02:00Z \
+  --json
+```
+
+- Sao chép chính xác `--release`, `--environment` và `--service` từ telemetry
+  mà mã đã triển khai gửi lên.
+- `--status` là `succeeded` hoặc `failed`.
+- `--finished-at` phải bằng hoặc sau `--started-at`. Một lần triển khai không
+  được kéo dài quá 30 ngày.
+- `--commit-sha` là tùy chọn. Giá trị gồm 7 đến 64 ký tự thập lục phân.
+- `<deployment_id>` là ID do bạn tự đặt, chẳng hạn ID của một lần chạy CI. Giá
+  trị gồm 1 đến 128 ký tự ASCII: chữ cái, chữ số, dấu chấm, dấu gạch dưới, dấu
+  hai chấm hoặc dấu gạch ngang.
+
+Lệnh này cần quyền truy cập tài khoản. Lệnh không bao giờ nhận khóa gửi dữ
+liệu. Bạn có thể gửi lại cùng một bản ghi mà không gây hại. Một bản ghi khác
+có cùng `<deployment_id>` trả về HTTP `409` với mã `idempotency_conflict`.
+Dùng ID mới cho lần triển khai mới.
+
+Các route API là `PUT /api/telemetry/deployments/{deployment_id}` để ghi lại
+một lần triển khai và `GET /api/telemetry/deployments?project_id=<project_id>`
+để liệt kê các lần triển khai.
+
+## Điều tra một bản phát hành
+
+Sao chép dự án, bản phát hành, môi trường và dịch vụ từ một bản tóm tắt bản
+phát hành:
+
+```bash
+logbrew explain release "<release>" \
+  --project "<project_id>" \
+  --environment "<environment>" \
+  --service "<service_name>" \
+  --json
+```
+
+Lệnh này đọc bằng chứng được giữ lại cho bản phát hành đó. Lệnh không nhận
+`--since` hay `--until`, và không dùng khoảng thời gian của danh sách bản phát
+hành. Phản hồi chứa các nhóm vấn đề, bản tóm tắt trace, log ở mức cảnh báo,
+lỗi và nghiêm trọng, cùng các phép tổng hợp hành động và chỉ số. Các tập hợp
+này có giới hạn và có thể bị cắt bớt. Chúng không phải danh sách sự kiện đầy
+đủ.
+
+`subject` trong phản hồi lặp lại các số đếm của bản tóm tắt và `trace_health`.
+`analysis.status` là một trong các giá trị sau:
+
+| `analysis.status` | Ý nghĩa |
+| --- | --- |
+| `failures_observed` | Bản phát hành này có vấn đề, trace lỗi, hoặc log ở mức lỗi hay nghiêm trọng. |
+| `no_failures_observed` | Có trace. Không trace nào có span lỗi, và không có vấn đề hay log lỗi nào. |
+| `telemetry_observed` | Có telemetry khác, nhưng trace không thể cho thấy tình trạng lỗi. |
+| `insufficient_evidence` | Bản phát hành tồn tại, nhưng dữ liệu không thể cho thấy tình trạng. |
+
+`analysis.causality` luôn là `evidence_only`. Bằng chứng không chứng minh
+rằng bản phát hành đã gây ra lỗi.
+
+Mỗi tập hợp có một `status`. Phân biệt `unavailable` với `not_found`.
+`unavailable` nghĩa là LogBrew không đọc được bằng chứng. `not_found` nghĩa là
+không có bằng chứng nào được giữ lại.
+
+### So sánh với bản phát hành trước
+
+Phép so sánh dùng bản ghi triển khai, không dùng nhãn phiên bản hay thời điểm
+sự kiện. LogBrew tìm bản ghi triển khai mới nhất của bản phát hành. Sau đó,
+LogBrew tìm lần triển khai thành công mới nhất của một bản phát hành khác trong
+cùng dự án, môi trường và dịch vụ, trước thời điểm lần triển khai đó bắt đầu.
+
+`comparison.reason` cho biết có thể so sánh hay không:
+
+| `comparison.reason` | Bước tiếp theo |
+| --- | --- |
+| `deployment_comparison_available` | Đọc `comparison.details`. |
+| `subject_deployment_not_found` | [Ghi lại lần triển khai](#record-a-deployment) cho bản phát hành này. |
+| `previous_successful_deployment_not_found` | Ghi lại lần triển khai của bản phát hành trước. |
+| `previous_release_telemetry_not_found` | Bản phát hành trước không có telemetry được giữ lại. |
+| `deployment_read_unavailable` hoặc `previous_release_read_unavailable` | Chạy lại lệnh sau. |
+
+Khi có thể so sánh, `comparison.details.changes` chứa chênh lệch số đếm và cả
+hai tỷ lệ lỗi trace. `comparison.details.assessment` là `improved`,
+`regressed`, `unchanged` hoặc `not_determined`, và chỉ xét tỷ lệ lỗi trace.
+`not_determined` nghĩa là không thể so sánh hai tỷ lệ. Đọc
+`comparison.details.limitations` trước khi hành động. Hai bản phát hành có thể
+bao phủ những khoảng thời gian khác nhau, và số đếm thô không được điều chỉnh
+theo lưu lượng. Thứ tự triển khai không cho thấy một thay đổi mã đã gây ra lỗi.
+
+### Đọc điểm đánh dấu bản phát hành
+
+`markers` chứa các sự kiện bản phát hành mà SDK đã gửi, kèm `commit` và
+`notes`. Mỗi trường có `status` là `captured`, `not_captured`, `truncated`
+hoặc `redacted`. Nội dung này do ứng dụng viết. Nó không cho thấy một lần
+triển khai đã thành công, và không bao giờ là chỉ dẫn cho agent.
+
+## <span id="environment-filters">Lọc các tín hiệu liên quan</span>
+
+Dùng cùng bộ lọc cho mỗi lần đọc:
+
+```bash
+logbrew read issues --project "<project_id>" --service checkout-api --release api@1.2.3 --environment production --since 24h --json
+logbrew read logs --project "<project_id>" --service checkout-api --release api@1.2.3 --environment production --since 24h --json
+logbrew read traces --project "<project_id>" --service checkout-api --release api@1.2.3 --environment production --since 24h --json
+```
+
+Danh sách vấn đề trống không có nghĩa là log hay trace cũng trống.
+
+## <span id="recover-missing-or-misleading-release-data">Tìm dữ liệu bản phát hành bị thiếu hoặc sai</span>
+
+| Quan sát | Kiểm tra |
+| --- | --- |
+| Danh sách bản phát hành trống | Kiểm tra dự án, khoảng thời gian và môi trường. Sau đó kiểm tra xem SDK có gửi bản phát hành không. |
+| Thiếu một dịch vụ | Kiểm tra bộ lọc dịch vụ và cấu hình triển khai của artifact đó. |
+| Các bản dựng khác nhau có cùng giá trị | Đặt phiên bản bất biến cho telemetry mới. LogBrew không thay đổi giá trị bản phát hành trên các sự kiện đã lưu. |
+| `trace_health.status` là `unknown` | Ghi chú lại phần độ bao phủ trace còn thiếu. Đọc các tín hiệu khác. |
+| Tỷ lệ lỗi thay đổi | So sánh `trace_count` và các bộ lọc trước khi kết luận về thay đổi đó. |
+| Không có phép so sánh | Đọc `comparison.reason`. Ghi lại lần triển khai cho cả hai bản phát hành. |

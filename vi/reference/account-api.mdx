@@ -1,0 +1,429 @@
+---
+title: "Account API và hạn mức sử dụng API"
+sidebarTitle: "Account API"
+description: "Đọc hạn mức sử dụng của tài khoản LogBrew, lịch sử hạn mức, trạng thái sẵn sàng của gói đăng ký và phản hồi đăng xuất."
+---
+
+Dùng Account API để đọc mức sử dụng, trạng thái hạn mức, lịch sử sử dụng và
+trạng thái sẵn sàng của gói đăng ký, cũng như để đăng xuất. Các lần đọc dữ liệu
+tài khoản dùng bearer token của tài khoản hoặc phiên trình duyệt. Không bao giờ
+dùng khóa gửi dữ liệu của dự án cho yêu cầu tài khoản. Không bao giờ dùng thông
+tin xác thực tài khoản làm cấu hình SDK hoặc cấu hình gửi dữ liệu.
+
+| Tác vụ | Endpoint |
+| --- | --- |
+| Đọc mức sử dụng và trạng thái hạn mức hiện tại | `GET /api/account/usage` |
+| Đọc mức sử dụng theo thời gian | `GET /api/account/usage/history` |
+| Đọc trạng thái sẵn sàng của gói đăng ký và tổ chức | `GET /api/account/subscription` |
+| Đăng xuất một phiên đăng nhập trên ứng dụng hoặc CLI | `POST /api/auth/logout` |
+| Thu hồi mọi phiên đăng nhập LogBrew | `POST /api/auth/logout-all` |
+| Xóa phiên trình duyệt | `POST /api/auth/web/logout` |
+
+Lỗi dùng [envelope lỗi API](/vi/reference/api-errors) chuẩn. Lần đọc không có
+xác thực tài khoản hợp lệ trả về `401` với `code: "unauthorized"`. Không hiển
+thị lỗi đó thành mức sử dụng bằng 0, biểu đồ trống hoặc gói miễn phí. Phương
+thức không được hỗ trợ trả về `405` với `code: "method_not_allowed"`, và `next`
+nêu tên yêu cầu được hỗ trợ.
+
+Account API báo cáo mức sử dụng telemetry, không phải số tiền. API này không báo
+cáo khoản phí, hóa đơn hoặc trạng thái thanh toán.
+
+## <span id="account-usage">Mức sử dụng của tài khoản</span>
+
+`GET /api/account/usage` là endpoint chuẩn cho mức sử dụng và hạn mức. Dùng
+endpoint này để lấy tổng mức sử dụng, thời điểm đặt lại, trạng thái hạn mức và
+số liệu phân tách theo dự án và theo luồng telemetry. Không tự tính mức sử dụng
+từ tệp SDK, tệp CLI hoặc bộ đếm phía client. Lệnh CLI `logbrew usage` đọc
+endpoint này. Xem [Tham khảo CLI](/vi/reference/cli).
+
+```bash
+curl "https://api.logbrew.co/api/account/usage" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER"
+```
+
+Ví dụ phản hồi với giá trị giả lập. Tài khoản miễn phí này có 1 dự án và chỉ gửi
+log trong kỳ hiện tại:
+
+```json
+{
+  "period_start": "2026-06-01T00:00:00Z",
+  "period_end": "2026-07-01T00:00:00Z",
+  "reset_at": "2026-07-01T00:00:00Z",
+  "plan": { "tier": "free", "status": "free" },
+  "limits": { "events": null, "bytes": null, "projects": null, "retention_days": 30 },
+  "usage": { "events": 27000, "bytes": 10485760, "projects": 1 },
+  "state": "ok",
+  "warning_threshold": 0.8,
+  "percent_used": 0.2,
+  "warning": false,
+  "blocked": false,
+  "limit": null,
+  "next": "continue sending telemetry",
+  "next_action": {
+    "code": "continue_sending_telemetry",
+    "target": "telemetry_ingest",
+    "state": "ok",
+    "limit": null,
+    "reset_at": "2026-07-01T00:00:00Z"
+  },
+  "by_project": [
+    { "project_id": "00000000-0000-4000-8000-000000000001", "events": 27000, "bytes": 10485760 }
+  ],
+  "by_stream": [
+    { "kind": "logs", "events": 27000, "bytes": 10485760 }
+  ]
+}
+```
+
+| Trường | Ý nghĩa |
+| --- | --- |
+| `period_start`, `period_end` | Kỳ sử dụng hiện tại. Thời điểm kết thúc không thuộc kỳ. |
+| `reset_at` | Thời điểm hạn mức sử dụng được đặt lại. Giá trị này bằng `period_end`. |
+| `plan.tier` | ID của gói: `free`, `pro` hoặc `scale`. |
+| `plan.status` | `free`, `trial`, `active`, `past_due` hoặc `disabled`. |
+| `limits.events`, `limits.bytes`, `limits.projects` | Trường tương thích. Các trường này là `null`. `null` không có nghĩa là không giới hạn. Dùng `state`, `limit` và `percent_used` để biết trạng thái hạn mức. |
+| `limits.retention_days` | Thời gian giữ dữ liệu của gói, tính bằng ngày, hoặc `null`. |
+| `usage.events`, `usage.bytes` | Tổng của mọi luồng telemetry trong kỳ. |
+| `usage.projects` | Số dự án mà tài khoản sở hữu. |
+| `state` | `ok`, `warning` hoặc `blocked`. |
+| `warning_threshold` | Tỷ lệ của một hạn mức mà khi đạt tới sẽ bắt đầu trạng thái `warning`, dưới dạng phân số. |
+| `percent_used` | Tỷ lệ cao nhất trong các hạn mức, dưới dạng phần trăm. Ví dụ, `80` nghĩa là 80%. |
+| `warning`, `blocked` | Dạng tương thích của `state`. |
+| `limit` | Hạn mức gây ra trạng thái hiện tại: `events`, `bytes` hoặc `null`. |
+| `next`, `next_action` | Văn bản hướng dẫn khôi phục và bước tiếp theo dạng mã cho trạng thái hiện tại. |
+| `by_project` | Mức sử dụng theo từng dự án. Mỗi dự án mà tài khoản sở hữu có 1 dòng, kể cả khi mức sử dụng bằng 0. Ghép dòng theo `project_id`, không theo vị trí trong mảng. |
+| `by_stream` | Mức sử dụng theo `kind` của từng luồng telemetry, như `logs`, `issues`, `actions` hoặc `traces`. |
+
+### Trạng thái hạn mức
+
+Dùng `state` cho nhánh xử lý chính. `limit` chỉ là `null` khi `state` là `ok`.
+
+| `state` | `warning` | `blocked` | `limit` | `next_action.code` | `next_action.target` |
+| --- | --- | --- | --- | --- | --- |
+| `ok` | `false` | `false` | `null` | `continue_sending_telemetry` | `telemetry_ingest` |
+| `warning` | `true` | `false` | `events` hoặc `bytes` | `reduce_usage_or_upgrade` | `pricing` |
+| `blocked` | `false` | `true` | `events` hoặc `bytes` | `wait_until_reset_or_upgrade` | `pricing` |
+
+`next_action.state`, `next_action.limit` và `next_action.reset_at` lặp lại các
+giá trị ở cấp trên cùng. Các giá trị `next_action.code` còn gồm
+`check_usage_limits` với target `account_usage`. Nếu client nhận được cặp giá
+trị này, đọc lại mức sử dụng và hiển thị `next`.
+
+LogBrew đo từng loại telemetry theo hạn mức riêng của loại đó. `limit` gộp
+chúng thành nhóm:
+
+- `events` gồm sự kiện vấn đề và span của trace.
+- `bytes` gồm byte log và byte chỉ số.
+
+Nếu một hạn mức bị chặn và một hạn mức khác đang cảnh báo, `limit` nêu tên hạn
+mức bị chặn. Trạng thái `warning` bắt đầu khi mức sử dụng đạt
+`warning_threshold` của một hạn mức. Trạng thái `blocked` bắt đầu khi mức sử
+dụng chạm hạn mức.
+
+Văn bản `next` có thể thay đổi, ví dụ khi các gói không được bán. Các giá trị
+`next_action` không thay đổi. Bản địa hóa dựa trên `next_action`. Không phân
+tích cú pháp `next`.
+
+Hạn mức sử dụng của tài khoản không phải là giới hạn tốc độ API. Khi lượng dữ
+liệu gửi vượt quá một hạn mức, yêu cầu gửi dữ liệu trả về `429` với
+`usage_limit_exceeded`, và body có thêm `limit` và `reset_at`. Trong lỗi đó,
+`limit` nêu tên chính xác hạn mức: `issue_events`, `log_bytes`, `metric_bytes`
+hoặc `trace_spans`. LogBrew từ chối toàn bộ yêu cầu. Không gửi lại loại
+telemetry đó cho đến `reset_at` hoặc cho đến khi gói thay đổi. Khi
+client gửi quá nhiều yêu cầu, API trả về `rate_limited`. Xem
+[Lỗi API](/vi/reference/api-errors#retry-rules).
+
+Phản hồi là một snapshot (dữ liệu tại thời điểm đọc). Đọc lại sau khi tài khoản thay đổi.
+
+<Note>
+  `GET /api/logs/usage` là phản hồi tương thích cũ dành cho ứng dụng di động,
+  với `bytes_used`, `limit_bytes` và `month`. Dùng `GET /api/account/usage` cho
+  các tích hợp mới.
+</Note>
+
+## Lịch sử sử dụng
+
+`GET /api/account/usage/history` trả về các khoảng gộp mức sử dụng với số lượng
+có giới hạn, để vẽ biểu đồ và lập báo cáo. Khoảng gộp không có dữ liệu được
+điền 0. Đặt `interval` thành một giá trị được hỗ trợ. Nếu bỏ `interval`, API dùng
+`monthly`. Route này không nhận tham số truy vấn nào khác.
+
+```bash
+curl --get "https://api.logbrew.co/api/account/usage/history" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "interval=daily"
+```
+
+| `interval` | Số khoảng gộp | Thời điểm bắt đầu khoảng gộp |
+| --- | ---: | --- |
+| `daily` | 30 | 00:00 UTC |
+| `weekly` | 12 | Thứ Hai, 00:00 UTC |
+| `monthly` | 12 | Ngày đầu tiên của tháng, 00:00 UTC |
+| `yearly` | 5 | Ngày 1 tháng 1, 00:00 UTC |
+
+| Trường | Ý nghĩa |
+| --- | --- |
+| `interval` | Chu kỳ đã yêu cầu. |
+| `period_start`, `period_end` | Thời điểm bắt đầu và thời điểm kết thúc (không bao gồm) của cửa sổ lịch sử. |
+| `current` | Toàn bộ phản hồi `GET /api/account/usage` cho kỳ hiện tại. |
+| `buckets` | Các khoảng gộp theo thứ tự thời gian, cũ nhất trước. Mỗi khoảng gộp có `period_start`, `period_end`, `usage`, `by_project` và `by_stream`. |
+
+Phản hồi `yearly` này dùng dữ liệu giả lập cho một yêu cầu vào tháng 6 năm 2026.
+Toàn bộ mức sử dụng diễn ra trong tháng 6:
+
+```json
+{
+  "interval": "yearly",
+  "period_start": "2022-01-01T00:00:00Z",
+  "period_end": "2027-01-01T00:00:00Z",
+  "current": {
+    "period_start": "2026-06-01T00:00:00Z",
+    "period_end": "2026-07-01T00:00:00Z",
+    "reset_at": "2026-07-01T00:00:00Z",
+    "plan": { "tier": "free", "status": "free" },
+    "limits": { "events": null, "bytes": null, "projects": null, "retention_days": 30 },
+    "usage": { "events": 27000, "bytes": 10485760, "projects": 1 },
+    "state": "ok",
+    "warning_threshold": 0.8,
+    "percent_used": 0.2,
+    "warning": false,
+    "blocked": false,
+    "limit": null,
+    "next": "continue sending telemetry",
+    "next_action": {
+      "code": "continue_sending_telemetry",
+      "target": "telemetry_ingest",
+      "state": "ok",
+      "limit": null,
+      "reset_at": "2026-07-01T00:00:00Z"
+    },
+    "by_project": [
+      { "project_id": "00000000-0000-4000-8000-000000000001", "events": 27000, "bytes": 10485760 }
+    ],
+    "by_stream": [{ "kind": "logs", "events": 27000, "bytes": 10485760 }]
+  },
+  "buckets": [
+    { "period_start": "2022-01-01T00:00:00Z", "period_end": "2023-01-01T00:00:00Z", "usage": { "events": 0, "bytes": 0, "projects": 0 }, "by_project": [], "by_stream": [] },
+    { "period_start": "2023-01-01T00:00:00Z", "period_end": "2024-01-01T00:00:00Z", "usage": { "events": 0, "bytes": 0, "projects": 0 }, "by_project": [], "by_stream": [] },
+    { "period_start": "2024-01-01T00:00:00Z", "period_end": "2025-01-01T00:00:00Z", "usage": { "events": 0, "bytes": 0, "projects": 0 }, "by_project": [], "by_stream": [] },
+    { "period_start": "2025-01-01T00:00:00Z", "period_end": "2026-01-01T00:00:00Z", "usage": { "events": 0, "bytes": 0, "projects": 0 }, "by_project": [], "by_stream": [] },
+    {
+      "period_start": "2026-01-01T00:00:00Z",
+      "period_end": "2027-01-01T00:00:00Z",
+      "usage": { "events": 27000, "bytes": 10485760, "projects": 1 },
+      "by_project": [
+        { "project_id": "00000000-0000-4000-8000-000000000001", "events": 27000, "bytes": 10485760 }
+      ],
+      "by_stream": [{ "kind": "logs", "events": 27000, "bytes": 10485760 }]
+    }
+  ]
+}
+```
+
+Dùng `current.reset_at` để biết thời điểm đặt lại hạn mức. Không dùng thời điểm
+kết thúc của cửa sổ lịch sử. `current` không phải là tổng của các khoảng gộp, và
+ngày của nó có thể khác với ngày của cửa sổ.
+
+Khoảng gộp cuối cùng chứa kỳ lịch hiện tại, là kỳ chưa kết thúc. Thời điểm kết
+thúc trong tương lai của khoảng gộp này không có nghĩa là LogBrew đã đo mức sử
+dụng trong tương lai. Khoảng gộp có giá trị 0 nghĩa là LogBrew không đếm được
+mức sử dụng nào trong khoảng gộp đó.
+
+Trong một khoảng gộp, `usage.projects` đếm các dự án có mức sử dụng trong khoảng
+gộp đó. Không cộng các số này để lấy số dự án. Dùng `current.usage.projects` để
+biết số dự án mà tài khoản sở hữu.
+
+Vẽ sự kiện và byte thành các chuỗi riêng vì chúng dùng đơn vị khác nhau. Các
+khoảng gộp chứa mức sử dụng, không chứa chi phí. Không gắn nhãn biểu đồ là chi
+tiêu, hóa đơn hoặc yêu cầu API.
+
+Chu kỳ không được hỗ trợ trả về `422`:
+
+```json
+{
+  "error": "Unsupported usage history interval",
+  "code": "validation_failed",
+  "next": "use interval=daily, weekly, monthly, or yearly",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+Tham số truy vấn không xác định cũng trả về `422` với `validation_failed`.
+
+## Trạng thái sẵn sàng của gói đăng ký
+
+`GET /api/account/subscription` là endpoint chỉ đọc. Dùng endpoint này để quyết
+định có bật các tùy chọn của gói trả phí hoặc của tổ chức hay không. Dùng
+endpoint mức sử dụng để biết trạng thái hạn mức.
+
+```bash
+curl "https://api.logbrew.co/api/account/subscription" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER"
+```
+
+Tài khoản miễn phí trả về phản hồi này. `account_id` là giá trị giả lập:
+
+```json
+{
+  "account_id": "00000000-0000-4000-8000-0000000000aa",
+  "tier": "free",
+  "billing_interval": "none",
+  "state": "free",
+  "access_state": "active",
+  "current_period_start": null,
+  "current_period_end": null,
+  "renews_at": null,
+  "cancels_at": null,
+  "organization_creation_allowed": false,
+  "organization_creation_blocker": "subscription_required",
+  "limits": {
+    "organizations": 0,
+    "members_per_organization": 0,
+    "projects_per_organization": 0,
+    "invitations_per_day": 0
+  },
+  "next": "<display text>",
+  "next_action": {
+    "code": "choose_plan",
+    "target": "pricing"
+  }
+}
+```
+
+`next` là văn bản hiển thị. Văn bản này thay đổi tùy theo các gói trả phí có
+đang được bán hay không. Hiển thị văn bản được trả về, hoặc bản địa hóa dựa trên
+`next_action`. Không hard-code tên gói lấy từ `next`.
+
+Giá trị enum:
+
+| Trường | Giá trị |
+| --- | --- |
+| `tier` | `free`, `pro`, `scale` |
+| `billing_interval` | `none`, `monthly`, `yearly` |
+| `state` | `free`, `trialing`, `active`, `past_due`, `paused`, `canceled` |
+| `access_state` | `active` cho `free`, `trialing` và `active`. `paused` cho `past_due`, `paused` và `canceled`. |
+| `organization_creation_blocker` | `subscription_required`, `subscription_inactive`, `organization_limit_exceeded` hoặc `null` |
+
+Mỗi lý do chặn có một cặp `next_action`:
+
+| `organization_creation_blocker` | `next_action.code` | `next_action.target` |
+| --- | --- | --- |
+| `null` | `create_or_manage_organization` | `organization` |
+| `subscription_required` | `choose_plan` | `pricing` |
+| `subscription_inactive` | `resume_subscription` | `billing` |
+| `organization_limit_exceeded` | `manage_organization_limit` | `organization` |
+
+Giá trị tier là ID, không phải tên hiển thị. Giữ nguyên các giá trị này trong
+client đã bản địa hóa. Tài khoản trả phí vẫn có thể bị chặn. Kiểm tra
+`organization_creation_allowed` trước khi bật tính năng tạo tổ chức.
+
+Endpoint này không tạo tổ chức, không gửi lời mời, không đổi vai trò và không
+thay đổi thông tin thanh toán.
+
+## Đăng xuất
+
+Chọn phạm vi nhỏ nhất phù hợp với tác vụ. Các endpoint này không xóa tài khoản
+hoặc dự án, không xoay vòng khóa gửi dữ liệu và không thu hồi quyền mà nhà cung
+cấp đăng nhập bên thứ ba đã cấp.
+
+| Phạm vi | Endpoint | Thông tin xác thực |
+| --- | --- | --- |
+| Một phiên đăng nhập trên ứng dụng hoặc CLI | `POST /api/auth/logout` | Refresh token của client đó trong body JSON. Không dùng bearer. |
+| Mọi phiên đăng nhập LogBrew | `POST /api/auth/logout-all` | Bearer token của tài khoản hoặc phiên trình duyệt. Không có body. |
+| Phiên trình duyệt hiện tại | `POST /api/auth/web/logout` | Không cần. Phản hồi xóa cookie của trình duyệt. |
+
+### Một phiên đăng nhập trên ứng dụng hoặc CLI
+
+Gửi yêu cầu từ client đang giữ refresh token. Đặt
+`Content-Type: application/json`:
+
+```json
+{
+  "refresh_token": "<current refresh token>"
+}
+```
+
+Không bao giờ yêu cầu người dùng hoặc agent in hoặc dán refresh token. Phản hồi
+thành công là `200`:
+
+```json
+{
+  "revoked": true,
+  "next_action": {
+    "code": "clear_local_session",
+    "target": "local_credentials"
+  }
+}
+```
+
+Yêu cầu này thu hồi một nhóm refresh token. LogBrew từ chối các lần làm mới token
+sau đó của phiên đăng nhập này. Các phiên đăng nhập khác của tài khoản không thay
+đổi. Access token mà client đã có vẫn hợp lệ cho đến khi hết hạn. Nếu thông tin
+xác thực tài khoản có thể bị lộ, dùng
+[Mọi phiên đăng nhập LogBrew](#every-logbrew-login).
+
+Sau khi nhận phản hồi, client xóa thông tin xác thực cục bộ của nó. Nếu bạn gửi
+lại cùng refresh token hợp lệ, phản hồi vẫn là `200` như cũ. Nếu token không hợp
+lệ, đã hết hạn hoặc là access token, phản hồi là `401` với
+`code: "unauthorized"` và `next_action.code: "authorize_request"`. Trong trường
+hợp đó, cũng xóa thông tin xác thực cục bộ. `logbrew logout` dùng endpoint này.
+
+### <span id="every-logbrew-login">Mọi phiên đăng nhập LogBrew</span>
+
+<Warning>
+  Yêu cầu này đăng xuất mọi client trên tài khoản. Lấy sự chấp thuận của chủ tài
+  khoản trước khi agent gửi yêu cầu.
+</Warning>
+
+Phản hồi thành công là `200`:
+
+```json
+{
+  "revoked": true,
+  "revoked_before": "2026-09-07T12:00:00.123Z",
+  "next_action": {
+    "code": "clear_local_session",
+    "target": "local_credentials"
+  }
+}
+```
+
+`revoked_before` bao gồm cả chính mốc thời gian đó và có độ chính xác đến mili
+giây. LogBrew từ chối access token, phiên trình duyệt và refresh token của lần
+đăng nhập diễn ra vào hoặc trước thời điểm đó. Token được làm mới sau đó từ một
+lần đăng nhập như vậy cũng bị từ chối. Các phiên luồng trực tiếp hiện tại kết
+thúc, và phản hồi xóa cookie phiên trình duyệt. Lần đăng nhập sau thời điểm đó
+vẫn hợp lệ. Mỗi client phải xóa thông tin xác thực LogBrew cục bộ và đăng nhập
+lại.
+
+Không tự động đăng nhập lại rồi lặp lại yêu cầu này. Yêu cầu mới cũng sẽ thu hồi
+lần đăng nhập mới.
+
+Nếu mất phản hồi, không báo rằng mọi phiên đăng nhập đã bị thu hồi. Lỗi `401`
+nhận sau đó từ một thông tin xác thực cũ không thay thế cho phản hồi thành công.
+Để biết thêm các bước khôi phục, đọc
+[Bảo vệ tài khoản bị xâm nhập](/vi/guides/troubleshooting#secure-a-compromised-account).
+
+### Phiên trình duyệt
+
+`POST /api/auth/web/logout` xóa cookie `logbrew_session` của trình duyệt và trả
+về `204 No Content` không có body. Gọi endpoint này từ trình duyệt. Không sao
+chép cookie phiên vào lệnh. Yêu cầu này không đăng xuất các client khác và không
+thu hồi bản sao của giá trị cookie. Để thu hồi mọi phiên, dùng
+[Mọi phiên đăng nhập LogBrew](#every-logbrew-login).
+
+### Khôi phục sau lỗi đăng xuất
+
+| Kết quả | Cách khôi phục |
+| --- | --- |
+| `401` từ `POST /api/auth/logout` | Xóa thông tin xác thực cục bộ của client. Không gửi loại thông tin xác thực khác. |
+| `401` từ `POST /api/auth/logout-all` | Đăng nhập từ một client tin cậy nếu người dùng vẫn muốn truy cập. Xin phê duyệt lại trước khi lặp lại yêu cầu. |
+| `405` | Dùng phương thức mà `next` nêu tên, và chỉ cho phạm vi mà người dùng đã phê duyệt. |
+| `invalid_json` từ `POST /api/auth/logout` | Gửi một đối tượng JSON có `refresh_token` dạng chuỗi và `Content-Type: application/json`. Không in token. |
+| Hết thời gian chờ hoặc trạng thái `5xx` | Không báo thành công. Không bắt đầu vòng lặp đăng nhập và đăng xuất tự động. Làm theo [quy tắc thử lại cho thao tác ghi](/vi/reference/api-errors#writes). |
+
+Để xem route, bộ lọc và phân trang telemetry, đọc
+[Telemetry API](/vi/reference/telemetry-api).

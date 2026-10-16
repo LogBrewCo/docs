@@ -1,0 +1,221 @@
+---
+title: "Support API: tạo và theo dõi yêu cầu hỗ trợ"
+sidebarTitle: "Báo cáo sự cố"
+description: "Tạo yêu cầu hỗ trợ LogBrew từ CLI hoặc Support API. Thêm thông tin chẩn đoán an toàn, theo dõi trạng thái và gửi thêm ngữ cảnh."
+---
+
+Tạo yêu cầu hỗ trợ khi một sự cố cần được xử lý tiếp. Sau đó, một người hoặc
+một agent AI có thể theo dõi yêu cầu hỗ trợ và bổ sung ngữ cảnh khi được yêu
+cầu. Chỉ tài khoản đã tạo yêu cầu hỗ trợ và đội hỗ trợ LogBrew mới đọc được
+nó.
+
+<Warning>
+  Dùng bearer token truy cập của tài khoản, chẳng hạn `$LOGBREW_TOKEN`. Không
+  bao giờ dùng khóa gửi dữ liệu của dự án. Xóa dữ liệu riêng tư trước khi viết tiêu
+  đề, mô tả hoặc thông tin chẩn đoán. Cơ chế tự động che dữ liệu không thay thế
+  bước rà soát này.
+</Warning>
+
+## Tạo yêu cầu hỗ trợ
+
+Từ CLI, chạy:
+
+```bash
+logbrew support create --category docs_confusion \
+  --title "First event is not visible" \
+  --description "Steps: send one info event, then read logs in the same project. Expected: one row. Observed: no rows." \
+  --project "<project_id>" --json
+```
+
+CLI đặt `source` thành `cli`. `--diagnostics` chỉ thêm tên binary, phiên bản
+CLI, hệ điều hành và kiến trúc. Chạy `logbrew support --help` để xem mọi flag.
+
+CLI không gửi khóa thử lại khi tạo yêu cầu hỗ trợ. Nếu không chắc về kết quả,
+chạy `logbrew support list --json` trước khi chạy lại lệnh. Nếu không, bạn có
+thể vô tình tạo thêm một yêu cầu hỗ trợ thứ hai.
+
+Từ API, gửi `POST /api/support/tickets` với `source`, `category`,
+`title` và `description`. Để thử lại an toàn, tạo một khóa thử lại một lần cho
+mỗi báo cáo và gửi khóa đó trong header `Idempotency-Key`. Ví dụ này dùng giá
+trị giả lập:
+
+```bash
+LOGBREW_SUPPORT_RETRY_KEY="$(uuidgen)"
+
+curl -sS "https://api.logbrew.co/api/support/tickets" \
+  -H "Authorization: Bearer ${LOGBREW_TOKEN:?Set an account access bearer}" \
+  -H "Idempotency-Key: ${LOGBREW_SUPPORT_RETRY_KEY:?Create a retry key for this report}" \
+  -H "Content-Type: application/json" \
+  --data '{
+    "source": "docs",
+    "category": "docs_confusion",
+    "title": "First event is not visible",
+    "description": "Steps: send one info event, then read logs in the same project. Expected: one row. Observed: no rows.",
+    "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    "diagnostics": {
+      "steps": 2,
+      "expected": "one matching row",
+      "observed": "no matching rows"
+    }
+  }'
+```
+
+Khóa thử lại gồm 1 đến 128 ký tự ASCII hiển thị được, không có dấu cách. Để
+thử lại, gửi cùng khóa với cùng nội dung. Khi đó phản hồi trả về cùng yêu cầu
+hỗ trợ. Dùng khóa mới cho một báo cáo khác. Hết thời gian chờ không chứng minh
+việc tạo đã thất bại. Header `Idempotency-Key` là tùy chọn. Nếu không có header
+này, gửi lại yêu cầu có thể tạo thêm một yêu cầu hỗ trợ khác.
+
+Các trường tùy chọn là `project_id`, `environment`, `runtime`, `framework`,
+`sdk_package`, `sdk_version`, `release`, `trace_id`, `event_id` và
+`diagnostics`. Bỏ `project_id` khi sự cố không thuộc riêng một dự án.
+`project_id` phải xác định một dự án đang hoạt động trong tài khoản của bạn.
+
+| Trường | Giá trị được chấp nhận |
+| --- | --- |
+| `source` | `cli`, `sdk`, `website`, `docs`, `mobile` |
+| `category` | `sdk_install_failure`, `ingest_failure`, `auth_failure`, `project_setup`, `dashboard_issue`, `docs_confusion`, `cli_issue`, `mobile_issue`, `billing_question`, `other` |
+| `title` | 1 đến 160 ký tự sau khi LogBrew xóa dấu cách ở hai đầu. |
+| `description` | 1 đến 4.000 ký tự sau khi LogBrew xóa dấu cách ở hai đầu. |
+| Các trường văn bản khác | Tối đa 256 ký tự mỗi trường. |
+
+Yêu cầu thành công trả về HTTP `200`:
+
+```json
+{
+  "ticket_id": "sup_11111111111141118111111111111111",
+  "status": "open",
+  "created_at": "2026-10-01T09:30:00Z",
+  "next": "Support ticket created. LogBrew will review the attached diagnostics.",
+  "next_action": {
+    "code": "review_ticket",
+    "target": "support_ticket"
+  }
+}
+```
+
+ID yêu cầu hỗ trợ bắt đầu bằng `sup_`. Dùng `next` làm hướng dẫn cho người đọc
+và dùng `next_action` để điều khiển chương trình.
+
+Để xóa một dự án, dùng phần cài đặt dự án hoặc `logbrew projects delete`. Không
+yêu cầu xóa dự án qua yêu cầu hỗ trợ.
+
+## Viết báo cáo hữu ích
+
+- Mỗi yêu cầu hỗ trợ chỉ báo cáo một sự cố.
+- Chọn `category` gần đúng nhất. Chỉ dùng `other` khi không có danh mục nào
+  phù hợp.
+- Nêu một triệu chứng và một nơi xảy ra trong `title`.
+- Viết `description` theo dạng các bước, sau đó là kết quả mong đợi và kết quả
+  thực tế.
+- Chỉ thêm ID dự án, bản phát hành, trace hoặc sự kiện khi chúng xác định cùng
+  một lỗi.
+
+Dùng các khóa `diagnostics` sau:
+
+| Khóa | Nội dung |
+| --- | --- |
+| `steps` | Số bước tái hiện. |
+| `expected` | Kết quả mong đợi, viết ngắn. |
+| `observed` | Kết quả thực tế, viết ngắn. |
+| `command_name` | Tên lệnh và lệnh con, không kèm tham số. |
+| `exit_code` | Mã thoát dạng số của tiến trình. |
+| `error_code` | Mã lỗi ổn định. |
+| `error_summary` | Tóm tắt lỗi ngắn, đã che dữ liệu nhạy cảm. |
+| `retry_count` | Số lần thử lại giống nhau. |
+| `last_delivery_status` | Trạng thái HTTP của lần gửi gần nhất, chẳng hạn `401`. |
+
+`diagnostics` là một đối tượng JSON tối đa 16 KB sau khi che dữ liệu. LogBrew
+thay một giá trị bằng `[redacted]` khi tên khóa của nó chỉ thông tin xác thực,
+phiên hoặc địa chỉ email. LogBrew cũng thay văn bản trông giống thông tin xác
+thực, URL hoặc đường dẫn cục bộ. LogBrew còn rút ngắn chuỗi dài và giới hạn độ
+lồng nhau, số khóa và số mục trong danh sách. Không dựa vào cơ chế che dữ liệu
+này. Xóa dữ liệu riêng tư trước khi gửi yêu cầu.
+
+## <span id="track-the-ticket">Theo dõi yêu cầu hỗ trợ</span>
+
+| Lệnh CLI | Route API | Kết quả |
+| --- | --- | --- |
+| `logbrew support list` | `GET /api/support/tickets` | Liệt kê các yêu cầu hỗ trợ của tài khoản. |
+| `logbrew support show <ticket_id>` | `GET /api/support/tickets/{ticket_id}` | Đọc một yêu cầu hỗ trợ và bước tiếp theo của nó. |
+| `logbrew support context <ticket_id>` | `GET /api/support/tickets/{ticket_id}/context` | Đọc ngữ cảnh đã thêm vào yêu cầu hỗ trợ. |
+| `logbrew support reply <ticket_id>` | `POST /api/support/tickets/{ticket_id}/context` | Thêm ngữ cảnh được yêu cầu. |
+| `logbrew support close <ticket_id>` | `PATCH /api/support/tickets/{ticket_id}` | Đặt `closed`. |
+| `logbrew support reopen <ticket_id>` | `PATCH /api/support/tickets/{ticket_id}` | Đặt `open`. |
+
+Danh sách nhận `project_id`, `status`, `source`, `category`, `release` và
+`limit`. `limit` mặc định là 100, tối đa là 500. Để phân trang bằng cursor, gửi
+`pagination=cursor`. Ở các trang sau, lặp lại cùng bộ lọc và gửi `cursor_time`
+và `cursor_id` từ `next_cursor`. ID cursor là một ID yêu cầu hỗ trợ dạng
+`sup_`. Dừng khi `next_cursor` là `null`. CLI dùng các flag `--project`,
+`--status`, `--source`, `--category`, `--release`, `--limit`,
+`--pagination`, `--cursor-time` và `--cursor-id`.
+
+Các giá trị trạng thái là `open`, `routed`, `in_progress`, `waiting_on_user`,
+`resolved` và `closed`. Bạn chỉ có thể đặt `open` hoặc `closed`. Gửi lại yêu
+cầu đóng hoặc mở lại vẫn thành công nhưng không thay đổi gì, nên bạn có thể
+thử lại đúng yêu cầu đó. Làm theo trạng thái và `next_action` được trả về:
+
+| Trạng thái | `next_action.code` | Bước tiếp theo |
+| --- | --- | --- |
+| `open`, `routed`, `in_progress` | `await_owner_update` | Chờ cập nhật. Đọc lại yêu cầu hỗ trợ sau. |
+| `waiting_on_user` | `provide_context` | Gửi ngữ cảnh được yêu cầu. |
+| `resolved`, `closed` | `open_new_ticket_if_needed` | Tạo yêu cầu hỗ trợ mới nếu sự cố xảy ra lại. |
+
+## Thêm ngữ cảnh được yêu cầu
+
+Trả lời khi yêu cầu hỗ trợ cần thêm ngữ cảnh. Khi đó, yêu cầu hỗ trợ có trạng
+thái `waiting_on_user` và `next_action.code` là `provide_context`.
+
+```bash
+logbrew support reply sup_11111111111141118111111111111111 \
+  --context "The same project and time filters still return no logs." \
+  --retry-key "<retry_key>" --json
+```
+
+Nội dung gửi tới API gồm `context` và `diagnostics` tùy chọn. Văn bản `context`
+phải có 1 đến 4.000 ký tự. Không đưa thông tin xác thực, URL, tên host hay
+đường dẫn cục bộ vào `context`. API từ chối văn bản đó với `422`. Gửi khóa thử
+lại trong header `Idempotency-Key`. Route ngữ cảnh bắt buộc có header này.
+Khóa gồm 1 đến 128 ký tự ASCII hiển thị được, không có dấu cách. Dùng khóa mới
+cho mỗi lần trả lời. Chỉ dùng lại khóa để thử lại cùng một lần trả lời.
+
+API nhận ngữ cảnh khi yêu cầu hỗ trợ ở trạng thái `open`, `routed`,
+`in_progress` hoặc `waiting_on_user`. API nhận 1 lần trả lời cho mỗi trạng thái
+của yêu cầu hỗ trợ. Sau một lần trả lời, chờ trạng thái thay đổi rồi mới gửi
+thêm ngữ cảnh. Trả lời một yêu cầu hỗ trợ `waiting_on_user` sẽ chuyển nó về
+`open`. Đọc `status` được trả về thay vì mặc định rằng thay đổi này đã xảy ra.
+
+Một lần trả lời thành công trả về `ticket_id`, `context_id`, `status`,
+`created_at`, `next` và `next_action`. `context_id` bắt đầu bằng `ctx_`. Đọc
+lại yêu cầu hỗ trợ trước khi trả lời lần yêu cầu ngữ cảnh tiếp theo.
+
+`GET /api/support/tickets/{ticket_id}/context` trả về 20 mục ngữ cảnh gần
+nhất, cũ nhất trước. Mỗi mục có `context_id`, `context`, `diagnostics` và
+`created_at`. Danh sách này không có cursor.
+
+Trả lời một yêu cầu hỗ trợ `resolved` hoặc `closed` sẽ trả về `422` với
+`code: "validation_failed"`. Chỉ mở lại yêu cầu hỗ trợ nếu người dùng muốn
+tiếp tục yêu cầu đó. `next_action` không cho agent quyền thay đổi trạng thái
+tài khoản.
+
+## Khôi phục sau lỗi
+
+| Trạng thái HTTP | `code` | Cách khôi phục |
+| --- | --- | --- |
+| `401` | `unauthorized` | Gửi bearer token truy cập của tài khoản hợp lệ. |
+| `404` | `not_found` | Liệt kê các yêu cầu hỗ trợ của tài khoản và dùng một ID `sup_` được trả về. Với lỗi về dự án, kiểm tra `project_id` hoặc bỏ trường này. |
+| `405` | `method_not_allowed` | Dùng một phương thức trong bảng ở mục [Theo dõi yêu cầu hỗ trợ](#track-the-ticket). |
+| `409` | `idempotency_conflict` | Khóa thử lại đã được dùng với một yêu cầu khác. Thử lại yêu cầu ban đầu, hoặc đọc yêu cầu hỗ trợ và dùng khóa mới. |
+| `422` | `validation_failed` | Sửa trường được nêu tên. Với PATCH, chỉ gửi `status: "open"` hoặc `status: "closed"`. |
+| `429` | `rate_limited` | Chờ, rồi thử lại. |
+
+Phản hồi lỗi chứa `error`, `code`, `next` và `next_action`. Xem
+[Lỗi API](/vi/reference/api-errors).
+
+## Giữ báo cáo an toàn
+
+Không bao giờ gửi thông tin bí mật, token, header authorization, khóa gửi dữ
+liệu, log thô, dữ liệu khách hàng, đường dẫn cục bộ, host hay mã nguồn không
+liên quan. Gửi một bản tóm tắt ngắn đã che dữ liệu nhạy cảm. Để tự kiểm tra,
+xem [Khắc phục sự cố](/vi/guides/troubleshooting).

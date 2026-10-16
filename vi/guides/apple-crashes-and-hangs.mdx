@@ -1,0 +1,387 @@
+---
+title: "Báo cáo crash iOS: crash và treo ứng dụng trên Apple"
+sidebarTitle: "Crash và treo trên Apple"
+description: "Thiết lập báo cáo crash cho ứng dụng iOS, tải lên dSYM khớp với bản dựng và đọc log crash iOS đã symbolicate trong LogBrew."
+---
+
+Dùng quy trình này để ghi nhận crash native và tình trạng treo luồng chính trong
+ứng dụng iOS. Ghi nhận treo cần UIKit. Tải lên dSYM khớp với bản dựng để xem vị
+trí mã nguồn trong các khung ngăn xếp (stack frame).
+
+Ứng dụng lưu một báo cáo cục bộ khi bị crash. Ở lần khởi chạy sau, ứng dụng gọi
+hàm gửi lại (replay) để gửi bằng chứng crash đến LogBrew. LogBrew không gửi báo
+cáo thô của Apple.
+
+<Note>
+  Dùng LogBrew Swift 0.1.6 trở lên. Dùng LogBrew CLI native 0.1.24 trở lên để
+  tải lên artifact (tệp bản dựng) dùng cho gỡ lỗi.
+</Note>
+
+<Warning>
+  Trong ứng dụng, dùng cấu hình gửi dữ liệu theo phạm vi dự án. Dùng tài khoản
+  đã đăng nhập để tải lên artifact và đọc vấn đề. Khóa artifact của dự án cũng
+  có thể tải lên từ máy build.
+  Không bao giờ đưa access token của tài khoản hoặc khóa artifact vào ứng dụng.
+</Warning>
+
+## Xác định phạm vi ghi nhận
+
+Kiểm tra thời điểm ứng dụng có thể gửi lại từng loại lỗi.
+
+| Lỗi | Kết quả ghi nhận | Thời điểm gửi |
+| --- | --- | --- |
+| Crash fatal (làm thoát ứng dụng) trên Apple | Sự kiện crash native chưa xử lý | Lần khởi chạy ứng dụng sau đó |
+| Treo luồng chính đã hồi phục | Sự kiện treo đã xử lý | Khi gửi lại sau khi hồi phục |
+| Treo rồi tiến trình bị chấm dứt | Sự kiện treo chưa xử lý | Lần khởi chạy ứng dụng sau đó |
+
+Đặt giá trị bản phát hành trước khi build. Giá trị này phải xác định được phiên
+bản và số build của ứng dụng. Dùng cùng giá trị này trong SDK, khi tải lên dSYM
+và trong bộ lọc vấn đề.
+
+Không đính kèm payload của người dùng, body yêu cầu hoặc header vào metadata
+crash.
+
+## Thêm product crash
+
+Trước tiên, thiết lập telemetry cho ứng dụng theo hướng dẫn
+[Tích hợp SDK](/vi/guides/sdk-ingestion). Quá trình gửi lại dùng `client` và `transport` đó.
+
+Thêm SDK công khai qua Swift Package Manager.
+
+```swift
+.package(
+    url: "https://github.com/LogBrewCo/sdk.git",
+    from: "0.1.6"
+)
+```
+
+Thêm product `LogBrew` để gửi telemetry. Chỉ thêm `LogBrewCrash` khi ứng dụng
+chủ động bật ghi nhận crash hoặc treo native.
+
+Tích hợp ghi nhận hỗ trợ iOS 15 trở lên. Chỉ giữ một đối tượng ghi nhận do ứng
+dụng sở hữu, vì trình xử lý crash fatal native áp dụng cho toàn bộ tiến trình.
+
+## Cấu hình một định danh chính xác
+
+Dùng cùng dự án, bản phát hành, môi trường và dịch vụ khi thiết lập runtime và
+khi tải lên artifact. LogBrew không tự suy ra hay thay thế các giá trị này.
+
+```swift
+import Foundation
+import LogBrew
+import LogBrewCrash
+
+let applicationSupport = try FileManager.default.url(
+    for: .applicationSupportDirectory,
+    in: .userDomainMask,
+    appropriateFor: nil,
+    create: true
+)
+
+let identity = try NativeArtifactIdentity(
+    projectId: "550e8400-e29b-41d4-a716-446655440000",
+    release: "com.example.app@1.2.3+45",
+    environment: "production",
+    service: "ios-app"
+)
+
+let watchdog: NativeHangWatchdogConfiguration? = nil
+
+let crashCapture = NativeCrashCapture(
+    configuration: try NativeCrashConfiguration(
+        storageDirectory: applicationSupport.appendingPathComponent(
+            "LogBrewCrash",
+            isDirectory: true
+        ),
+        artifactIdentity: identity,
+        hangWatchdog: watchdog
+    )
+)
+
+try crashCapture.install()
+```
+
+Cài đối tượng ghi nhận trên luồng chính trước khi tạo UI gốc. Tạo thư mục cha
+trước. Giữ thư mục lưu dữ liệu ở chế độ riêng tư và chỉ thuộc về ứng dụng.
+
+Đối tượng ghi nhận ghi lại ngoại lệ Mach, signal, ngoại lệ C++ và ngoại lệ
+Objective-C. Báo cáo cục bộ không chứa nội dung bộ nhớ, tên hàng đợi hoặc log
+console.
+
+Báo cáo crash cục bộ có thể chứa thông tin nhạy cảm về ứng dụng và thiết bị.
+Không đưa báo cáo vào bản sao lưu đám mây hoặc thư mục dùng chung. LogBrew gửi
+UUID của khung, kiến trúc và offset thay vì báo cáo thô.
+
+`NativeCrashConfiguration` có hai giới hạn không bắt buộc:
+
+| Tham số | Mặc định | Phạm vi | Tác dụng |
+| --- | --- | --- | --- |
+| `maxStoredReports` | `5` | 1 đến 32 | Số báo cáo cục bộ mà ứng dụng giữ lại. |
+| `maxReplayBytes` | 4 MiB | 1 KiB đến 16 MiB | Khi gửi lại, báo cáo lớn hơn kích thước này sẽ bị loại bỏ. |
+
+Giá trị nằm ngoài phạm vi khiến cấu hình ném lỗi
+`crash_invalid_configuration`.
+
+## Bật ghi nhận treo
+
+Ghi nhận treo tắt khi `watchdog` là `nil`. Để bật, thay khai báo `watchdog` ở
+trên trước khi gọi `install()`:
+
+```swift
+let watchdog = try NativeHangWatchdogConfiguration(
+    threshold: 2
+)
+```
+
+Ngưỡng tính bằng giây, từ 1 đến 30. Ghi nhận treo cũng cần
+`artifactIdentity`. Nếu thiếu, cấu hình ném lỗi
+`crash_invalid_configuration`.
+
+Giữ một đối tượng `crashCapture` duy nhất trong suốt vòng đời của tiến trình.
+Đối tượng ghi nhận thứ hai không cài được. Lệnh gọi `install()` của nó ném lỗi
+`crash_capture_owned`. Để đổi ngưỡng, dùng giá trị mới ở lần khởi chạy ứng dụng
+sau.
+
+Treo đã hồi phục được gửi lại với `crash.handled` đặt thành `true`. Treo vẫn
+đang diễn ra khi tiến trình bị chấm dứt được gửi lại với `crash.handled` đặt
+thành `false`.
+
+Cả hai dạng đều có metadata dạng số `durationMs`. Chúng giữ cùng định danh
+artifact mà các khung của crash fatal sử dụng.
+
+Watchdog tạm dừng khi ứng dụng không ở trạng thái hoạt động hoặc đang chạy dưới
+debugger. Watchdog cũng ngừng ghi nhận khi thiết bị chịu áp lực nhiệt nghiêm
+trọng.
+
+Ngưỡng ngắn có thể báo công việc bình thường trên luồng chính thành treo. Kiểm
+tra ngưỡng với cấu hình build mà bạn phát hành. Trạng thái đã xử lý mô tả việc
+hồi phục. Trạng thái này không đánh dấu vấn đề là đã giải quyết. Lần treo đã xử lý
+vẫn đã chặn giao diện, nên cũng cần xem xét.
+
+## Gửi lại sau khi khởi chạy
+
+Sau khi cài đối tượng ghi nhận, gửi lại các báo cáo đang chờ qua client SDK.
+
+```swift
+let replay = try crashCapture.replayPendingReports(
+    in: client,
+    transport: transport
+)
+
+print(
+    "acknowledged=\(replay.acknowledged) " +
+    "discarded=\(replay.discarded) " +
+    "pending=\(replay.pending)"
+)
+```
+
+Ứng dụng của bạn phải tự gọi hàm gửi lại. Riêng việc hồi phục sau khi treo không
+gửi sự kiện nào. Gọi cùng phương thức này sau khi hồi phục hoặc ở lần khởi chạy
+sau.
+
+Quá trình gửi lại xử lý các báo cáo hợp lệ theo thứ tự cũ nhất trước và giữ
+nguyên ID sự kiện ổn định của chúng. Lần gửi thất bại giữ báo cáo ở trạng thái
+chờ. Lần gửi được chấp nhận sẽ xóa báo cáo.
+
+Quá trình gửi lại loại bỏ các báo cáo không đọc được và các báo cáo lớn hơn
+`maxReplayBytes`. Kiểm tra cả ba số đếm. Riêng số báo cáo đang chờ bằng 0 không
+chứng minh đã gửi thành công.
+
+Bật chế độ gửi bền vững trước khi gửi lại nếu một yêu cầu thất bại phải được giữ
+qua lần khởi động lại tiếp theo. Không gọi `purge()` trong quá trình khôi phục
+mạng hoặc xác thực thông thường.
+
+## Tải lên dSYM khớp với bản dựng
+
+Tạo bản Archive của ứng dụng với thông tin gỡ lỗi được bật. Giữ dSYM từ đúng
+bản dựng mà người dùng đang chạy.
+
+Kiểm tra UUID image của dSYM.
+
+```bash
+xcrun dwarfdump --uuid "path/to/App.app.dSYM"
+```
+
+Chạy kiểm tra hợp lệ artifact trên máy cục bộ trước khi tải lên.
+
+```bash
+logbrew debug-artifacts upload "path/to/App.app.dSYM" \
+  --project "<project UUID>" \
+  --release "com.example.app@1.2.3+45" \
+  --environment "production" \
+  --service "ios-app" \
+  --expect-image-uuid "<Mach-O UUID>" \
+  --dry-run \
+  --json
+```
+
+Lặp lại `--expect-image-uuid` cho mỗi kiến trúc cần thiết. Lệnh thất bại khi
+tập UUID tìm thấy khác với tập UUID mong đợi.
+
+Kiểm tra quyền truy cập tài khoản. Sau đó chạy cùng lệnh nhưng bỏ `--dry-run`.
+
+```bash
+logbrew status --json
+
+logbrew debug-artifacts upload "path/to/App.app.dSYM" \
+  --project "<project UUID>" \
+  --release "com.example.app@1.2.3+45" \
+  --environment "production" \
+  --service "ios-app" \
+  --expect-image-uuid "<Mach-O UUID>" \
+  --json
+```
+
+Lệnh tải lên kiểm tra hợp lệ các đối tượng Apple được hỗ trợ và xác
+minh mọi định danh đã tải lên. Lệnh không đưa đường dẫn cục bộ hoặc tên tệp vào metadata API.
+
+`status` trong JSON cho biết kết quả:
+
+| `status` | Ý nghĩa |
+| --- | --- |
+| `validated` | Lần chạy thử (dry run) tìm thấy các đối tượng mong đợi. Không có gì được tải lên. |
+| `verified` | Đã tải lên bằng quyền truy cập tài khoản và xác minh mọi định danh. |
+| `already_present` | LogBrew đã có mọi định danh. |
+| `uploaded` | Đã tải tệp lên bằng khóa artifact của dự án. CLI không xác minh được các tệp này. |
+
+Máy build có thể tải lên bằng khóa artifact của dự án trong `LOGBREW_TOKEN`
+thay vì quyền truy cập tài khoản. Tạo khóa theo hướng dẫn trong
+[Tạo khóa artifact](/vi/guides/source-maps#create-an-artifact-key). Lần tải lên
+đó báo `uploaded`. Sau đó, xác minh từng định danh bằng quyền truy cập tài
+khoản:
+
+```bash
+logbrew debug-artifacts lookup \
+  --project "<project UUID>" \
+  --release "com.example.app@1.2.3+45" \
+  --environment "production" \
+  --service "ios-app" \
+  --image-uuid "<Mach-O UUID>" \
+  --architecture arm64 \
+  --json
+```
+
+`status: "found"` xác nhận có artifact. `status: "missing"` nghĩa là LogBrew
+không có artifact cho định danh đó.
+
+Việc phân giải dựa trên UUID image và toàn bộ định danh artifact, không dựa
+trên tên tệp nguồn. Build lại từ cùng mã nguồn có thể tạo ra UUID khác. Tải lên
+đúng gói dSYM, không tải cả thư mục build.
+
+## Xác minh kết quả đọc lại từ LogBrew
+
+Lọc danh sách vấn đề theo cùng phạm vi runtime. Ví dụ này chọn các vấn đề
+`unresolved`. Vấn đề đã giải quyết hoặc đã lưu trữ sẽ không xuất hiện.
+
+```bash
+logbrew read issues \
+  --project "<project UUID>" \
+  --release "com.example.app@1.2.3+45" \
+  --environment "production" \
+  --service "ios-app" \
+  --status "unresolved" \
+  --since "24h" \
+  --json
+```
+
+Phản hồi danh sách xác định vấn đề đã được gộp nhóm. Đọc chi tiết vấn đề để yêu
+cầu LogBrew phân giải khung.
+
+```bash
+logbrew read issue "<issue UUID>" --json
+```
+
+Artifact khớp sẽ thêm một đối tượng `symbolication`. Ví dụ này cho thấy một số
+trường được chọn từ một vấn đề có khung đã phân giải, không phải toàn bộ phản
+hồi.
+
+```json
+{
+  "severity": "critical",
+  "attributes": {
+    "metadata": {
+      "crash.replayed": true
+    }
+  },
+  "symbolication": {
+    "status": "resolved",
+    "frames": [
+      {
+        "index": 0,
+        "status": "resolved",
+        "resolved": {
+          "source": "AppRuntime.swift",
+          "line": 42,
+          "column": 1,
+          "name": "terminateForCrash()"
+        }
+      }
+    ]
+  }
+}
+```
+
+## Đọc bằng chứng crash
+
+Mỗi khung có `status` riêng. Trường `symbolication.status` dùng cùng các giá
+trị:
+
+| `status` | Ý nghĩa |
+| --- | --- |
+| `resolved` | Artifact khớp đã phân giải khung. `resolved` có tệp nguồn, dòng, cột hoặc tên hàm mà artifact cung cấp. |
+| `artifact_not_found` | Không có artifact đã tải lên nào khớp với định danh sự kiện và UUID image. |
+| `source_not_resolved` | Có artifact khớp, nhưng artifact đó không phân giải được khung này. |
+| `invalid_metadata` | Sự kiện có metadata artifact không đầy đủ hoặc không nhất quán. |
+| `unavailable` | Không hoàn tất được việc đọc kết quả phân giải khung. |
+
+Trong ghi chú của bạn, giữ khung chưa phân giải ở trạng thái chưa phân giải.
+Không báo nó là ngăn xếp trống.
+
+LogBrew phân giải khung khi bạn đọc vấn đề. dSYM tải lên sau vẫn có thể phân
+giải khung của sự kiện trước đó. dSYM không thể thêm các khung mà sự kiện chưa
+ghi nhận.
+
+Khung mã ứng dụng giúp thu hẹp phạm vi tìm mã, nhưng không chứng minh nguyên
+nhân. Để xem breadcrumb, chuỗi ngoại lệ và bằng chứng trace, đọc kết quả điều
+tra vấn đề:
+
+```bash
+logbrew investigate issue "<issue UUID>" --json
+```
+
+Trong phản hồi đó, khung có `source: "symbolicated"` đến từ artifact đã tải
+lên. Khung có `source: "captured"` là vị trí mà ứng dụng đã gửi. Xem
+[Điều tra một vấn đề](/vi/guides/investigate-an-issue) để biết các trường phản hồi.
+
+Giữ đầy đủ phạm vi dự án, bản phát hành, môi trường và dịch vụ trong mọi lần
+đọc. Không mở rộng một lần tra cứu thất bại sang các dự án khác.
+
+## Xác minh thiết lập production
+
+Dùng một lỗi thử nghiệm đã được duyệt trong bản dựng đã triển khai. Không bao
+giờ dùng hành động của khách hàng để kích hoạt lỗi. Kiểm tra từng mục theo thứ
+tự và dừng ở lỗi đầu tiên:
+
+1. Định danh runtime khớp với định danh artifact đã tải lên.
+2. Lần khởi chạy sau gửi lại một sự kiện được xác nhận, với 0 báo cáo bị loại
+   bỏ và 0 báo cáo đang chờ.
+3. Danh sách vấn đề theo phạm vi trả về vấn đề thử nghiệm với trạng thái đã xử
+   lý như mong đợi.
+4. Khung mã ứng dụng mong đợi được phân giải.
+5. Lần khởi chạy bình thường tiếp theo không thêm lần xảy ra nào khác.
+
+## Khôi phục an toàn
+
+| Kết quả | Cách khôi phục |
+| --- | --- |
+| Xác thực khi tải lên thất bại | Chạy `logbrew login`, xác nhận bằng `logbrew status --json`, rồi lặp lại đúng lệnh tải lên. |
+| Kiểm tra UUID khi tải lên thất bại | Chọn dSYM từ bản dựng đã triển khai và chạy thử (dry run) lại. |
+| `artifact_not_found` | Xác minh định danh sự kiện và tải lên dSYM khớp với cùng phạm vi. |
+| `source_not_resolved` | Giữ đầy đủ thông tin gỡ lỗi của bản dựng và kiểm tra cài đặt build của bản đã triển khai. |
+| `invalid_metadata` | Đảm bảo bạn đang dùng LogBrew Swift 0.1.6 trở lên. Ghi nhận một sự kiện mới với định danh chính xác. |
+| `unavailable` | Giữ vấn đề ở trạng thái hiển thị và thử lại cùng lần đọc chi tiết theo phạm vi sau. |
+| Báo cáo gửi lại vẫn đang chờ | Sửa trạng thái transport hoặc xác thực, rồi khởi chạy lại mà không xóa báo cáo. |
+| Kết quả gửi lại có mục bị loại bỏ | Không tính các mục đó là đã gửi. Kiểm tra cấu hình ghi nhận và tái hiện bằng một sự kiện thử nghiệm mới đã được duyệt. |
+
+Để điều tra vấn đề nói chung, dùng
+[Điều tra một vấn đề](/vi/guides/investigate-an-issue).

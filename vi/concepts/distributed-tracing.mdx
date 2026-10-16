@@ -1,0 +1,226 @@
+---
+title: "Distributed tracing: trace, span và ngữ cảnh"
+sidebarTitle: "Distributed tracing"
+description: "Tìm hiểu cách trace và span liên kết yêu cầu, log, vấn đề, hành động và chỉ số trong LogBrew."
+---
+
+Distributed tracing theo dõi một yêu cầu hoặc thao tác khi nó đi qua các dịch
+vụ đã gắn instrumentation. Một trace gom các span của công việc đó. Mỗi span là
+một thao tác có đo thời gian, chẳng hạn một yêu cầu HTTP, một lệnh gọi cơ sở dữ
+liệu, một thao tác hàng đợi hoặc một job chạy nền. Thiếu một span thì một phần
+đường đi sẽ không rõ.
+
+Dùng trace khi log báo lỗi nhưng không cho biết thao tác đã đi qua những đâu.
+Trace có thể cho thấy:
+
+- Thao tác nào đã bắt đầu yêu cầu.
+- Yêu cầu tốn thời gian ở đâu.
+- Thao tác con nào trả về lỗi.
+- Log, vấn đề, hành động và chỉ số nào có cùng trace ID.
+- Dịch vụ, môi trường và bản phát hành nào đã gửi từng span.
+
+## Các trường của trace và span
+
+| Trường | Ý nghĩa |
+| --- | --- |
+| `trace_id` | Xác định trace chứa span. |
+| `span_id` | Xác định một thao tác trong trace. |
+| `parent_span_id` | Nối thao tác con với thao tác đã bắt đầu nó. Span gốc không có giá trị này. |
+| `name` | Tên của thao tác, chẳng hạn một mẫu route. |
+| `operation` | Loại công việc, chẳng hạn `http.server` hoặc `db.query`. |
+| `status` | Kết quả được báo cáo, chẳng hạn `ok`, `error` hoặc `cancelled`. |
+| `started_at` | Thời điểm thao tác bắt đầu. |
+| `duration_ms` | Thời lượng chạy của thao tác, tính bằng mili giây. |
+| `service_name`, `environment`, `release` | Phạm vi của dịch vụ đã gửi span. |
+
+Span gốc bắt đầu một trace và không có span cha. Các span con có cùng trace ID,
+có span ID riêng và có parent ID. Chỉ các ID này mới nối các thao tác với nhau.
+Riêng dấu thời gian thì không nối được. LogBrew chỉ tính một span là span lỗi
+khi `status` của nó là `error`.
+
+## Một yêu cầu đi qua nhiều dịch vụ
+
+1. Dịch vụ web bắt đầu một span phía máy chủ cho route checkout.
+2. Client thanh toán tạo một span con cho yêu cầu HTTP gửi ra ngoài của nó.
+3. Dịch vụ thanh toán tiếp tục trace bằng span phía máy chủ của riêng nó.
+4. Một helper cơ sở dữ liệu ghi lại một span con cho thao tác ghi.
+5. Ứng dụng gửi một log lỗi an toàn bên trong span thanh toán đang hoạt động.
+
+Cả 5 bản ghi đều có cùng trace ID. Nếu một dịch vụ không nhận được ngữ cảnh
+trace, công việc của nó sẽ không thuộc trace đó, kể cả khi thời gian trùng nhau.
+
+## Truyền ngữ cảnh
+
+Các SDK của LogBrew dùng ngữ cảnh trace W3C. Ví dụ, khi nhận header
+`traceparent` hợp lệ, SDK Node.js tiếp tục trace đó bằng một span yêu cầu mới.
+Nếu header bị thiếu hoặc không hợp lệ, SDK bắt đầu một span gốc mới. Log, vấn đề, hành động và
+chỉ số được ghi nhận trong phạm vi yêu cầu đó đều mang trace của yêu cầu.
+
+Instrumentation cho yêu cầu gửi ra ngoài chỉ ghi header `traceparent` vào những
+đích bạn cấu hình, chẳng hạn `tracePropagationTargets`. Chỉ gửi ngữ cảnh trace
+đến các dịch vụ tin cậy đã gắn instrumentation. Trace ID dùng để liên kết tương
+quan giữa các thao tác. Nó không phải là cơ chế xác thực.
+
+Message trong hàng đợi cũng có thể mang ngữ cảnh trace. Trong Node.js, gọi
+`createLogBrewQueueTraceHeaders()` trong thao tác của producer để thêm header
+`traceparent` vào message. Ở phía consumer, truyền header đó vào
+`queueOperationWithLogBrewSpan()` dưới dạng `traceparent`. Xem
+[Trace hàng đợi trong JavaScript](/vi/guides/sdk-ingestion#javascript-queue-tracing).
+
+Các tích hợp cho yêu cầu đến và yêu cầu gửi ra ngoài của Node.js và Python không
+ghi body của yêu cầu hoặc phản hồi, query string, header tùy ý hoặc giá trị
+`traceparent` thô vào span. Đặt tên span theo mẫu route, không theo URL cụ thể.
+Để xem các tích hợp cho runtime của bạn, đọc
+hướng dẫn [Tích hợp SDK](/vi/guides/sdk-ingestion).
+
+## <span id="capture-spans">Span ghi nhận</span>
+
+LogBrew lưu mọi log, vấn đề, hành động và chỉ số mới kèm một trace ID. Nếu một
+tín hiệu không trỏ đến span nào trong cùng lần gửi, LogBrew thêm một span ghi
+nhận cho tín hiệu đó:
+
+| Trường | Giá trị |
+| --- | --- |
+| `name` | `log capture`, `issue capture`, `action capture` hoặc `metric capture` |
+| `operation` | `logbrew.log`, `logbrew.issue`, `logbrew.action` hoặc `logbrew.metric` |
+| `duration_ms` | `0` |
+| `parent_span_id` | Span đang hoạt động khi ứng dụng ghi nhận tín hiệu. Để trống khi không có span nào đang hoạt động. |
+| `status` | `error` cho một vấn đề, một log `error` hoặc `critical`, hoặc một hành động thất bại. Các trường hợp khác để trống. |
+| `attributes.logbrew.evidence` | `signal_capture` |
+
+Khi đó, `span_id` của tín hiệu xác định span ghi nhận của nó. Nếu tín hiệu không
+có ngữ cảnh trace, LogBrew tạo một trace ID mới cho nó. Trace đó cho thấy
+LogBrew đã lưu tín hiệu. Nó không cho thấy đường đi của một yêu cầu. Đừng coi các
+span ghi nhận trong cùng một trace là một yêu cầu.
+
+Span ghi nhận được tính vào `span_count` và `error_span_count`. Vì vậy, một log
+lỗi có thể khiến `--status error` chọn một trace mà trong đó không thao tác nào
+của ứng dụng thất bại. Đọc `operation` của từng span lỗi trước khi kết luận.
+
+## Đọc trace
+
+Dùng trace ID chính xác lấy từ log, vấn đề hoặc danh sách trace:
+
+```bash
+logbrew read traces --project "<project_id>" --status error --since 24h --json
+logbrew read trace "<trace_id>" --project "<project_id>" --json
+```
+
+`--status error` chọn các trace có ít nhất một span lỗi. `--status ok` chọn các
+trace không có span lỗi nào. `--min-duration-ms 500` chọn các trace chạy từ 500
+mili giây trở lên.
+
+Đọc thời lượng của span gốc trước. Sau đó xem các span con dài nhất và các trạng
+thái lỗi. Luôn để ý dự án, dịch vụ, môi trường và bản phát hành, để một trace từ
+staging không trở thành bằng chứng về production.
+
+Một trace chỉ cho thấy một lần thực thi, không phải mốc hiệu năng. Trước khi đề
+xuất thay đổi về hiệu năng, so sánh nhiều trace với xu hướng của chỉ số liên
+quan.
+
+### Tóm tắt trace
+
+`GET /api/telemetry/traces/{trace_id}/summary` trả về bản tóm tắt không kèm
+thuộc tính của span:
+
+| Trường | Ý nghĩa |
+| --- | --- |
+| `root_span` | Span sớm nhất có span cha không nằm trong trace. Nếu span nào cũng có span cha trong trace, đây là span sớm nhất. |
+| `slowest_child_span` | Span dài nhất có span cha. |
+| `slowest_path` | Chuỗi span cha đã biết, từ một span gốc đến span con chậm nhất. |
+| `error_spans` | Tối đa 5 span dài nhất có trạng thái `error`. |
+| `services` | Số span, số span lỗi và thời lượng của span dài nhất ở từng dịch vụ. |
+| `duration_ms` | Thời gian từ lúc span sớm nhất bắt đầu đến lúc span muộn nhất kết thúc. |
+
+Nếu `root_span.parent_span_id` có giá trị, span gốc thật không nằm trong trace.
+Đừng coi `root_span` là điểm bắt đầu của yêu cầu.
+
+### Giải thích trace
+
+`logbrew explain trace` trả về kết quả điều tra một trace:
+
+```bash
+logbrew explain trace "<trace_id>" --json
+```
+
+| Trường | Ý nghĩa |
+| --- | --- |
+| `analysis.status` | `errors_observed`, `latency_focus` hoặc `no_error_observed`. |
+| `analysis.first_error_span`, `analysis.first_error_path` | Span lỗi sớm nhất và chuỗi span cha đã biết của nó. |
+| `analysis.bottleneck_span`, `analysis.bottleneck_path` | Span dài nhất có span cha, và chuỗi span cha đã biết của nó. |
+| `correlations` | Các vấn đề, log, hành động và chỉ số có cùng trace ID. Mỗi danh sách có `status` và `truncated`. |
+| `evidence` | Các trường đã ghi nhận, chưa ghi nhận, đã che và bị cắt bớt. |
+| `next_actions` | Các lần đọc tiếp theo, theo thứ tự ưu tiên. |
+
+`analysis.causality` là `evidence_only`. Phân tích này không chứng minh nguyên
+nhân gốc. CLI yêu cầu phản hồi phiên bản 3, trong đó mỗi vấn đề, hành động và
+chỉ số liên quan cũng có `span_id` chính xác của nó.
+
+Để xem một span cùng span cha, các span con và ranh giới dịch vụ của nó, chạy:
+
+```bash
+logbrew explain span "<trace_id>" "<span_id>" --project "<project_id>" \
+  --environment production --release "<release>" --json
+```
+
+`topology.parent_chain_status` cho biết chuỗi span cha có đầy đủ hay không:
+
+| Giá trị | Ý nghĩa |
+| --- | --- |
+| `root` | Span không có parent ID. |
+| `complete` | Mọi span cha cho đến span gốc đều nằm trong trace. |
+| `missing` | Một parent ID trỏ đến span không nằm trong trace. |
+| `cycle` | Các parent ID tạo thành một vòng lặp. |
+| `truncated` | Giới hạn của phản hồi khiến chuỗi không đầy đủ. |
+| `unavailable` | Không đọc xong được trace. |
+
+## Thiếu ngữ cảnh trace
+
+Không phải sự kiện nào cũng có trace của yêu cầu tạo ra nó. Đọc trạng thái
+trace:
+
+| Trạng thái | Ý nghĩa |
+| --- | --- |
+| `available` | Có thể đọc bằng chứng trace chính xác. |
+| `not_linked` | Sự kiện không có trace ID. Một số sự kiện cũ không có trace ID. |
+| `not_found` | Sự kiện có trace ID, nhưng không có trace nào khớp với phạm vi đã chọn. |
+| `unavailable` | Không đọc được bằng chứng trace tại thời điểm đó. |
+
+`not_linked` không phải là lỗi. Một trace `available` cũng có thể cho thấy sự
+kiện không có ngữ cảnh yêu cầu. Nếu span ghi nhận của sự kiện không có
+`parent_span_id`, nghĩa là không có span nào đang hoạt động khi ứng dụng ghi
+nhận sự kiện. Công việc chạy nền bên ngoài phạm vi yêu cầu thường cho kết quả
+này. Để tìm liên kết bị thiếu:
+
+1. Đọc dự án, dịch vụ, môi trường, bản phát hành và thời điểm của sự kiện.
+2. Kiểm tra công việc có chạy bên trong một yêu cầu hoặc thao tác đã gắn
+   instrumentation hay không.
+3. Kiểm tra các tích hợp phía client và phía máy chủ có truyền ngữ cảnh qua ranh
+   giới đó hay không.
+4. Sau khi sửa instrumentation, ghi nhận một sự kiện mới và đọc nó.
+
+Phiên bản SDK mới không thêm ngữ cảnh trace vào các sự kiện đã gửi trước đó.
+Đừng liên kết một sự kiện với trace dựa vào dấu thời gian, route, nội dung
+thông điệp hoặc bản phát hành.
+
+## Lên kế hoạch trace cho một dự án
+
+Bắt đầu với một yêu cầu hoặc job quan trọng, chẳng hạn checkout. Gắn
+instrumentation cho từng ranh giới một:
+
+1. Tạo một span cho yêu cầu đến hoặc thao tác chạy nền.
+2. Thêm span con cho các lệnh gọi ra ngoài quan trọng.
+3. Tiếp tục ngữ cảnh trace W3C qua các ranh giới dịch vụ tin cậy.
+4. Gửi một log an toàn bên trong span đang hoạt động.
+5. Đọc log đó, mở trace ID của nó, rồi kiểm tra span gốc, các span con, dịch
+   vụ, môi trường, bản phát hành, trạng thái và thời lượng.
+
+Chỉ thêm ranh giới tiếp theo khi bước kiểm tra này đạt. Dùng chung một trace chỉ
+cho thấy tương quan. Nó không chứng minh rằng một span đã gây ra vấn đề.
+
+Để kiểm tra tên span, chạy
+`logbrew traces --project "<project_id>" --pagination cursor --json`. Đối tượng
+`naming_quality` đếm các trace trên trang kết quả đó có tên span gốc chung chung
+(`generic_name_traces`) hoặc có route không khớp (`unmatched_route_traces`).
+Nếu cách đặt tên cần xem lại, `naming_quality.next_action.code` là
+`improve_trace_naming`.

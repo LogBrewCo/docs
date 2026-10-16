@@ -1,0 +1,171 @@
+---
+title: "Xoay vòng khóa API: xoay vòng khóa gửi dữ liệu LogBrew"
+sidebarTitle: "Xoay vòng khóa gửi dữ liệu"
+description: "Xoay vòng khóa gửi dữ liệu LogBrew. Kiểm tra khóa thay thế trước khi thu hồi theo kế hoạch. Khắc phục lỗi mà không làm lộ thông tin xác thực."
+---
+
+Xoay vòng là thay khóa gửi dữ liệu của dự án bằng một khóa mới. Việc này không
+thay đổi dự án hoặc telemetry đã lưu. Quản lý khóa bằng xác thực tài khoản. Khóa
+gửi dữ liệu chỉ gửi được telemetry. Khóa này không dùng để quản lý khóa.
+
+Trước khi bắt đầu, [cài CLI và đăng nhập](/vi/guides/cli). Đặt
+`LOGBREW_PROJECT_ID` thành UUID của dự án. Đặt `LOGBREW_API_URL` thành
+`https://api.logbrew.co`. Các ví dụ dùng Bash, curl 7.76.0 trở lên và jq.
+
+Với lần xoay vòng theo kế hoạch, tạo, triển khai và kiểm tra khóa thay thế
+trước khi thu hồi khóa cũ. Đặt chu kỳ xoay vòng trong chính sách bảo mật của
+bạn. Nếu khóa có ngày hết hạn, thay khóa trước ngày đó.
+
+<Warning>
+  Khóa bị lộ là một sự cố bảo mật. Thu hồi khóa ngay lập tức, kể cả khi khóa
+  thay thế chưa được triển khai. Ứng dụng vẫn dùng khóa đã bị thu hồi sẽ không
+  gửi được telemetry.
+</Warning>
+
+<Steps>
+  <Step title="Tạo khóa thay thế">
+    `POST /api/projects/{project_id}/ingest-keys` nhận `label` không rỗng, dài
+    tối đa 120 ký tự. `kind` là `cli`, `sdk`, `browser`, `server` hoặc
+    `artifact`. Khóa `artifact` không gửi được telemetry. `expires_at` không bắt
+    buộc và phải là thời điểm RFC3339 trong tương lai.
+
+    Dùng cùng `kind` với khóa cũ. CLI dùng `sdk` khi bạn bỏ `--kind`, và dùng
+    `CLI-created SDK key` khi bạn bỏ `--label`. CLI không có flag đặt ngày hết hạn.
+    Để đặt `expires_at`, dùng API.
+
+    CLI lưu token dùng một lần vào một tệp mới mà chỉ chủ sở hữu truy cập được,
+    nằm ngoài hệ thống quản lý mã nguồn. CLI in metadata, không in token:
+
+    ```bash
+    : "${LOGBREW_PROJECT_ID:?set LOGBREW_PROJECT_ID}" &&
+    : "${LOGBREW_REPLACEMENT_KEY_FILE:?choose a new private key file}" &&
+    logbrew projects keys create "$LOGBREW_PROJECT_ID" \
+      --ingest-key-file "$LOGBREW_REPLACEMENT_KEY_FILE" \
+      --label "checkout production rotation" --kind server --json
+    ```
+
+    Chỉ tiếp tục sau khi lệnh thành công. Đặt `NEW_KEY_ID` thành
+    `ingest_key.id` được trả về.
+
+    Nếu kết quả không chắc chắn, chạy lại đúng lệnh đó. CLI dùng lại khóa thử
+    lại đang chờ của nó. Không dùng `--abandon-retry` cho lần thử lại này.
+
+    Client gọi API trực tiếp chỉ nhận token một lần trong phản hồi. Để thử lại,
+    gửi cùng header `Idempotency-Key` với cùng body. Trong 24 giờ, lần thử lại
+    đó trả về cùng một khóa. Không bao giờ in, commit hoặc chia sẻ token.
+  </Step>
+
+  <Step title="Triển khai khóa mới khi khóa cũ vẫn hoạt động">
+    Đặt token mới vào cài đặt triển khai được bảo vệ. Triển khai ứng dụng. Giữ
+    khóa cũ ở trạng thái hoạt động. Không để cả hai token xuất hiện trong mã
+    nguồn, đầu ra build và log.
+  </Step>
+
+  <Step title="Gửi một sự kiện giả lập">
+    Nạp token mới vào biến shell `new_ingest_key`. Không in token. Gửi một log
+    giả lập bằng khóa mới, rồi đọc lại log đó:
+
+    ```bash
+    occurred_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+
+    curl --fail-with-body -sS "$LOGBREW_API_URL/api/telemetry/ingest" \
+      -H "Authorization: Bearer $new_ingest_key" \
+      -H "Content-Type: application/json" \
+      --data @- <<JSON &&
+    {
+      "project_id": "$LOGBREW_PROJECT_ID",
+      "environment": "production",
+      "release": "ingest-key-rotation@1",
+      "service_name": "checkout-api",
+      "sdk_name": "native-api",
+      "sdk_version": "0.1.0",
+      "items": [
+        {
+          "type": "log",
+          "data": {
+            "level": "info",
+            "message": "ingest key rotation check",
+            "source": "setup",
+            "attributes": {},
+            "occurred_at": "$occurred_at"
+          }
+        }
+      ]
+    }
+    JSON
+
+    logbrew read logs --project "$LOGBREW_PROJECT_ID" \
+      --release ingest-key-rotation@1 \
+      --environment production \
+      --since "$occurred_at" \
+      --json
+    ```
+
+    Chỉ tiếp tục khi lần đọc trả về đúng log này với cùng `occurred_at`. Một log
+    kiểm tra xoay vòng cũ hơn không chứng minh khóa mới hoạt động. Đồng thời xác
+    nhận ứng dụng đã triển khai có gửi telemetry. Nếu một lệnh thất bại, dừng
+    lại và đọc phản hồi. Giữ khóa cũ hoạt động, trừ khi khóa đó đã bị lộ.
+  </Step>
+
+  <Step title="Liệt kê metadata khóa không chứa thông tin bí mật">
+    Đặt `LOGBREW_ACCOUNT_BEARER` từ xác thực tài khoản của bạn. Tìm ID của khóa
+    cũ. Xác nhận `NEW_KEY_ID` đang ở trạng thái `active`:
+
+    ```bash
+    (
+      set -o pipefail
+      curl --fail-with-body -sS "$LOGBREW_API_URL/api/projects/$LOGBREW_PROJECT_ID/ingest-keys" \
+        -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+        | jq -e 'select(type == "array") | map({id, label, kind, token_prefix, status, created_at, expires_at, revoked_at})'
+    )
+    ```
+
+    Phản hồi là một mảng metadata khóa, không chứa token. Trạng thái là
+    `active`, `expired` hoặc `revoked`. Khóa chuyển sang `expired` khi đã qua
+    thời điểm `expires_at`.
+  </Step>
+
+  <Step title="Chỉ thu hồi khóa cũ">
+    Đặt `OLD_KEY_ID` từ danh sách. Lệnh chỉ thu hồi khóa cũ khi hai ID khác
+    nhau:
+
+    ```bash
+    if [ -n "${OLD_KEY_ID:-}" ] && [ -n "${NEW_KEY_ID:-}" ] \
+      && [ "$OLD_KEY_ID" != "$NEW_KEY_ID" ]; then
+      (
+        set -o pipefail
+        curl --fail-with-body -sS -X DELETE \
+          "$LOGBREW_API_URL/api/projects/$LOGBREW_PROJECT_ID/ingest-keys/$OLD_KEY_ID" \
+          -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+          | jq -e --arg id "$OLD_KEY_ID" \
+            'select(.id == $id and .status == "revoked") | {id, label, kind, token_prefix, status, created_at, expires_at, revoked_at}'
+      )
+    else
+      printf '%s\n' 'Set different old and replacement key IDs before revocation.' >&2
+      false
+    fi
+    ```
+
+    `DELETE` có tính idempotent: gửi lại cùng yêu cầu không gây thêm thay đổi.
+    Lệnh trả về metadata khóa với `status: "revoked"` và `revoked_at` đã được
+    đặt. Bạn có thể lặp lại lệnh một cách an toàn sau khi nhận phản hồi không
+    chắc chắn.
+
+    Chạy `unset new_ingest_key`. Xử lý tệp khóa theo chính sách quản lý thông tin
+    bí mật của bạn.
+  </Step>
+</Steps>
+
+## Khôi phục an toàn
+
+| Phản hồi | Bước tiếp theo |
+| --- | --- |
+| `404`, `code: "not_found"` | Xác nhận tài khoản sở hữu dự án và các ID khóa. Làm theo `next_action.code: "check_resource"`. Không thử các ID khác. |
+| `code: "validation_failed"` | Sửa trường, giá trị hoặc dấu thời gian được nêu tên. Làm theo `next` và `next_action`. |
+| `401` hoặc `403` khi quản lý khóa | Dùng xác thực tài khoản, không dùng khóa gửi dữ liệu. |
+| `401`, `code: "ingest_key_invalid"` trên yêu cầu gửi dữ liệu | Khóa đã bị thu hồi, đã hết hạn hoặc không hợp lệ cho telemetry. Dùng khóa mới đang hoạt động của dự án đã chọn. Làm theo `next_action.code: "configure_ingest_key"`. |
+| `401` hoặc `403` trên yêu cầu gửi dữ liệu | Dùng khóa gửi dữ liệu mới của dự án đã chọn. Không dùng thông tin xác thực tài khoản. |
+
+Nếu xoay vòng vẫn thất bại, [báo cáo sự cố](/vi/guides/report-a-problem). Chỉ
+chia sẻ metadata khóa. Không đưa vào thông tin xác thực, header, telemetry thô,
+dữ liệu khách hàng, đường dẫn cục bộ hoặc mã nguồn.

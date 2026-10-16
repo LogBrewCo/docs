@@ -1,0 +1,222 @@
+---
+title: "Khắc phục sự cố ứng dụng: tìm log ứng dụng bị thiếu"
+sidebarTitle: "Khắc phục sự cố"
+description: "Khắc phục tình trạng thiếu log ứng dụng, lỗi thiết lập dự án, bộ lọc, bằng chứng vấn đề và liên kết trace bằng các bước kiểm tra an toàn của LogBrew."
+---
+
+Dùng trang này khi telemetry bị thiếu, không đầy đủ hoặc quá rộng. Kiểm tra quyền
+truy cập trước. Sau đó, giữ cố định dự án, dịch vụ, bản phát hành, môi trường và
+khoảng thời gian trong khi tìm nguyên nhân.
+
+<Note>
+  Thêm `--json` cho quy trình làm việc của agent. Lần kiểm tra thất bại trả về
+  trường `next` ổn định.
+</Note>
+
+## Bắt đầu với các bước kiểm tra nhanh
+
+| Triệu chứng | Kiểm tra đầu tiên | Bước tiếp theo |
+| --- | --- | --- |
+| CLI chưa đăng nhập | `logbrew status --json` | Một người tự chạy `logbrew login`. |
+| Thiếu một dự án | `logbrew projects --json` | Dùng ID từ danh sách dự án. |
+| Trạng thái thiết lập không rõ | `logbrew doctor --project "<project_id>" --json` | Làm theo giá trị `next` được trả về. |
+| Log trống | Đọc log theo đúng dự án và khoảng thời gian | Kiểm tra riêng các loại tín hiệu khác. |
+| Kết quả quá rộng | Thêm bộ lọc dự án, dịch vụ, bản phát hành và môi trường | Giữ cùng phạm vi trong mỗi lần đọc. |
+| Thiếu trace | Đọc chi tiết vấn đề | Chỉ đọc trace khi phản hồi có trace ID. |
+| Khung JavaScript hiển thị mã đã build | Kiểm tra cặp bản dựng và source map | Làm theo [Source map JavaScript](/vi/guides/source-maps). |
+| Agent MCP không đọc được dự án | Kiểm tra các dự án đã duyệt | Làm theo [Khắc phục sự cố kết nối](/vi/guides/mcp#fix-connection-problems). |
+
+## <span id="recover-missing-first-telemetry">Khôi phục telemetry đầu tiên bị thiếu</span>
+
+Chạy các lệnh chỉ đọc này trước khi thay đổi cấu hình SDK:
+
+```bash
+logbrew version --json
+logbrew status --json
+logbrew projects --json
+logbrew doctor --project "<project_id>" --json
+```
+
+`logbrew doctor` kiểm tra quyền truy cập API, xác thực, dự án, khóa gửi dữ liệu,
+thiết lập, telemetry và khả năng hiển thị log. Lệnh này không thay đổi dự án.
+Đọc `status` tổng thể và từng mục kiểm tra trong báo cáo. Xem
+[Đọc báo cáo doctor của dự án](/vi/reference/cli#read-a-project-doctor-report).
+Mã thoát `0` không có nghĩa là mọi mục kiểm tra đều đạt.
+
+| Trạng thái doctor | Bước tiếp theo |
+| --- | --- |
+| `needs_ingest_key` | Tạo khóa gửi dữ liệu theo phạm vi dự án. Xem [Xoay vòng khóa gửi dữ liệu](/vi/guides/rotate-ingest-key). |
+| `needs_setup` | Hoàn tất thiết lập SDK. Xem [Tích hợp SDK](/vi/guides/sdk-ingestion). |
+| `needs_telemetry` | Gửi một sự kiện thử nghiệm an toàn từ ứng dụng, rồi chạy lại doctor. |
+| `ready` | Đọc log, vấn đề, bản phát hành hoặc trace gần đây. |
+
+Báo cáo cũng có thể có trạng thái `auth_invalid`, `project_missing`,
+`api_unreachable` hoặc `check_failed`. Mục
+[Đọc báo cáo doctor của dự án](/vi/reference/cli#read-a-project-doctor-report)
+nêu bước tiếp theo cho từng trạng thái.
+
+Dự án `ready` vẫn có thể không có log, vì mỗi loại tín hiệu là riêng biệt. Mục
+kiểm tra `logs` có thể là `empty` hoặc `unavailable`. Lần đọc log thất bại không
+phải là kết quả trống.
+
+### Gửi một sự kiện thử nghiệm an toàn
+
+Gửi một log thử nghiệm có thông điệp duy nhất từ SDK đã cài. Không đưa vào token,
+dữ liệu người dùng hoặc body yêu cầu. Ghi lại ID dự án, dịch vụ, môi trường, bản
+phát hành, thời điểm bắt đầu theo UTC và phiên bản SDK. Chờ gửi xong, rồi đọc một
+khoảng thời gian ngắn trong cùng dự án. Không gửi thêm sự kiện thử nghiệm khi
+việc gửi vẫn đang chờ.
+
+## Tìm log bị thiếu
+
+Đọc một phạm vi nhỏ và chính xác trước:
+
+```bash
+logbrew read releases --project "<project_id>" --environment production --json
+logbrew read logs --project "<project_id>" --environment production \
+  --release checkout@1 --since 1h --limit 20 --json
+```
+
+Kiểm tra các mục này theo thứ tự:
+
+1. ID dự án thuộc về ứng dụng đã gửi sự kiện.
+2. Dịch vụ, bản phát hành và môi trường khớp chính xác, kể cả chữ hoa, chữ
+   thường và khoảng trắng.
+3. Khoảng thời gian chứa thời điểm của sự kiện. LogBrew trả về thời điểm sự kiện
+   theo UTC. `--until` là cận trên và không được tính vào khoảng.
+4. Không có bộ lọc tìm kiếm hoặc bộ lọc mức độ nghiêm trọng nào làm ẩn sự kiện.
+5. Ứng dụng đã gửi đúng loại tín hiệu mà bạn đọc. Log không tạo ra vấn đề hoặc
+   trace.
+
+Nếu vẫn không thấy sự kiện, bỏ từng bộ lọc một:
+
+1. Giữ dự án và mở rộng khoảng thời gian.
+2. Bỏ bộ lọc bản phát hành.
+3. Bỏ bộ lọc môi trường.
+4. Bỏ bộ lọc dịch vụ.
+5. Bỏ bộ lọc tìm kiếm và bộ lọc mức độ nghiêm trọng.
+
+Dừng lại khi sự kiện xuất hiện. Bộ lọc cuối cùng mà bạn vừa bỏ không khớp với
+cấu hình ứng dụng. Không đọc tất cả dự án thay cho dự án đã cấu hình.
+
+| Kết quả | Ý nghĩa | Kiểm tra tiếp theo |
+| --- | --- | --- |
+| Không có dòng nào trong một dự án | Không có kết quả khớp trong phạm vi đó | Kiểm tra thời gian và bộ lọc. |
+| Có log nhưng không có vấn đề | Không có lỗi đã gộp nhóm nào khớp với bộ lọc | Kiểm tra ứng dụng có gửi lỗi không. |
+| Vấn đề không có trace | Lần xảy ra không có liên kết trace dùng được | Đọc trạng thái trace trong kết quả điều tra vấn đề. |
+| Có bản phát hành nhưng không có log | Bản phát hành có các tín hiệu khác, nhưng không có log trong phạm vi đó | So sánh số đếm trong `logbrew read releases`. Đọc từng loại tín hiệu trong cùng dự án. |
+| Sự kiện xuất hiện sau khi bỏ một bộ lọc | Bộ lọc đó đã loại sự kiện | Sửa bộ lọc hoặc giá trị trong ứng dụng. |
+
+Một trang kết quả không phải là tổng số. Với `--pagination cursor`, tiếp tục
+bằng `next_cursor` được trả về và giữ nguyên bộ lọc. Xem
+[Phân trang bằng cursor](/vi/reference/telemetry-api-filters#cursor-pagination).
+
+### Kiểm tra giao diện bảng điều khiển
+
+Bảng điều khiển hiển thị snapshot (dữ liệu tại thời điểm đọc) của từng danh
+sách. Trong giao diện log, bật **Trực tiếp** để thêm log mới khi log đến. Các
+giao diện khác không cập nhật trực tiếp. Tải lại trang để lấy snapshot mới.
+Snapshot cũ khác với kết quả trống.
+
+LogBrew chỉ lưu telemetry mà ứng dụng gửi. Xóa thông tin xác thực, body yêu cầu,
+giá trị query và dữ liệu cá nhân trước khi gửi. Dùng
+[Kiểm soát dữ liệu ghi nhận](/vi/guides/safe-capture) để kiểm tra các trường mà bạn
+chọn.
+
+## Kiểm tra vấn đề và trace
+
+Dùng ID vấn đề hoặc trace ID mà LogBrew đã trả về. Không bao giờ tự đặt ra ID.
+
+```bash
+logbrew read issues --project "<project_id>" --environment production \
+  --status unresolved --since 24h --json
+logbrew read issue "<issue_id>" --json
+logbrew read trace "<trace_id>" --project "<project_id>" --json
+logbrew read logs --trace "<trace_id>" --project "<project_id>" --json
+```
+
+`--status` nhận `unresolved`, `resolved` và `archived`. `ignored` chọn cùng các
+vấn đề như `archived`.
+
+Trạng thái vấn đề và trạng thái trace là hai thứ khác nhau. Các giá trị trạng
+thái trace `not_linked`, `not_found` và `unavailable` có ý nghĩa khác nhau. Xem
+[Điều tra một vấn đề](/vi/guides/investigate-an-issue) để biết từng giá trị. Đọc vấn
+đề và log của vấn đề trước khi giải quyết, lưu trữ hoặc mở lại vấn đề.
+
+## Xử lý lỗi CLI và API
+
+Ở chế độ JSON, lỗi CLI chứa `ok`, `error`, `message` và `next`:
+
+```json
+{
+  "ok": false,
+  "error": "not_logged_in",
+  "message": "not logged in: run logbrew login",
+  "next": "run logbrew login"
+}
+```
+
+Khi API trả về lỗi, `error` là `api_error`. Lỗi cũng có `status` (mã trạng thái
+HTTP), `api_code` (`code` của API), `api_error` và `api_next`. Với lỗi
+`rate_limited`, lỗi còn có `retry_after_seconds`. CLI không tự động thử lại.
+
+| Trạng thái hoặc lỗi | Cách khôi phục |
+| --- | --- |
+| `not_logged_in` hoặc HTTP `401` | Một người tự chạy `logbrew login`. Sau đó thử đọc lại. |
+| HTTP `403` | Dùng đúng thông tin xác thực cho dự án. Thay đổi vấn đề còn cần quyền quản lý vấn đề trong dự án. Không hiển thị giá trị thông tin xác thực. |
+| HTTP `404` | Dùng ID dự án, vấn đề hoặc trace hiện hành lấy từ một phản hồi. |
+| HTTP `422` | Sửa trường được nêu tên. |
+| HTTP `429` với `rate_limited` | Chờ `retry_after_seconds`, rồi thử lại một lần. |
+| HTTP `429` với mã khác | Dừng thử lại tự động. Làm theo `api_next`. |
+| HTTP `5xx` | Chờ, thử lại một lần đọc, và báo cáo sự cố nếu lỗi vẫn tiếp diễn. |
+
+Xem [Lỗi API](/vi/reference/api-errors) để biết từng mã lỗi.
+
+## <span id="secure-a-compromised-account">Bảo vệ tài khoản bị xâm nhập</span>
+
+Nếu người khác có thể đang giữ access token, refresh token hoặc cookie phiên của
+tài khoản, đăng xuất mọi client LogBrew. Làm theo quy trình
+[đăng xuất toàn tài khoản](/vi/reference/account-api#every-logbrew-login). Một
+người phải tự phê duyệt thao tác này. `logbrew logout` và đăng xuất trên trình
+duyệt chỉ kết thúc một client, nên không đủ.
+
+Đăng xuất toàn tài khoản cũng dừng mọi kết nối MCP đã được phê duyệt trước đó.
+Sau khi thành công, xóa thông tin xác thực LogBrew cục bộ trên từng client và
+đăng nhập lại từ một client tin cậy. Chỉ phê duyệt lại các MCP client sau khi bạn
+tin tưởng chúng. Nếu mất phản hồi, không báo rằng mọi client đã đăng xuất và
+không tự động lặp lại yêu cầu.
+
+Đăng xuất toàn tài khoản không xoay vòng khóa gửi dữ liệu của dự án. Nếu khóa gửi
+dữ liệu đã bị lộ, [xoay vòng khóa gửi dữ liệu](/vi/guides/rotate-ingest-key).
+
+## Khắc phục sự cố an toàn
+
+Dùng thông tin xác thực truy cập tài khoản cho các lần đọc bằng CLI. Chỉ dùng
+thông tin xác thực gửi dữ liệu theo phạm vi dự án cho các lần ghi từ SDK. Không
+đưa token, header authorization, log thô, dữ liệu khách hàng, body yêu cầu, đường
+dẫn cục bộ hoặc mã nguồn vào lệnh, cuộc trò chuyện hoặc yêu cầu hỗ trợ.
+
+Trước khi báo cáo sự cố, lặp lại một lần đọc với phạm vi nhỏ nhất mà vẫn còn lỗi.
+Ghi lại lệnh (không kèm giá trị thông tin xác thực), mã lỗi, ID dự án và các giá
+trị bộ lọc. Nếu các bước kiểm tra không khắc phục được lỗi,
+[báo cáo sự cố](/vi/guides/report-a-problem).
+
+## Trang liên quan
+
+<CardGroup cols={2}>
+  <Card title="Bắt đầu nhanh" icon="rocket" href="/vi/quickstart">
+    Gửi và đọc sự kiện an toàn đầu tiên.
+  </Card>
+
+  <Card title="Dùng CLI" icon="square-terminal" href="/vi/guides/cli">
+    Dùng bộ lọc chính xác và đầu ra JSON.
+  </Card>
+
+  <Card title="Điều tra một vấn đề" icon="search" href="/vi/guides/investigate-an-issue">
+    Đọc bằng chứng của vấn đề trước khi đổi trạng thái.
+  </Card>
+
+  <Card title="Lỗi API" icon="triangle-alert" href="/vi/reference/api-errors">
+    Cách khôi phục cho từng mã lỗi.
+  </Card>
+</CardGroup>

@@ -1,0 +1,267 @@
+---
+title: "Hướng dẫn thiết lập theo dõi sự kiện cho Node.js"
+sidebarTitle: "Ghi nhận sự kiện sản phẩm"
+description: "Gửi sự kiện sản phẩm đã phân loại từ Node.js, kèm người dùng có khai báo loại và phiên. Chạy thử ghi nhận cục bộ, rồi đọc kết quả bằng CLI."
+---
+
+Dùng sự kiện sản phẩm để ghi lại các hành động có tên của người dùng trong ứng
+dụng, như mở trang thanh toán hoặc hoàn tất mua hàng. SDK không cài trình lắng
+nghe lượt nhấp và không thu thập nội dung biểu mẫu. Mã của bạn tự ghi lại từng
+sự kiện.
+
+Để biết quy tắc đếm và các loại báo cáo, xem
+[Phân tích sản phẩm](/vi/concepts/product-analytics).
+
+## Chuẩn bị chạy thử
+
+Dùng một ứng dụng Node.js 18 trở lên và một dự án LogBrew mà bạn có quyền đọc.
+Nếu bạn chưa từng gửi telemetry, làm theo hướng dẫn
+[Bắt đầu nhanh](/vi/quickstart) trước. Tách lần chạy thử này khỏi hoạt động
+của khách hàng.
+
+Cài các gói trong thư mục ứng dụng:
+
+```bash
+npm install @logbrew/sdk@0.1.28 @logbrew/node@0.1.12
+```
+
+Dùng khóa gửi dữ liệu phía máy chủ của dự án. Lưu khóa trong
+`LOGBREW_SERVER_API_KEY`, không đưa vào hệ thống quản lý mã nguồn. Không bao
+giờ đặt khóa phía máy chủ vào bundle trình duyệt. Access token của tài khoản
+dùng để đọc kết quả. Token này không dùng để cấu hình SDK.
+
+## Xác định ý nghĩa của một sự kiện
+
+Bắt đầu từ một câu hỏi về sản phẩm. Ví dụ: người dùng có gửi đơn thanh toán
+sau khi mở trang thanh toán không? Đặt cho mỗi sự kiện một tên cố định, một
+điều kiện kích hoạt chính xác và một vị trí duy nhất trong ứng dụng ghi lại nó.
+
+| Tên sự kiện | Điều kiện kích hoạt |
+| --- | --- |
+| `checkout.opened` | Ứng dụng mở trang thanh toán. Đây không phải là một lần mua hàng. |
+| `checkout.submitted` | Ứng dụng chấp nhận thao tác gửi đơn. Đây không phải là thanh toán thành công. |
+| `checkout.completed` | Ứng dụng xác nhận đã hoàn tất. Không ghi sự kiện này cho mỗi lượt nhấp hoặc mỗi lần thử lại yêu cầu mạng. |
+
+Giữ tên sự kiện ổn định qua các bản phát hành và các ngôn ngữ. Không tạo tên
+từ địa chỉ email, số đơn hàng, URL hoặc văn bản do người dùng nhập.
+
+Dùng thuộc tính tùy chỉnh với một tập nhỏ giá trị đã duyệt. Ví dụ,
+`checkout_mode` có thể là `guest` hoặc `signed_in`. Không thêm tên sự kiện mới
+cho mỗi giá trị. Không gửi nội dung biểu mẫu.
+
+Chỉ ghi lại mỗi hành động nghiệp vụ ở một nơi. Nếu cả trình duyệt và máy chủ
+cùng ghi lại một hành động, tổng số sẽ tăng gấp đôi.
+
+## Dùng đúng loại hoạt động
+
+| Loại | Ý nghĩa | Cách ghi nhận |
+| --- | --- | --- |
+| `interaction` | Hành động sản phẩm do ứng dụng định nghĩa. | `createProductActionAttributes`, như bên dưới. |
+| `page_view` | Lượt xem trang trên trình duyệt. | Tính năng ghi nhận lượt xem trang của SDK trình duyệt. |
+| `screen_view` | Lượt xem màn hình trong ứng dụng. | Hàm hỗ trợ ghi nhận lượt xem màn hình trên di động. |
+
+`createProductActionAttributes` đặt `analyticsSchemaVersion: 1` và
+`analyticsKind: "interaction"` trong metadata của sự kiện. Mẫu route (route
+template) hoặc tên màn hình mà bạn truyền vào sẽ đặt `analyticsSurface`. Dùng
+mẫu route, như `/orders/:id`, không dùng URL cụ thể.
+
+Tên sự kiện không quyết định loại. Một tương tác có tên `page_view` vẫn là
+tương tác. Log, vấn đề và span không phải là sự kiện sản phẩm. Với các runtime
+khác, xem [Tích hợp SDK](/vi/guides/sdk-ingestion).
+
+## <span id="set-users-and-sessions-on-each-event">Đặt người dùng và phiên cho từng sự kiện</span>
+
+- Với người dùng đã đăng nhập, đặt `context.subject` thành một ID ổn định với
+  `kind: "user"`.
+- Với khách truy cập ẩn danh, dùng một ID riêng với `kind: "anonymous"`.
+- Đặt ID phiên của ứng dụng vào `context.session.id`. Dùng lại ID này trong
+  suốt phiên.
+
+Không bao giờ dùng tên, địa chỉ email, địa chỉ IP hoặc access token làm ID. ID
+ổn định liên kết các hành động của một người dùng. ID này không làm cho dữ liệu
+trở thành ẩn danh.
+
+Không đặt người dùng hoặc phiên mặc định trên client dùng chung ở máy chủ.
+Truyền chủ thể và phiên của yêu cầu đã tạo ra từng sự kiện. SDK không tạo các
+ID này và không phát hiện việc đăng nhập, đăng xuất hoặc chuyển tài khoản.
+LogBrew không gộp chủ thể ẩn danh vào người dùng sau khi đăng nhập.
+
+## Chạy ví dụ trên máy cục bộ
+
+Lưu ví dụ này thành `product-events.mjs`. Ví dụ ghi lại 5 hành động thử nghiệm
+qua các lượt truy cập ẩn danh, các lần đăng nhập và 2 người dùng. Client chỉ
+giữ ngữ cảnh dịch vụ và triển khai dùng chung. Lần chạy thử này tắt việc tự
+động gửi.
+
+```js
+import { randomUUID } from "node:crypto";
+import { createProductActionAttributes, SdkError } from "@logbrew/sdk";
+import { createLogBrewNodeClient } from "@logbrew/node";
+
+try {
+  const client = createLogBrewNodeClient({
+    automaticDelivery: false,
+    context: {
+      schemaVersion: 1,
+      resource: {
+        service: { name: "analytics-check", version: "analytics@1" },
+        deployment: { environment: "development", release: "analytics@1" }
+      }
+    }
+  });
+  const startedAt = new Date().toISOString();
+  client.release(randomUUID(), startedAt, { version: "analytics@1" });
+  client.environment(randomUUID(), startedAt, { name: "development" });
+
+  function record(name, subject, sessionId) {
+    client.action(randomUUID(), new Date().toISOString(), {
+      ...createProductActionAttributes({
+        name,
+        routeTemplate: "/checkout",
+        metadata: { checkout_mode: subject.kind === "user" ? "signed_in" : "guest" }
+      }),
+      context: { schemaVersion: 1, subject, session: { id: sessionId } }
+    });
+  }
+
+  record("checkout.opened", { id: "anon_demo_a", kind: "anonymous" }, randomUUID());
+  const userSession = randomUUID();
+  record("checkout.submitted", { id: "user_demo_a", kind: "user" }, userSession);
+  record("checkout.completed", { id: "user_demo_a", kind: "user" }, userSession);
+  record("checkout.opened", { id: "anon_demo_b", kind: "anonymous" }, randomUUID());
+  record("checkout.submitted", { id: "user_demo_b", kind: "user" }, randomUUID());
+
+  if (process.argv.includes("--send")) {
+    const response = await client.shutdown();
+    console.log(JSON.stringify({
+      mode: "sent",
+      status_code: response.statusCode,
+      attempts: response.attempts
+    }));
+  } else {
+    const batch = JSON.parse(client.previewJson());
+    const actions = batch.events.filter(event => event.type === "action");
+    console.log(JSON.stringify({
+      mode: "local_preview",
+      actions: actions.length,
+      kinds: [...new Set(actions.map(event => event.attributes.metadata.analyticsKind))],
+      dropped: client.droppedEvents()
+    }));
+  }
+} catch (error) {
+  console.error(JSON.stringify({
+    ok: false,
+    error: error instanceof SdkError ? error.code : "capture_failed"
+  }));
+  process.exitCode = 1;
+}
+```
+
+Chạy script không kèm `--send`. Lệnh này không gửi yêu cầu nào:
+
+```bash
+LOGBREW_SERVER_API_KEY=local-preview-only node product-events.mjs
+```
+
+Kết quả mong đợi:
+
+```json
+{"mode":"local_preview","actions":5,"kinds":["interaction"],"dropped":0}
+```
+
+Các điểm đánh dấu bản phát hành và môi trường không phải là hành động sản phẩm.
+Kết quả này chỉ cho thấy hàng đợi cục bộ. Nó không cho thấy LogBrew đã nhận
+các sự kiện. Không in `previewJson()` trong ứng dụng có ngữ cảnh khách hàng
+thật.
+
+## Xử lý đăng nhập và đăng xuất
+
+- Trước khi đăng nhập, gửi chủ thể ẩn danh hiện tại kèm mỗi sự kiện.
+- Sau khi đăng nhập, gửi ID ổn định của người dùng với loại `user`.
+- Khi đăng xuất, ngừng dùng ngữ cảnh của người dùng đó. Tạo chủ thể ẩn danh mới
+  theo chính sách quyền riêng tư của bạn.
+- Khi chuyển tài khoản, dùng ID của người dùng mới.
+
+Ví dụ bắt đầu một phiên mới khi danh tính thay đổi. Chọn quy tắc phiên của
+riêng bạn và áp dụng cho từng sự kiện. Ngữ cảnh của sự kiện thay thế chủ thể và
+phiên của client cho sự kiện đó. Nếu sự kiện bỏ trống một trong hai giá trị,
+sự kiện sẽ dùng giá trị của client. Vì vậy, ví dụ không đặt chủ thể hoặc phiên
+cho client. Với tác vụ chạy sau, giữ danh tính của người dùng đã khởi chạy tác
+vụ đó.
+
+## Gửi một lần và đọc kết quả
+
+Đặt khóa phía máy chủ của dự án thử nghiệm vào biến môi trường của tiến trình.
+Chạy lệnh này một lần:
+
+```bash
+node product-events.mjs --send
+```
+
+Mỗi lần chạy tạo ID sự kiện mới, nên lần chạy thứ hai sẽ thêm 5 sự kiện nữa.
+Nếu tiến trình thất bại, kết quả in ra chứa mã lỗi SDK. Khóa bị từ chối cho kết
+quả:
+
+```json
+{"ok":false,"error":"unauthenticated"}
+```
+
+Đảm bảo khóa gửi dữ liệu đang hoạt động và thuộc dự án thử nghiệm. Đăng nhập
+vào tài khoản không sửa được khóa SDK. Với các lỗi khác, xem
+[Lỗi API](/vi/reference/api-errors) và
+[Khắc phục sự cố](/vi/guides/troubleshooting).
+
+Sau khi LogBrew chấp nhận batch, tìm các sự kiện trên bảng điều khiển:
+
+1. Mở **Phân tích**.
+2. Trong **Dự án**, chọn dự án thử nghiệm.
+3. Trong **Khoảng thời gian**, chọn **24 giờ**.
+4. Tìm 3 tên sự kiện trong **Sự kiện hàng đầu** và `/checkout` trong
+   **Trang và màn hình hàng đầu**.
+
+Hoạt động khác trong dự án sẽ làm thay đổi các tổng số này. Để kiểm tra chính
+xác theo dịch vụ, bản phát hành và môi trường, đọc bản tổng quan bằng
+[CLI](/vi/guides/cli) đã đăng nhập:
+
+```bash
+logbrew analytics overview --project "<project_id>" --since 1h \
+  --service analytics-check --release analytics@1 \
+  --environment development --json
+```
+
+Với một lần chạy trong khoảng thời gian không có hoạt động nào khác, kết quả
+mong đợi là:
+
+- 5 tương tác, tất cả đều có ngữ cảnh phiên, tại trang `/checkout`.
+- 3 sự kiện từ người dùng và 2 sự kiện từ chủ thể ẩn danh.
+- 2 người dùng, 2 chủ thể ẩn danh và 4 phiên.
+
+Số người dùng, chủ thể và phiên duy nhất là số ước tính. Tổng số sự kiện là số
+chính xác trong khoảng thời gian đã chọn. Lần chạy thử này không đo tỷ lệ
+chuyển đổi hoặc tỷ lệ quay lại.
+
+| Kết quả | Kiểm tra tiếp theo |
+| --- | --- |
+| Không có hoạt động sản phẩm | Kiểm tra kết quả gửi, dự án, khoảng thời gian, dịch vụ, bản phát hành và môi trường. |
+| Hoạt động chưa được phân loại | Dùng `createProductActionAttributes`. Riêng tên sự kiện không đặt được loại. |
+| Số người dùng khác dự kiến | Kiểm tra `context.subject` trên từng sự kiện. Chủ thể ẩn danh không được tính là người dùng. |
+| Số phiên khác dự kiến | Kiểm tra `context.session.id` trên từng sự kiện và quy tắc phiên của bạn. |
+| Nhiều sự kiện hơn dự kiến | Kiểm tra các lần chạy lặp lại và các hành động được ghi ở hai nơi. |
+
+## Kiểm tra sự kiện trong ứng dụng của bạn
+
+Chuyển các lệnh gọi ghi nhận vào các handler của ứng dụng. Giữ nguyên ý nghĩa,
+loại và quy tắc danh tính của từng sự kiện. Kiểm tra bằng tài khoản giả lập
+trước.
+
+| Kiểm tra trong ứng dụng | Kết quả ghi nhận mong đợi |
+| --- | --- |
+| Mở trang thanh toán mà không gửi đơn | Chỉ có `checkout.opened`. |
+| Gửi biểu mẫu không qua được bước kiểm tra hợp lệ | Không có `checkout.submitted`. Không bao giờ gửi nội dung biểu mẫu. |
+| Chấp nhận đơn gửi, rồi thanh toán thất bại | Có `checkout.submitted`, không có `checkout.completed`. |
+| Thử lại yêu cầu sau khi đã xác nhận hoàn tất | Không có `checkout.completed` thứ hai. |
+| Đăng xuất, rồi dùng tài khoản khác | Các sự kiện sau đó dùng chủ thể và phiên mới. |
+
+Bản xem trước cục bộ kiểm tra việc ghi nhận. Batch được chấp nhận kiểm tra việc
+gửi. Cả hai đều không cho thấy lệnh gọi ghi nhận chạy đúng chỗ trong ứng
+dụng của bạn.
