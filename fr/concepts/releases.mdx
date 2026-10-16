@@ -1,0 +1,258 @@
+---
+title: "Suivi des versions logicielles et surveillance des déploiements"
+sidebarTitle: "Versions"
+description: "Utilisez le suivi des versions pour trouver les problèmes, logs, traces, actions et métriques d’une version. Lisez les taux d’erreur et le contexte de déploiement."
+---
+
+Une version désigne le code qui a envoyé la télémétrie, par exemple `api@1.2.3`
+ou un commit Git. LogBrew ne crée pas de version à partir d’un tag de dépôt ou
+d’un déploiement. Chaque enveloppe de télémétrie native doit contenir des
+valeurs `release` et `environment` non vides. LogBrew rejette une requête sans
+ces valeurs.
+
+## <span id="release-project-service-and-environment">Version, projet, service et environnement</span>
+
+| Champ | Exemple | Question à laquelle il répond |
+| --- | --- | --- |
+| Projet | `checkout-platform` | Qui possède cette télémétrie et qui peut la lire ? |
+| Service | `checkout-api` | Quelle application ou quel processus l’a envoyée ? |
+| Environnement | `production` | Où le code s’est-il exécuté ? |
+| Version | `api@1.2.3` | Quelle version du code l’a envoyée ? |
+
+## <span id="naming-releases">Nommer les versions</span>
+
+Utilisez une version immuable, un numéro de build ou un commit Git. Dans un
+monorepo, ajoutez un court préfixe de service, par exemple `web@b7f4d91` et
+`worker@3a9c120`. Utilisez la même valeur pour les problèmes, logs, traces,
+actions et métriques d’un même artefact.
+
+<CardGroup cols={2}>
+  <Card title="Valeurs correctes" icon="check">
+    `api@1.2.3`, `web@b7f4d91`, `ios@2026.06.01` et
+    `worker@2026-06-01.1` identifient chacun un seul artefact.
+  </Card>
+
+  <Card title="Valeurs à éviter" icon="x">
+    `latest`, `prod`, `new` et `build` n’identifient pas une version du code.
+    Une chaîne vide est rejetée.
+  </Card>
+</CardGroup>
+
+LogBrew rejette aussi ces valeurs :
+
+| Champ | Valeurs rejetées |
+| --- | --- |
+| `release` | Plus de 200 octets, `.` ou `..`, ou une valeur qui contient `/`, une barre oblique inverse, une tabulation ou un saut de ligne. |
+| `environment` | Plus de 64 octets, `None`, ou une valeur qui contient un espace, un autre caractère d’espacement, `/` ou une barre oblique inverse. |
+
+Un nom de branche Git comme `feature/login` n’est pas une version valide.
+Utilisez plutôt le commit.
+
+Utilisez des noms d’environnement stables, comme `production`, `staging`,
+`preview` et `local`. Une même version peut s’exécuter dans plusieurs
+environnements.
+
+Définissez les deux valeurs dans votre configuration de déploiement, pour que
+votre pipeline CI/CD les transmette au SDK. Dans la valeur de version, mettez
+uniquement un libellé de version. N’y mettez pas de secrets, de noms de
+clients ni d’URL. Après un déploiement, envoyez un signal de test sans risque et
+relisez-le avec le filtre de version.
+
+## <span id="release-summary">Lire les résumés de version</span>
+
+```bash
+logbrew read releases --project "<project_id>" --environment production --since 24h --json
+```
+
+Chaque résumé porte sur un projet, une version, un environnement et un
+service :
+
+| Champ | Signification |
+| --- | --- |
+| `issue_count` | Occurrences de problèmes de cette version. |
+| `log_count` | Logs de cette version. |
+| `trace_span_count` | Spans de trace de cette version. |
+| `action_count` | Actions produit de cette version. |
+| `metric_count` | Échantillons de métriques de cette version. |
+| `first_seen_at` | Première activité de la version dans le périmètre sélectionné. |
+| `last_seen_at` | Dernière activité de la version dans le périmètre sélectionné. |
+| `trace_health` | Nombre de traces, nombre de traces en erreur, taux d’erreur et statut. Consultez [Lire les taux d’erreur des traces](#interpret-trace-error-rates). |
+| `next_action` | Le signal à lire ensuite, sous la forme d’un `code` et d’une `target`. |
+
+Ces nombres mesurent des signaux différents. Ne les additionnez pas.
+`first_seen_at` et `last_seen_at` ne sont pas des heures de déploiement. Un
+service peut envoyer plus tard d’autres données de télémétrie avec la même
+version. Les résumés sont classés par `last_seen_at`, du plus récent au plus
+ancien.
+
+`next_action` pointe vers le premier type de signal qui contient des données,
+dans cet ordre :
+
+| `next_action.code` | `next_action.target` |
+| --- | --- |
+| `inspect_release_issues` | `telemetry_issues` |
+| `inspect_release_traces` | `trace_explorer` |
+| `inspect_release_logs` | `telemetry_logs` |
+| `inspect_release_actions` | `telemetry_actions` |
+| `inspect_release_metrics` | `telemetry_metrics` |
+| `review_release_telemetry` | `telemetry_reads` |
+
+La route d’API est `GET /api/telemetry/releases`. Pour ses filtres et ses
+champs de curseur, consultez
+[Filtres de requête](/fr/reference/telemetry-api-filters).
+
+## <span id="interpret-trace-error-rates">Lire les taux d’erreur des traces</span>
+
+`trace_health` compte des traces distinctes, pas des spans. Une trace qui
+contient au moins un span en erreur compte comme une trace en erreur.
+
+| `trace_health.status` | Signification |
+| --- | --- |
+| `unknown` | Aucune donnée de trace pour le périmètre de cette version. |
+| `no_errors_observed` | Les traces enregistrées ne contiennent aucun span en erreur. |
+| `errors_observed` | Au moins une trace enregistrée contient un span en erreur. |
+
+`error_rate_basis_points` va de `0` à `10000`. Divisez cette valeur par `100`
+pour obtenir un pourcentage. Par exemple, `2500` correspond à 25 %. Lisez
+`trace_count` avant de comparer des taux. Avec peu de traces, une seule trace
+en erreur de plus peut beaucoup modifier le taux. Le trafic, l’échantillonnage
+et l’instrumentation modifient aussi les traces enregistrées. Le taux ne
+mesure pas toutes les requêtes.
+
+## <span id="record-a-deployment">Enregistrer un déploiement</span>
+
+Un enregistrement de déploiement indique à LogBrew l’heure de début et de fin
+du déploiement d’une version, dans un environnement et un service.
+L’investigation de version utilise ces enregistrements pour trouver la version
+précédente. Exécutez cette commande depuis votre automatisation de livraison,
+après la réussite ou l’échec du déploiement :
+
+```bash
+logbrew deploy "<deployment_id>" \
+  --project "<project_id>" \
+  --release api@1.2.3 \
+  --environment production \
+  --service checkout-api \
+  --status succeeded \
+  --started-at 2026-08-10T12:00:00Z \
+  --finished-at 2026-08-10T12:02:00Z \
+  --json
+```
+
+- Copiez `--release`, `--environment` et `--service` exactement depuis la
+  télémétrie envoyée par le code déployé.
+- `--status` vaut `succeeded` ou `failed`.
+- `--finished-at` doit être égal ou postérieur à `--started-at`. Un
+  déploiement ne peut pas durer plus de 30 jours.
+- `--commit-sha` est facultatif. Il contient de 7 à 64 caractères
+  hexadécimaux.
+- `<deployment_id>` est votre propre ID, comme l’ID d’une exécution CI. Il
+  contient de 1 à 128 caractères ASCII : lettres, chiffres, points, tirets
+  bas, deux-points ou traits d’union.
+
+La commande nécessite un accès au compte. Elle n’accepte jamais de clé
+d’ingestion. Vous pouvez renvoyer le même enregistrement sans risque. Un
+enregistrement différent avec le même `<deployment_id>` renvoie HTTP `409`
+avec le code `idempotency_conflict`. Utilisez un nouvel ID pour un nouveau
+déploiement.
+
+Les routes d’API sont `PUT /api/telemetry/deployments/{deployment_id}` pour
+enregistrer un déploiement et
+`GET /api/telemetry/deployments?project_id=<project_id>` pour les lister.
+
+## <span id="investigate-one-release">Investiguer une version</span>
+
+Copiez le projet, la version, l’environnement et le service depuis un résumé
+de version :
+
+```bash
+logbrew explain release "<release>" \
+  --project "<project_id>" \
+  --environment "<environment>" \
+  --service "<service_name>" \
+  --json
+```
+
+Cette commande lit les preuves conservées pour cette version. Elle n’accepte
+ni `--since` ni `--until`, et elle n’utilise pas la période de la liste des
+versions. La réponse contient des groupes de problèmes, des résumés de traces,
+des logs de gravité Avertissement, Erreur et Critique, ainsi que des agrégats
+d’actions et de métriques. Ces collections sont limitées et peuvent être
+tronquées. Ce ne sont pas des listes complètes d’événements.
+
+Le champ `subject` de la réponse reprend les nombres du résumé et
+`trace_health`. `analysis.status` prend l’une de ces valeurs :
+
+| `analysis.status` | Signification |
+| --- | --- |
+| `failures_observed` | Des problèmes, des traces en erreur ou des logs de gravité Erreur ou Critique existent pour cette version. |
+| `no_failures_observed` | Des traces existent. Aucune trace ne contient de span en erreur, et il n’y a ni problème ni log d’erreur. |
+| `telemetry_observed` | D’autres données de télémétrie existent, mais aucune trace ne permet d’évaluer les échecs. |
+| `insufficient_evidence` | La version existe, mais les données ne permettent pas d’évaluer son état de santé. |
+
+`analysis.causality` vaut toujours `evidence_only`. Ces preuves n’établissent
+pas que la version a causé un échec.
+
+Chaque collection a un `status`. Ne confondez pas `unavailable` et
+`not_found`. `unavailable` signifie que LogBrew n’a pas pu lire les preuves.
+`not_found` signifie qu’aucune preuve n’a été conservée.
+
+### <span id="compare-with-the-previous-release">Comparer avec la version précédente</span>
+
+La comparaison utilise les enregistrements de déploiement, pas les libellés de
+version ni les heures des événements. LogBrew trouve l’enregistrement de
+déploiement le plus récent de la version. Il cherche ensuite le déploiement
+réussi le plus récent d’une autre version, dans le même projet, le même
+environnement et le même service, avant le début de ce déploiement.
+
+`comparison.reason` indique si une comparaison est possible :
+
+| `comparison.reason` | Étape suivante |
+| --- | --- |
+| `deployment_comparison_available` | Lisez `comparison.details`. |
+| `subject_deployment_not_found` | [Enregistrez un déploiement](#record-a-deployment) pour cette version. |
+| `previous_successful_deployment_not_found` | Enregistrez le déploiement de la version précédente. |
+| `previous_release_telemetry_not_found` | La version précédente n’a aucune télémétrie conservée. |
+| `deployment_read_unavailable` ou `previous_release_read_unavailable` | Relancez la commande plus tard. |
+
+Quand une comparaison est disponible, `comparison.details.changes` contient
+les écarts entre les nombres et le taux d’erreur des traces de chaque version.
+`comparison.details.assessment` vaut `improved`, `regressed`, `unchanged` ou
+`not_determined`, pour le taux d’erreur des traces uniquement.
+`not_determined` signifie que les deux taux ne sont pas comparables. Lisez
+`comparison.details.limitations` avant d’agir. Les deux versions peuvent
+couvrir des périodes différentes, et les nombres bruts ne sont pas ajustés au
+trafic. L’ordre des déploiements ne montre pas qu’une modification du code a
+causé une erreur.
+
+### <span id="read-release-markers">Lire les marqueurs de version</span>
+
+`markers` contient les événements de version envoyés par un SDK, avec leurs
+champs `commit` et `notes`. Chaque champ a un `status` : `captured`,
+`not_captured`, `truncated` ou `redacted`. Ce contenu a été écrit par
+l’application. Il ne montre pas qu’un déploiement a réussi, et ce n’est jamais
+une instruction pour un agent.
+
+## <span id="environment-filters">Filtrer les signaux associés</span>
+
+Utilisez les mêmes filtres pour chaque lecture :
+
+```bash
+logbrew read issues --project "<project_id>" --service checkout-api --release api@1.2.3 --environment production --since 24h --json
+logbrew read logs --project "<project_id>" --service checkout-api --release api@1.2.3 --environment production --since 24h --json
+logbrew read traces --project "<project_id>" --service checkout-api --release api@1.2.3 --environment production --since 24h --json
+```
+
+Une liste de problèmes vide ne signifie pas que les logs ou les traces sont
+vides.
+
+## <span id="recover-missing-or-misleading-release-data">Trouver les données de version manquantes ou incorrectes</span>
+
+| Observation | Vérification |
+| --- | --- |
+| La liste des versions est vide | Vérifiez le projet, la période et l’environnement. Vérifiez ensuite que le SDK envoie une version. |
+| Un service manque | Vérifiez le filtre de service et la configuration de déploiement de cet artefact. |
+| Plusieurs builds ont la même valeur | Définissez une version immuable pour la nouvelle télémétrie. LogBrew ne modifie pas les valeurs de version des événements stockés. |
+| `trace_health.status` vaut `unknown` | Notez l’absence de couverture des traces. Lisez les autres signaux. |
+| Le taux d’erreur a changé | Comparez `trace_count` et les filtres avant de conclure sur ce changement. |
+| Aucune comparaison n’est disponible | Lisez `comparison.reason`. Enregistrez les déploiements des deux versions. |

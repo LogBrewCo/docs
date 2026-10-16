@@ -1,0 +1,236 @@
+---
+title: "Dépanner les logs d’application manquants"
+sidebarTitle: "Dépannage"
+description: "Dépannez les logs d’application manquants, la configuration, les filtres, les preuves des problèmes et les liens de trace avec des vérifications LogBrew sans risque."
+---
+
+Utilisez cette page quand la télémétrie est manquante, incomplète ou trop
+étendue. Vérifiez d’abord l’accès. Gardez ensuite le même projet, le même
+service, la même version, le même environnement et la même période pendant que
+vous cherchez la cause.
+
+<Note>
+  Ajoutez `--json` pour les workflows d’agents. Une vérification qui échoue
+  renvoie un champ `next` stable.
+</Note>
+
+## Commencer par les vérifications rapides
+
+| Symptôme | Première vérification | Étape suivante |
+| --- | --- | --- |
+| La CLI n’est pas connectée | `logbrew status --json` | Une personne exécute `logbrew login`. |
+| Un projet est absent | `logbrew projects --json` | Utilisez un ID de la liste des projets. |
+| L’état de la configuration n’est pas clair | `logbrew doctor --project "<project_id>" --json` | Suivez la valeur `next` renvoyée. |
+| Les logs sont vides | Lisez les logs du projet et de la période exacts | Vérifiez séparément les autres types de signaux. |
+| Les résultats sont trop étendus | Ajoutez les filtres de projet, de service, de version et d’environnement | Gardez le même périmètre dans chaque lecture. |
+| Une trace est absente | Lisez le détail du problème | Ne lisez une trace que si la réponse contient un ID de trace. |
+| Les frames JavaScript montrent le code compilé | Vérifiez la paire build et source map | Suivez [Source maps JavaScript](/fr/guides/source-maps). |
+| Un agent MCP ne peut pas lire un projet | Vérifiez les projets autorisés | Suivez [Dépanner la connexion MCP](/fr/guides/mcp#fix-connection-problems). |
+
+## <span id="recover-missing-first-telemetry">Retrouver la première télémétrie manquante</span>
+
+Exécutez ces commandes en lecture seule avant de modifier la configuration du
+SDK :
+
+```bash
+logbrew version --json
+logbrew status --json
+logbrew projects --json
+logbrew doctor --project "<project_id>" --json
+```
+
+`logbrew doctor` vérifie l’accès à l’API, l’authentification, le projet, la clé
+d’ingestion, la configuration, la télémétrie et la visibilité des logs. Il ne
+modifie pas le projet. Lisez le `status` global et chaque vérification du
+[rapport de diagnostic](/fr/reference/cli#read-a-project-doctor-report). Le code
+de sortie `0` ne signifie pas que toutes les vérifications ont réussi.
+
+| Statut du diagnostic | Étape suivante |
+| --- | --- |
+| `needs_ingest_key` | Créez une clé d’ingestion limitée au projet. Consultez [Renouveler une clé d’ingestion](/fr/guides/rotate-ingest-key). |
+| `needs_setup` | Terminez la configuration du SDK. Consultez [Intégration du SDK](/fr/guides/sdk-ingestion). |
+| `needs_telemetry` | Envoyez un signal de test sans risque depuis l’application, puis relancez le diagnostic. |
+| `ready` | Lisez les logs, problèmes, versions ou traces récents. |
+
+Le rapport peut aussi avoir le statut `auth_invalid`, `project_missing`,
+`api_unreachable` ou `check_failed`. Le
+[rapport de diagnostic](/fr/reference/cli#read-a-project-doctor-report) donne
+l’étape suivante pour chacun.
+
+Un projet `ready` peut quand même n’avoir aucun log, car chaque type de signal
+est distinct. La vérification `logs` peut valoir `empty` ou `unavailable`. Une
+lecture de logs échouée n’est pas un résultat vide.
+
+### Envoyer un signal de test sans risque
+
+Envoyez un log de test avec un message unique depuis le SDK installé.
+N’incluez ni jeton, ni données utilisateur, ni corps de requête. Notez
+l’ID du projet, le service, l’environnement, la version, l’heure de
+début UTC et la version du SDK. Attendez la fin de l’envoi, puis lisez une
+courte période dans le même projet. N’envoyez pas d’autres signaux de test
+tant que l’envoi est en attente.
+
+## Trouver les logs manquants
+
+Lisez d’abord un périmètre réduit et exact :
+
+```bash
+logbrew read releases --project "<project_id>" --environment production --json
+logbrew read logs --project "<project_id>" --environment production \
+  --release checkout@1 --since 1h --limit 20 --json
+```
+
+Vérifiez ces points dans l’ordre :
+
+1. L’ID du projet appartient à l’application qui a envoyé le signal.
+2. Le service, la version et l’environnement correspondent exactement, casse
+   et espaces compris.
+3. La période inclut l’heure du signal. LogBrew renvoie les heures des signaux
+   en UTC. `--until` est une borne supérieure exclue.
+4. Aucun filtre de recherche ou de gravité ne masque le signal.
+5. L’application a envoyé le type de signal que vous lisez. Un log ne crée ni
+   problème ni trace.
+
+Si le signal reste introuvable, retirez un filtre à la fois :
+
+1. Gardez le projet et élargissez la période.
+2. Retirez le filtre de version.
+3. Retirez le filtre d’environnement.
+4. Retirez le filtre de service.
+5. Retirez les filtres de recherche et de gravité.
+
+Arrêtez-vous dès que le signal apparaît. Le dernier filtre retiré ne correspond
+pas à la configuration de l’application. Ne lisez pas tous les projets à la
+place du projet configuré.
+
+| Résultat | Ce qu’il montre | Vérification suivante |
+| --- | --- | --- |
+| Aucune ligne dans un projet | Aucune correspondance dans ce périmètre | Vérifiez l’heure et les filtres. |
+| Des logs, mais aucun problème | Aucune erreur groupée ne correspond aux filtres | Vérifiez que l’application a envoyé une erreur. |
+| Un problème sans trace | L’occurrence n’a pas de lien de trace exploitable | Lisez le statut de la trace dans l’investigation du problème. |
+| Une version, mais aucun log | La version a d’autres signaux, mais aucun log dans ce périmètre | Comparez les nombres dans `logbrew read releases`. Lisez chaque type de signal dans le même projet. |
+| Le signal apparaît après le retrait d’un filtre | Ce filtre excluait le signal | Corrigez le filtre ou la valeur de l’application. |
+
+Une page de résultats n’est pas un total. Avec `--pagination cursor`,
+continuez avec le `next_cursor` renvoyé et gardez les mêmes filtres. Consultez
+[Pagination par curseur](/fr/reference/telemetry-api-filters#cursor-pagination).
+
+### Vérifier la vue du tableau de bord
+
+Le tableau de bord affiche un instantané de chaque liste. Dans la vue des logs,
+activez **En direct** pour ajouter les nouveaux logs dès leur arrivée. Les
+autres vues ne se mettent pas à jour en direct. Rechargez la page pour obtenir
+un nouvel instantané. Un instantané périmé n’est pas un résultat vide.
+
+LogBrew enregistre uniquement la télémétrie que l’application envoie. Retirez
+les identifiants, les corps de requête, les valeurs des paramètres de requête
+et les données personnelles avant l’envoi. Utilisez
+[Contrôler les données capturées](/fr/guides/safe-capture) pour vérifier votre
+sélection de champs.
+
+## Vérifier les problèmes et les traces
+
+Utilisez un ID de problème ou de trace renvoyé par LogBrew. N’en
+inventez jamais.
+
+```bash
+logbrew read issues --project "<project_id>" --environment production \
+  --status unresolved --since 24h --json
+logbrew read issue "<issue_id>" --json
+logbrew read trace "<trace_id>" --project "<project_id>" --json
+logbrew read logs --trace "<trace_id>" --project "<project_id>" --json
+```
+
+`--status` accepte `unresolved`, `resolved` et `archived`. `ignored`
+sélectionne les mêmes problèmes que `archived`.
+
+Le statut du problème et le statut de la trace sont différents. Les valeurs de
+statut de trace `not_linked`, `not_found` et `unavailable` ont des sens
+différents. Consultez [Investiguer un problème](/fr/guides/investigate-an-issue)
+pour chaque valeur. Lisez le problème et ses logs avant de le résoudre, de
+l’archiver ou de le rouvrir.
+
+## Gérer les erreurs de la CLI et de l’API
+
+En mode JSON, une erreur de la CLI contient `ok`, `error`, `message` et
+`next` :
+
+```json
+{
+  "ok": false,
+  "error": "not_logged_in",
+  "message": "not logged in: run logbrew login",
+  "next": "run logbrew login"
+}
+```
+
+Quand l’API renvoie une erreur, `error` vaut `api_error`. L’erreur contient
+aussi `status` (le statut HTTP), `api_code` (le `code` de l’API), `api_error`
+et `api_next`. Pour une erreur `rate_limited`, elle contient aussi
+`retry_after_seconds`. La CLI ne réessaie pas automatiquement.
+
+| Statut ou erreur | Correction |
+| --- | --- |
+| `not_logged_in` ou HTTP `401` | Une personne exécute `logbrew login`. Relancez ensuite la lecture. |
+| HTTP `403` | Utilisez le bon identifiant pour le projet. Une modification de problème exige aussi l’autorisation de gérer les problèmes du projet. N’affichez pas la valeur de l’identifiant. |
+| HTTP `404` | Utilisez un ID actuel de projet, de problème ou de trace issu d’une réponse. |
+| HTTP `422` | Corrigez le champ indiqué. |
+| HTTP `429` avec `rate_limited` | Attendez `retry_after_seconds`, puis réessayez une fois. |
+| HTTP `429` avec un autre code | Arrêtez les nouvelles tentatives automatiques. Suivez `api_next`. |
+| HTTP `5xx` | Attendez, relancez une lecture et signalez le dysfonctionnement s’il persiste. |
+
+Consultez [Erreurs de l’API](/fr/reference/api-errors) pour chaque code d’erreur.
+
+## <span id="secure-a-compromised-account">Sécuriser un compte compromis</span>
+
+Si quelqu’un d’autre détient peut-être un jeton d’accès au compte, un jeton
+d’actualisation ou un cookie de session, déconnectez tous les clients LogBrew.
+Suivez la procédure de
+[déconnexion de tout le compte](/fr/reference/account-api#every-logbrew-login).
+Une personne doit approuver cette action. `logbrew logout` et une déconnexion
+dans le navigateur ne déconnectent qu’un seul client : ils ne suffisent pas.
+
+La déconnexion de tout le compte arrête aussi chaque connexion MCP autorisée
+avant elle. Une fois l’opération réussie, effacez les identifiants LogBrew
+locaux sur chaque client et reconnectez-vous depuis un client de confiance.
+N’autorisez de nouveau les clients MCP qu’une fois que vous leur faites
+confiance. Si la réponse est perdue, n’affirmez pas que tous les clients sont
+déconnectés et ne répétez pas la requête automatiquement.
+
+La déconnexion de tout le compte ne renouvelle pas les clés d’ingestion des
+projets. Si une clé d’ingestion a été exposée,
+[renouvelez la clé d’ingestion](/fr/guides/rotate-ingest-key).
+
+## Dépanner en toute sécurité
+
+Utilisez un identifiant d’accès au compte pour les lectures de la CLI. Utilisez
+un identifiant d’ingestion limité au projet uniquement pour les écritures du
+SDK. Ne mettez ni jetons, ni en-têtes d’autorisation, ni logs bruts, ni données
+client, ni corps de requête, ni chemins locaux, ni code source dans une
+commande, une discussion ou un ticket de support.
+
+Avant de signaler un dysfonctionnement, relancez une lecture avec le plus petit
+périmètre qui échoue encore. Notez la commande sans les valeurs des
+identifiants, le code d’erreur, l’ID du projet et les valeurs des
+filtres. Si les vérifications ne règlent rien,
+[signalez un problème](/fr/guides/report-a-problem).
+
+## Pages associées
+
+<CardGroup cols={2}>
+  <Card title="Démarrage rapide" icon="rocket" href="/fr/quickstart">
+    Envoyez et lisez le premier signal sans risque.
+  </Card>
+
+  <Card title="Utiliser la CLI" icon="square-terminal" href="/fr/guides/cli">
+    Utilisez des filtres exacts et une sortie JSON.
+  </Card>
+
+  <Card title="Investiguer un problème" icon="search" href="/fr/guides/investigate-an-issue">
+    Lisez les preuves du problème avant de changer son statut.
+  </Card>
+
+  <Card title="Erreurs de l’API" icon="triangle-alert" href="/fr/reference/api-errors">
+    Corrigez chaque code d’erreur.
+  </Card>
+</CardGroup>

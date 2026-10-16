@@ -1,0 +1,233 @@
+---
+title: "Télémétrie applicative : logs, traces et métriques"
+sidebarTitle: "Télémétrie"
+description: "Comparez logs, traces, métriques, problèmes et actions produit. Choisissez le signal LogBrew adapté à votre investigation."
+---
+
+La télémétrie désigne les preuves structurées qu’une application envoie sur son
+comportement. Les logs enregistrent des événements signalés. Les traces relient
+des opérations. Les métriques mesurent des valeurs. Les problèmes regroupent des
+échecs. Les actions enregistrent l’activité produit.
+
+Les champs de projet, de service, d’environnement, de version et d’heure
+donnent le périmètre de chaque résultat. Pour connaître les signaux que capture
+votre SDK, lisez le guide [Intégration du SDK](/fr/guides/sdk-ingestion).
+
+## <span id="choose-the-correct-telemetry-data-type">Choisir un signal</span>
+
+| Signal | À utiliser pour |
+| --- | --- |
+| Problèmes | Les échecs répétés, comme une exception de paiement avec 18 occurrences. |
+| Logs | Un événement signalé par l’application, comme un paiement en échec. |
+| Traces | Les opérations et la durée d’une requête à travers les services instrumentés. |
+| Métriques | Une valeur mesurée dans le temps, comme la durée des requêtes ou le nombre de tâches terminées. |
+| Actions | L’activité produit, comme une vue de page, une vue d’écran ou une interaction. |
+
+Commencez l’investigation d’un échec par les problèmes ou les logs. Utilisez
+une trace disponible pour examiner une exécution. Utilisez la tendance d’une
+métrique pour examiner une période plus large. Pour l’activité et la rétention,
+lisez [Analyses produit](/fr/concepts/product-analytics).
+
+Capturez uniquement les champs dont une investigation a besoin. Utilisez des
+noms de service, d’opération et de métrique stables. N’envoyez pas
+d’identifiants, de données de paiement ni de corps de requête bruts. Le guide
+[Contrôler les données capturées](/fr/guides/safe-capture) présente les
+contrôles disponibles.
+
+## Logs
+
+Un log (ou journal) est un enregistrement émis par l’application à un instant
+précis. Un log utile contient :
+
+- L’heure source de l’événement.
+- Une gravité canonique.
+- Le périmètre du projet et du service.
+- L’environnement et la version.
+- Les identifiants de trace et de span quand le log a un contexte de trace
+  actif.
+- Quelques attributs courts et nommés qui donnent le contexte de l’événement.
+
+Une réponse de log contient ces valeurs dans `occurred_at`, `severity`,
+`project_id`, `service_name`, `environment`, `release`, `trace_id`, `span_id`
+et `attributes`. Placez le contexte dans des attributs nommés, pas dans le
+texte du message.
+
+Des logs de plusieurs services affichés dans une même vue n’ont pas de relation
+de trace entre eux. Seul le contexte de trace crée cette relation.
+
+## Traces
+
+Une trace contient les spans d’une requête ou d’une opération. Un span racine
+n’a pas de parent. Un span enfant identifie son parent. Tous les spans d’une
+trace ont le même ID de trace et des ID de span différents. Consultez
+[Traçage distribué](/fr/concepts/distributed-tracing).
+
+Un log, un problème, une action ou une métrique envoyé sans contexte de trace
+actif reçoit une trace de capture. Cette trace contient uniquement des spans de
+capture. Elle ne montre pas le chemin d’une requête. Consultez
+[Spans de capture](/fr/concepts/distributed-tracing#capture-spans).
+
+## <span id="read-the-metric-value">Métriques</span>
+
+Une métrique enregistre une valeur mesurée dans le temps. Lisez chaque
+métrique avec son nom, son unité, ses dimensions, son projet, sa période et son
+intervalle. LogBrew choisit la `value` de chaque point à partir du `kind` et de
+la `temporality` de la métrique :
+
+| Contrat de la métrique | `aggregation.code` | `value` du point |
+| --- | --- | --- |
+| `gauge` avec `instant` | `gauge_last` | Le dernier état dans l’intervalle, comme la longueur d’une file d’attente. |
+| `counter` avec `delta` | `delta_sum` | La somme des variations dans l’intervalle, comme le nombre de tâches terminées. |
+| `histogram` avec `delta` | `distribution_p95` | Le 95ᵉ centile approximatif, comme la durée des requêtes. |
+| Un flux `cumulative` | `raw_cumulative_last` | Le dernier total brut. Ce n’est pas un taux. |
+| Une autre combinaison | `raw_last` | Le dernier échantillon brut. |
+
+Par exemple, 3 échantillons d’un compteur delta avec les valeurs `2`, `3` et
+`5` dans un même intervalle donnent un point avec une `value` de `10` et un
+`sample_count` de `3`. Avec 3 échantillons d’une jauge qui ont les mêmes
+valeurs, dans cet ordre, le point a une `value` de `5`. Une valeur p95 n’est pas
+une moyenne. Environ 95 % des observations enregistrées sont inférieures ou
+égales à cette valeur.
+
+Avec `status: "ready"`, l’agrégation dérivée est disponible. Avec
+`status: "limited"`, lisez `aggregation.limitation` et utilisez uniquement les
+valeurs brutes. N’additionnez pas une jauge ni un flux cumulatif. Un intervalle
+sans point n’est pas un zéro mesuré. Pour les champs de requête, lisez
+[Filtres de requête](/fr/reference/telemetry-api-filters).
+
+`GET /api/telemetry/metrics/series` renvoie ces points. Cette route exige `project_id`,
+`name` et `since`. Chaque série a une seule `identity` avec un `kind`, une
+`unit` et une `temporality`. Les séries dont l’identité diffère restent
+séparées. Chaque point peut aussi contenir :
+
+| Champ | Signification |
+| --- | --- |
+| `min`, `max`, `average` | L’étendue et la moyenne des échantillons de l’intervalle. |
+| `p50`, `p95`, `p99` | Des centiles approximatifs pour un histogramme. |
+| `rate_per_second` | La somme du compteur delta divisée par la durée de l’intervalle. |
+| `trace_exemplars` | Des ID de trace échantillonnés dans l’intervalle. Ouvrez-en un pour examiner une requête de cet intervalle. |
+
+`coverage.truncated` vaut `true` quand `series_limit` a omis des séries de
+plus faible volume. Pour comparer une période d’une métrique avec la période
+précédente de même durée, exécutez :
+
+```bash
+logbrew explain metric '<metric-name>' --project '<project-id>' --since 24h --json
+```
+
+## Problèmes
+
+Un problème regroupe des échecs répétés par empreinte stable. Il a une gravité,
+un statut, un nombre d’occurrences, une heure de première occurrence et une
+heure de dernière occurrence. Le détail d’un problème peut ajouter des chaînes
+d’exceptions, des frames de pile, des breadcrumbs, des logs associés et une
+relation de trace.
+
+`last_seen_at` correspond à l’occurrence la plus récente du groupe.
+L’occurrence que vous sélectionnez peut être plus ancienne. Lisez les deux
+heures.
+
+Le `status` d’un problème vaut `unresolved`, `resolved` ou `archived`. La
+version 1 des réponses de l’API affiche `archived` sous la forme `ignored`. Les
+versions 2 et 3 ajoutent `priority` (`high`, `medium` ou `low`) et
+`priority_source`. La version 3 ajoute aussi `assignee`. Consultez
+[Valeurs de statut](/fr/guides/issue-workflow#status-values) et
+[Priorité](/fr/guides/issue-workflow#priority).
+
+## Actions
+
+Une action enregistre une activité produit. Une classification prise en charge
+la marque comme vue de page, vue d’écran ou interaction. Le nom de l’événement
+seul ne définit pas la classification. Utilisez
+[Capture d’événements produit](/fr/guides/product-events) pour ajouter ce
+contexte.
+
+Une session n’est pas un utilisateur. Un sujet anonyme n’est pas un utilisateur
+identifié.
+
+## <span id="shared-fields">Champs communs</span>
+
+| Champ | Utilisation |
+| --- | --- |
+| `project_id` | Désigne le projet qui possède la télémétrie et fixe la limite de lecture. |
+| `service_name` | Identifie l’application ou le service qui a envoyé le signal. |
+| `environment` | Sépare les données de production, de staging, de preview et locales. |
+| `release` | Identifie la version du code déployé. |
+| `occurred_at` | Donne l’heure source d’un log ou d’une action. Les spans utilisent `started_at`. |
+| `trace_id` | Relie les signaux capturés dans le même contexte de trace. |
+| `span_id` | Identifie le span auquel appartient un signal dans sa trace. |
+
+## <span id="severity-values">Valeurs de gravité</span>
+
+| Valeur canonique | Alias acceptés en entrée |
+| --- | --- |
+| `info` | `trace`, `debug`, `info` |
+| `warning` | `warn`, `warning` |
+| `error` | `error` |
+| `critical` | `fatal`, `critical` |
+
+LogBrew accepte les alias en entrée, en majuscules comme en minuscules. L’API,
+la CLI et les événements en direct utilisent les valeurs canoniques. Les
+valeurs de gravité inconnues sont rejetées. La gravité est l’urgence
+enregistrée. Elle ne montre ni l’impact métier ni la cause racine.
+
+Un utilisateur peut modifier la gravité affichée d’un problème ou d’un log. La
+réponse contient alors un objet `triage` avec `effective_severity`. Le champ
+`severity` conserve la valeur capturée.
+
+## Lectures en direct et instantanées
+
+`logbrew read` renvoie un instantané pour le projet, la période et les filtres
+sélectionnés. Relancez la commande pour lire les nouveaux événements.
+`logbrew watch` diffuse les nouveaux logs, problèmes et actions tant que la
+connexion est ouverte. Cette commande ne diffuse ni les traces ni les
+métriques. Un échec de connexion ne montre pas que le projet est vide.
+
+## <span id="evidence-quality-and-trace-lifecycle">États des preuves</span>
+
+Les réponses distinguent ces états : capturé, manquant, masqué, tronqué et
+indisponible. Les preuves de trace ont 4 états : `available`, `not_linked`,
+`not_found` et `unavailable`. Consultez la
+[Vue d’ensemble](/fr/introduction#follow-exact-relationships) pour leur
+signification, et
+[Limites des preuves](/fr/introduction#read-evidence-states-before-drawing-a-conclusion)
+pour les champs de couverture. Un SDK plus récent n’ajoute pas de champs aux
+signaux qu’il a envoyés plus tôt.
+
+## <span id="a-practical-investigation">Investiguer un projet</span>
+
+<Steps>
+  <Step title="Trouver les problèmes non résolus">
+    ```bash
+    logbrew read issues --project '<project-id>' --status unresolved --since 24h --json
+    ```
+  </Step>
+
+  <Step title="Lire un problème">
+    Cette commande lit l’historique conservé du problème. Le filtre `--since`
+    de la liste ne s’applique pas.
+
+    ```bash
+    logbrew investigate issue '<issue-id>' --json
+    ```
+  </Step>
+
+  <Step title="Ouvrir une trace disponible">
+    Utilisez l’ID de trace uniquement quand l’occurrence sélectionnée en
+    renvoie un.
+
+    ```bash
+    logbrew read trace '<trace-id>' --project '<project-id>' --json
+    ```
+  </Step>
+
+  <Step title="Lire les preuves associées">
+    Filtrez les logs, les actions et les métriques sur le même projet, le
+    même service, le même environnement et la même version. Ne reliez pas des signaux uniquement
+    par l’heure.
+  </Step>
+</Steps>
+
+Pour les champs des réponses, consultez
+[API de télémétrie](/fr/reference/telemetry-api) et
+[Formats de réponse](/fr/reference/telemetry-response-shapes).

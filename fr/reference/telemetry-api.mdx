@@ -1,0 +1,292 @@
+---
+title: "API de télémétrie : requêtes, réponses et codes d’erreur"
+sidebarTitle: "API de télémétrie"
+description: "Utilisez l’API d’observabilité LogBrew pour l’ingestion, les lectures par périmètre, les analyses, la mise à jour des problèmes et les erreurs lisibles par machine."
+---
+
+L’API de télémétrie échange du JSON en HTTP sur `https://api.logbrew.co`. Les
+SDK publics envoient leurs lots gérés à `POST /v1/events`. Les clients natifs
+personnalisés envoient des enveloppes natives à `POST /api/telemetry/ingest`.
+Les deux routes d’ingestion exigent un jeton bearer d’ingestion limité au
+projet.
+
+Les lectures et les modifications qui appartiennent au compte utilisent un
+jeton bearer de compte. N’utilisez jamais un jeton bearer de compte ni une
+session de navigateur comme configuration du SDK ou de l’ingestion. N’envoyez
+jamais un jeton bearer d’ingestion à une route de lecture.
+
+## Envoyer une requête bien délimitée
+
+Suivez cette liste avant qu’un client envoie une requête :
+
+1. Choisissez la route et la méthode HTTP dans le tableau des points de
+   terminaison.
+2. Utilisez le bon jeton bearer : un jeton bearer d’ingestion pour
+   l’ingestion, un jeton bearer de compte pour tout le reste.
+3. Sélectionnez le périmètre de projet que la route prend en charge.
+   N’élargissez pas le périmètre après une réponse vide.
+4. N’ajoutez que les paramètres de requête que la route accepte. Consultez
+   [Filtres de requête](/fr/reference/telemetry-api-filters).
+5. Envoyez `Content-Type: application/json` quand la route a un corps JSON.
+6. Lisez le statut HTTP et le corps de la réponse avant de réessayer.
+7. Gardez les jetons bearer, les tickets de flux et les corps de réponse
+   complets hors des logs et des prompts des agents.
+
+## Points de terminaison
+
+### Ingestion
+
+| Méthode | Chemin | Rôle |
+| --- | --- | --- |
+| `POST` | `/v1/events` | Ingérer les lots que les SDK LogBrew publics construisent et envoient. |
+| `POST` | `/api/telemetry/ingest` | Ingérer les enveloppes de télémétrie natives d’un client personnalisé. |
+
+Laissez le SDK construire les lots `/v1/events`. Ne les construisez pas à la
+main. Pour l’enveloppe native, consultez
+[Intégration du SDK](/fr/guides/sdk-ingestion).
+
+### Lectures de télémétrie
+
+| Méthode | Chemin | Rôle |
+| --- | --- | --- |
+| `GET` | `/api/logs` | Lister les logs structurés. |
+| `GET` | `/api/logs/{log_id}` | Lire un log. |
+| `GET` | `/api/logs/attributes` | Lister les chemins et les types d’attributs de logs qu’un filtre peut rechercher. |
+| `GET` | `/api/telemetry/issues` | Lister les problèmes groupés. |
+| `GET` | `/api/telemetry/issues/{issue_id}` | Lire un problème groupé. |
+| `GET` | `/api/telemetry/issues/{issue_id}/events` | Lister les occurrences d’un problème groupé. |
+| `PATCH` | `/api/telemetry/issues/{issue_id}` | Mettre à jour le statut, la priorité ou le responsable d’un problème. |
+| `POST` | `/api/telemetry/issues/bulk` | Mettre à jour le statut, la priorité ou le responsable de 1 à 100 problèmes d’un projet. |
+| `GET` | `/api/telemetry/issues/assignees` | Lister les comptes auxquels des problèmes peuvent être attribués dans un projet. |
+| `PUT` | `/api/telemetry/issues/{issue_id}/triage-rule` | Définir la règle de gravité d’un problème. |
+| `PUT` | `/api/logs/{log_id}/triage-rule` | Définir la règle de gravité et l’état ignoré des logs qui correspondent à un log. |
+| `GET` | `/api/telemetry/traces` | Découvrir les traces dans le périmètre d’un projet. |
+| `GET` | `/api/telemetry/traces/{trace_id}` | Lister les spans d’une trace. |
+| `GET` | `/api/telemetry/traces/{trace_id}/summary` | Lire un résumé limité d’une trace. |
+| `GET` | `/api/telemetry/actions` | Lister les actions produit. |
+| `GET` | `/api/telemetry/metrics` | Lister les échantillons de métriques. |
+| `GET` | `/api/telemetry/metrics/series` | Lire une métrique par intervalles de temps. |
+| `GET` | `/api/telemetry/releases` | Lister les résumés de versions. |
+| `GET` | `/api/telemetry/summary/volume` | Lire le nombre de signaux d’un projet par intervalles de temps. |
+
+### Déploiements
+
+| Méthode | Chemin | Commande CLI |
+| --- | --- | --- |
+| `PUT` | `/api/telemetry/deployments/{deployment_id}` | `logbrew deploy` |
+| `GET` | `/api/telemetry/deployments/{deployment_id}?project_id=<project-uuid>` | Aucune |
+| `GET` | `/api/telemetry/deployments?project_id=<project-uuid>` | Aucune |
+
+Enregistrez un déploiement depuis votre automatisation de livraison, après sa
+réussite ou son échec. Le corps de `PUT` contient `project_id`, `release`,
+`environment`, `service_name`, `status` (`succeeded` ou `failed`),
+`started_at`, `finished_at` et un `commit_sha` facultatif. Utilisez les mêmes
+valeurs de `release`, `environment` et `service_name` que votre SDK. Le compte
+doit posséder le projet.
+
+`deployment_id` est votre propre ID du déploiement. Une nouvelle
+tentative avec le même ID et le même corps renvoie le déploiement
+enregistré. Le même ID avec un corps différent échoue avec `409` et
+`idempotency_conflict`. Utilisez un nouvel ID pour un autre
+déploiement.
+
+### Investigations
+
+Chaque route d’investigation renvoie un dossier de preuves borné sur un seul
+objet. La commande `logbrew explain` de la [CLI](/fr/reference/cli) lit ces
+routes et valide la réponse.
+
+| Méthode | Chemin | Commande CLI |
+| --- | --- | --- |
+| `GET` | `/api/logs/{log_id}/investigation` | `logbrew explain log` |
+| `GET` | `/api/telemetry/issues/{issue_id}/investigation` | `logbrew explain issue` |
+| `GET` | `/api/telemetry/issues/{issue_id}/correction-verification` | `logbrew investigate issue <issue_id> verify` |
+| `GET` | `/api/telemetry/traces/{trace_id}/investigation` | `logbrew explain trace` |
+| `GET` | `/api/telemetry/traces/{trace_id}/spans/{span_id}/investigation` | `logbrew explain span` |
+| `GET` | `/api/telemetry/actions/{action_id}/investigation` | `logbrew explain action` |
+| `GET` | `/api/telemetry/metrics/investigation` | `logbrew explain metric` |
+| `GET` | `/api/telemetry/releases/investigation` | `logbrew explain release` |
+
+### Analyses produit
+
+| Méthode | Chemin | Commande CLI |
+| --- | --- | --- |
+| `GET` | `/api/telemetry/analytics/overview` | `logbrew analytics overview` |
+| `GET` | `/api/telemetry/analytics/properties` | `logbrew analytics properties` |
+| `POST` | `/api/telemetry/analytics/funnel` | `logbrew analytics funnel` |
+| `POST` | `/api/telemetry/analytics/retention` | `logbrew analytics retention` |
+| `POST` | `/api/telemetry/analytics/lifecycle` | `logbrew analytics lifecycle` |
+| `POST` | `/api/telemetry/analytics/paths` | `logbrew analytics paths` |
+| `POST` | `/api/telemetry/analytics/segments/compare` | `logbrew analytics compare` |
+
+Les routes d’analyse `POST` acceptent un corps JSON, pas des paramètres de
+requête. Consultez [Analyses produit](/fr/concepts/product-analytics).
+
+### Flux en direct
+
+| Méthode | Chemin | Rôle |
+| --- | --- | --- |
+| `POST` | `/api/feed/ticket` | Créer un ticket de flux en direct de courte durée avec un jeton bearer de compte. |
+| `GET` | `/api/feed/live?ticket=<ticket>` | Ouvrir une connexion WebSocket avec ce ticket. |
+
+### Compte et connexion
+
+Les routes d’utilisation, de quota, d’abonnement et de déconnexion se trouvent
+dans l’[API de compte](/fr/reference/account-api).
+
+## Codes de statut de succès
+
+| Opération | Statut de succès |
+| --- | --- |
+| Ingestion, lectures, mises à jour de problèmes, règles, déploiements, analyses et tickets de flux | `200 OK` |
+| Connexion au flux en direct | `101 Switching Protocols`, puis des messages WebSocket |
+
+Une réponse `200` ne prouve pas que les preuves sont complètes. Lisez les
+champs de couverture, de troncature et de statut de la réponse.
+
+## Filtres de requête et pagination
+
+Chaque route de lecture accepte ses propres paramètres de requête. Les alias
+pratiques comme `project`, `trace` et `user` ne sont pas des paramètres de
+requête. Par défaut, les routes de liste renvoient un tableau simple. Avec
+`pagination=cursor`, elles renvoient une enveloppe avec curseur. La liste des
+déploiements renvoie toujours un objet de page. Consultez
+[Filtres de requête](/fr/reference/telemetry-api-filters).
+
+## Réponses et erreurs
+
+- [Formats de réponse](/fr/reference/telemetry-response-shapes) montre un
+  exemple pour chaque famille de réponses.
+- [Erreurs de l’API](/fr/reference/api-errors) liste les codes d’erreur et les
+  actions de correction.
+
+Lisez `code` avant le message destiné aux humains. Utilisez `next_action` pour
+le comportement du programme et `next` pour guider une personne. N’analysez
+pas le texte de `error` ni de `next`.
+
+## Mettre à jour les problèmes
+
+Ces requêtes utilisent un jeton bearer de compte. Il est volontairement
+différent de `LOGBREW_INGEST_BEARER`. Le compte doit avoir l’autorisation de
+gérer les problèmes du projet concerné. Sinon, la requête échoue avec `403` et
+`forbidden`. La même autorisation couvre les modifications du statut, de la
+priorité et du responsable, ainsi que les règles des problèmes et des logs.
+
+Chaque requête définit un ou plusieurs de ces champs :
+
+| Champ | Valeurs |
+| --- | --- |
+| `status` | `unresolved`, `resolved` ou `archived`. `ignored` est un ancien nom de `archived`. |
+| `priority` | `high`, `medium` ou `low`. |
+| `assignee` | Un ID d’utilisateur, `me` pour le compte connecté, ou `none` pour retirer l’attribution. |
+
+Une requête sans aucun de ces champs échoue avec `422` et
+`validation_failed`.
+
+Un problème a au plus un responsable. Le responsable doit pouvoir lire le
+projet. Sinon, la requête échoue avec `422` et `validation_failed`, et LogBrew
+ne modifie rien. Pour obtenir les comptes que vous pouvez désigner, utilisez
+[Lister les responsables](#list-assignees). Toute autre valeur de `assignee`
+échoue aussi avec `422` et `validation_failed`.
+
+Une priorité que vous définissez reste fixe. Sans priorité définie à la main,
+la priorité suit la gravité du problème : `error` et `critical` donnent
+`high`, `warning` donne `medium` et `info` donne `low`.
+
+Un champ qui a déjà la valeur demandée ne change pas. Vous pouvez renvoyer la
+même requête après un délai d’attente dépassé. Un délai dépassé ne prouve pas
+que la modification n’a pas eu lieu. Relisez le problème avant d’envoyer une
+modification différente.
+
+### <span id="update-one-issue">Mettre à jour un problème</span>
+
+Ajoutez `response_version=3` pour obtenir `archived`, la priorité et le
+responsable dans la réponse :
+
+```bash
+curl -X PATCH "$LOGBREW_API_URL/api/telemetry/issues/$ISSUE_ID?response_version=3" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  -H "Content-Type: application/json" \
+  --data '{ "status": "archived", "priority": "low", "assignee": "me" }'
+```
+
+La réponse est le problème mis à jour. Consultez les
+[exemples de réponses de statut de problème](/fr/reference/telemetry-response-shapes#issue-status-response-examples).
+
+### <span id="update-issues-in-bulk">Mettre à jour des problèmes en masse</span>
+
+Envoyez `project_id` et 1 à 100 ID de problèmes différents de ce
+projet :
+
+```bash
+curl -X POST "$LOGBREW_API_URL/api/telemetry/issues/bulk" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  -H "Content-Type: application/json" \
+  --data '{
+    "project_id": "<project-uuid>",
+    "issue_ids": ["<issue-uuid-1>", "<issue-uuid-2>"],
+    "assignee": "<user-uuid>"
+  }'
+```
+
+La requête applique la même modification à chaque problème. La réponse
+contient `project_id` et `results`, avec un résultat par ID de
+problème, dans l’ordre de la requête. Chaque résultat contient `issue_id`,
+`outcome` et `issue`. `issue` est le problème actuel dans la version 3 de la
+réponse, ou `null` pour `not_found`.
+
+| `outcome` | Signification |
+| --- | --- |
+| `updated` | LogBrew a appliqué la modification. |
+| `unchanged` | Le problème avait déjà les valeurs demandées. |
+| `not_found` | Le projet n’a aucun problème avec cet ID. LogBrew n’a rien modifié pour lui. |
+
+Une liste vide, plus de 100 ID ou un ID répété échouent avec
+`422` et `validation_failed`. Répartissez un ensemble plus grand sur plusieurs
+requêtes. Si le compte ne peut pas lire le projet, la requête échoue avec `404`
+et `not_found`.
+
+### <span id="list-assignees">Lister les responsables</span>
+
+Envoyez l’ID du projet pour obtenir tous les comptes auxquels des
+problèmes peuvent être attribués dans ce projet :
+
+```bash
+curl "$LOGBREW_API_URL/api/telemetry/issues/assignees?project_id=$PROJECT_ID" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER"
+```
+
+La liste contient tous les comptes qui peuvent lire le projet. Chaque entrée
+contient `user_id`, `name` et `email`. `name` vaut `null` quand le compte n’a
+pas de nom. Consultez la
+[réponse de la liste des responsables](/fr/reference/telemetry-response-shapes#assignee-list-response).
+Tout compte qui peut lire le projet peut obtenir cette liste. Si le compte ne
+peut pas lire le projet, la requête échoue avec `404` et `not_found`.
+
+Quand un membre perd l’accès au projet, les problèmes qui lui sont attribués
+n’affichent plus de responsable. Si le membre retrouve l’accès, les problèmes
+l’affichent de nouveau, sauf si quelqu’un a modifié ou retiré le responsable
+entre-temps.
+
+### Définir des règles pour les problèmes et les logs
+
+Une règle change la façon dont LogBrew affiche les signaux correspondants. Elle
+ne supprime pas de données. La `severity` capturée reste inchangée, et la
+réponse affiche la règle dans `triage`.
+
+| Requête | Corps JSON |
+| --- | --- |
+| `PUT /api/telemetry/issues/{issue_id}/triage-rule` | `{ "severity": "<value>" }` |
+| `PUT /api/logs/{log_id}/triage-rule` | `{ "severity": "<value>", "ignored": true }` |
+
+`severity` vaut `info`, `warning`, `error`, `critical` ou `source`. `source`
+annule le remplacement et affiche de nouveau la gravité capturée. Pour une règle
+de log, `ignored: true` masque les logs correspondants dans la liste de logs
+par défaut. Lisez-les avec `status=ignored` ou `status=all`. La règle
+s’applique aux signaux correspondants déjà conservés et futurs. Une autre
+valeur échoue avec `422` et `validation_failed`.
+
+<Warning>
+  N’envoyez pas de versions vides. LogBrew les refuse pour que le suivi des
+  versions reste fiable.
+</Warning>

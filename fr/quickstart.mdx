@@ -1,0 +1,302 @@
+---
+title: "Logs Node.js : démarrage rapide de l’observabilité avec LogBrew"
+sidebarTitle: "Démarrage rapide"
+description: "Créez un projet, configurez les logs Node.js, envoyez un signal SDK sans risque et lisez le log stocké sans afficher d’identifiants."
+---
+
+Créez un projet de développement. Envoyez un log Node.js. Relisez-le depuis
+LogBrew. La CLI crée le projet et enregistre sa clé d’ingestion. La connexion
+dans le navigateur n’est nécessaire que si la CLI n’a pas d’accès valide au
+compte.
+
+<Note>
+  Utilisez `--json` pour les workflows d’agents. Gardez les identifiants dans
+  une configuration locale protégée. Ne transmettez que des noms de variables
+  entre personnes, outils et agents.
+</Note>
+
+## <span id="first-project-success-path">Avant de commencer</span>
+
+Préparez :
+
+- Node.js 18 ou une version plus récente.
+- La CLI LogBrew v0.1.30 ou une version plus récente.
+- `jq`.
+- Bash ou Zsh.
+- Un répertoire de paquet pour une application Node.js côté serveur.
+
+L’exemple utilise le projet `quickstart-node`, l’environnement `development`
+et la version `quickstart@1`. Gardez ce test séparé de la production. Pour un
+autre runtime, utilisez le guide
+[Intégration du SDK](/fr/guides/sdk-ingestion).
+
+<Warning>
+  Gardez le fichier de la clé d’ingestion hors du dépôt, lisible uniquement
+  par vous. Ne mettez pas cette clé serveur dans du code exécuté par le
+  navigateur, dans un bundle public ou dans un prompt.
+</Warning>
+
+## <span id="send-and-read-your-first-log">Envoyer et lire votre premier log</span>
+
+<Steps>
+  <Step title="Lire l’état du compte" id="confirm-account-access">
+    Installez la CLI avec la commande du guide [Utiliser la CLI](/fr/guides/cli).
+    Lisez ensuite l’état de son compte.
+
+    ```bash
+    logbrew status --json
+    ```
+
+    **Point de contrôle :** la commande status indique un accès authentifié
+    au compte.
+    Sinon, une personne exécute `logbrew login` une fois. Exécutez ensuite de
+    nouveau `logbrew status --json`. Un agent ne doit pas lancer une nouvelle
+    connexion quand l’authentification actuelle fonctionne.
+  </Step>
+
+  <Step title="Créer un projet depuis la CLI">
+    Choisissez un nouveau fichier dans un répertoire accessible uniquement par
+    son propriétaire. La CLI écrit la clé d’ingestion du projet dans ce
+    fichier avant d’annoncer la réussite. Elle n’affiche jamais la clé ni le
+    chemin de son fichier.
+
+    ```bash
+    install -d -m 700 "$HOME/.logbrew"
+
+    project_result="$(
+      logbrew projects create quickstart-node \
+        --runtime node \
+        --environment development \
+        --ingest-key-file "$HOME/.logbrew/quickstart-node.ingest" \
+        --json
+    )"
+    export LOGBREW_PROJECT_ID="$(jq -er '.project.id' <<<"$project_result")"
+    jq '{status, setup_status: .setup.status, ingest_key_kind: .ingest_key.kind, next}' \
+      <<<"$project_result"
+    unset project_result
+    ```
+
+    La création du projet modifie l’état du compte. Le fichier de destination
+    ne doit pas exister. Si le résultat n’est pas clair, exécutez de nouveau
+    exactement la même commande. La CLI réutilise l’identité de sa requête en
+    attente. Utilisez `--abandon-retry` uniquement pour démarrer une autre
+    tentative.
+
+    **Point de contrôle :** la sortie indique `status: "created"`, un statut
+    de configuration `created` et un type de clé d’ingestion. Le projet existe
+    et la clé est enregistrée. Cela ne montre pas l’envoi de télémétrie.
+    Consultez [Projets et configuration](/fr/concepts/projects).
+  </Step>
+
+  <Step title="Installer le SDK Node.js">
+    ```bash
+    npm install @logbrew/sdk @logbrew/node
+    ```
+
+    N’utilisez jamais un identifiant de compte comme configuration SDK. Gardez
+    la clé du projet hors de la sortie des commandes, des prompts, des
+    tickets, des fichiers source et de la configuration des paquets.
+  </Step>
+
+  <Step title="Envoyer un log SDK sans risque">
+    Envoyez des marqueurs de version et d’environnement avec un seul log
+    `info` qui ne contient que des valeurs fictives. La clé est définie
+    uniquement pour ce processus Node.js. L’identité de l’application va dans
+    `context`.
+
+    Chaque exécution crée de nouveaux ID d’événement. Si le SDK réessaie
+    l’envoi pendant la même exécution, il envoie le même corps avec les mêmes
+    ID. LogBrew ne stocke pas une deuxième fois un signal déjà accepté
+    quand une nouvelle tentative le renvoie.
+
+    ```bash
+    LOGBREW_SERVER_API_KEY="$(< "$HOME/.logbrew/quickstart-node.ingest")" \
+      node --input-type=module <<'JS'
+    import { randomUUID } from "node:crypto";
+    import { SdkError } from "@logbrew/sdk";
+    import { createLogBrewNodeClient } from "@logbrew/node";
+
+    const client = createLogBrewNodeClient({
+      context: {
+        schemaVersion: 1,
+        resource: { service: { name: "quickstart-node", version: "quickstart@1" } }
+      }
+    });
+    const occurredAt = new Date().toISOString();
+
+    client.release(randomUUID(), occurredAt, {
+      version: "quickstart@1",
+      metadata: { service: "quickstart-node" }
+    });
+    client.environment(randomUUID(), occurredAt, { name: "development" });
+    client.log(randomUUID(), occurredAt, {
+      message: "LogBrew quickstart check",
+      level: "info",
+      logger: "quickstart-node"
+    });
+
+    try {
+      const response = await client.shutdown();
+      console.log(JSON.stringify({
+        ok: true,
+        status_code: response.statusCode,
+        attempts: response.attempts
+      }));
+    } catch (error) {
+      console.error(JSON.stringify({
+        ok: false,
+        error: error instanceof SdkError ? error.code : "delivery_failed"
+      }));
+      process.exitCode = 1;
+    }
+    JS
+    ```
+
+    Ne mettez ni identifiants, ni en-têtes, ni corps de requête, ni données
+    client, ni chemins locaux dans le signal.
+
+    **Point de contrôle :** le script affiche `"ok":true` avec un
+    `status_code` `2xx`. `attempts` est supérieur à `1` après une nouvelle
+    tentative. Un envoi réussi n’est pas la dernière vérification.
+
+    Si l’envoi échoue, le script se termine avec le code `1` et affiche une
+    courte erreur JSON, comme `{"ok":false,"error":"unauthenticated"}`. Il
+    n’affiche ni le corps de la requête ni la clé. Une clé de projet rejetée
+    provoque `unauthenticated`. Une nouvelle connexion à la CLI ne corrige pas
+    cette erreur.
+  </Step>
+
+  <Step title="Lire le rapport de diagnostic du projet" id="verify-readiness-with-the-project-doctor">
+    Pour cette lecture, la CLI utilise l’accès au compte qu’elle a enregistré.
+    N’utilisez pas la clé d’ingestion du projet.
+
+    ```bash
+    : "${LOGBREW_PROJECT_ID:?set the project UUID}"
+
+    logbrew doctor --project "$LOGBREW_PROJECT_ID" --json
+    ```
+
+    **Point de contrôle :** le rapport contient `status: "ready"`. Lisez aussi
+    chaque élément de `checks`. Le code de sortie `0` ne montre pas que toutes
+    les vérifications ont réussi. Pour un autre statut, suivez `next` et la
+    [référence du rapport de diagnostic](/fr/reference/cli#read-a-project-doctor-report).
+    Un projet `ready` ne montre pas que ce log de test est arrivé.
+  </Step>
+
+  <Step title="Lire le log de test">
+    Utilisez le projet, la version et l’environnement du lot envoyé par le
+    SDK.
+
+    ```bash
+    logbrew read logs --project "$LOGBREW_PROJECT_ID" \
+      --release quickstart@1 \
+      --environment development \
+      --since 1h \
+      --json
+    ```
+
+    **Point de contrôle :** `LogBrew quickstart check` apparaît pour ce
+    projet, cette version et cet environnement. Cela montre uniquement
+    l’envoi du log de test.
+  </Step>
+</Steps>
+
+## <span id="understand-the-test-result">Lire le résultat du test</span>
+
+L’exemple envoie 3 éléments. Un seul est un log. Les marqueurs de
+version et d’environnement donnent du contexte au log.
+
+| Champ de l’exemple | Donnée enregistrée |
+| --- | --- |
+| `message` | L’opération enregistrée par le test, `LogBrew quickstart check`. |
+| `level: "info"` | Un signal de test normal, pas un échec. |
+| `logger` | Le logger de l’application qui a créé l’enregistrement. |
+| `occurredAt` | Le moment où cette exécution a créé le signal, sous forme d’horodatage UTC. |
+| `context.resource.service` | Le service de l’application et sa version, pas l’identité du SDK. |
+
+Gardez le test au niveau `info`. Ne le passez pas à `error` pour le trouver
+plus facilement. Utilisez plutôt les filtres de projet et de période.
+Consultez [Valeurs de gravité](/fr/concepts/telemetry#severity-values).
+
+La ligne `console.log` affiche le résultat de l’envoi dans votre terminal.
+L’appel `client.log` envoie le log à LogBrew. Un premier envoi réussi
+affiche :
+
+```json
+{ "ok": true, "status_code": 200, "attempts": 1 }
+```
+
+La clé d’ingestion détermine le projet qui reçoit le log. Un filtre
+`--project` de la CLI ne déplace pas les signaux.
+
+Ce log n’a pas de contexte de trace, car l’exemple ne crée pas de span de
+requête. Cela ne signifie pas que le log a échoué. La lecture par la CLI est
+un instantané. Relancez-la pour lire les signaux suivants, ou utilisez
+`logbrew watch logs --json` pour un flux en direct.
+
+## <span id="common-recovery-decisions">Corriger les erreurs courantes</span>
+
+| Résultat | Étape suivante |
+| --- | --- |
+| Le statut de la CLI n’est pas authentifié | Une personne exécute `logbrew login`. Exécutez ensuite de nouveau la commande status. |
+| Le fichier de la clé d’ingestion existe | Choisissez un chemin inutilisé. N’écrasez pas un identifiant inconnu. |
+| Le résultat de la création du projet n’est pas clair | Exécutez de nouveau exactement la même commande de création. |
+| `unauthenticated` | Examinez la clé d’ingestion du projet, pas l’identifiant du compte de la CLI. Une nouvelle connexion ne corrige pas cette erreur. |
+| `rate_limited` | Attendez avant de renvoyer. Ne relancez pas en boucle et ne créez pas de nouvelle clé. |
+| `transport_error` ou `network_failure` | Examinez la connectivité. Une réponse en échec ne montre pas que la requête précédente n’a eu aucun effet. |
+| `delivery_failed` | Arrêtez-vous et examinez l’échec. N’affichez ni les secrets ni le corps de la requête. |
+| Le `status` du diagnostic n’est pas `ready` | Lisez `checks` et `next` dans le [rapport de diagnostic](/fr/reference/cli#read-a-project-doctor-report). Gardez le même projet. |
+| La lecture des logs est vide | Comparez le projet, l’environnement, la version et la période avec le lot envoyé. |
+
+Si la télémétrie manque toujours, utilisez les
+[vérifications de la première télémétrie](/fr/guides/troubleshooting#recover-missing-first-telemetry).
+Si ces vérifications ne suffisent pas,
+[signalez un problème](/fr/guides/report-a-problem). Ne joignez ni
+identifiants, ni télémétrie brute, ni données client, ni chemins locaux, ni
+code source.
+
+## <span id="move-to-your-application">Passer à votre application</span>
+
+- Créez le client une seule fois dans le code de configuration de votre
+  application.
+- Figez les versions du SDK dans vos fichiers de paquets. Testez les mises à
+  jour hors de la production.
+- Chargez la clé d’ingestion depuis votre configuration de secrets
+  existante. Renouvelez-la après une exposition possible. Consultez
+  [Renouveler une clé d’ingestion](/fr/guides/rotate-ingest-key).
+- Utilisez des noms de service, d’environnement et de version stables, issus
+  de votre configuration de déploiement. Consultez
+  [Versions](/fr/concepts/releases).
+- Rédigez des messages de log qui nomment l’opération et son résultat, comme
+  `Report generation completed`. Gardez les valeurs privées hors du message.
+  Ne copiez pas une requête entière ou un enregistrement utilisateur complet
+  dans un log.
+- Gardez un seul émetteur pour chaque log de l’application, afin d’éviter les
+  doublons. Avant d’ajouter LogBrew, trouvez l’intégration qui envoie déjà
+  chaque enregistrement.
+- Avant un déploiement en production, envoyez un signal sans risque par le
+  vrai chemin du code et relisez-le. Vérifiez son message, son service, sa version
+  et son environnement. Un exemple autonome ne teste pas le chemin du code de
+  votre application.
+
+Cet exemple ne configure ni la capture dans le navigateur, ni les source maps,
+ni la capture mobile. Pour cela, commencez par le guide
+[Intégration du SDK](/fr/guides/sdk-ingestion).
+
+<CardGroup cols={2}>
+  <Card title="Projets et configuration" icon="folder-kanban" href="/fr/concepts/projects">
+    Lisez l’état de configuration et gérez les clés d’ingestion du projet.
+  </Card>
+
+  <Card title="Intégration du SDK" icon="cloud-upload" href="/fr/guides/sdk-ingestion">
+    Choisissez le paquet SDK de votre runtime.
+  </Card>
+
+  <Card title="Investiguer un problème" icon="bug" href="/fr/guides/investigate-an-issue">
+    Suivez les preuves de la trace et des logs associés pour un problème.
+  </Card>
+
+  <Card title="Signaler un problème" icon="life-buoy" href="/fr/guides/report-a-problem">
+    Envoyez un signalement de support privé et sans risque.
+  </Card>
+</CardGroup>

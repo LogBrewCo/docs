@@ -1,0 +1,399 @@
+---
+title: "Rapports de plantage iOS : plantages et blocages Apple"
+sidebarTitle: "Plantages et blocages Apple"
+description: "Configurez les rapports de plantage d’une application iOS, importez les dSYM correspondants et lisez dans LogBrew les logs de plantage iOS symbolisés."
+---
+
+Suivez cette procédure pour capturer les plantages natifs et les blocages du
+thread principal dans une application iOS. La capture des blocages nécessite
+UIKit. Importez le dSYM correspondant pour afficher l’emplacement dans le code
+source de chaque frame de pile.
+
+L’application enregistre un rapport local quand elle plante. À un lancement
+ultérieur, votre application lance le rejeu pour envoyer les preuves du
+plantage à LogBrew. LogBrew n’envoie pas le rapport Apple brut.
+
+<Note>
+  Utilisez LogBrew Swift 0.1.6 ou plus récent. Utilisez la CLI LogBrew native
+  0.1.24 ou plus récente pour importer les artefacts de débogage.
+</Note>
+
+<Warning>
+  Dans l’application, utilisez une configuration d’ingestion limitée au projet.
+  Utilisez une connexion au compte pour importer les artefacts et lire les
+  problèmes. Une clé d’artefact de projet peut aussi servir à importer depuis
+  une machine de build.
+  N’incluez jamais de jeton d’accès au compte ni de clé d’artefact dans l’application.
+</Warning>
+
+## Définir les limites de la capture
+
+Vérifiez quand votre application peut rejouer chaque type de défaillance.
+
+| Défaillance | Résultat de la capture | Moment de l’envoi |
+| --- | --- | --- |
+| Plantage Apple fatal | Un signal de plantage natif non géré | Un lancement ultérieur de l’application |
+| Blocage du thread principal terminé | Un signal de blocage géré | Au rejeu, après la fin du blocage |
+| Blocage suivi d’un arrêt du processus | Un signal de blocage non géré | Un lancement ultérieur de l’application |
+
+Définissez la valeur de version avant le build. Elle doit identifier la version
+et le build de l’application. Utilisez la même valeur dans le SDK, l’import du
+dSYM et le filtre des problèmes.
+
+N’ajoutez pas de données utilisateur, de corps de requête ni d’en-têtes aux
+métadonnées de plantage.
+
+## Ajouter le produit de capture des plantages
+
+Commencez par [configurer la télémétrie du SDK](/fr/guides/sdk-ingestion) pour
+votre application. Le rejeu utilise ce `client` et ce `transport`.
+
+Ajoutez le SDK public avec Swift Package Manager.
+
+```swift
+.package(
+    url: "https://github.com/LogBrewCo/sdk.git",
+    from: "0.1.6"
+)
+```
+
+Ajoutez le produit `LogBrew` pour envoyer la télémétrie. N’ajoutez
+`LogBrewCrash` que si l’application active explicitement la capture native des
+plantages ou des blocages.
+
+L’intégration de capture prend en charge iOS 15 ou plus récent. Gardez un seul
+objet de capture, détenu par l’application, car les gestionnaires natifs
+d’erreurs fatales s’appliquent à tout le processus.
+
+## Configurer une identité exacte
+
+Utilisez le même projet, la même version, le même environnement et le même
+service dans la configuration d’exécution et dans l’import des artefacts. LogBrew ne déduit pas
+et ne remplace pas ces valeurs.
+
+```swift
+import Foundation
+import LogBrew
+import LogBrewCrash
+
+let applicationSupport = try FileManager.default.url(
+    for: .applicationSupportDirectory,
+    in: .userDomainMask,
+    appropriateFor: nil,
+    create: true
+)
+
+let identity = try NativeArtifactIdentity(
+    projectId: "550e8400-e29b-41d4-a716-446655440000",
+    release: "com.example.app@1.2.3+45",
+    environment: "production",
+    service: "ios-app"
+)
+
+let watchdog: NativeHangWatchdogConfiguration? = nil
+
+let crashCapture = NativeCrashCapture(
+    configuration: try NativeCrashConfiguration(
+        storageDirectory: applicationSupport.appendingPathComponent(
+            "LogBrewCrash",
+            isDirectory: true
+        ),
+        artifactIdentity: identity,
+        hangWatchdog: watchdog
+    )
+)
+
+try crashCapture.install()
+```
+
+Installez l’objet de capture sur le thread principal avant de créer l’interface
+racine. Créez d’abord son dossier parent. Gardez le dossier de stockage privé et
+détenu par l’application.
+
+L’objet de capture enregistre les exceptions Mach, les signaux POSIX, les
+exceptions C++ et les exceptions Objective-C. Le rapport local n’inclut ni le contenu de
+la mémoire, ni les noms des files d’attente, ni les logs de la console.
+
+Le rapport de plantage local peut contenir des détails sensibles sur
+l’application et l’appareil. Gardez-le hors des sauvegardes cloud et des
+dossiers partagés. LogBrew envoie les UUID des frames, les architectures et les
+décalages au lieu du rapport brut.
+
+`NativeCrashConfiguration` a deux limites facultatives :
+
+| Paramètre | Valeur par défaut | Plage | Effet |
+| --- | --- | --- | --- |
+| `maxStoredReports` | `5` | 1 à 32 | Le nombre de rapports locaux que l’application conserve. |
+| `maxReplayBytes` | 4 Mio | 1 Kio à 16 Mio | Le rejeu supprime un rapport plus grand que cette taille. |
+
+Une valeur hors de sa plage fait échouer la configuration avec
+`crash_invalid_configuration`.
+
+## Activer la capture des blocages
+
+La capture des blocages est désactivée quand `watchdog` vaut `nil`. Pour
+l’activer, remplacez la déclaration de `watchdog` ci-dessus avant d’appeler
+`install()` :
+
+```swift
+let watchdog = try NativeHangWatchdogConfiguration(
+    threshold: 2
+)
+```
+
+Le seuil est en secondes, de 1 à 30. La capture des blocages nécessite aussi
+`artifactIdentity`. Sans elle, la configuration échoue avec
+`crash_invalid_configuration`.
+
+Gardez un seul objet `crashCapture` pendant toute la durée de vie du processus.
+Un second objet de capture ne peut pas s’installer. Son appel à `install()`
+échoue avec `crash_capture_owned`. Pour changer le seuil, utilisez la nouvelle
+valeur au prochain lancement de l’application.
+
+Un blocage terminé est rejoué avec `crash.handled` à `true`. Un blocage encore
+en cours au moment de l’arrêt du processus est rejoué avec `crash.handled` à
+`false`.
+
+Les deux formes incluent la métadonnée numérique `durationMs`. Elles gardent la
+même identité d’artefact que les frames des plantages fatals.
+
+Le watchdog se met en pause quand l’application est inactive ou sous un
+débogueur. Il suspend aussi la capture en cas de forte pression thermique.
+
+Un seuil court peut signaler comme blocages des traitements normaux du thread
+principal. Testez le seuil avec la configuration de build que vous livrez.
+L’état géré décrit la reprise. Il ne marque pas le problème comme résolu. Un
+blocage géré a quand même figé l’interface : examinez-le aussi.
+
+## Rejouer après le lancement
+
+Après l’installation de la capture, rejouez les rapports en attente avec votre
+client SDK.
+
+```swift
+let replay = try crashCapture.replayPendingReports(
+    in: client,
+    transport: transport
+)
+
+print(
+    "acknowledged=\(replay.acknowledged) " +
+    "discarded=\(replay.discarded) " +
+    "pending=\(replay.pending)"
+)
+```
+
+Votre application doit lancer le rejeu. La fin d’un blocage n’envoie aucun
+signal à elle seule. Appelez la même méthode après la fin du blocage ou au
+prochain lancement.
+
+Le rejeu traite les rapports valides du plus ancien au plus récent et garde
+leurs ID de signal stables. Un envoi échoué laisse son rapport en
+attente. Un envoi accepté le supprime.
+
+Le rejeu supprime les rapports qu’il ne peut pas lire et ceux qui dépassent
+`maxReplayBytes`. Vérifiez les trois nombres. Un nombre de rapports en attente
+égal à zéro ne prouve pas l’envoi à lui seul.
+
+Activez l’envoi durable avant le rejeu quand une requête échouée doit survivre
+à un autre redémarrage. N’appelez pas `purge()` pendant une reprise habituelle
+après un problème de réseau ou d’authentification.
+
+## Importer le dSYM correspondant
+
+Archivez l’application avec les informations de débogage activées. Gardez le
+dSYM du build exact que les utilisateurs exécutent.
+
+Inspectez ses UUID d’image.
+
+```bash
+xcrun dwarfdump --uuid "path/to/App.app.dSYM"
+```
+
+Validez l’artefact en local avant l’import.
+
+```bash
+logbrew debug-artifacts upload "path/to/App.app.dSYM" \
+  --project "<project UUID>" \
+  --release "com.example.app@1.2.3+45" \
+  --environment "production" \
+  --service "ios-app" \
+  --expect-image-uuid "<Mach-O UUID>" \
+  --dry-run \
+  --json
+```
+
+Répétez `--expect-image-uuid` pour chaque architecture requise. La commande
+échoue quand l’ensemble des UUID trouvés diffère de l’ensemble attendu.
+
+Vérifiez l’accès au compte. Exécutez ensuite la même commande sans
+`--dry-run`.
+
+```bash
+logbrew status --json
+
+logbrew debug-artifacts upload "path/to/App.app.dSYM" \
+  --project "<project UUID>" \
+  --release "com.example.app@1.2.3+45" \
+  --environment "production" \
+  --service "ios-app" \
+  --expect-image-uuid "<Mach-O UUID>" \
+  --json
+```
+
+La commande d’import valide les objets Apple pris en charge et vérifie chaque
+identité importée. Elle n’inclut ni chemin local ni nom de fichier dans les
+métadonnées de l’API.
+
+Le champ JSON `status` indique le résultat :
+
+| `status` | Signification |
+| --- | --- |
+| `validated` | L’exécution à blanc a trouvé les objets attendus. Rien n’a été importé. |
+| `verified` | L’accès au compte a importé et vérifié chaque identité. |
+| `already_present` | LogBrew possède déjà chaque identité. |
+| `uploaded` | Une clé d’artefact de projet a importé les fichiers. La CLI n’a pas pu les vérifier. |
+
+Une machine de build peut importer avec une clé d’artefact de projet dans
+`LOGBREW_TOKEN`, au lieu de l’accès au compte. Créez la clé comme indiqué dans
+[Créer une clé d’artefact](/fr/guides/source-maps#create-an-artifact-key). Cet
+import renvoie `uploaded`. Vérifiez ensuite chaque identité avec l’accès au
+compte :
+
+```bash
+logbrew debug-artifacts lookup \
+  --project "<project UUID>" \
+  --release "com.example.app@1.2.3+45" \
+  --environment "production" \
+  --service "ios-app" \
+  --image-uuid "<Mach-O UUID>" \
+  --architecture arm64 \
+  --json
+```
+
+`status: "found"` confirme l’artefact. `status: "missing"` signifie que
+LogBrew n’a aucun artefact pour cette identité.
+
+La résolution s’appuie sur l’UUID d’image et sur l’identité complète de
+l’artefact, pas sur le nom du fichier source. Un nouveau build du même code
+source peut avoir des UUID différents. Importez le bundle dSYM exact, pas un
+dossier de build entier.
+
+## Vérifier la lecture depuis LogBrew
+
+Filtrez la liste des problèmes avec le même périmètre d’exécution. Cet exemple
+sélectionne les problèmes `unresolved`. Un problème résolu ou archivé
+n’apparaît pas.
+
+```bash
+logbrew read issues \
+  --project "<project UUID>" \
+  --release "com.example.app@1.2.3+45" \
+  --environment "production" \
+  --service "ios-app" \
+  --status "unresolved" \
+  --since "24h" \
+  --json
+```
+
+La réponse de la liste identifie le problème groupé. Lisez son détail pour
+demander la résolution des frames par LogBrew.
+
+```bash
+logbrew read issue "<issue UUID>" --json
+```
+
+Un artefact correspondant ajoute un objet `symbolication`. Cet exemple montre
+une sélection de champs d’un problème avec un frame résolu, pas la réponse
+complète.
+
+```json
+{
+  "severity": "critical",
+  "attributes": {
+    "metadata": {
+      "crash.replayed": true
+    }
+  },
+  "symbolication": {
+    "status": "resolved",
+    "frames": [
+      {
+        "index": 0,
+        "status": "resolved",
+        "resolved": {
+          "source": "AppRuntime.swift",
+          "line": 42,
+          "column": 1,
+          "name": "terminateForCrash()"
+        }
+      }
+    ]
+  }
+}
+```
+
+## Lire les preuves du plantage
+
+Chaque frame a son propre `status`. Le champ `symbolication.status` utilise les
+mêmes valeurs :
+
+| `status` | Signification |
+| --- | --- |
+| `resolved` | Un artefact correspondant a résolu le frame. `resolved` contient le fichier source, la ligne, la colonne ou le nom de fonction que l’artefact fournit. |
+| `artifact_not_found` | Aucun artefact importé ne correspond à l’identité du signal et à l’UUID d’image. |
+| `source_not_resolved` | Un artefact correspondant existe, mais il n’a pas résolu ce frame. |
+| `invalid_metadata` | Le signal a des métadonnées d’artefact incomplètes ou incohérentes. |
+| `unavailable` | La lecture de la résolution du frame n’a pas pu aboutir. |
+
+Notez un frame non résolu comme non résolu. Ne le présentez pas comme une pile
+vide.
+
+LogBrew résout les frames quand vous lisez le problème. Un dSYM importé plus
+tard peut résoudre les frames d’un signal plus ancien. Il ne peut pas ajouter
+des frames que le signal n’a pas capturés.
+
+Un frame applicatif réduit la recherche dans le code, mais il ne prouve pas la
+cause. Pour les Breadcrumbs, la chaîne d’exceptions et les preuves de trace,
+lisez l’investigation du problème :
+
+```bash
+logbrew investigate issue "<issue UUID>" --json
+```
+
+Dans cette réponse, un frame avec `source: "symbolicated"` provient d’un
+artefact importé. Un frame avec `source: "captured"` est l’emplacement envoyé
+par l’application. Consultez [Investiguer un problème](/fr/guides/investigate-an-issue)
+pour les champs de la réponse.
+
+Gardez le périmètre complet (projet, version, environnement et service) à
+chaque lecture. N’étendez pas une recherche échouée à d’autres projets.
+
+## Vérifier la configuration de production
+
+Utilisez une défaillance de test approuvée dans le build déployé. N’utilisez
+jamais l’action d’un client comme déclencheur. Vérifiez chaque point dans
+l’ordre et arrêtez-vous au premier échec :
+
+1. L’identité d’exécution correspond à l’identité de l’artefact importé.
+2. Un lancement ultérieur rejoue un signal confirmé, avec zéro rapport supprimé
+   et zéro rapport en attente.
+3. La liste des problèmes filtrée renvoie le problème de test avec l’état géré attendu.
+4. Le frame applicatif attendu est résolu.
+5. Un lancement normal ultérieur n’ajoute pas d’autre occurrence.
+
+## Corriger sans risque
+
+| Résultat | Correction |
+| --- | --- |
+| L’authentification de l’import échoue | Exécutez `logbrew login`, vérifiez `logbrew status --json` et relancez exactement le même import. |
+| La validation des UUID de l’import échoue | Sélectionnez le dSYM du build déployé et relancez l’exécution à blanc. |
+| `artifact_not_found` | Vérifiez l’identité du signal et importez le dSYM correspondant avec le même périmètre. |
+| `source_not_resolved` | Conservez toutes les informations de débogage du build et inspectez les paramètres du build déployé. |
+| `invalid_metadata` | Vérifiez que vous utilisez LogBrew Swift 0.1.6 ou plus récent. Capturez un nouveau signal avec l’identité exacte. |
+| `unavailable` | Gardez le problème visible et relancez plus tard la même lecture détaillée avec le même périmètre. |
+| Le rejeu reste en attente | Corrigez l’état du transport ou de l’authentification, puis relancez l’application sans purger le rapport. |
+| Le rejeu signale des entrées supprimées | Ne les comptez pas comme envoyées. Vérifiez la configuration de la capture et reproduisez avec un nouveau signal de test approuvé. |
+
+Pour investiguer un problème avec l’API dans le cas général, consultez
+[Investiguer un problème](/fr/guides/investigate-an-issue).
