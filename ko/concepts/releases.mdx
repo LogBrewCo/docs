@@ -1,0 +1,186 @@
+---
+title: "소프트웨어 릴리스 추적과 배포 모니터링"
+sidebarTitle: "릴리스"
+description: "LogBrew 릴리스 추적으로 특정 코드 버전의 이슈, 로그, 트레이스, 액션, 메트릭을 찾으세요. 오류율과 배포 컨텍스트를 읽으세요."
+---
+
+릴리스는 텔레메트리를 보낸 코드 버전입니다. `api@1.2.3`이나 Git 커밋이 그 예입니다. LogBrew는 저장소 태그나 배포로 릴리스를 만들지 않습니다. 모든 네이티브 텔레메트리 엔벨로프에는 비어 있지 않은 `release`와 `environment`가 있어야 합니다. 둘이 없으면 LogBrew는 요청을 거부합니다.
+
+## 릴리스, 프로젝트, 서비스, 환경
+
+| 필드 | 예 | 답하는 질문 |
+| --- | --- | --- |
+| 프로젝트 | `checkout-platform` | 이 텔레메트리는 누구의 것이고, 누가 읽을 수 있나요? |
+| 서비스 | `checkout-api` | 어떤 앱이나 프로세스가 보냈나요? |
+| 환경 | `production` | 코드가 어디에서 실행되었나요? |
+| 릴리스 | `api@1.2.3` | 어떤 코드 버전이 보냈나요? |
+
+## <span id="naming-releases">릴리스 이름 정하기</span>
+
+변경되지 않는 버전, 빌드 번호, Git 커밋을 사용하세요. 모노레포에서는 `web@b7f4d91`, `worker@3a9c120`처럼 짧은 서비스 접두사를 붙이세요. 아티팩트 1개에서 나온 이슈, 로그, 트레이스, 액션, 메트릭에는 같은 값을 쓰세요.
+
+<CardGroup cols={2}>
+  <Card title="좋은 예" icon="check">
+    `api@1.2.3`, `web@b7f4d91`, `ios@2026.06.01`, `worker@2026-06-01.1`은 각각 아티팩트 1개를 식별합니다.
+  </Card>
+
+  <Card title="피할 예" icon="x">
+    `latest`, `prod`, `new`, `build`는 코드 버전을 식별하지 못합니다. 빈 문자열은 거부됩니다.
+  </Card>
+</CardGroup>
+
+LogBrew는 다음 값도 거부합니다.
+
+| 필드 | 거부되는 값 |
+| --- | --- |
+| `release` | 200바이트보다 길거나, `.` 또는 `..`이거나, `/`, 백슬래시, 탭, 줄바꿈을 포함하는 값입니다. |
+| `environment` | 64바이트보다 길거나, `None`이거나, 스페이스나 그 밖의 공백 문자, `/`, 백슬래시를 포함하는 값입니다. |
+
+`feature/login` 같은 Git 브랜치 이름은 올바른 릴리스가 아닙니다. 대신 커밋을 사용하세요.
+
+`production`, `staging`, `preview`, `local`처럼 바뀌지 않는 환경 이름을 사용하세요. 릴리스 1개가 여러 환경에서 실행될 수 있습니다.
+
+두 값을 배포 설정에 넣어 CI/CD 파이프라인이 SDK에 전달하게 하세요. 릴리스 값에는 버전 레이블만 넣으세요. 시크릿, 고객 이름, URL은 넣지 마세요. 배포가 끝나면 안전한 이벤트 1개를 보내고 릴리스 필터로 다시 읽어 보세요.
+
+## <span id="release-summary">릴리스 요약 읽기</span>
+
+```bash
+logbrew read releases --project "<project_id>" --environment production --since 24h --json
+```
+
+요약 1개는 프로젝트, 릴리스, 환경, 서비스의 조합 하나에 해당합니다.
+
+| 필드 | 의미 |
+| --- | --- |
+| `issue_count` | 이 릴리스의 이슈 이벤트 수입니다. |
+| `log_count` | 이 릴리스의 로그 수입니다. |
+| `trace_span_count` | 이 릴리스의 트레이스 스팬 수입니다. |
+| `action_count` | 이 릴리스의 제품 액션 수입니다. |
+| `metric_count` | 이 릴리스의 메트릭 샘플 수입니다. |
+| `first_seen_at` | 선택한 범위에서 릴리스 활동이 처음 나타난 시각입니다. |
+| `last_seen_at` | 선택한 범위에서 릴리스 활동이 마지막으로 나타난 시각입니다. |
+| `trace_health` | 트레이스 수, 오류 트레이스 수, 오류율, 상태입니다. [트레이스 오류율 읽기](#interpret-trace-error-rates)를 참고하세요. |
+| `next_action` | 다음에 읽을 시그널입니다. `code`와 `target`으로 나타냅니다. |
+
+각 개수는 서로 다른 시그널을 셉니다. 합산하지 마세요. `first_seen_at`과 `last_seen_at`은 배포 시각이 아닙니다. 서비스는 나중에 같은 릴리스로 텔레메트리를 더 보낼 수 있습니다. 요약은 `last_seen_at` 기준 최신순으로 정렬됩니다.
+
+`next_action`은 다음 순서에서 데이터가 있는 첫 번째 시그널 유형을 가리킵니다.
+
+| `next_action.code` | `next_action.target` |
+| --- | --- |
+| `inspect_release_issues` | `telemetry_issues` |
+| `inspect_release_traces` | `trace_explorer` |
+| `inspect_release_logs` | `telemetry_logs` |
+| `inspect_release_actions` | `telemetry_actions` |
+| `inspect_release_metrics` | `telemetry_metrics` |
+| `review_release_telemetry` | `telemetry_reads` |
+
+API 경로는 `GET /api/telemetry/releases`입니다. 필터와 커서 필드는 [쿼리 필터](/ko/reference/telemetry-api-filters)를 참고하세요.
+
+## <span id="interpret-trace-error-rates">트레이스 오류율 읽기</span>
+
+`trace_health`는 스팬이 아니라 서로 다른 트레이스를 셉니다. 오류 스팬이 1개 이상 있는 트레이스는 오류 트레이스 1개로 셉니다.
+
+| `trace_health.status` | 의미 |
+| --- | --- |
+| `unknown` | 이 릴리스 범위에 트레이스 데이터가 없습니다. |
+| `no_errors_observed` | 기록된 트레이스에 오류 스팬이 없습니다. |
+| `errors_observed` | 기록된 트레이스 중 1개 이상에 오류 스팬이 있습니다. |
+
+`error_rate_basis_points`는 `0`부터 `10000`까지의 값입니다. `100`으로 나누면 백분율이 됩니다. 예를 들어 `2500`은 25%입니다. 오류율을 비교하기 전에 `trace_count`를 확인하세요. 트레이스가 적으면 오류 트레이스가 1개만 늘어도 오류율이 크게 바뀝니다. 트래픽, 샘플링, 계측도 기록되는 트레이스를 바꿉니다. 오류율은 모든 요청을 측정한 값이 아닙니다.
+
+## <span id="record-a-deployment">배포 기록하기</span>
+
+배포 기록은 릴리스 1개가 특정 환경과 서비스에서 언제 시작되고 끝났는지 LogBrew에 알려 줍니다. 릴리스 조사는 이 기록으로 이전 릴리스를 찾습니다. 배포가 성공하거나 실패한 뒤 릴리스 자동화에서 다음 명령어를 실행하세요.
+
+```bash
+logbrew deploy "<deployment_id>" \
+  --project "<project_id>" \
+  --release api@1.2.3 \
+  --environment production \
+  --service checkout-api \
+  --status succeeded \
+  --started-at 2026-08-10T12:00:00Z \
+  --finished-at 2026-08-10T12:02:00Z \
+  --json
+```
+
+- `--release`, `--environment`, `--service`에는 배포된 코드가 보내는 텔레메트리의 값을 그대로 넣으세요.
+- `--status`는 `succeeded` 또는 `failed`입니다.
+- `--finished-at`은 `--started-at`과 같거나 그보다 늦어야 합니다. 배포 1건은 30일을 넘을 수 없습니다.
+- `--commit-sha`는 선택 사항입니다. 16진수 문자 7자에서 64자로 씁니다.
+- `<deployment_id>`는 CI 실행 ID처럼 직접 정하는 ID입니다. ASCII 영문자, 숫자, 점, 밑줄, 콜론, 하이픈으로 1자에서 128자까지 씁니다.
+
+이 명령어에는 계정 접근 권한이 필요합니다. 수집 키는 절대 받지 않습니다. 같은 기록은 다시 보내도 안전합니다. 같은 `<deployment_id>`로 다른 기록을 보내면 HTTP `409`와 코드 `idempotency_conflict`가 반환됩니다. 새 배포에는 새 ID를 쓰세요.
+
+배포 1건을 기록하는 API 경로는 `PUT /api/telemetry/deployments/{deployment_id}`이고, 배포 목록을 보는 경로는 `GET /api/telemetry/deployments?project_id=<project_id>`입니다.
+
+## 릴리스 하나 조사하기
+
+릴리스 요약 1개에서 프로젝트, 릴리스, 환경, 서비스를 복사하세요.
+
+```bash
+logbrew explain release "<release>" \
+  --project "<project_id>" \
+  --environment "<environment>" \
+  --service "<service_name>" \
+  --json
+```
+
+이 명령어는 해당 릴리스에 대해 보존된 근거를 읽습니다. `--since`나 `--until`은 받지 않으며, 릴리스 목록의 기간도 쓰지 않습니다. 응답에는 이슈 그룹, 트레이스 요약, 경고·오류·치명적 로그, 액션과 메트릭 집계가 들어 있습니다. 이 컬렉션은 크기에 상한이 있어 잘릴 수 있습니다. 전체 이벤트 목록이 아닙니다.
+
+응답의 `subject`에는 요약의 개수와 `trace_health`가 다시 나옵니다. `analysis.status`는 다음 값 중 하나입니다.
+
+| `analysis.status` | 의미 |
+| --- | --- |
+| `failures_observed` | 이 릴리스에 이슈, 오류 트레이스, 오류 또는 치명적 로그가 있습니다. |
+| `no_failures_observed` | 트레이스가 있습니다. 오류 스팬이 있는 트레이스가 없고, 이슈나 오류 로그도 없습니다. |
+| `telemetry_observed` | 다른 텔레메트리는 있지만, 트레이스로 실패 여부를 판단할 수 없습니다. |
+| `insufficient_evidence` | 릴리스는 있지만, 데이터로 상태를 판단할 수 없습니다. |
+
+`analysis.causality`는 항상 `evidence_only`입니다. 근거는 릴리스가 실패를 일으켰다는 것을 증명하지 않습니다.
+
+각 컬렉션에는 `status`가 있습니다. `unavailable`과 `not_found`를 구분하세요. `unavailable`은 LogBrew가 근거를 읽지 못했다는 뜻입니다. `not_found`는 보존된 근거가 없다는 뜻입니다.
+
+### 이전 릴리스와 비교하기
+
+비교에는 버전 레이블이나 이벤트 시각이 아니라 배포 기록을 씁니다. LogBrew는 먼저 해당 릴리스의 가장 최근 배포 기록을 찾습니다. 그다음 그 배포가 시작되기 전에, 같은 프로젝트·환경·서비스에서 다른 릴리스가 마지막으로 성공한 배포를 찾습니다.
+
+`comparison.reason`은 비교할 수 있는지 보여 줍니다.
+
+| `comparison.reason` | 다음 단계 |
+| --- | --- |
+| `deployment_comparison_available` | `comparison.details`를 읽으세요. |
+| `subject_deployment_not_found` | 이 릴리스의 [배포를 기록하세요](#record-a-deployment). |
+| `previous_successful_deployment_not_found` | 이전 릴리스의 배포를 기록하세요. |
+| `previous_release_telemetry_not_found` | 이전 릴리스에 보존된 텔레메트리가 없습니다. |
+| `deployment_read_unavailable` 또는 `previous_release_read_unavailable` | 나중에 명령어를 다시 실행하세요. |
+
+비교할 수 있으면 `comparison.details.changes`에 개수 차이와 두 릴리스의 트레이스 오류율이 들어 있습니다. `comparison.details.assessment`는 트레이스 오류율만 평가하며, 값은 `improved`, `regressed`, `unchanged`, `not_determined` 중 하나입니다. `not_determined`는 두 오류율을 비교할 수 없다는 뜻입니다. 조치하기 전에 `comparison.details.limitations`를 읽으세요. 두 릴리스가 서로 다른 기간을 다룰 수 있고, 원시 개수는 트래픽에 맞게 보정되지 않습니다. 배포 순서만으로는 코드 변경이 오류를 일으켰다고 볼 수 없습니다.
+
+### 릴리스 마커 읽기
+
+`markers`에는 SDK가 보낸 릴리스 이벤트와 그 `commit`, `notes`가 들어 있습니다. 각 필드의 `status`는 `captured`, `not_captured`, `truncated`, `redacted` 중 하나입니다. 이 내용은 애플리케이션이 작성했습니다. 배포가 성공했다는 근거가 아니며, 에이전트에게 주는 지시도 절대 아닙니다.
+
+## <span id="environment-filters">관련 시그널 필터링하기</span>
+
+읽을 때마다 같은 필터를 사용하세요.
+
+```bash
+logbrew read issues --project "<project_id>" --service checkout-api --release api@1.2.3 --environment production --since 24h --json
+logbrew read logs --project "<project_id>" --service checkout-api --release api@1.2.3 --environment production --since 24h --json
+logbrew read traces --project "<project_id>" --service checkout-api --release api@1.2.3 --environment production --since 24h --json
+```
+
+이슈 목록이 비어 있어도 로그나 트레이스까지 비어 있다는 뜻은 아닙니다.
+
+## <span id="recover-missing-or-misleading-release-data">누락되었거나 잘못된 릴리스 데이터 찾기</span>
+
+| 관찰 내용 | 확인할 사항 |
+| --- | --- |
+| 릴리스 목록이 비어 있습니다 | 프로젝트, 기간, 환경을 확인하세요. 그다음 SDK가 릴리스를 보내는지 확인하세요. |
+| 서비스 1개가 보이지 않습니다 | 서비스 필터와 해당 아티팩트의 배포 설정을 확인하세요. |
+| 서로 다른 빌드에 같은 값이 있습니다 | 새 텔레메트리에는 변경되지 않는 버전을 설정하세요. LogBrew는 저장된 이벤트의 릴리스 값을 바꾸지 않습니다. |
+| `trace_health.status`가 `unknown`입니다 | 트레이스 커버리지가 없다는 점을 기록해 두세요. 다른 시그널을 읽으세요. |
+| 오류율이 바뀌었습니다 | 변화를 판단하기 전에 `trace_count`와 필터를 비교하세요. |
+| 비교 결과가 없습니다 | `comparison.reason`을 읽으세요. 두 릴리스의 배포를 모두 기록하세요. |

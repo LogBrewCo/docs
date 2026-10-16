@@ -1,0 +1,316 @@
+---
+title: "iOS 크래시 리포팅: Apple 크래시와 멈춤 수집"
+sidebarTitle: "Apple 크래시와 멈춤"
+description: "iOS 앱 크래시 리포팅을 설정하고, 일치하는 dSYM을 업로드하고, LogBrew에서 심볼리케이션된 iOS 앱 크래시 로그를 읽으세요."
+---
+
+이 절차로 iOS 앱의 네이티브 크래시와 메인 스레드 멈춤을 수집하세요. 멈춤 수집에는 UIKit이 필요합니다. 스택 프레임에서 소스 위치를 보려면 일치하는 dSYM을 업로드하세요.
+
+앱은 크래시가 나면 로컬 리포트를 저장합니다. 앱이 다음에 실행될 때 재전송을 호출해 크래시 근거를 LogBrew로 보냅니다. LogBrew는 원본 Apple 리포트를 보내지 않습니다.
+
+<Note>
+  LogBrew Swift 0.1.6 이상을 사용하세요. 디버그 아티팩트를 업로드하려면 네이티브 LogBrew CLI 0.1.24 이상을 사용하세요.
+</Note>
+
+<Warning>
+  앱 안에서는 프로젝트 범위의 수집 설정을 사용하세요. 아티팩트 업로드와 이슈 읽기에는 계정 로그인을 사용하세요. 빌드 머신에서는 프로젝트 아티팩트 키로도 업로드할 수 있습니다. 계정 액세스 토큰이나 아티팩트 키를 앱에 넣지 마세요.
+</Warning>
+
+## 수집 범위 계획하기
+
+앱이 실패 유형별로 언제 재전송할 수 있는지 확인하세요.
+
+| 실패 | 수집 결과 | 전송 시점 |
+| --- | --- | --- |
+| 치명적인 Apple 크래시 | 처리되지 않은 네이티브 크래시 이벤트 | 이후 앱 실행 시 |
+| 복구된 메인 스레드 멈춤 | 처리된 멈춤 이벤트 | 복구 후 재전송할 때 |
+| 멈춤 후 종료 | 처리되지 않은 멈춤 이벤트 | 이후 앱 실행 시 |
+
+빌드 전에 릴리스 값을 정하세요. 이 값은 앱 버전과 빌드를 식별해야 합니다. SDK, dSYM 업로드, 이슈 필터에 같은 값을 사용하세요.
+
+크래시 메타데이터에 사용자 페이로드, 요청 본문, 헤더를 붙이지 마세요.
+
+## 크래시 제품 추가하기
+
+먼저 앱에 [SDK 텔레메트리를 설정](/ko/guides/sdk-ingestion)하세요. 재전송은 그 `client`와 `transport`를 사용합니다.
+
+Swift Package Manager로 공개 SDK를 추가하세요.
+
+```swift
+.package(
+    url: "https://github.com/LogBrewCo/sdk.git",
+    from: "0.1.6"
+)
+```
+
+텔레메트리를 보내려면 `LogBrew` 제품을 추가하세요. `LogBrewCrash`는 앱에서 네이티브 크래시나 멈춤 수집을 명시적으로 켤 때만 추가하세요.
+
+수집 통합은 iOS 15 이상을 지원합니다. 네이티브 치명적 오류 핸들러는 프로세스 전체에 적용되므로, 앱이 소유하는 수집 객체를 1개만 유지하세요.
+
+## 정확한 식별 정보 하나 설정하기
+
+런타임 설정과 아티팩트 업로드에 같은 프로젝트, 릴리스, 환경, 서비스를 사용하세요. LogBrew는 이 값을 추론하거나 바꾸지 않습니다.
+
+```swift
+import Foundation
+import LogBrew
+import LogBrewCrash
+
+let applicationSupport = try FileManager.default.url(
+    for: .applicationSupportDirectory,
+    in: .userDomainMask,
+    appropriateFor: nil,
+    create: true
+)
+
+let identity = try NativeArtifactIdentity(
+    projectId: "550e8400-e29b-41d4-a716-446655440000",
+    release: "com.example.app@1.2.3+45",
+    environment: "production",
+    service: "ios-app"
+)
+
+let watchdog: NativeHangWatchdogConfiguration? = nil
+
+let crashCapture = NativeCrashCapture(
+    configuration: try NativeCrashConfiguration(
+        storageDirectory: applicationSupport.appendingPathComponent(
+            "LogBrewCrash",
+            isDirectory: true
+        ),
+        artifactIdentity: identity,
+        hangWatchdog: watchdog
+    )
+)
+
+try crashCapture.install()
+```
+
+루트 UI를 만들기 전에 메인 스레드에서 수집 객체를 설치하세요. 상위 디렉터리를 먼저 만드세요. 저장 디렉터리는 앱이 소유하는 비공개 디렉터리로 유지하세요.
+
+수집 객체는 Mach 예외, 시그널, C++ 예외, Objective-C 예외를 기록합니다. 로컬 리포트에는 메모리 내용, 큐 이름, 콘솔 로그가 들어가지 않습니다.
+
+로컬 크래시 리포트에는 민감한 앱 정보와 기기 정보가 들어 있을 수 있습니다. 클라우드 백업과 공유 디렉터리에 들어가지 않게 하세요. LogBrew는 원본 리포트 대신 프레임 UUID, 아키텍처, 오프셋을 보냅니다.
+
+`NativeCrashConfiguration`에는 선택 사항인 한도 2개가 있습니다.
+
+| 매개변수 | 기본값 | 범위 | 효과 |
+| --- | --- | --- | --- |
+| `maxStoredReports` | `5` | 1~32 | 앱이 보관하는 로컬 리포트 수입니다. |
+| `maxReplayBytes` | 4 MiB | 1 KiB~16 MiB | 재전송할 때 이 크기보다 큰 리포트는 버립니다. |
+
+범위를 벗어난 값을 쓰면 설정에서 `crash_invalid_configuration` 오류가 발생합니다.
+
+## 멈춤 수집 켜기
+
+`watchdog`가 `nil`이면 멈춤 수집이 꺼져 있습니다. 켜려면 `install()`을 호출하기 전에 위의 `watchdog` 선언을 다음으로 바꾸세요.
+
+```swift
+let watchdog = try NativeHangWatchdogConfiguration(
+    threshold: 2
+)
+```
+
+임곗값은 초 단위이며 1부터 30까지입니다. 멈춤 수집에는 `artifactIdentity`도 필요합니다. 없으면 설정에서 `crash_invalid_configuration` 오류가 발생합니다.
+
+프로세스가 살아 있는 동안 `crashCapture` 객체를 1개만 유지하세요. 두 번째 수집 객체는 설치할 수 없습니다. 그 객체의 `install()` 호출은 `crash_capture_owned` 오류를 발생시킵니다. 임곗값을 바꾸려면 다음 앱 실행 때 새 값을 사용하세요.
+
+복구된 멈춤은 `crash.handled`를 `true`로 설정해 재전송됩니다. 프로세스 종료로 남은 진행 중 멈춤은 `crash.handled`를 `false`로 설정해 재전송됩니다.
+
+두 형식 모두 숫자 `durationMs` 메타데이터를 포함합니다. 치명적 크래시 프레임과 같은 아티팩트 식별 정보를 유지합니다.
+
+워치독은 앱이 비활성 상태이거나 디버거에 연결된 동안 일시 중지됩니다. 발열이 심할 때도 수집하지 않습니다.
+
+임곗값이 짧으면 정상적인 메인 스레드 작업도 멈춤으로 보고될 수 있습니다. 실제로 배포하는 빌드 구성으로 임곗값을 테스트하세요. 처리됨 상태는 복구되었다는 뜻입니다. 이슈가 해결되었다는 표시가 아닙니다. 처리된 멈춤도 인터페이스를 막았으므로 함께 검토하세요.
+
+## 실행 후 재전송하기
+
+수집 객체를 설치한 뒤 SDK 클라이언트로 대기 중인 리포트를 재전송하세요.
+
+```swift
+let replay = try crashCapture.replayPendingReports(
+    in: client,
+    transport: transport
+)
+
+print(
+    "acknowledged=\(replay.acknowledged) " +
+    "discarded=\(replay.discarded) " +
+    "pending=\(replay.pending)"
+)
+```
+
+앱이 직접 재전송을 호출해야 합니다. 멈춤에서 복구되는 것만으로는 이벤트가 전송되지 않습니다. 복구 후나 다음 실행 때 같은 메서드를 호출하세요.
+
+재전송은 유효한 리포트를 오래된 것부터 처리하며 고정된 이벤트 ID를 유지합니다. 전송에 실패한 리포트는 대기 상태로 남습니다. 전송이 접수되면 리포트가 삭제됩니다.
+
+재전송은 읽을 수 없는 리포트와 `maxReplayBytes`보다 큰 리포트를 버립니다. 세 가지 수를 모두 확인하세요. 대기 중인 리포트 수가 0이라는 것만으로는 전송이 증명되지 않습니다.
+
+실패한 요청이 다음 재시작 뒤에도 남아 있어야 한다면 재전송 전에 지속 전송을 켜세요. 일반적인 네트워크 복구나 인증 복구 중에는 `purge()`를 호출하지 마세요.
+
+## 일치하는 dSYM 업로드하기
+
+디버그 정보를 켠 상태로 앱을 아카이브하세요. 사용자가 실행하는 바로 그 빌드의 dSYM을 보관하세요.
+
+dSYM의 이미지 UUID를 확인하세요.
+
+```bash
+xcrun dwarfdump --uuid "path/to/App.app.dSYM"
+```
+
+업로드하기 전에 로컬에서 아티팩트를 검증하세요.
+
+```bash
+logbrew debug-artifacts upload "path/to/App.app.dSYM" \
+  --project "<project UUID>" \
+  --release "com.example.app@1.2.3+45" \
+  --environment "production" \
+  --service "ios-app" \
+  --expect-image-uuid "<Mach-O UUID>" \
+  --dry-run \
+  --json
+```
+
+필요한 아키텍처마다 `--expect-image-uuid`를 반복하세요. 찾은 UUID 집합이 예상 집합과 다르면 명령어가 실패합니다.
+
+계정 접근 권한을 확인하세요. 그런 다음 `--dry-run` 없이 같은 명령어를 실행하세요.
+
+```bash
+logbrew status --json
+
+logbrew debug-artifacts upload "path/to/App.app.dSYM" \
+  --project "<project UUID>" \
+  --release "com.example.app@1.2.3+45" \
+  --environment "production" \
+  --service "ios-app" \
+  --expect-image-uuid "<Mach-O UUID>" \
+  --json
+```
+
+업로드 명령어는 지원되는 Apple 객체를 검증하고, 업로드된 모든 식별 정보를 확인합니다. API 메타데이터에 로컬 경로나 파일 이름을 넣지 않습니다.
+
+JSON `status`가 결과를 보여 줍니다.
+
+| `status` | 의미 |
+| --- | --- |
+| `validated` | 드라이 런에서 예상한 객체를 찾았습니다. 아무것도 업로드하지 않았습니다. |
+| `verified` | 계정 접근 권한으로 모든 식별 정보를 업로드하고 확인했습니다. |
+| `already_present` | LogBrew에 이미 모든 식별 정보가 있습니다. |
+| `uploaded` | 프로젝트 아티팩트 키로 파일을 업로드했습니다. CLI가 파일을 확인하지 못했습니다. |
+
+빌드 머신은 계정 접근 권한 대신 `LOGBREW_TOKEN`에 프로젝트 아티팩트 키를 넣어 업로드할 수 있습니다. 키는 [아티팩트 키 만들기](/ko/guides/source-maps#create-an-artifact-key)에 나온 대로 만드세요. 이 업로드는 `uploaded`를 보고합니다. 나중에 계정 접근 권한으로 각 식별 정보를 확인하세요.
+
+```bash
+logbrew debug-artifacts lookup \
+  --project "<project UUID>" \
+  --release "com.example.app@1.2.3+45" \
+  --environment "production" \
+  --service "ios-app" \
+  --image-uuid "<Mach-O UUID>" \
+  --architecture arm64 \
+  --json
+```
+
+`status: "found"`는 아티팩트가 있다는 확인입니다. `status: "missing"`은 LogBrew에 해당 식별 정보의 아티팩트가 없다는 뜻입니다.
+
+프레임 해석은 소스 파일 이름이 아니라 이미지 UUID와 전체 아티팩트 식별 정보로 일치 여부를 판단합니다. 같은 소스를 다시 빌드해도 UUID가 달라질 수 있습니다. 빌드 디렉터리 전체가 아니라 정확한 dSYM 번들을 업로드하세요.
+
+## 호스팅된 데이터 다시 읽어 확인하기
+
+같은 런타임 범위로 이슈 목록을 필터링하세요. 이 예는 `unresolved` 이슈를 선택합니다. 해결됨 또는 보관됨 이슈는 나타나지 않습니다.
+
+```bash
+logbrew read issues \
+  --project "<project UUID>" \
+  --release "com.example.app@1.2.3+45" \
+  --environment "production" \
+  --service "ios-app" \
+  --status "unresolved" \
+  --since "24h" \
+  --json
+```
+
+목록 응답은 그룹으로 묶인 이슈를 식별합니다. 호스팅된 프레임 해석을 요청하려면 그 이슈의 상세 정보를 읽으세요.
+
+```bash
+logbrew read issue "<issue UUID>" --json
+```
+
+일치하는 아티팩트가 있으면 `symbolication` 객체가 추가됩니다. 이 예는 해석된 프레임이 있는 이슈에서 일부 필드만 보여 줍니다. 전체 응답이 아닙니다.
+
+```json
+{
+  "severity": "critical",
+  "attributes": {
+    "metadata": {
+      "crash.replayed": true
+    }
+  },
+  "symbolication": {
+    "status": "resolved",
+    "frames": [
+      {
+        "index": 0,
+        "status": "resolved",
+        "resolved": {
+          "source": "AppRuntime.swift",
+          "line": 42,
+          "column": 1,
+          "name": "terminateForCrash()"
+        }
+      }
+    ]
+  }
+}
+```
+
+## 크래시 근거 읽기
+
+각 프레임에는 자체 `status`가 있습니다. `symbolication.status` 필드도 같은 값을 사용합니다.
+
+| `status` | 의미 |
+| --- | --- |
+| `resolved` | 일치하는 아티팩트가 프레임을 해석했습니다. `resolved`에는 아티팩트가 제공하는 소스, 줄, 열, 함수 이름이 들어 있습니다. |
+| `artifact_not_found` | 이벤트 식별 정보 및 이미지 UUID와 일치하는 업로드된 아티팩트가 없습니다. |
+| `source_not_resolved` | 일치하는 아티팩트는 있지만 이 프레임을 해석하지 못했습니다. |
+| `invalid_metadata` | 이벤트의 아티팩트 메타데이터가 불완전하거나 일관되지 않습니다. |
+| `unavailable` | 프레임 해석 읽기를 완료하지 못했습니다. |
+
+해석되지 않은 프레임은 메모에도 해석되지 않은 상태로 남기세요. 빈 스택으로 보고하지 마세요.
+
+LogBrew는 이슈를 읽을 때 프레임을 해석합니다. 나중에 업로드한 dSYM으로 이전 이벤트의 프레임도 해석할 수 있습니다. 다만 이벤트가 수집하지 않은 프레임을 추가할 수는 없습니다.
+
+애플리케이션 프레임은 코드를 찾을 범위를 좁혀 주지만 원인을 증명하지는 않습니다. 브레드크럼, 예외 체인, 트레이스 근거는 이슈 조사 결과에서 읽으세요.
+
+```bash
+logbrew investigate issue "<issue UUID>" --json
+```
+
+이 응답에서 `source: "symbolicated"`인 프레임은 업로드된 아티팩트에서 나온 것입니다. `source: "captured"`인 프레임은 앱이 보낸 위치입니다. 응답 필드는 [이슈 조사하기](/ko/guides/investigate-an-issue)를 참고하세요.
+
+모든 읽기에서 프로젝트, 릴리스, 환경, 서비스 범위를 모두 유지하세요. 조회에 실패했다고 여러 프로젝트로 범위를 넓히지 마세요.
+
+## 프로덕션 설정 확인하기
+
+배포된 빌드에서 승인된 테스트 실패를 사용하세요. 고객의 액션을 트리거로 사용하지 마세요. 각 항목을 순서대로 확인하고, 처음 실패한 곳에서 멈추세요.
+
+1. 런타임 식별 정보가 업로드된 아티팩트 식별 정보와 일치합니다.
+2. 이후 실행에서 접수 확인된 이벤트 1개를 재전송하며, 버린 리포트와 대기 중인 리포트가 모두 0개입니다.
+3. 범위를 지정한 이슈 목록이 예상한 처리 상태로 테스트 이슈를 반환합니다.
+4. 예상한 애플리케이션 프레임이 해석됩니다.
+5. 이후 정상 실행에서 발생 건이 더 추가되지 않습니다.
+
+## 안전하게 복구하기
+
+| 결과 | 복구 방법 |
+| --- | --- |
+| 업로드 인증 실패 | `logbrew login`을 실행하고 `logbrew status --json`으로 확인한 다음 같은 업로드를 반복하세요. |
+| 업로드 UUID 검증 실패 | 배포된 빌드의 dSYM을 선택하고 드라이 런을 반복하세요. |
+| `artifact_not_found` | 이벤트 식별 정보를 확인하고 같은 범위로 일치하는 dSYM을 업로드하세요. |
+| `source_not_resolved` | 빌드의 전체 디버그 정보를 유지하고 배포된 빌드 설정을 확인하세요. |
+| `invalid_metadata` | LogBrew Swift 0.1.6 이상인지 확인하세요. 정확한 식별 정보로 새 이벤트를 수집하세요. |
+| `unavailable` | 이슈를 계속 표시해 두고 나중에 같은 범위로 상세 정보를 다시 읽으세요. |
+| 재전송이 대기 상태로 남음 | 전송 또는 인증 상태를 바로잡은 다음 리포트를 지우지 말고 다시 실행하세요. |
+| 재전송이 버린 항목을 보고함 | 전송된 것으로 세지 마세요. 수집 설정을 확인하고 승인된 새 테스트 이벤트로 재현하세요. |
+
+일반적인 이슈 조사는 [API로 이슈 조사하기](/ko/guides/investigate-an-issue)를 사용하세요.
