@@ -80,8 +80,8 @@ translated page:
 python3 scripts/check_locales.py
 ```
 
-A locale goes into the `docs.json` language switcher only when all its pages
-exist. Until then, `.mintignore` keeps its folder out of the site.
+Every locale is in the `docs.json` language switcher. A new locale joins it
+only when all its pages exist.
 
 ## License
 
