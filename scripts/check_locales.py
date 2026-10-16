@@ -17,7 +17,7 @@ LOCALES = ["tr", "de", "es", "ja", "fr", "pt-BR", "it", "nl", "vi",
            "zh-Hans", "ko", "id", "pl", "ar"]
 ROOT = Path(__file__).resolve().parent.parent
 FENCE = re.compile(r"^( *)(`{3,}|~{3,}).*?^\1\2[ \t]*$", re.M | re.S)
-INLINE = re.compile(r"`[^`\n]+`")
+INLINE = re.compile(r"`[^`\n]+(?:\n[^`\n]+)*`")
 LINK = re.compile(r"\]\(([^)\s]+)\)|href=\"([^\"]+)\"")
 COMPONENT = re.compile(r"<([A-Z][A-Za-z]*)[\s>/]")
 FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.S)
@@ -54,7 +54,7 @@ def parse(path):
     return {
         "meta": meta,
         "fences": fences,
-        "inline": set(INLINE.findall(prose)),
+        "inline": {" ".join(code.split()) for code in INLINE.findall(prose)},
         "links": links,
         "components": Counter(COMPONENT.findall(INLINE.sub("", prose))),
         "text": text,
