@@ -1,0 +1,256 @@
+---
+title: "什么是产品分析？指标与回访用户"
+sidebarTitle: "产品分析"
+description: "选择项目和日期，查看活动、漏斗、留存和生命周期变化。根据结果采取行动前，先检查数据覆盖率。"
+---
+
+产品分析展示用户如何使用你的应用。LogBrew 读取应用发送的产品操作，包括页面浏览、屏幕浏览和互动。使用[产品事件采集](/zh-Hans/guides/product-events)发送这些事件，并附带用户和会话上下文。
+
+每个结果只对应一个项目和一个时间范围。服务名不能用来选择项目。日志和问题是独立的信号。即使它们存在，也不代表同一时间范围内有分析数据。
+
+## 事件、用户和会话
+
+| 单位 | 含义 |
+| --- | --- |
+| 事件 | 一次记录下来的操作。一个人可以发送多个事件。 |
+| 已识别用户 | 由应用提供的稳定、不透明的主体 ID，类型为 `user`。 |
+| 匿名主体 | 带类型但不是用户的主体 ID。它永远不会计为用户。 |
+| 会话 | 由应用明确提供的会话 ID。一个人可以有多个会话。 |
+
+例如，20 个会话中有 200 次操作，并不代表有 20 个人使用了应用。事件总数在所选时间范围内是精确值。去重后的用户数、会话数和匿名主体数都是近似值。
+
+使用不透明 ID。不要用姓名、电子邮件地址或其他个人信息作为 ID。分析响应从不返回原始用户 ID 或会话 ID。
+
+## 打开控制台概览
+
+1. 在 LogBrew 控制台中打开**分析**。
+2. 选择一个项目。
+3. 选择 **24 小时**、**7 天**、**14 天**、**30 天** 或 **自定义**。
+4. 先查看活动图表，再查看**热门事件**和**热门页面**。
+5. 查看用户数之前，先打开**覆盖率和限制**。
+
+选择**自定义**时，先选择第一天和最后一天，再选择**应用**。这两天都包含在范围内。例如，4 月 12 日至 4 月 16 日共 5 天。控制台使用 UTC 日期。自定义范围最长 31 天，且不能包含未来的日期。
+
+控制台还会针对同一项目和日期显示两个用户趋势。**用户会回访吗？** 显示留存。**用户群体在如何变化？** 显示生命周期分组。两个趋势都使用已识别用户的全部已分类活动。你无需为它们选择事件。
+
+## <span id="use-the-analytics-api">读取项目概览</span>
+
+```bash
+logbrew analytics overview --project "<project_id>" --since 7d --json
+```
+
+添加 `--until <RFC3339>` 可指定结束时间，该时间本身不包含在范围内。`--interval` 可取 `auto`、`1m`、`5m`、`15m`、`1h`、`6h` 或 `1d`。`--top-limit` 设置每个排行列表的行数，范围为 `1` 到 `20`，默认值为 `10`。添加 `--service`、`--release` 或 `--environment` 可按精确的上下文筛选。对应的 API 端点是 `GET /api/telemetry/analytics/overview`。
+
+概览包含活动总数、时间序列、热门操作和已分类活动。以下摘录展示了总数及其覆盖率：
+
+```json
+{
+  "schema_version": 3,
+  "analysis_level": "user_and_session",
+  "summary": {
+    "actions": 120,
+    "active_identified_users": 18,
+    "active_anonymous_subjects": 7,
+    "sessions": 24
+  },
+  "coverage": {
+    "identified_actions": 100,
+    "anonymous_actions": 20,
+    "subject_coverage": {
+      "index_version": 1,
+      "identified_user_events": 100,
+      "anonymous_subject_events": 8,
+      "legacy_unknown_kind_events": 4,
+      "missing_subject_events": 6,
+      "historical_unindexed_events": 2
+    },
+    "sessionized_actions": 90,
+    "traced_actions": 60,
+    "top_actions_truncated": true
+  },
+  "next_action": { "code": "build_product_funnel" }
+}
+```
+
+5 个 `subject_coverage` 计数相加等于 `summary.actions`。只有 `identified_user_events` 计入用户。`anonymous_actions` 包含其余 4 种状态。在此示例中，8 个匿名主体事件大约来自 7 个不同的匿名主体。这两个数字都不是用户数。排行列表被截断，并不说明低频事件不存在。
+
+`analysis_level` 的值为 `no_data`、`event_only`、`user_level` 或 `user_and_session`，表示数据能回答哪些问题。该级别取 `summary` 和 `classified_activity` 两者中支持的最高级别。它并不表示两组都有用户或会话。
+
+### 区分两组活动
+
+| 响应字段 | 计入的事件 |
+| --- | --- |
+| `summary`、`coverage`、`series`、`top_actions` | 产品操作事件，包括没有受支持分类的操作。 |
+| `classified_activity` | 页面浏览、屏幕浏览和互动。页面浏览不属于操作。 |
+
+已分类的屏幕浏览和互动也属于操作。不要把 `summary.actions` 和 `classified_activity.summary.events` 相加。查看你所使用的那一组的覆盖率。`classified_activity.coverage.subject_coverage` 中的各项主体计数相加等于 `classified_activity.summary.events`。
+
+`summary.actions` 可能为 `0`，而已分类的页面浏览仍提供用户数和会话数。在断定没有产品活动之前，先检查 `classified_activity`。
+
+### 遵循下一步建议
+
+`next_action` 包含 `code`、`target` 和 `reason`。它指出最重要的采集缺口或下一个分析步骤：
+
+| `next_action.code` | 含义 |
+| --- | --- |
+| `capture_product_activity` | 没有符合查询范围的产品事件。 |
+| `classify_product_activity` | 有事件，但没有一个是页面浏览、屏幕浏览或互动。 |
+| `identify_product_users` | 没有任何事件带有类型为 `user` 的主体。 |
+| `sessionize_product_activity` | 没有任何事件带有会话 ID。 |
+| `capture_funnel_steps` | 已命名的已分类事件少于 2 个。 |
+| `build_product_funnel` | 数据足以构建漏斗。 |
+
+在应用中修改采集代码，然后检查一个新事件。旧事件无法证明修改已生效。
+
+### 直接调用 API
+
+发送账号 Bearer 令牌。发送 `response_version=3`，即可获得与 CLI 读取内容相同的响应。如果省略 `response_version`，API 会返回版本 `1`，其中没有匿名主体计数，也没有 `subject_coverage`。
+
+```bash
+curl -sS -G "https://api.logbrew.co/api/telemetry/analytics/overview" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project_id>" \
+  --data-urlencode "since=7d" \
+  --data-urlencode "response_version=3"
+```
+
+`since` 可以是正数时长（例如 `24h`、`7d` 或 `30d`），也可以是 RFC3339 时间戳。`until` 是可选的 RFC3339 时间戳。范围包含 `since`，不包含 `until`。如果省略 `until`，范围在请求时刻结束。范围不能超过 31 天。
+
+要查询 2026 年 4 月 12 日至 4 月 16 日，将 `since` 设为 `2026-04-12T00:00:00Z`，将 `until` 设为 `2026-04-17T00:00:00Z`。
+
+超过 31 天的范围会返回 HTTP `422`：
+
+```json
+{
+  "error": "product analytics range must not exceed 31 days",
+  "code": "validation_failed",
+  "next": "use a shorter range or query consecutive bounded windows",
+  "next_action": { "code": "fix_request", "target": "request" }
+}
+```
+
+在程序逻辑中读取 `code` 和 `next_action`。向用户展示 `error` 和 `next`。[API 错误](/zh-Hans/reference/api-errors)列出了其他错误响应。
+
+下文的 `POST` 分析路由接受 JSON 请求体，其中包含相同的 `project_id`、`since`、`until`、`service_name`、`release` 和 `environment` 字段。未知的请求体字段会被拒绝。
+
+## <span id="measure-a-funnel">衡量漏斗</span>
+
+漏斗衡量经过 2 到 8 个有序步骤的转化：
+
+```bash
+logbrew analytics funnel --project "<project_id>" --since 7d \
+  --step page-view /pricing \
+  --step interaction checkout_started \
+  --step interaction checkout_completed \
+  --json
+```
+
+每个后续步骤的时间戳都必须晚于上一个步骤。一个事件不能同时完成两个步骤。默认单位是会话。使用 `--unit identified-user` 可跨会话统计用户。从概览中复制事件名称。两个不相关总数的比值不是转化率。
+
+最后一步必须发生在从第一步开始计算的转化窗口内。使用 `--conversion-window` 设置窗口，例如 `30m` 或 `1h`。默认值为 24 小时；如果范围更短，则为整个范围。窗口不能长于范围。
+
+API 路由是 `POST /api/telemetry/analytics/funnel`。[有序漏斗响应](/zh-Hans/reference/telemetry-response-shapes#ordered-funnel-response)展示了请求体和响应。
+
+## 探索某个事件前后的路径
+
+路径展示某个锚点事件之后或之前最常见的已命名事件序列：
+
+```bash
+logbrew analytics paths following --project "<project_id>" --since 24h \
+  --anchor-kind page-view --anchor-event /pricing \
+  --json
+```
+
+使用 `preceding` 代替 `following`，可查看锚点之前的事件。`--depth` 设置该方向上的事件数，范围为 `1` 到 `8`，默认值为 `4`。`--path-limit` 设置路径数，范围为 `1` 到 `20`，默认值为 `10`。连续相同的事件计为一个事件。添加 `--keep-repeated` 可保留每一个重复事件。
+
+路径使用会话 ID。后续路径从每个会话中的第一个锚点开始。前序路径在最后一个锚点结束。路径不统计用户，也不说明操作为什么失败。API 路由是 `POST /api/telemetry/analytics/paths`。
+
+## 查看留存
+
+留存展示已识别用户在起始事件之后是否回访：
+
+```bash
+logbrew analytics retention --project "<project_id>" --since 30d \
+  --start-kind page-view --start-event /signup \
+  --return-kind interaction --return-event report_opened \
+  --json
+```
+
+`--interval` 可取 `hour`、`day`、`week` 或 `thirty-day`。`thirty-day` 表示 30 天，而不是一个日历月。`--interval-count` 的范围为 `1` 到 `31`，默认值为 `10`。`--mode return-on` 只统计恰好落在每个周期内的回访。`return-on-or-after` 统计在每个周期内或之后的回访。
+
+回访必须发生在该用户的起始事件之后。每个用户只有一个起点，即范围内的第一个起始事件。该事件不一定是该用户有史以来的第一个事件。用户在同一周期内多次回访，该周期只计一次。
+
+查看每个周期的留存人数时，要结合符合条件的用户数。所在周期尚未结束的用户不符合条件，也不会计为流失。例如，100 个符合条件的用户中有 40 个回访，留存率就是 40%。回访率较低并不能说明用户为什么离开。
+
+### 请求全部活动的留存
+
+API 路由是 `POST /api/telemetry/analytics/retention`。要在不指定事件名称的情况下衡量留存，将 `response_version` 设为 `2`，并省略 `start_event` 和 `return_event`：
+
+```bash
+curl -sS "https://api.logbrew.co/api/telemetry/analytics/retention" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "project_id": "<project_id>",
+    "since": "14d",
+    "response_version": 2,
+    "interval": "day",
+    "interval_count": 10,
+    "mode": "return_on",
+    "cohort_mode": "first_in_range"
+  }'
+```
+
+响应会将 `query.activity_scope` 设为 `all_classified_activity`。之后的任何页面浏览、屏幕浏览或互动都计为回访。要选择事件，省略 `response_version`，并按 `{ "kind": "page_view", "event_name": "/signup" }` 的格式同时发送 `start_event` 和 `return_event`。
+
+范围除以间隔，再乘以 `interval_count`，结果不能超过 500。例如，14 天、间隔为 `day`、周期数为 `10` 时，结果为 140。如果省略 `interval`，API 对不超过 48 小时的范围使用 `hour`，对更长的范围使用 `day`。
+
+## 查看生命周期
+
+生命周期按周期把完成某个事件的已识别用户归入一个分组：
+
+```bash
+logbrew analytics lifecycle --project "<project_id>" --since 30d \
+  --event-kind interaction --event report_opened \
+  --json
+```
+
+| 分组 | 含义 |
+| --- | --- |
+| 在观测历史中为新增 | 当前活跃，且在历史窗口内没有更早的事件。 |
+| 持续活跃 | 当前活跃，在上一个周期也活跃。 |
+| 重新活跃 | 中断一段时间后，当前再次活跃。 |
+| 休眠 | 在上一个周期活跃，但当前不活跃。 |
+
+“在观测历史中为新增”不等于首次使用的客户。更早的活动可能在历史窗口之外，历史窗口由 `--history-periods` 设置。不要把各周期的总数相加来统计整个范围内的去重用户数。
+
+`--history-periods` 的范围为 `since` 之前的 `2` 到 `31` 个周期，默认值为 `2`。历史不能超过 62 天。整个范围最多包含 100 个周期。每个周期都有 `fully_observed`，周期尚未结束时为 `false`。休眠表示在当前周期不活跃，而不是永久流失。
+
+API 路由是 `POST /api/telemetry/analytics/lifecycle`。要使用全部已分类活动而不是单个事件，将 `response_version` 设为 `2`，并省略 `event`：
+
+```json
+{
+  "project_id": "<project_id>",
+  "since": "30d",
+  "response_version": 2,
+  "interval": "day",
+  "history_period_count": 7
+}
+```
+
+## 比较两个周期
+
+分别请求每个周期。使用相同的项目、时长、事件名称和筛选条件。先比较活动量、事件构成以及身份和会话覆盖率，再比较用户数。不完整周期的活动量可能低于完整周期。
+
+| 观察结果 | 下一步检查 | 局限 |
+| --- | --- | --- |
+| 某个事件增加了 | 检查它的会话和覆盖率。 | 事件更多并不表示人更多。 |
+| 转化率变化了 | 两个周期使用相同的漏斗步骤和单位。 | 不要比较不同的漏斗定义。 |
+| 回访用户减少了 | 检查符合条件的用户和完整周期。 | 较新的群组可能显得比较早的群组差。 |
+| 用户停在某一步 | 查看该步骤的问题和日志。 | 时间范围相同并不能说明原因。 |
+
+当结果指向某个故障时，查看同一项目、同一时间的相关问题和日志。只有当事件带有精确的链路关联时，才打开链路。时间范围相同并不能说明是某个错误导致了下降。
+
+要重复某次比较，记录项目 ID、两个 UTC 范围、间隔、筛选条件、单位、覆盖率和截断状态。不要记录原始用户 ID。
+
+响应字段和错误请参阅[遥测 API](/zh-Hans/reference/telemetry-api) 和 [API 错误](/zh-Hans/reference/api-errors)。

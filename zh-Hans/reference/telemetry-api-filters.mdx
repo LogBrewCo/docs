@@ -1,0 +1,380 @@
+---
+title: "API 查询参数与游标分页"
+sidebarTitle: "查询筛选条件"
+description: "按项目、服务、版本、环境、严重程度、链路、问题状态、优先级、负责人和时间筛选 LogBrew 遥测数据。使用游标继续读取结果。"
+---
+
+每个读取路由都接受各自的查询键。除非矩阵中另有说明，[筛选矩阵](#filter-matrix)中的路由遇到未知的键或类型错误的值时，会返回 `422` 和 `validation_failed`。`project`、`trace` 和 `user` 这类易记的别名不是查询键。不要把一个路由的筛选条件照搬到另一个路由。
+
+## 构建带筛选条件的请求
+
+把查询字符串放在路径之后。使用 `--data-urlencode`，确保保留字符被正确编码。以下请求读取某个项目最近 24 小时内的严重（critical）日志：
+
+```bash
+curl --get "https://api.logbrew.co/api/logs" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "severity=critical" \
+  --data-urlencode "since=24h"
+```
+
+按以下顺序添加筛选条件：
+
+1. 用 `project_id` 或 `project_ids` 选择项目。
+2. 用 `since`（以及可选的 `until`）添加时间范围。
+3. 添加服务、版本、环境、状态或特定信号的筛选条件。
+4. 需要更小的分页时，设置 `limit`。
+5. 只有在游标响应返回游标字段之后，才添加这些字段。
+
+返回的每一行都符合请求中的所有筛选条件。省略的筛选条件使用路由的默认值。例如，省略 `status` 时，`GET /api/logs` 使用 `status=active`。
+
+## <span id="filter-matrix">筛选矩阵</span>
+
+“必需”列中的键必须出现在请求中。其他键都是可选的。
+
+| 路由 | 必需 | 可选查询键 |
+| --- | --- | --- |
+| `GET /api/logs` | 无 | `project_id` 或 `project_ids`、`severity`、`level`（兼容别名）、`status`、`search`、`trace_id`、`service_name`、`release`、`environment`、`since`、`until`、`attribute_filters`、`pagination`、`cursor_time`、`cursor_id`、`limit` |
+| `GET /api/logs/attributes` | `since` | `project_id` 或 `project_ids`、`type`、`search`、`severity`、`level`、`service_name`、`release`、`environment`、`until`、`cursor_count`、`cursor_path`、`cursor_type`、`limit` |
+| `GET /api/telemetry/issues` | 无 | `project_id` 或 `project_ids`、`status`、`severity`、`priority`、`assignee`、`service_name`、`release`、`environment`、`since`、`until`、`pagination`、`cursor_time`、`cursor_id`、`limit`、`response_version` |
+| `GET /api/telemetry/issues/{issue_id}` | 无 | `response_version`。此路由会忽略其他键。 |
+| `GET /api/telemetry/issues/{issue_id}/events` | 无 | `pagination`、`cursor_time`、`cursor_id`、`limit` |
+| `GET /api/telemetry/issues/assignees` | `project_id` | 无 |
+| `GET /api/telemetry/actions` | 无 | `project_id` 或 `project_ids`、`name`、`distinct_id`、`service_name`、`release`、`environment`、`since`、`until`、`pagination`、`cursor_time`、`cursor_id`、`limit` |
+| `GET /api/telemetry/metrics` | 无 | `project_id` 或 `project_ids`、`name`、`service_name`、`release`、`environment`、`since`、`until`、`pagination`、`cursor_time`、`cursor_id`、`limit` |
+| `GET /api/telemetry/metrics/series` | `project_id`、`name`、`since` | `until`、`interval`、`group_by`、`service_name`、`release`、`environment`、`series_limit` |
+| `GET /api/telemetry/releases` | 无 | `project_id` 或 `project_ids`、`service_name`、`release`、`environment`、`since`、`until`、`pagination`、`cursor_time`、`cursor_project_id`、`cursor_release`、`cursor_environment`、`cursor_service_name`、`limit` |
+| `GET /api/telemetry/traces` | 无 | `project_id` 或 `project_ids`、`service_name`、`release`、`environment`、`status`、`since`、`until`、`min_duration_ms`、`pagination`、`cursor_time`、`cursor_trace_id`、`limit` |
+| `GET /api/telemetry/traces/{trace_id}` 和 `.../summary` | 无 | `project_id`、`release`、`environment` |
+| `GET /api/telemetry/summary/volume` | `project_id`、`since` | `until`、`interval`、`service_name`、`release`、`environment`、`response_version` |
+| `GET /api/telemetry/deployments` | `project_id` | `release`、`environment`、`service_name`、`status`、`since`、`until`、`pagination`、`cursor_time`、`cursor_id`、`limit` |
+| `GET /api/telemetry/deployments/{deployment_id}` | `project_id` | 无 |
+| `GET /api/telemetry/traces/{trace_id}/investigation` | 无 | `project_id`、`release`、`environment`、`response_version` |
+| `GET /api/telemetry/traces/{trace_id}/spans/{span_id}/investigation` | `project_id`、`release`、`environment` | 无 |
+| `GET /api/telemetry/issues/{issue_id}/investigation` | 无 | `response_version`，以及 `selection` 或 `occurrence_id` |
+| `GET /api/telemetry/issues/{issue_id}/correction-verification` | `baseline_occurrence_id`、`candidate_deployment_id` | 无 |
+| `GET /api/telemetry/releases/investigation` | `project_id`、`release`、`environment`、`service_name` | `response_version` |
+| `GET /api/telemetry/metrics/investigation` | `project_id`、`name`、`since` | `until`、`interval`、`group_by`、`service_name`、`release`、`environment`、`series_limit`、`response_version` |
+| `GET /api/telemetry/analytics/overview` | `project_id`、`since` | `until`、`interval`、`top_limit`、`service_name`、`release`、`environment`、`response_version` |
+| `GET /api/telemetry/analytics/properties` | `project_id`、`since` | `until`、`limit`、`service_name`、`release`、`environment`、`response_version` |
+
+对于问题排查，`selection` 的值为 `first`、`latest` 或 `recommended`。`selection` 和 `occurrence_id` 只能发送其中一个。两者都需要 2 到 13 之间的 `response_version`。使用第 2 版或更高版本且未指定选择器时，LogBrew 使用 `recommended`。从 `GET /api/telemetry/issues/{issue_id}/events` 获取 `occurrence_id`。
+
+`POST` 分析路由接受 JSON 请求体。参见[产品分析](/zh-Hans/concepts/product-analytics)。
+
+## 通用筛选条件与特定信号的筛选条件
+
+`service_name`、`release` 和 `environment` 可以缩小所有遥测列表的范围。使用与 SDK 发送的值完全相同的值。
+
+有些筛选条件只属于某一种信号：
+
+- 日志接受 `search`、`trace_id`、`severity` 和 `attribute_filters`。
+- 日志接受 `status`：`active`（默认）、`ignored` 或 `all`。`ignored` 选择被日志规则从活动视图中隐藏的日志。
+- 问题接受问题 `status`：`unresolved`、`resolved` 或 `archived`。`ignored` 是 `archived` 的旧名称，选中的问题相同。
+- 问题接受 `severity`：`info`、`warning`、`error` 或 `critical`。
+- 问题接受 `priority`：`high`、`medium` 或 `low`。
+- 问题接受 `assignee`：`me` 表示分配给当前登录账号的问题，`none` 表示没有负责人的问题，也可以是用户 ID。
+- 操作和指标接受 `name`。
+- 操作接受 `distinct_id`。
+- 链路接受链路 `status` 和 `min_duration_ms`。
+- 部署接受 `status`：`succeeded` 或 `failed`。
+
+日志和问题的 `severity` 筛选条件比较的是生效的严重程度。如果规则更改了严重程度，筛选条件使用规则设定的值。参见[严重程度值](/zh-Hans/reference/telemetry-response-shapes#severity-values)。
+
+## 时间范围
+
+`since` 接受以小时或天为单位的正整数，例如 `24h` 或 `7d`，也接受 RFC3339 时间戳。简写的时长以每次请求的时间为基准计算。
+
+`until` 只接受 RFC3339 时间戳。它是不包含在内的结束时间：时间正好等于 `until` 的行不在结果中。`since` 则包含在内。例如，`since=2026-10-01T00:00:00Z` 和 `until=2026-10-02T00:00:00Z` 选择完整的 1 天。LogBrew 按毫秒精度比较时间。
+
+`until` 必须晚于 `since`。如果不是，或者 `until` 不是 RFC3339 时间戳，请求会失败，并返回 `422` 和 `validation_failed`。
+
+分多页读取时，选择一个 RFC3339 开始时间，并在每一页都使用它。每一页的 `until` 也要保持相同。
+
+以下请求读取 1 天内的错误日志：
+
+```bash
+curl --get "https://api.logbrew.co/api/logs" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "severity=error" \
+  --data-urlencode "since=2026-10-01T00:00:00Z" \
+  --data-urlencode "until=2026-10-02T00:00:00Z"
+```
+
+<Note>
+  部署列表使用不同的时间规则。它的 `since` 和 `until` 只接受 RFC3339 时间戳，并且两者都包含在内。比较的是部署完成的时间。
+</Note>
+
+## 问题响应版本
+
+问题列表和问题详情接受 `response_version=1`、`response_version=2` 或 `response_version=3`。默认为第 1 版。其他值会失败，并返回 `422` 和 `validation_failed`。
+
+- 第 1 版把归档状态显示为 `ignored`，不显示优先级。
+- 第 2 版把归档状态显示为 `archived`，并增加 `priority` 和 `priority_source`。
+- 第 3 版包含第 2 版的所有字段，并增加 `assignee`。
+
+所有版本都接受 `status=archived`、`priority` 和 `assignee`。参见[问题响应](/zh-Hans/reference/telemetry-response-shapes#issue-response)。
+
+## 严重程度筛选条件
+
+在 `GET /api/logs` 上使用 `severity=info|warning|error|critical`。较早的 `level` 键是兼容别名。两个键都接受规范值，以及别名 `trace`、`debug`、`warn` 和 `fatal`。LogBrew 会先把别名转换为对应的规范值，再进行比较。
+
+如果请求同时发送了 `severity` 和 `level`，LogBrew 会先对两者进行规范化。值冲突时，请求会被拒绝，并返回：
+
+```text
+log severity and level filters conflict; use one value
+```
+
+## <span id="trace-filters">链路筛选条件</span>
+
+用于链路发现时，`status` 为 `error` 或 `ok`。省略它则两者都包含。`min_duration_ms` 必须大于或等于 0，并且只适用于链路发现。
+
+以下请求查找耗时至少 500 毫秒的错误链路：
+
+```bash
+curl --get "https://api.logbrew.co/api/telemetry/traces" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "status=error" \
+  --data-urlencode "min_duration_ms=500" \
+  --data-urlencode "since=7d"
+```
+
+对于链路详情和摘要，把 `trace_id` 进行百分号编码后作为路径段。不要把它作为查询键发送。
+
+## <span id="project-scope">项目范围</span>
+
+使用 `project_id=<project-uuid>` 读取单个项目。对于矩阵中列出 `project_ids` 的路由，使用 `project_ids=<uuid>,<uuid>` 指定由 2 到 50 个项目组成的确切集合。在这些路由上，两个键都省略时，会读取账号可以读取的所有项目。要求 `project_id` 的路由只接受 1 个项目。
+
+```text
+project_id=00000000-0000-4000-8000-000000000001
+project_ids=00000000-0000-4000-8000-000000000001,00000000-0000-4000-8000-000000000002
+```
+
+以下选择方式会被 LogBrew 拒绝，并返回 `422` 和 `validation_failed`：
+
+- 同时包含 `project_id` 和 `project_ids` 的请求。
+- `project_ids` 的值少于 2 个或多于 50 个 ID。
+- 存在重复的 ID，或者某个 ID 不是 UUID。
+
+如果 `project_ids` 中某个 ID 对应的项目是账号无法读取的，请求会失败，并返回 `404` 和 `not_found`。不要删掉该 ID 后继续，而是请用户重新选择一组项目。
+
+每一页游标结果都要保持相同的项目范围。结果为空时，不要去掉项目筛选条件，因为那样问的就是另一个问题了。
+
+## 分桶序列
+
+`GET /api/telemetry/metrics/series` 以时间桶的形式返回单个指标。`GET /api/telemetry/summary/volume` 以时间桶的形式返回信号计数。两个路由都遵循以下规则：
+
+- `since` 是必需的。`until` 是可选的，默认为请求时间。
+- 从 `since` 到 `until` 的范围最长为 31 天。
+- `interval` 为 `auto`、`1m`、`5m`、`15m`、`1h`、`6h` 或 `1d`，默认为 `auto`。会产生超过 500 个时间桶的间隔会失败。
+- `service_name`、`release` 和 `environment` 是精确匹配的筛选条件。
+
+对于指标序列，`name` 是来自 `GET /api/telemetry/metrics` 的确切指标名称。`group_by` 为 `none`、`service_name`、`release` 或 `environment`。`series_limit` 为 1 到 20。
+
+对于信号数量，`until` 不能是将来的时间，`response_version` 只能为 `1`。
+
+## 筛选日志属性
+
+使用 `GET /api/logs/attributes` 查找可以搜索的属性路径和类型，然后向 `GET /api/logs` 发送 `attribute_filters`。两个请求都需要 `since`。
+
+### 读取属性目录
+
+以下请求在某个项目中查找包含 `status` 的数值路径：
+
+```bash
+curl --get "https://api.logbrew.co/api/logs/attributes" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "since=2026-06-01T00:00:00Z" \
+  --data-urlencode "type=number" \
+  --data-urlencode "search=status" \
+  --data-urlencode "limit=2"
+```
+
+响应是一个对象，而不是裸数组。这个合成示例包含 2 个属性，并且还有下一页：
+
+```json
+{
+  "attributes": [
+    { "path": "/http/status_code", "type": "number", "observed_count": 50, "last_seen_at": "2026-06-01T12:00:03.789Z" },
+    { "path": "/response/status", "type": "number", "observed_count": 42, "last_seen_at": "2026-06-01T12:00:02.456Z" }
+  ],
+  "coverage": {
+    "total_logs": 60,
+    "fully_indexed_logs": 50,
+    "partially_indexed_logs": 2,
+    "unindexed_logs": 8
+  },
+  "next_cursor": { "observed_count": 42, "path": "/response/status", "type": "number" }
+}
+```
+
+`type` 为 `string`、`number` 或 `boolean`。`observed_count` 是该时间范围内具有该路径和类型的日志数量。`last_seen_at` 是其中最新一条日志的时间。一条日志可以有多个路径，所以不要把这些计数相加来得到日志数量。
+
+`coverage` 说明属性筛选条件可以搜索哪些日志：
+
+| 字段 | 含义 |
+| --- | --- |
+| `total_logs` | 符合目录的项目、时间、严重程度、服务、版本和环境筛选条件的日志。 |
+| `fully_indexed_logs` | 所有受支持的属性值都可搜索的日志。 |
+| `partially_indexed_logs` | 部分值未被索引的日志。筛选条件可能漏掉未被索引的值。 |
+| `unindexed_logs` | 带类型的属性筛选条件无法搜索的日志。 |
+
+这 3 组之和等于 `total_logs`。目录的 `type`、`search` 和游标不会改变覆盖范围。`attributes` 列表为空并不表示 `total_logs` 为 0。
+
+目录没有 `status` 键。它的严重程度筛选条件比较的是采集时的严重程度，而不是生效的严重程度。
+
+`search` 是长度为 1 到 128 字节、不含控制字符的路径子串。`limit` 设置每页的属性数量。
+
+### 继续读取目录
+
+目录不使用 `pagination=cursor`。重复所有筛选条件，并从 `next_cursor` 复制全部 3 个字段：
+
+| 返回的字段 | 下一个请求的键 |
+| --- | --- |
+| `next_cursor.observed_count` | `cursor_count` |
+| `next_cursor.path` | `cursor_path` |
+| `next_cursor.type` | `cursor_type` |
+
+`next_cursor` 为 `null` 时停止。
+
+### 应用带类型的筛选条件
+
+从目录中复制路径和类型。路径使用 JSON Pointer 语法，而不是点分隔的键。路径中的 `~0` 或 `~1` 转义保持不变。
+
+以下请求读取数值型响应状态大于或等于 500 的日志：
+
+```bash
+curl --get "https://api.logbrew.co/api/logs" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "since=2026-06-01T00:00:00Z" \
+  --data-urlencode 'attribute_filters=[{"path":"/response/status","type":"number","operator":"gte","value":500}]'
+```
+
+`attribute_filters` 是包含 1 到 4 个筛选条件的 JSON 数组。日志必须符合每一个筛选条件。每个筛选条件都有 `path`、`type`、`operator` 和 `value`。`value` 的 JSON 类型必须与 `type` 一致：数字 `500` 不同于字符串 `"500"`。
+
+| `type` | `operator` 的值 |
+| --- | --- |
+| `string` | `eq`、`ne`、`contains`、`starts_with` |
+| `number` | `eq`、`ne`、`gt`、`gte`、`lt`、`lte` |
+| `boolean` | `eq`、`ne` |
+
+`ne` 只匹配具有该路径的日志。没有该路径的日志不匹配 `ne`。对于 `string`，`case_sensitive` 是可选的，默认为 `false`。对于 `number` 和 `boolean`，LogBrew 会拒绝 `"case_sensitive": true`。
+
+适用以下限制：
+
+- JSON 数组最大为 4,096 字节。
+- 字符串值最大为 1,024 字节。
+- `contains` 和 `starts_with` 需要非空字符串。
+- 数字必须是有限值，范围为 -9,007,199,254,740,992 到 9,007,199,254,740,992。
+
+索引无法搜索的日志不会匹配筛选条件，但它仍可能出现在不带 `attribute_filters` 的请求结果中。日志响应参见[日志响应](/zh-Hans/reference/telemetry-response-shapes#log-response)。
+
+### 修正属性错误
+
+下面每个错误都返回 `422` 和 `validation_failed`：
+
+| `error` | 修正方法 |
+| --- | --- |
+| `log attribute queries require since` | 在目录请求中添加 `since`，或者在带有 `attribute_filters` 的日志请求中添加。 |
+| `invalid log attribute filters` | 发送一个包含 1 到 4 个筛选条件的 JSON 数组，每个筛选条件都带有来自目录的路径、类型、运算符和值。 |
+| `invalid log attribute cursor` | 同时发送 `next_cursor` 中的 `cursor_count`、`cursor_path` 和 `cursor_type`。 |
+| `invalid log attribute search` | 发送不超过 128 字节的非空路径子串。 |
+
+修正请求后再重试。不要删除筛选条件，因为那会改变结果。
+
+## <span id="cursor-pagination">游标分页</span>
+
+游标模式需要主动启用。不启用时，列表路由返回裸数组。请求第一页时，发送 `pagination=cursor`，不带游标字段。请求之后的每一页时，重复所有筛选条件，并发送完整的游标字段组：
+
+| 路由 | 用于继续读取的游标字段 |
+| --- | --- |
+| 日志、问题、问题发生记录、操作、指标和部署 | `cursor_time` 和 `cursor_id` |
+| 版本 | `cursor_time`、`cursor_project_id`、`cursor_release`、`cursor_environment` 和 `cursor_service_name` |
+| 链路发现 | `cursor_time` 和 `cursor_trace_id` |
+
+把返回的 `next_cursor` 字段对应到下一个请求：
+
+- `next_cursor.time` 对应 `cursor_time`。
+- `next_cursor.id` 对应 `cursor_id`。
+- 对于链路，`next_cursor.trace_id` 对应 `cursor_trace_id`。
+- 对于版本，在返回的每个字段名前加上 `cursor_`，例如 `next_cursor.release` 对应 `cursor_release`。
+
+`next_cursor` 为 `null` 时停止。不要根据最后一行自行计算游标。版本游标不会改变所选的项目，保留原来的 `project_id` 或 `project_ids`。
+
+```bash
+curl --get "https://api.logbrew.co/api/logs" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "severity=error" \
+  --data-urlencode "since=2026-06-01T00:00:00Z" \
+  --data-urlencode "pagination=cursor" \
+  --data-urlencode "limit=50"
+```
+
+`limit` 设置每页大小。一页返回的行数可能更少。这些路由不接受 `page` 或 `page_number`。
+
+| 路由 | 默认 `limit` | 最大 `limit` |
+| --- | ---: | ---: |
+| 日志、日志属性、问题、操作、指标、版本和链路发现 | 100 | 500 |
+| 问题发生记录 | 25 | 100 |
+| 部署 | 50 | 100 |
+
+在大多数路由上，如果 `limit` 超过最大值，LogBrew 会把它改为最大值。部署列表会拒绝 1 到 100 范围之外的 `limit`，并返回 `422`。即使没有 `pagination=cursor`，部署列表也总是返回带有 `next_cursor` 的分页对象。
+
+以下请求会被 LogBrew 拒绝，并返回 `422` 和 `validation_failed`：
+
+- `pagination` 的值不是 `cursor`。
+- 带有游标字段，但没有 `pagination=cursor`。
+- 游标字段组不完整。
+- `cursor_time` 不是 RFC3339 时间戳。
+
+游标标记的是位置，不会冻结数据。需要最新的视图时，重新从第一页开始读取。
+
+CLI 使用相同的字段：
+
+```bash
+logbrew read logs --severity error --pagination cursor --limit 50 --json
+logbrew read logs --severity error --pagination cursor --limit 50 \
+  --cursor-time <time> --cursor-id <id> --json
+```
+
+## 诊断空结果
+
+列表为空表示没有任何行符合所有筛选条件，并不能说明其他信号的情况。按以下顺序检查请求：
+
+1. 确认项目 ID。
+2. 逐个移除可选的筛选条件。
+3. 如果预期的事件更早，放宽 `since`。如果预期的事件更新，移除 `until` 或把它往后调。
+4. 将 `service_name`、`release` 和 `environment` 与 SDK 发送的值进行比较。
+5. 对于日志，如果日志规则可能隐藏了预期的日志，添加 `status=all`。
+6. 确认路由接受每个筛选条件。
+
+## 从被拒绝的查询中恢复
+
+被拒绝的查询返回标准的错误响应格式。未知的键或类型错误的值会返回 `422`：
+
+```json
+{
+  "error": "invalid query parameters",
+  "code": "validation_failed",
+  "next": "check query parameter names and value types, then retry",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+常见的修正方法：
+
+- 把易记的别名替换为[筛选矩阵](#filter-matrix)中的键。
+- 发送路由所需的每个用于继续读取的游标字段。
+- 从第一页的请求中移除游标字段。
+- 只使用一种项目选择方式。
+- 把不受支持的严重程度或链路状态替换为规范值。
+
+错误码和恢复方法，参见 [API 错误](/zh-Hans/reference/api-errors)。响应体参见[响应格式](/zh-Hans/reference/telemetry-response-shapes)。

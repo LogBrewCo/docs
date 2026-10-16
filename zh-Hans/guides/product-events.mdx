@@ -1,0 +1,211 @@
+---
+title: "Node.js 事件埋点接入指南"
+sidebarTitle: "产品事件采集"
+description: "在 Node.js 中发送已分类的产品事件，并附上标明类型的用户和会话。先在本地运行采集测试，再用 CLI 查看结果。"
+---
+
+使用产品事件记录应用中已命名的用户操作，例如打开结账页面或完成购买。SDK 不会安装点击监听器，也不会收集表单内容。每个事件都由你的代码记录。
+
+计数规则和报告类型请参阅[产品分析](/zh-Hans/concepts/product-analytics)。
+
+## 准备测试
+
+使用 Node.js 18 或更高版本的应用，以及一个你有读取权限的 LogBrew 项目。如果你之前没有发送过遥测数据，先从[快速入门](/zh-Hans/quickstart)开始。不要让此测试混入客户活动。
+
+在应用目录中安装以下包：
+
+```bash
+npm install @logbrew/sdk@0.1.28 @logbrew/node@0.1.12
+```
+
+为项目使用服务端接入密钥。把它保存在 `LOGBREW_SERVER_API_KEY` 中，不要纳入源码管理。切勿把服务端密钥放进浏览器打包文件。账号访问令牌用于读取结果，不用于配置 SDK。
+
+## 确定一个事件代表什么
+
+从一个产品问题出发。例如：用户打开结账页面后，会提交吗？为每个事件指定一个固定名称、一个明确的触发条件，以及应用中唯一一个记录它的位置。
+
+| 事件名称 | 触发条件 |
+| --- | --- |
+| `checkout.opened` | 应用打开结账页面。这不是购买。 |
+| `checkout.submitted` | 应用接受提交操作。这不代表支付成功。 |
+| `checkout.completed` | 应用确认完成。不要在每次点击或网络重试时记录它。 |
+
+在不同版本和语言之间保持事件名称不变。不要用电子邮件地址、订单号、URL 或用户输入的文本拼接名称。
+
+自定义属性只使用一小组经过批准的值。例如，`checkout_mode` 可以是 `guest` 或 `signed_in`。不要为每个值新增一个事件名称。不要发送表单内容。
+
+每个业务操作只在一个位置记录。如果浏览器和服务器都记录同一个操作，总数会翻倍。
+
+## 使用正确的活动类型
+
+| 类型 | 含义 | 采集路径 |
+| --- | --- | --- |
+| `interaction` | 由应用定义的产品操作。 | `createProductActionAttributes`，如下所示。 |
+| `page_view` | 浏览器页面浏览。 | 浏览器 SDK 的页面浏览采集。 |
+| `screen_view` | 应用屏幕浏览。 | 移动端的屏幕浏览辅助函数。 |
+
+`createProductActionAttributes` 会在事件元数据中设置 `analyticsSchemaVersion: 1` 和 `analyticsKind: "interaction"`。它的路由模板或屏幕名称决定 `analyticsSurface`。使用路由模板（例如 `/orders/:id`），而不是具体的 URL。
+
+事件名称不决定类型。名为 `page_view` 的互动仍然是互动。日志、问题和 Span（一次计时操作）都不是产品事件。其他运行时请参阅 [SDK 接入](/zh-Hans/guides/sdk-ingestion)。
+
+## <span id="set-users-and-sessions-on-each-event">为每个事件设置用户和会话</span>
+
+- 对于已登录用户，将 `context.subject` 设为稳定的 ID，并设置 `kind: "user"`。
+- 对于匿名访客，使用另一个 ID，并设置 `kind: "anonymous"`。
+- 把应用的会话 ID 放进 `context.session.id`。在整个会话中重复使用它。
+
+切勿使用姓名、电子邮件地址、IP 地址或访问令牌作为 ID。稳定的 ID 会把同一用户的操作关联起来，但不会让数据变成匿名数据。
+
+不要在共享的服务端客户端上设置默认用户或会话。为每个事件传入产生它的那个请求的主体和会话。SDK 不会创建这些 ID，也不会检测登录、退出登录或账号切换。登录后，LogBrew 不会把匿名主体合并到用户中。
+
+## 在本地运行示例
+
+将此示例保存为 `product-events.mjs`。它记录 5 个测试操作，涵盖匿名访问、登录和 2 个用户。客户端只保存共享的服务和部署上下文。此测试关闭了自动投递。
+
+```js
+import { randomUUID } from "node:crypto";
+import { createProductActionAttributes, SdkError } from "@logbrew/sdk";
+import { createLogBrewNodeClient } from "@logbrew/node";
+
+try {
+  const client = createLogBrewNodeClient({
+    automaticDelivery: false,
+    context: {
+      schemaVersion: 1,
+      resource: {
+        service: { name: "analytics-check", version: "analytics@1" },
+        deployment: { environment: "development", release: "analytics@1" }
+      }
+    }
+  });
+  const startedAt = new Date().toISOString();
+  client.release(randomUUID(), startedAt, { version: "analytics@1" });
+  client.environment(randomUUID(), startedAt, { name: "development" });
+
+  function record(name, subject, sessionId) {
+    client.action(randomUUID(), new Date().toISOString(), {
+      ...createProductActionAttributes({
+        name,
+        routeTemplate: "/checkout",
+        metadata: { checkout_mode: subject.kind === "user" ? "signed_in" : "guest" }
+      }),
+      context: { schemaVersion: 1, subject, session: { id: sessionId } }
+    });
+  }
+
+  record("checkout.opened", { id: "anon_demo_a", kind: "anonymous" }, randomUUID());
+  const userSession = randomUUID();
+  record("checkout.submitted", { id: "user_demo_a", kind: "user" }, userSession);
+  record("checkout.completed", { id: "user_demo_a", kind: "user" }, userSession);
+  record("checkout.opened", { id: "anon_demo_b", kind: "anonymous" }, randomUUID());
+  record("checkout.submitted", { id: "user_demo_b", kind: "user" }, randomUUID());
+
+  if (process.argv.includes("--send")) {
+    const response = await client.shutdown();
+    console.log(JSON.stringify({
+      mode: "sent",
+      status_code: response.statusCode,
+      attempts: response.attempts
+    }));
+  } else {
+    const batch = JSON.parse(client.previewJson());
+    const actions = batch.events.filter(event => event.type === "action");
+    console.log(JSON.stringify({
+      mode: "local_preview",
+      actions: actions.length,
+      kinds: [...new Set(actions.map(event => event.attributes.metadata.analyticsKind))],
+      dropped: client.droppedEvents()
+    }));
+  }
+} catch (error) {
+  console.error(JSON.stringify({
+    ok: false,
+    error: error instanceof SdkError ? error.code : "capture_failed"
+  }));
+  process.exitCode = 1;
+}
+```
+
+运行脚本时不要加 `--send`。此命令不会发送任何请求：
+
+```bash
+LOGBREW_SERVER_API_KEY=local-preview-only node product-events.mjs
+```
+
+预期输出：
+
+```json
+{"mode":"local_preview","actions":5,"kinds":["interaction"],"dropped":0}
+```
+
+版本和环境标记不是产品操作。此结果只反映本地队列，不代表 LogBrew 已收到这些事件。在包含真实客户上下文的应用中，不要打印 `previewJson()`。
+
+## 处理登录和退出登录
+
+- 登录前，每个事件都发送当前的匿名主体。
+- 登录后，发送该用户的稳定 ID，类型为 `user`。
+- 退出登录时，停止使用该用户的上下文。按照你的隐私政策创建新的匿名主体。
+- 切换账号时，使用新用户的 ID。
+
+示例在身份变化时会开始一个新会话。选择你自己的会话规则，并应用到每个事件。事件上下文会在该事件中替换客户端的主体和会话。如果事件省略了其中一项，就使用客户端的值。因此，示例没有为客户端设置主体或会话。对于稍后运行的任务，保留发起它的用户的身份。
+
+## 发送一次并查看结果
+
+在进程环境中设置测试项目的服务端密钥。只运行一次此命令：
+
+```bash
+node product-events.mjs --send
+```
+
+每次运行都会创建新的事件 ID，所以第二次运行会再增加 5 个事件。如果进程失败，输出中会包含 SDK 错误码。密钥被拒绝时会输出：
+
+```json
+{"ok":false,"error":"unauthenticated"}
+```
+
+确保接入密钥处于有效状态，并且属于测试项目。登录账号并不能修复 SDK 密钥。其他故障请参阅 [API 错误](/zh-Hans/reference/api-errors)和[故障排除](/zh-Hans/guides/troubleshooting)。
+
+LogBrew 接受这批数据后，在控制台中查找这些事件：
+
+1. 打开**分析**。
+2. 在**项目**下选择测试项目。
+3. 在**时间范围**下选择 **24 小时**。
+4. 在**热门事件**下找到这 3 个事件名称，在**热门页面**下找到 `/checkout`。
+
+项目中的其他活动会改变这些总数。要精确核对服务、版本和环境，使用已登录的 [CLI](/zh-Hans/guides/cli) 读取概览：
+
+```bash
+logbrew analytics overview --project "<project_id>" --since 1h \
+  --service analytics-check --release analytics@1 \
+  --environment development --json
+```
+
+如果该时间范围内只有这一次运行，预期结果为：
+
+- 5 次互动，全部带有会话上下文，页面均为 `/checkout`。
+- 3 个事件来自用户，2 个来自匿名主体。
+- 2 个用户、2 个匿名主体和 4 个会话。
+
+去重后的用户数、主体数和会话数都是近似值。事件总数在所选时间范围内是精确值。此测试不衡量转化或留存。
+
+| 结果 | 下一步检查 |
+| --- | --- |
+| 没有产品活动 | 检查投递结果、项目、时间范围、服务、版本和环境。 |
+| 活动未分类 | 使用 `createProductActionAttributes`。仅靠事件名称不会设置类型。 |
+| 用户数不一致 | 检查每个事件上的 `context.subject`。匿名主体不计为用户。 |
+| 会话数不一致 | 检查每个事件上的 `context.session.id` 和你的会话规则。 |
+| 事件比预期多 | 检查是否重复运行，以及是否有操作在两个位置被记录。 |
+
+## 在应用中测试事件
+
+把采集调用移到应用的处理函数中。保持每个事件的含义、类型和身份规则不变。先用虚构的测试账号验证。
+
+| 应用测试 | 预期采集结果 |
+| --- | --- |
+| 打开结账页面但不提交 | 只有 `checkout.opened`。 |
+| 提交未通过校验的表单 | 没有 `checkout.submitted`。切勿发送表单内容。 |
+| 接受提交，然后支付失败 | 有 `checkout.submitted`，没有 `checkout.completed`。 |
+| 确认完成后重试请求 | 没有第二个 `checkout.completed`。 |
+| 退出登录，然后使用另一个账号 | 之后的事件使用新的主体和会话。 |
+
+本地预览检验的是采集，被接受的批次检验的是投递。两者都不能证明采集调用在应用中的正确位置运行。

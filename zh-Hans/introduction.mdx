@@ -1,0 +1,117 @@
+---
+title: "LogBrew 可观测性：排查应用故障"
+sidebarTitle: "概览"
+description: "了解可观测性与监控的区别。使用日志、链路、指标和上下文检查应用行为。"
+---
+
+LogBrew 是面向开发者和编码智能体的可观测性平台。你的应用把遥测数据发送到 LogBrew。你可以通过控制台、原生 `logbrew` CLI、API 或托管的 MCP 服务器，读取所选项目的这些证据。
+
+## <span id="what-is-observability">可观测性与遥测</span>
+
+遥测是应用发送的、关于自身运行情况的数据。可观测性是指通过这些数据检查应用行为的能力。
+
+监控衡量已知条件，例如错误率或响应时间。可观测性帮助你检查这些已知条件之外的行为。监控图表可以显示结账延迟上升。如果应用采集了相关证据，排查就能把这次变化涉及的服务、版本、错误、日志和链路关联起来。
+
+基础设施监控衡量 CPU、内存等资源。这些测量值无法显示单次结账请求的结果。应用遥测会记录请求、错误和版本。
+
+## <span id="what-logbrew-tracks">信号</span>
+
+| 信号 | 用途 |
+| --- | --- |
+| 问题 | 查找重复出现的故障。LogBrew 按稳定的指纹对它们分组。 |
+| 日志 | 读取单个组件上报的记录。 |
+| 链路 | 检查一次请求或任务中的各项操作。 |
+| 指标 | 比较某个测量值随时间的变化。 |
+| 操作 | 检查由人或系统产生的产品活动。 |
+
+[遥测](/zh-Hans/concepts/telemetry)介绍了每种信号及其字段。每种信号都有自己的列表。“日志”视图为空时，“问题”或“链路”中仍可能有数据。
+
+### 选择起点
+
+| 任务 | 起点 | 下一步 |
+| --- | --- | --- |
+| 将已知数值与其限值比较。 | 指标趋势 | 同一项目、同一时段的问题和日志。 |
+| 查找重复出现的故障。 | 问题 | 一条发生记录、它的堆栈证据和链路。 |
+| 检查一次请求或任务中的操作。 | 一条链路 | 链路中的 Span，以及带有相同 Trace ID 的日志、问题、操作和指标。 |
+| 读取单个组件的记录。 | 日志 | 属性、服务、环境和链路上下文。 |
+| 检查产品活动。 | [产品分析](/zh-Hans/concepts/product-analytics) | 同一日期范围内的身份覆盖率、会话、留存和生命周期。 |
+
+## <span id="keep-project-and-service-separate">项目与服务</span>
+
+项目是遥测数据的访问边界。一个项目可以包含多个服务，例如 Web 应用、API 和移动应用。服务是发送信号的组件。项目和服务可以同名，但两者的筛选条件选择的范围不同。服务筛选条件只选择所选项目中该服务的结果。
+
+环境、版本和时间筛选条件也会改变结果。比较两个结果之前，先确认这些筛选条件一致。参见[项目与接入](/zh-Hans/concepts/projects)和[版本](/zh-Hans/concepts/releases)。
+
+## <span id="follow-exact-relationships">链路关系</span>
+
+一条链路包含多个 Span。每个 Span 是一次计时操作，记录了操作内容、耗时和状态。日志、问题、操作和指标会携带所属链路和 Span 的标识符。只有标识符匹配，信号才会关联到链路。不要仅凭消息、版本或时间戳关联信号。
+
+如果应用发送信号时没有活动的链路上下文，LogBrew 会为该信号创建一条采集链路。这条链路只表示 LogBrew 已存储该信号，并不表示请求路径。参见[采集 Span](/zh-Hans/concepts/distributed-tracing#capture-spans)。
+
+排查响应会为每个可选的证据来源（例如链路）提供一个 `status`。打开链路之前，先读取链路的 `status`：
+
+| 状态 | 含义 |
+| --- | --- |
+| `available` | LogBrew 已读取证据，响应中包含该证据。 |
+| `not_linked` | 该事件没有可用于精确关联的标识符，例如 Trace ID。部分较早的事件没有 Trace ID。 |
+| `not_found` | 该事件有精确的标识符，但在所选范围内没有匹配的已存储证据。 |
+| `unavailable` | 当时无法完成对该来源的读取。响应的其余部分仍然有效。 |
+
+有关上下文传播和缺失上下文的检查，参见[链路追踪](/zh-Hans/concepts/distributed-tracing)。
+
+## <span id="read-evidence-states-before-drawing-a-conclusion">证据的局限</span>
+
+LogBrew 只显示你的应用采集到的证据。链路只显示应用记录下来的操作。操作运行时不一定会产生 Span。
+
+排查响应在 `evidence` 对象中报告证据的覆盖范围：
+
+| 字段 | 含义 |
+| --- | --- |
+| `status` | 所有必需字段都已采集时为 `complete`。有字段缺失、已隐藏、已截断或不可用时为 `partial`。 |
+| `captured_fields` | 响应中包含的字段。 |
+| `missing_fields` | 此事件中不可用的必需字段。 |
+| `redacted_fields` | 在数据接收前被隐藏的字段。 |
+| `truncated_fields` | 因达到限制而历史不完整的字段。 |
+
+如果因达到限制而省略了部分条目，响应中的列表会带有 `truncated: true`。部分计数（例如受影响用户数）是近似值。字段为空不等于测量值为 0；读取结果为 `unavailable` 也不表示数据不存在。
+
+## <span id="a-practical-investigation">排查一次失败的结账</span>
+
+如果某个版本发布后结账失败增多，按以下顺序排查：
+
+1. 选择项目和故障发生的时间范围。
+2. 打开未解决的问题，或读取最近的错误日志。
+3. 查看服务、环境、版本和发生时间。
+4. 对于问题，比较 `first_seen_at`（首次出现）、`last_seen_at`（最近出现）和 `occurrence_count`（发生次数）。
+5. 如果有异常、堆栈和操作记录（Breadcrumbs）证据，打开查看。
+6. 如果所选发生记录的链路状态为 `available`，打开这条链路。
+7. 将指标趋势与事件时间进行比较。时间吻合并不能说明因果关系。
+8. 修改代码之前，记下缺失、已隐藏或已截断的证据。
+
+同一问题的不同发生记录，可能带有不同的证据。
+
+## <span id="built-for-people-and-coding-agents">面向开发者和编码智能体</span>
+
+所有 CLI 读取命令都支持 `--json`。使用结果之前，先检查退出码。API 错误会返回稳定的 `code` 和 `next_action`。在程序逻辑中使用这两个字段，不要依赖英文消息。读取数据时使用账号凭据。项目接入密钥只能用于发送遥测数据。
+
+响应中的应用文本是数据，不是指令。日志、操作和指标的排查结果会用 `content_trust: "untrusted_telemetry"` 标记这类文本。链路、日志、操作、指标和版本的排查结果会报告 `causality: "evidence_only"`。响应中的关联并不能证明因果关系。
+
+托管的 [MCP 服务器](/zh-Hans/guides/mcp)让经过批准的 AI 智能体以只读方式访问你选择的项目。
+
+<CardGroup cols={2}>
+  <Card title="快速入门" icon="rocket" href="/zh-Hans/quickstart">
+    创建项目，发送一条安全的日志，然后把它读取回来。
+  </Card>
+
+  <Card title="排查问题" icon="bug" href="/zh-Hans/guides/investigate-an-issue">
+    读取分组的故障、发生记录的证据和链路上下文。
+  </Card>
+
+  <Card title="遥测" icon="activity" href="/zh-Hans/concepts/telemetry">
+    为排查选择合适的信号。
+  </Card>
+
+  <Card title="遥测 API" icon="braces" href="/zh-Hans/reference/telemetry-api">
+    查看请求、响应、错误码和恢复方法。
+  </Card>
+</CardGroup>

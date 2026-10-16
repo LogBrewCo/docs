@@ -1,0 +1,188 @@
+---
+title: "在 Vite 中使用 JavaScript Source Map"
+sidebarTitle: "JavaScript Source Map"
+description: "从 Vite 构建上传 JavaScript Source Map，不把凭据放进应用，并把压缩后的堆栈帧映射回原始源代码位置。"
+---
+
+压缩后的 JavaScript 文件可能把许多行源代码放在一行中。来自这类文件的堆栈帧指向生成代码中的行和列。[Source Map](https://ecma-international.org/publications-and-standards/standards/ecma-426/) 把这个位置对应到原始文件、行和列。
+
+本指南使用 `@logbrew/sdk` 0.1.28 中的 Vite 插件。你需要一个 Vite 应用、该应用构建输出的访问权限，以及创建项目密钥的权限。Apple 调试文件参见 [Apple 崩溃与卡顿](/zh-Hans/guides/apple-crashes-and-hangs)。
+
+## 构建与运行时信号保持一致
+
+上传时使用的项目、版本、环境和服务，要与应用运行时发送的信号保持一致。版本命名参见[版本](/zh-Hans/concepts/releases)。本指南使用 `web@1.2.3`、`staging` 和 `checkout-web`。
+
+构建出的代码发生变化时，更改版本。先上传准备好的构建，再部署同一份构建。上传之后，不要重新构建，也不要修改其中的 JavaScript。
+
+## 添加 Vite 插件
+
+在应用目录中安装 SDK：
+
+```bash
+npm install @logbrew/sdk@0.1.28
+```
+
+把插件添加到 `vite.config.js`。保留其他插件和构建设置。替换项目 ID：
+
+```js
+import { createLogBrewViteReleaseArtifactsPlugin } from "@logbrew/sdk/vite-release-artifacts";
+
+export default {
+  plugins: [
+    createLogBrewViteReleaseArtifactsPlugin({
+      projectId: "<project_id>",
+      release: "web@1.2.3",
+      environment: "staging",
+      service: "checkout-web",
+      minifiedPathPrefix: "https://app.example.com"
+    })
+  ]
+};
+```
+
+`minifiedPathPrefix` 是构建目录部署后的 URL。插件会在后面拼接每个文件在该目录中的路径。例如，`dist/assets/app.js` 会变成 `https://app.example.com/assets/app.js`。如果构建部署在 `/web` 下，前缀中要包含 `/web`。不要在前缀中添加 `/assets`。
+
+不设置 `upload` 选项时，插件不会向 LogBrew 发送任何内容。它还会：
+
+- 在你没有设置 `build.sourcemap` 时，把它设为 `"hidden"`。如果你把它设成了 `false`，改为 `"hidden"`。
+- 在你没有设置压缩器选项时，保留函数名。如果你自行设置了压缩器选项，记得在其中保留函数名。
+
+隐藏的 Source Map 以普通文件的形式留在构建输出中，没有访问控制。不要使用内联 Source Map。插件不接受嵌在 JavaScript 文件中的 Source Map。
+
+## 在本地构建并检查
+
+运行生产构建：
+
+```bash
+npm run build
+```
+
+插件会给每个 JavaScript 文件及其 Source Map 分配相同的 Debug ID，移除嵌入的 `sourcesContent` 和本地应用根路径，并写入 `dist/logbrew-release-artifacts.json`。
+
+打开清单文件。确认 `validation.status` 为 `ready`，并且其中列出了本次构建的文件和部署后的 URL。隐藏的 Source Map 会产生 `sourceMappingURL comment missing` 警告，这是预期行为。
+
+如果 Source Map 中包含私有路径或你不想共享的源代码文本，不要上传。上传内容还包括编译后的 JavaScript，所以不要把机密信息放进应用包中。
+
+在本地检查上传内容。此命令不会发送请求，也不需要密钥：
+
+```bash
+npx --no-install logbrew-release-artifacts upload-js \
+  --build-dir dist \
+  --manifest dist/logbrew-release-artifacts.json \
+  --endpoint https://api.logbrew.co/api/release-artifacts \
+  --allow-hosted \
+  --dry-run
+```
+
+只有当命令以退出码 `0` 退出并输出 `"status": "dry_run"` 时，才继续下一步。这一步检查的是本地文件和清单，不测试服务器。如果你的构建使用其他输出目录，修改这两个路径。
+
+要检查映射，运行构建后的应用，复制一个生成代码中的堆栈帧，包括文件、行和列：
+
+```bash
+npx --no-install logbrew-release-artifacts symbolicate-js \
+  --build-dir dist \
+  --manifest dist/logbrew-release-artifacts.json \
+  --stack-frame "at checkoutTotal (https://app.example.com/assets/index-a1b2c3.js:2:780)"
+```
+
+确认结果中有 `"status": "resolved"`。`original` 对象显示源文件、行和列。此命令在本地运行，不会上传任何内容。
+
+## <span id="create-an-artifact-key">创建构建产物密钥</span>
+
+使用 [LogBrew CLI](/zh-Hans/guides/cli) 登录。找到项目 ID：
+
+```bash
+logbrew projects --json
+```
+
+为项目创建构建产物密钥。使用仅所有者可访问的目录中的新文件路径：
+
+```bash
+install -d -m 700 "$HOME/.logbrew" &&
+logbrew projects keys create "<project_id>" \
+  --ingest-key-file "$HOME/.logbrew/checkout-web.artifact" \
+  --label "Checkout web build" \
+  --kind artifact \
+  --json
+```
+
+命令成功后才继续。如果结果不明确，用相同的参数再运行一次同一条命令。不要使用 `--abandon-retry`。
+
+构建产物密钥限定于单个项目，并且只能写入。它用于上传 Source Map 和调试文件，不能发送遥测数据，也不能读取构建产物的元数据。不要用账号凭据或运行时 SDK 密钥代替它。
+
+把密钥以 `LOGBREW_RELEASE_ARTIFACT_TOKEN` 保存在构建环境的密钥设置中。不要输出或提交它。不要把它放进客户端可见的变量中，例如 `VITE_*` 或 `EXPO_PUBLIC_*`。
+
+在执行上传的进程中设置该变量。辅助工具不会读取 `.env` 文件。Vite 在[解析配置](https://vite.dev/config/#using-environment-variables-in-config)时也不会把它们加载到 `process.env` 中。
+
+## 上传准备好的构建
+
+使用已检查过的同一批文件和清单。此命令会把内容上传到 LogBrew：
+
+```bash
+npx --no-install logbrew-release-artifacts upload-js \
+  --build-dir dist \
+  --manifest dist/logbrew-release-artifacts.json \
+  --endpoint https://api.logbrew.co/api/release-artifacts \
+  --allow-hosted
+```
+
+`"status": "uploaded"` 表示 LogBrew 已接受上传。如果命令以错误退出，停下来并参考下表处理。
+
+遇到网络错误或 `408`、`429`、`5xx` 响应时，辅助工具最多重试 2 次，每次发送的都是同一批准备好的文件。使用 `--max-retries` 更改重试次数。
+
+手动上传成功后，也可以改为在 Vite 构建过程中上传。在插件配置中添加此选项：
+
+```js
+upload: {
+  endpoint: "https://api.logbrew.co/api/release-artifacts",
+  allowHostedUpload: true,
+  tokenEnv: "LOGBREW_RELEASE_ARTIFACT_TOKEN"
+}
+```
+
+只使用一种上传方式。准备或上传出错时，插件会中止构建。添加 `dryRun: true` 可以在不上传的情况下测试。
+
+插件不会从输出目录中删除 Source Map。不要把 `.map` 文件或清单部署到公开网站或 CDN。
+
+要映射已采集问题中的某个堆栈帧，针对同一份准备好的构建，用该帧运行 `symbolicate-js`。
+
+## <span id="verify-a-new-issue">读取新问题</span>
+
+把同一份准备好的构建部署到测试环境。通过你的问题采集路径触发一个安全的测试错误。此测试不要发送用户输入、凭据或原始堆栈。
+
+用相同的项目和构建上下文查找新问题：
+
+```bash
+logbrew read issues --project "<project_id>" \
+  --release "web@1.2.3" --environment staging \
+  --service checkout-web --since 1h --json
+```
+
+从结果中复制问题 ID。读取它最新的发生记录：
+
+```bash
+logbrew investigate issue "<issue_id>" --occurrence latest --json
+```
+
+先查看事件时间、项目、服务、环境和版本，再查看 `event.stack_frames`。带有 `source: "symbolicated"` 的帧包含根据你上传的文件得出的原始文件、行和列。带有 `source: "captured"` 的帧包含应用发送的位置。
+
+`logbrew read issue "<issue_id>" --json` 还会返回一个 `symbolication` 对象。其中每个帧都有一个 `status`：`resolved`、`artifact_not_found`、`source_not_resolved`、`invalid_metadata` 或 `unavailable`。只有 `resolved` 的帧才有原始位置。
+
+LogBrew 在你读取问题时才映射堆栈帧。因此，在错误发生之后上传的文件，也能映射具有相同 Debug ID 的较早事件。已映射的帧指出了需要检查的代码，但不能说明错误的原因。其他字段参见[排查问题](/zh-Hans/guides/investigate-an-issue)。
+
+## 检查失败时的处理
+
+| 结果 | 下一步 |
+| --- | --- |
+| 清单状态不是 `ready` | 查看 `validation.errors`。修正构建设置后重新构建。不要手动编辑清单。 |
+| 因 Source Map 缺失或为内联而中止构建 | 把 `build.sourcemap` 设为 `"hidden"` 或 `true`，然后重新构建。 |
+| `auth_missing` | 在上传进程中设置 `LOGBREW_RELEASE_ARTIFACT_TOKEN`。试运行不会测试密钥。 |
+| `auth_failed`（`401` 或 `403`） | 使用同一项目的构建产物密钥。不要使用运行时密钥或账号密钥。 |
+| `validation_failed`（`400` 或 `413`） | 检查准备好的文件及其大小。不要再次发送相同的上传。 |
+| 带有本地错误的 `validation_failed` | 查看 `validation.errors`。如果构建后有文件被修改，重新构建并检查。 |
+| `retryable_error` | 遇到网络错误、`408`、`429` 或服务器错误后，所有重试都失败了。稍后用同一批准备好的文件重试。 |
+| `upload_failed` | 服务器返回了其他状态。检查 `--endpoint` 的值。 |
+| 帧无法解析 | 检查 Debug ID、部署 URL 前缀和构建。不要使用其他构建或版本的 Source Map。 |
+| 没有出现新问题 | 测试 Source Map 之前，先检查问题采集、运行时密钥和时间筛选条件。 |
+
+不要在支持消息中包含源文件、密钥或私有路径。参见[故障排除](/zh-Hans/guides/troubleshooting)和 [API 错误](/zh-Hans/reference/api-errors)。

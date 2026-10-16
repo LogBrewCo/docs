@@ -1,0 +1,204 @@
+---
+title: "使用 LogBrew 记录 React Native 日志"
+sidebarTitle: "React Native"
+description: "安装 React Native SDK，发送一条测试日志，并在正确的 LogBrew 项目中找到它。安全配置 Expo，并处理投递错误。"
+---
+
+把 React Native 应用的日志发送到 LogBrew。先发送一条测试日志，再用 CLI 在正确的项目中找到它。本指南使用 Expo。纯 React Native 应用（不使用 Expo）通过自己的配置加载密钥。
+
+开始之前，你需要：
+
+- 一个可以在本地运行的 React Native 应用。
+- 一个 LogBrew 项目。请参阅[项目与接入](/zh-Hans/concepts/projects)。
+- 一个已登录的 CLI。请参阅[使用 CLI](/zh-Hans/guides/cli)。
+
+## 安装 SDK
+
+在应用目录中安装这两个包。保留应用原有的 React 和 React Native 依赖：
+
+```bash
+npm install @logbrew/sdk@0.1.28 @logbrew/react-native@0.1.35
+```
+
+## 创建项目 SDK 密钥
+
+为应用提供一个仅限该项目、只能写入的 SDK 密钥。Expo 会把所有 `EXPO_PUBLIC_*` 值打包进应用。切勿在该变量中放入账号凭据或服务端凭据。
+
+CLI v0.1.32 或更高版本可以为现有项目创建密钥，但不会创建新项目。查找项目 ID：
+
+```bash
+logbrew projects --json
+```
+
+创建密钥。在只有所有者可以访问的目录中使用一个新的文件路径：
+
+```bash
+install -d -m 700 "$HOME/.logbrew" &&
+logbrew projects keys create "<project_id>" \
+  --ingest-key-file "$HOME/.logbrew/my-mobile-app.ingest" \
+  --label "My mobile app" \
+  --kind sdk \
+  --json
+```
+
+命令成功后再继续。如果结果不明确，用相同的参数再次运行同一条命令。不要使用 `--abandon-retry`。
+
+不要把密钥文件纳入源码管理。不要使用为 CLI 授权的账号凭据。在本地 Expo 开发中，把密钥放在应用根目录下一个已被忽略的 `.env.local` 文件中：
+
+```dotenv
+EXPO_PUBLIC_LOGBREW_CLIENT_KEY=<your_project_sdk_key>
+```
+
+在下面的接入模块中保留对 `process.env.EXPO_PUBLIC_LOGBREW_CLIENT_KEY` 的直接引用。修改该值后，完全重新加载应用。构建时配置请参阅 [Expo 环境变量](https://docs.expo.dev/guides/environment-variables/)。纯 React Native 应用则通过自己的配置加载密钥。
+
+## 创建客户端
+
+把这段接入代码放在应用启动时加载的一个模块中。不要在每次渲染时创建客户端。把服务、环境和版本放进 `context`：
+
+```js
+import { AppState } from "react-native";
+import {
+  createAppStateListener,
+  createLogBrewReactNativeClient,
+  createReactNativeFetchTransport
+} from "@logbrew/react-native";
+
+const clientKey = process.env.EXPO_PUBLIC_LOGBREW_CLIENT_KEY;
+if (!clientKey) {
+  throw new Error("Set EXPO_PUBLIC_LOGBREW_CLIENT_KEY");
+}
+
+const client = createLogBrewReactNativeClient({
+  clientKey,
+  context: {
+    schemaVersion: 1,
+    resource: {
+      service: { name: "my-mobile-app" },
+      deployment: {
+        environment: __DEV__ ? "development" : "production",
+        release: "mobile@1.0.0"
+      }
+    }
+  },
+  transport: createReactNativeFetchTransport()
+});
+
+const stopAppStateListener = createAppStateListener(client, AppState, {
+  flushOnBackground: true
+});
+
+export async function verifyLogBrewSetup() {
+  client.log(`evt_react_native_setup_${Date.now()}`, new Date().toISOString(), {
+    level: "info",
+    message: "React Native setup check"
+  });
+
+  const receipt = await client.flush();
+  if (receipt.statusCode < 200 || receipt.statusCode >= 300) {
+    throw new Error("LogBrew did not accept the setup event");
+  }
+  return {
+    status_code: receipt.statusCode,
+    attempts: receipt.attempts,
+    batches: receipt.batches
+  };
+}
+```
+
+fetch 传输层会开启自动投递，并带有次数有限的重试和一个队列。不要再添加第二个 flush 定时器。应用变为非活跃状态或进入后台时，AppState 监听器会请求最后一次 flush。应用销毁时，调用 `stopAppStateListener()`。
+
+使用原生队列时，一个密钥只能被一个活跃客户端使用。同一密钥的第二个客户端会以 `configuration_error` 失败。这也是只创建一次客户端的另一个原因。
+
+## 发送并查找测试日志
+
+从一个仅在开发环境中使用的测试入口调用一次 `verifyLogBrewSetup()`。等待结果，并处理被拒绝的 Promise。不要打印密钥或信号批次。
+
+结果为 `2xx` 且 `batches` 大于 0，表示 LogBrew 已接受该批次。空的 flush 会返回 `204`，尝试次数和批次数都为 0，因为自动投递可能已经先把信号发出。无论哪种情况，都用 CLI 读取已保存的日志：
+
+```bash
+logbrew read logs --project "<project_id>" \
+  --search "React Native setup check" --since 1h --json
+```
+
+检查结果中的信号时间和服务。空结果不能说明原因。检查项目、密钥和时间范围。
+
+`RecordingTransport.alwaysAccept()` 仅用于本地测试。它返回模拟的 `202`，不发送任何请求。
+
+## 离线与重启后的投递
+
+在运行中的应用里读取 `client.deliveryHealth().storage`：
+
+- `persistent`：客户端使用原生队列。应用重启后，待投递的信号会重新加载。
+- `memory`：JavaScript 运行时重启后，待投递的信号会丢失。
+
+默认的 `persistentQueue: "auto"` 会在应用二进制包含 LogBrew 原生模块时使用原生队列。Expo Go 和较旧的二进制使用内存队列。仅更新 JavaScript 无法添加原生模块。
+
+如果生产环境中的应用需要在重启后继续投递，设置 `persistentQueue: "required"`。这样，缺少原生队列时，创建客户端会以 `configuration_error` 失败。带上原生模块重新构建应用。只有在你确实需要内存队列时，才使用 `persistentQueue: "disabled"`。
+
+原生队列最多容纳 1,000 个信号和 4 MiB 信号数据。客户端上更小的限制同样适用。原生队列中的信号在重启后保留各自的事件 ID。
+
+投递遵循“至少一次”语义，因此重试可能把同一个信号发送两次。如果事件 ID 和内容与 LogBrew 已接受的某个信号一致，LogBrew 不会再次存储它。后台 flush 只是一次尝试，不能证明已经送达。测试离线采集和应用重启，然后在项目中找到已保存的信号。
+
+### 读取投递状态
+
+`client.deliveryHealth()` 返回队列和投递状态，不包含信号内容。先读取以下字段：
+
+| 字段 | 含义 |
+| --- | --- |
+| `storage` | `persistent` 或 `memory`。 |
+| `deliveryState` | 自动投递的当前状态。 |
+| `lastOutcome` | 上一次投递尝试的结果。 |
+| `lastStatusClass` | 上一次响应状态的类别，或网络错误。 |
+| `pausedReason` | 收到 `401` 后为 `authentication`。收到 `429` 后为 `rate_limit`。 |
+| `queueEvents` | 等待投递的信号数。 |
+| `acceptedEvents` | LogBrew 已接受的信号数。 |
+| `droppedByReason` | 客户端丢弃的信号数，按原因分类。 |
+
+## 选择日志内容
+
+每条消息都要简短、具体。描述应用中发生的结果，例如请求失败或已安排重试。不要包含姓名、电子邮件地址、访问令牌、表单值或请求体。
+
+使用与日志内容相符的严重程度：`info`（信息）、`warning`（警告）、`error`（错误）或 `critical`（严重）。保持服务、环境和版本一致，方便查找相关记录。
+
+`npx react-native log-ios` 和 `npx react-native log-android` 显示的是本地设备日志，不会查询 LogBrew。请参阅 [React Native 原生调试](https://reactnative.dev/docs/debugging-native-code)。
+
+## 从失败的检查中恢复
+
+`flush()` 失败时，返回的 Promise 会以 SDK 错误码被拒绝。不要在错误报告中包含密钥和信号内容。
+
+| 结果 | 下一步 |
+| --- | --- |
+| 缺少客户端密钥 | 接入流程会在发送前停止。通过应用配置加载项目 SDK 密钥。 |
+| `401`、`unauthenticated` | LogBrew 拒绝了该密钥。自动投递暂停，并显示 `pausedReason: "authentication"`。创建新客户端之前，先修正或替换项目 SDK 密钥。切勿使用账号凭据。 |
+| `429`、`rate_limited` | SDK 会保留该批次，并以 `pausedReason: "rate_limit"` 暂停自动投递。不要添加重试循环。 |
+| `400`、`transport_error` | LogBrew 拒绝了请求。检查信号字段和包版本。 |
+| `network_failure` | SDK 没有拿到投递结果。LogBrew 可能已经接受了该信号。检查网络连接和 `deliveryHealth()`。 |
+| `5xx`、`transport_error` | SDK 已经重试过。手动重试之前，先读取已保存的日志。 |
+| CLI 结果为空 | 检查项目、密钥、信号时间和筛选条件。 |
+
+更多检查请参阅[故障排除](/zh-Hans/guides/troubleshooting)。
+
+## 在发布包中保留 Expo Debug ID
+
+通过 LogBrew 创建 Expo Metro 配置。这样，运行时包会获得与其 Source Map 相同的 Debug ID：
+
+```js
+// metro.config.js
+const { getLogBrewExpoConfig } = require("@logbrew/react-native/metro");
+
+module.exports = getLogBrewExpoConfig(__dirname);
+```
+
+如果应用使用 React Native Worklets 的 bundle 模式，在 LogBrew 辅助函数之后再应用该转换：
+
+```js
+// metro.config.js
+const { getLogBrewExpoConfig } = require("@logbrew/react-native/metro");
+const { getBundleModeMetroConfig } = require("react-native-worklets/bundleMode");
+
+module.exports = getBundleModeMetroConfig(getLogBrewExpoConfig(__dirname));
+```
+
+该辅助函数会保留现有的 Expo 预序列化插件。
+
+纯 React Native 应用则改用 `withLogBrewMetroConfig()` 包装最终的 Metro 配置。不要在 Expo 中使用这个包装函数。否则，生产构建会停止，并显示一条指向 `getLogBrewExpoConfig()` 的消息。

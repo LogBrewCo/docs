@@ -1,0 +1,169 @@
+---
+title: "链路追踪：链路、Span 与上下文"
+sidebarTitle: "链路追踪"
+description: "了解 LogBrew 如何通过链路和 Span 关联请求、日志、问题、操作和指标。"
+---
+
+链路追踪记录一次请求或操作经过各个已插桩服务的过程。一条链路把这项工作的所有 Span 归为一组。每个 Span 是一次计时操作，例如一次 HTTP 请求、一次数据库调用、一次队列操作或一个后台任务。缺少某个 Span，路径中的这一段就无从得知。
+
+当日志报告了故障，却没有说明操作经过的路径时，使用链路。链路可以显示：
+
+- 哪项操作发起了请求。
+- 请求在哪些环节耗费了时间。
+- 哪个子操作返回了错误。
+- 哪些日志、问题、操作和指标带有相同的 Trace ID。
+- 每个 Span 由哪个服务、环境和版本发送。
+
+## 链路与 Span 字段
+
+| 字段 | 含义 |
+| --- | --- |
+| `trace_id` | 标识该 Span 所属的链路。 |
+| `span_id` | 标识链路中的一项操作。 |
+| `parent_span_id` | 把子操作连接到发起它的操作。根 Span 没有该值。 |
+| `name` | 操作的名称，例如路由模板。 |
+| `operation` | 工作类型，例如 `http.server` 或 `db.query`。 |
+| `status` | 上报的结果，例如 `ok`、`error` 或 `cancelled`。 |
+| `started_at` | 操作开始的时间。 |
+| `duration_ms` | 操作运行的时长，单位为毫秒。 |
+| `service_name`、`environment`、`release` | 发送该 Span 的服务所属的范围。 |
+
+根 Span 开启一条链路，没有父 Span。子 Span 使用同一个 Trace ID，各有自己的 Span ID，并带有一个父 ID。只有这些 ID 能把操作连接起来，仅凭时间戳不能。只有当 Span 的 `status` 为 `error` 时，LogBrew 才把它计为错误 Span。
+
+## 跨服务的一次请求
+
+1. Web 服务为结账路由启动一个服务端 Span。
+2. 支付客户端为它发出的 HTTP 请求创建一个子 Span。
+3. 支付服务用自己的服务端 Span 延续这条链路。
+4. 数据库辅助函数为这次写入记录一个子 Span。
+5. 应用在活动的支付 Span 内发送一条安全的错误日志。
+
+这 5 条记录都带有相同的 Trace ID。如果某个服务没有收到链路上下文，即使时间重叠，它的工作也不会加入这条链路。
+
+## 传播上下文
+
+LogBrew SDK 使用 W3C Trace Context。例如，Node.js SDK 收到有效的 `traceparent` 请求头时，会用一个新的请求 Span 延续该链路。如果请求头缺失或无效，SDK 会启动一个新的根 Span。在该请求范围内采集的日志、问题、操作和指标都会带有这个请求的链路。
+
+出站插桩只会向你配置的目标（例如 `tracePropagationTargets`）写入 `traceparent` 请求头。只把链路上下文发送给可信且已插桩的服务。Trace ID 用于关联操作，不能用于身份验证。
+
+队列消息也可以携带链路上下文。在 Node.js 中，在生产者操作里调用 `createLogBrewQueueTraceHeaders()`，为消息添加 `traceparent` 消息头。在消费者中，把这个消息头作为 `traceparent` 传给 `queueOperationWithLogBrewSpan()`。参见 [JavaScript 队列链路追踪](/zh-Hans/guides/sdk-ingestion#javascript-queue-tracing)。
+
+Node.js 和 Python 的请求集成与出站集成不会在 Span 中记录请求体或响应体、查询字符串、任意请求头，也不会记录原始的 `traceparent` 值。用路由模板而不是具体 URL 为 Span 命名。要了解你所用运行时的集成，阅读 [SDK 接入](/zh-Hans/guides/sdk-ingestion)。
+
+## <span id="capture-spans">采集 Span</span>
+
+LogBrew 存储每条新的日志、问题、操作和指标时，都会附带一个 Trace ID。如果某个信号没有引用同一次投递中的 Span，LogBrew 会为它添加一个采集 Span：
+
+| 字段 | 值 |
+| --- | --- |
+| `name` | `log capture`、`issue capture`、`action capture` 或 `metric capture` |
+| `operation` | `logbrew.log`、`logbrew.issue`、`logbrew.action` 或 `logbrew.metric` |
+| `duration_ms` | `0` |
+| `parent_span_id` | 应用采集该信号时处于活动状态的 Span。没有活动的 Span 时为空。 |
+| `status` | 对于问题、`error` 或 `critical` 级别的日志，以及失败的操作，值为 `error`。其他情况下为空。 |
+| `attributes.logbrew.evidence` | `signal_capture` |
+
+之后，该信号的 `span_id` 就指向它的采集 Span。如果信号没有链路上下文，LogBrew 会为它创建一个新的 Trace ID。这条链路只表示 LogBrew 已存储该信号，并不表示请求路径。不要把同一链路中的多个采集 Span 当作一次请求。
+
+采集 Span 会计入 `span_count` 和 `error_span_count`。因此，即使链路中没有任何应用操作失败，一条错误日志也可能让 `--status error` 选中这条链路。得出结论之前，先查看每个错误 Span 的 `operation`。
+
+## 读取链路
+
+使用来自日志、问题或链路列表的确切 Trace ID：
+
+```bash
+logbrew read traces --project "<project_id>" --status error --since 24h --json
+logbrew read trace "<trace_id>" --project "<project_id>" --json
+```
+
+`--status error` 选择至少有一个错误 Span 的链路。`--status ok` 选择没有错误 Span 的链路。`--min-duration-ms 500` 选择运行时长不少于 500 毫秒的链路。
+
+先看根 Span 的耗时，再检查耗时最长的子 Span 和错误状态。始终关注项目、服务、环境和版本，以免把预发布环境的链路当作生产环境的证据。
+
+一条链路只代表一次执行，不是性能基准。提出性能改进之前，先把多条链路与相关的指标趋势进行比较。
+
+### 链路摘要
+
+`GET /api/telemetry/traces/{trace_id}/summary` 返回不含 Span 属性的摘要：
+
+| 字段 | 含义 |
+| --- | --- |
+| `root_span` | 父 Span 不在该链路中的 Span 里最早的那个。如果每个 Span 的父 Span 都在链路中，则为最早的 Span。 |
+| `slowest_child_span` | 有父 Span 的 Span 中耗时最长的那个。 |
+| `slowest_path` | 从根 Span 到最慢子 Span 的已知父级链。 |
+| `error_spans` | 状态为 `error` 的 Span 中耗时最长的那些，最多 5 个。 |
+| `services` | 每个服务的 Span 数、错误 Span 数和最长 Span 耗时。 |
+| `duration_ms` | 从最早的 Span 开始到最晚的 Span 结束的时长。 |
+
+如果 `root_span.parent_span_id` 有值，说明真正的根 Span 不在这条链路中。不要把 `root_span` 当作请求的起点。
+
+### 解释链路
+
+`logbrew explain trace` 返回一份链路排查结果：
+
+```bash
+logbrew explain trace "<trace_id>" --json
+```
+
+| 字段 | 含义 |
+| --- | --- |
+| `analysis.status` | `errors_observed`、`latency_focus` 或 `no_error_observed`。 |
+| `analysis.first_error_span`、`analysis.first_error_path` | 最早的错误 Span 及其已知的父级链。 |
+| `analysis.bottleneck_span`、`analysis.bottleneck_path` | 有父 Span 的 Span 中耗时最长的那个，及其已知的父级链。 |
+| `correlations` | 带有相同 Trace ID 的问题、日志、操作和指标。每个列表都有 `status` 和 `truncated`。 |
+| `evidence` | 已采集、缺失、已隐藏和已截断的字段。 |
+| `next_actions` | 接下来要读取的内容，按优先级排序。 |
+
+`analysis.causality` 的值为 `evidence_only`。该分析不能证明根本原因。CLI 请求第 3 版响应，在这一版中，每个相关的问题、操作和指标还带有确切的 `span_id`。
+
+要检查某个 Span 及其父 Span、子 Span 和服务边界，运行：
+
+```bash
+logbrew explain span "<trace_id>" "<span_id>" --project "<project_id>" \
+  --environment production --release "<release>" --json
+```
+
+`topology.parent_chain_status` 表示父级链是否完整：
+
+| 值 | 含义 |
+| --- | --- |
+| `root` | 该 Span 没有父 ID。 |
+| `complete` | 直到根 Span 的每个父 Span 都在链路中。 |
+| `missing` | 某个父 ID 指向不在链路中的 Span。 |
+| `cycle` | 父 ID 形成了循环。 |
+| `truncated` | 响应限制导致父级链不完整。 |
+| `unavailable` | 链路读取未能完成。 |
+
+## 缺失链路上下文
+
+并不是每个事件都有对应请求的链路。查看链路状态：
+
+| 状态 | 含义 |
+| --- | --- |
+| `available` | 可以读取确切的链路证据。 |
+| `not_linked` | 该事件没有 Trace ID。部分较早的事件没有 Trace ID。 |
+| `not_found` | 该事件有 Trace ID，但在所选范围内没有匹配的链路。 |
+| `unavailable` | 当时无法读取链路证据。 |
+
+`not_linked` 不是错误。状态为 `available` 的链路也可能说明该事件没有请求上下文。如果事件的采集 Span 没有 `parent_span_id`，说明应用采集该事件时没有活动的 Span。请求范围之外的后台任务经常出现这种结果。要找出缺失的关联：
+
+1. 查看该事件的项目、服务、环境、版本和时间。
+2. 确认这项工作运行在已插桩的请求或操作内部。
+3. 确认客户端和服务端集成会跨越该边界传播上下文。
+4. 修正插桩后，采集一个新事件并读取它。
+
+新版 SDK 不会为之前发送的事件补充链路上下文。不要根据时间戳、路由、消息或版本把事件关联到链路。
+
+## 为单个项目规划链路追踪
+
+从一个重要的请求或任务开始，例如结账。每次只为一个边界插桩：
+
+1. 为传入的请求或后台操作创建一个 Span。
+2. 为重要的出站调用添加子 Span。
+3. 在可信的服务边界之间延续 W3C Trace Context。
+4. 在活动的 Span 内发送一条安全的日志。
+5. 读取这条日志，打开它的 Trace ID，检查根 Span、子 Span、服务、环境、版本、状态和耗时。
+
+这项检查通过后，再添加下一个边界。共享同一条链路只说明存在关联，不能证明某个 Span 导致了问题。
+
+要检查 Span 名称，运行 `logbrew traces --project "<project_id>" --pagination cursor --json`。`naming_quality` 对象会统计该页中根名称过于笼统（`generic_name_traces`）或路由未匹配（`unmatched_route_traces`）的链路数量。如果命名需要改进，`naming_quality.next_action.code` 的值为 `improve_trace_naming`。

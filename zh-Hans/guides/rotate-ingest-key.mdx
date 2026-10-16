@@ -1,0 +1,137 @@
+---
+title: "API 密钥轮换：轮换 LogBrew 接入密钥"
+sidebarTitle: "轮换接入密钥"
+description: "轮换 LogBrew 接入密钥。按计划撤销旧密钥前，先测试替换密钥。出错时安全恢复，不暴露凭据。"
+---
+
+轮换会替换项目的接入密钥，不会改变项目或它已存储的遥测数据。使用账号身份验证管理密钥。接入密钥只能发送遥测数据，不能管理密钥。
+
+开始之前，先[安装 CLI 并登录](/zh-Hans/guides/cli)。将 `LOGBREW_PROJECT_ID` 设为项目 UUID。将 `LOGBREW_API_URL` 设为 `https://api.logbrew.co`。示例使用 Bash、curl 7.76.0 或更高版本，以及 jq。
+
+按计划轮换时，先创建、部署并测试替换密钥，再撤销旧密钥。在你的安全策略中规定轮换周期。如果密钥设有过期日期，在该日期之前替换它。
+
+<Warning>
+  密钥泄露属于安全事件。立即撤销该密钥，即使替换密钥尚未部署。仍在使用已撤销密钥的应用将无法发送遥测数据。
+</Warning>
+
+<Steps>
+  <Step title="创建替换密钥">
+    `POST /api/projects/{project_id}/ingest-keys` 接受一个非空的 `label`，最多 120 个字符。`kind` 可取 `cli`、`sdk`、`browser`、`server` 或 `artifact`。`artifact` 密钥不能发送遥测数据。可选的 `expires_at` 必须是未来的 RFC3339 时间。
+
+    使用与旧密钥相同的 `kind`。省略 `--kind` 时，CLI 使用 `sdk`；省略 `--label` 时，CLI 使用 `CLI-created SDK key`。CLI 没有设置过期时间的选项。要设置 `expires_at`，改用 API。
+
+    CLI 会把一次性令牌保存到源码管理之外的一个新文件中，该文件只有所有者可以访问。CLI 只打印元数据，不打印令牌：
+
+    ```bash
+    : "${LOGBREW_PROJECT_ID:?set LOGBREW_PROJECT_ID}" &&
+    : "${LOGBREW_REPLACEMENT_KEY_FILE:?choose a new private key file}" &&
+    logbrew projects keys create "$LOGBREW_PROJECT_ID" \
+      --ingest-key-file "$LOGBREW_REPLACEMENT_KEY_FILE" \
+      --label "checkout production rotation" --kind server --json
+    ```
+
+    命令成功后再继续。将 `NEW_KEY_ID` 设为返回的 `ingest_key.id`。
+
+    如果不确定结果，再次运行完全相同的命令。CLI 会复用它待处理的重试键。这次重试不要使用 `--abandon-retry`。
+
+    直接调用 API 的客户端只会在响应中收到一次令牌。要重试，用相同的请求体发送相同的 `Idempotency-Key` 请求头。24 小时内，该重试会返回同一个密钥。切勿打印、提交或分享令牌。
+  </Step>
+
+  <Step title="在旧密钥仍有效时部署新密钥">
+    把新令牌放进受保护的部署设置中。部署应用。保持旧密钥有效。不要让这两个令牌出现在源码、构建输出或日志中。
+  </Step>
+
+  <Step title="发送一个模拟信号">
+    把新令牌加载到 shell 变量 `new_ingest_key` 中。不要打印它。用新密钥发送一条模拟日志，然后把它读回来：
+
+    ```bash
+    occurred_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+
+    curl --fail-with-body -sS "$LOGBREW_API_URL/api/telemetry/ingest" \
+      -H "Authorization: Bearer $new_ingest_key" \
+      -H "Content-Type: application/json" \
+      --data @- <<JSON &&
+    {
+      "project_id": "$LOGBREW_PROJECT_ID",
+      "environment": "production",
+      "release": "ingest-key-rotation@1",
+      "service_name": "checkout-api",
+      "sdk_name": "native-api",
+      "sdk_version": "0.1.0",
+      "items": [
+        {
+          "type": "log",
+          "data": {
+            "level": "info",
+            "message": "ingest key rotation check",
+            "source": "setup",
+            "attributes": {},
+            "occurred_at": "$occurred_at"
+          }
+        }
+      ]
+    }
+    JSON
+
+    logbrew read logs --project "$LOGBREW_PROJECT_ID" \
+      --release ingest-key-rotation@1 \
+      --environment production \
+      --since "$occurred_at" \
+      --json
+    ```
+
+    只有读取结果返回这条日志，且 `occurred_at` 相同时，才继续。较早的轮换检查日志不能证明新密钥可用。同时确认已部署的应用正在发送遥测数据。如果某条命令失败，停下来查看响应。除非旧密钥已经泄露，否则保持它有效。
+  </Step>
+
+  <Step title="列出不含令牌的密钥元数据">
+    根据你的账号身份验证设置 `LOGBREW_ACCOUNT_BEARER`。找到旧密钥的 ID。确认 `NEW_KEY_ID` 为 `active`：
+
+    ```bash
+    (
+      set -o pipefail
+      curl --fail-with-body -sS "$LOGBREW_API_URL/api/projects/$LOGBREW_PROJECT_ID/ingest-keys" \
+        -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+        | jq -e 'select(type == "array") | map({id, label, kind, token_prefix, status, created_at, expires_at, revoked_at})'
+    )
+    ```
+
+    响应是一个不含令牌的密钥元数据数组。状态为 `active`、`expired` 或 `revoked`。`expires_at` 时间过后，密钥状态变为 `expired`。
+  </Step>
+
+  <Step title="只撤销旧密钥">
+    根据列表设置 `OLD_KEY_ID`。只有当两个 ID 不同时，该命令才会撤销旧密钥：
+
+    ```bash
+    if [ -n "${OLD_KEY_ID:-}" ] && [ -n "${NEW_KEY_ID:-}" ] \
+      && [ "$OLD_KEY_ID" != "$NEW_KEY_ID" ]; then
+      (
+        set -o pipefail
+        curl --fail-with-body -sS -X DELETE \
+          "$LOGBREW_API_URL/api/projects/$LOGBREW_PROJECT_ID/ingest-keys/$OLD_KEY_ID" \
+          -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+          | jq -e --arg id "$OLD_KEY_ID" \
+            'select(.id == $id and .status == "revoked") | {id, label, kind, token_prefix, status, created_at, expires_at, revoked_at}'
+      )
+    else
+      printf '%s\n' 'Set different old and replacement key IDs before revocation.' >&2
+      false
+    fi
+    ```
+
+    `DELETE` 是幂等的。它返回密钥元数据，其中 `status: "revoked"`，并已设置 `revoked_at`。如果响应结果不确定，可以安全地重复执行。
+
+    运行 `unset new_ingest_key`。按照你的密钥管理策略处理密钥文件。
+  </Step>
+</Steps>
+
+## 安全恢复
+
+| 响应 | 下一步 |
+| --- | --- |
+| `404`、`code: "not_found"` | 确认该账号拥有这个项目和这些密钥 ID。按照 `next_action.code: "check_resource"` 处理。不要尝试其他 ID。 |
+| `code: "validation_failed"` | 修正响应中指出的字段、值或时间戳。按照 `next` 和 `next_action` 处理。 |
+| 管理密钥时返回 `401` 或 `403` | 使用账号身份验证，而不是接入密钥。 |
+| 数据接收请求返回 `401`、`code: "ingest_key_invalid"` | 该密钥已撤销、已过期，或不能用于遥测。为所选项目使用新的有效密钥。按照 `next_action.code: "configure_ingest_key"` 处理。 |
+| 数据接收请求返回 `401` 或 `403` | 为所选项目使用新的接入密钥。不要使用账号凭据。 |
+
+如果轮换仍然失败，[报告问题](/zh-Hans/guides/report-a-problem)。只分享密钥元数据。不要包含凭据、请求头、原始遥测数据、客户数据、本地路径或源代码。

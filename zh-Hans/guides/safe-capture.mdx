@@ -1,0 +1,152 @@
+---
+title: "日志脱敏：防止敏感数据进入日志"
+sidebarTitle: "控制采集的数据"
+description: "选择经过批准的日志字段，在本地测试敏感数据。了解 LogBrew JavaScript、Node.js 和浏览器采集控制项的限制。"
+---
+
+启用采集之前，先选定应用要发送的内容。不要让密码、访问令牌、表单内容和用户私密数据进入信号。
+
+用经过批准的字段构建每个信号。不要把完整的请求、响应或错误对象复制到元数据中。隐藏（脱敏）会替换敏感值。筛选会省略整个信号。即使是有效的 SDK 信号，也可能包含应用不应发送的数据。
+
+本指南适用于以下包版本：
+
+- `@logbrew/sdk` 0.1.28
+- `@logbrew/node` 0.1.12
+- `@logbrew/browser` 0.1.11
+
+其他运行时请参阅 [SDK 接入](/zh-Hans/guides/sdk-ingestion)中对应的包指南。
+
+## 选择要采集的字段
+
+对于一次失败的结账，记录固定的消息、路由模板和状态码。不要记录姓名、电子邮件地址或支付数据。
+
+| 字段 | 采集规则 |
+| --- | --- |
+| 消息 | 使用固定文本，例如 `checkout.failed`。不要插入表单文本或凭据。 |
+| 路由 | 使用模板，例如 `/orders/:id`。URL 路径、查询字符串或片段可能包含私密数据。 |
+| 状态 | 只接受有效的状态码，不接受来自用户输入的字符串。 |
+| 元数据 | 逐个选择具名字段。不要复制请求、响应或错误的全部属性。 |
+| 主体和会话 | 使用经过批准的遥测标识符，而不是登录令牌或会话 Cookie。 |
+
+用户和会话上下文请参阅[产品事件采集](/zh-Hans/guides/product-events#set-users-and-sessions-on-each-event)。即使 ID 不包含姓名，也可能识别出某个人。
+
+## 在本地测试字段选择
+
+使用 Node.js 18 或更高版本。在一个空目录中安装该包：
+
+```bash
+npm install --save-exact @logbrew/sdk@0.1.28
+```
+
+此测试不使用真实密钥，也不发送任何请求。将它保存为 `safe-capture.mjs`：
+
+```js
+import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import { LogBrewClient, SdkError } from "@logbrew/sdk";
+
+try {
+  const client = LogBrewClient.create({
+    apiKey: "local-preview-only",
+    sdkName: "privacy-check",
+    sdkVersion: "0.1.28",
+    automaticDelivery: false
+  });
+
+  function recordCheckoutFailure(input) {
+    const status = input?.status;
+    if (!Number.isInteger(status) || status < 400 || status > 599) {
+      return false;
+    }
+    client.log(randomUUID(), new Date().toISOString(), {
+      message: "checkout.failed",
+      level: "error",
+      metadata: { route: "/checkout", status }
+    });
+    return true;
+  }
+
+  const excludedValue = "SYNTHETIC_PRIVATE_VALUE";
+  assert.equal(recordCheckoutFailure({
+    status: 503,
+    authorization: excludedValue,
+    body: excludedValue
+  }), true);
+  assert.equal(recordCheckoutFailure({ status: excludedValue }), false);
+
+  const preview = client.previewJson();
+  const batch = JSON.parse(preview);
+  assert.equal(batch.events.length, 1);
+  assert.equal(preview.includes(excludedValue), false);
+  assert.deepEqual(batch.events[0].attributes.metadata, {
+    route: "/checkout",
+    status: 503
+  });
+  client.purgePendingEvents();
+  console.log(JSON.stringify({
+    ok: true,
+    checked_events: 1,
+    excluded_value_found: false
+  }));
+} catch (error) {
+  console.error(JSON.stringify({
+    ok: false,
+    error: error instanceof SdkError ? error.code : "privacy_check_failed"
+  }));
+  process.exitCode = 1;
+}
+```
+
+运行测试：
+
+```bash
+node safe-capture.mjs
+```
+
+预期输出：
+
+```json
+{"ok":true,"checked_events":1,"excluded_value_found":false}
+```
+
+断言失败时会打印 `"ok":false`，并以退出码 1 退出。SDK 校验错误会打印对应的 SDK 错误码。不要打印或上传包含真实数据的预览。
+
+在你的采集代码中使用相同的模式，并在测试中保留这些断言。为应用不能发送的每个字段和值各添加一项检查。如果使用基于模式匹配的隐藏规则，每次修改规则后都重新运行检查。此测试只检查一条排队中的日志，不能代替隐私审查。
+
+## 错误消息和堆栈
+
+| 采集路径 | 行为 |
+| --- | --- |
+| `createIssueAttributesFromError`（core） | 在问题消息和 `metadata.errorMessage` 中保留错误文本。只有设置 `includeErrorStack: true` 时才添加 `metadata.errorStack`。异常链条目会把每条消息标记为 `redacted`（已隐藏），不携带消息文本。 |
+| core 的 console 调用转换 | 可能在日志消息和元数据中保留错误文本。 |
+| `createBrowserErrorEvent`（浏览器） | 使用固定的错误摘要，移除 `metadata.errorMessage`，并将异常链中的消息标记为已隐藏。 |
+
+自定义的 `options.message` 不会移除 `metadata.errorMessage`。检查完整的信号，而不只是标题。从源头上让错误消息不包含敏感值。
+
+## 按作用范围使用各项控制
+
+### JavaScript core 与 Node.js
+
+`LogBrewClient.create` 接受 `eventFilter`。返回 `false` 可在信号进入队列之前将其省略。其他任何返回值都会保留该信号。筛选函数收到的是信号的副本，因此修改副本不会隐藏任何内容。在这些版本中，`createLogBrewNodeClient` 和 `createLogBrewBrowserClient` 不会应用 `eventFilter`。
+
+`droppedEvents()` 统计因大小或队列限制而丢弃的信号，不统计被 `eventFilter` 省略的信号。
+
+Node 客户端会添加运行时上下文，例如 Node 版本、操作系统和架构。设置 `captureRuntimeContext: false` 可省略这些信息。此设置不会移除应用自己提供的上下文，也不会停止采集。
+
+### 浏览器
+
+浏览器客户端默认采集全局错误、未处理的 Promise 拒绝和首次页面浏览。将 `captureGlobalErrors`、`captureUnhandledRejections` 或 `capturePageViews` 设为 `false`，可关闭对应的一项。
+
+页面浏览包含路径名（pathname）。除非你设置了 `includeQueryString`、`includeHash`、`includeDocumentTitle` 或 `includeUserAgent`，否则页面浏览不包含查询字符串、片段、文档标题和完整的 User-Agent。如果路径名可能包含私密数据，关闭自动页面浏览，改用安全的路由名称自行发送页面浏览。
+
+`sanitizeMetadata` 只修改元数据，不修改页面浏览或操作的名称。页面浏览名称包含具体的路径名，例如 `page_view /orders/1234`。元数据中的 `routeTemplate` 决定“分析”中显示的页面（surface），但不会修改名称。`shouldCaptureError` 只省略浏览器问题，不筛选日志或其他信号。
+
+设置 `captureRuntimeContext: false` 可省略浏览器品牌、平台和设备系列。此设置不控制 `includeUserAgent`。
+
+## 正式采集之前
+
+使用模拟数据测试每条已启用的采集路径，包括错误处理路径和日志集成。
+
+采集方面的修改只对新信号生效。`purgePendingEvents()` 会清空空闲的本地队列；正在发送时，它会失败。它不会停止之后的采集，也不会删除 LogBrew 已接受的信号。浏览器的 `uninstall()` 会移除监听器，但保留已排队的信号。这些方法不能替代用户同意流程或数据删除流程。
+
+然后按照[快速入门](/zh-Hans/quickstart)发送一个模拟信号。如果找不到它，请参阅[故障排除](/zh-Hans/guides/troubleshooting)。HTTP 错误请参阅 [API 错误](/zh-Hans/reference/api-errors)。

@@ -1,0 +1,129 @@
+---
+title: "LogBrew 项目接入与信号检查"
+sidebarTitle: "项目与接入"
+description: "完成 LogBrew 项目接入。选择服务名和环境名，查看接入状态，并找到应用发送的测试信号。"
+---
+
+项目是遥测数据的访问边界。每个已接收的信号都属于一个项目，每个读取命令都可以按项目筛选。
+
+如果遥测数据需要单独的归属或访问边界，就使用单独的项目。对大多数团队来说，一个项目对应一个应用、服务或产品领域。代码仓库不必与项目一一对应。一个 monorepo 可以把多个服务发送到同一个项目，用服务名区分它们。
+
+## <span id="project-service-environment">项目、服务、环境</span>
+
+| 术语 | 示例 | 用途 |
+| --- | --- | --- |
+| 项目 | `checkout-platform` | 归属和访问控制。 |
+| 服务 | `checkout-api` | 发送该信号的应用或服务。 |
+| 环境 | `production` | 运行时上下文。 |
+| 版本 | `api@1.2.3` | 代码版本。 |
+
+## <span id="recommended-model">完成项目接入</span>
+
+[安装 CLI](/zh-Hans/guides/cli)。运行 `logbrew status --json` 查看账号的访问权限。如果访问权限无效，由人运行 `logbrew login`。项目接入密钥不能用于登录。
+
+<Steps>
+  <Step title="创建或选择项目">
+    先列出你的项目。只有项目不存在时才创建。
+
+    ```bash
+    logbrew projects --json
+    install -d -m 700 "$HOME/.logbrew"
+
+    logbrew projects create checkout-api \
+      --runtime node \
+      --environment production \
+      --ingest-key-file "$HOME/.logbrew/checkout-api.ingest" \
+      --json
+    ```
+
+    CLI 会把接入密钥写入一个新文件，只有文件所有者可以访问。CLI 不会输出密钥或文件路径。如果结果不明确，原样再运行一次该命令，不要更改项目名称或密钥文件。CLI 会复用尚未完成的请求标识。[快速入门](/zh-Hans/quickstart)介绍了如何从结果中读取项目 ID。
+
+    对于已有项目，记录其接入状态：
+
+    ```bash
+    logbrew projects setup "<project_id>" --source cli --environment production --json
+    ```
+
+    要为已有项目再创建一个接入密钥，使用 `logbrew projects keys create`。[轮换接入密钥](/zh-Hans/guides/rotate-ingest-key)给出了该命令。
+
+    `logbrew setup --create-project` 只显示帮助信息，不会创建项目。
+  </Step>
+
+  <Step title="在 SDK 中设置服务名">
+    使用代码仓库和部署中的名称，例如 `api`、`worker`、`web`、`ios` 或 `checkout-api`。服务名只是一个标签，不能用来选择项目。项目由接入密钥决定。重命名服务不会移动已存储的信号。如果找不到某个信号，先检查应用使用的项目和接入密钥，再考虑创建新项目。
+  </Step>
+
+  <Step title="使用标准环境名">
+    使用 `production`、`staging`、`preview` 和 `local`。如果你的部署使用其他名称，就始终使用同一套名称。环境名不能包含空格、`/` 或反斜杠。
+  </Step>
+
+  <Step title="发送测试信号并读取">
+    按照 [SDK 接入](/zh-Hans/guides/sdk-ingestion)的说明，用项目接入密钥配置 SDK。创建项目不会在你的应用中安装 SDK。不要把密钥提交到源代码管理中。在应用中设置服务、环境和版本。发送一个安全的信号，然后读取它：
+
+    ```bash
+    logbrew read logs --project "<project_id>" --json
+    ```
+
+    每种信号都有自己的列表。日志列表为空并不表示项目中没有问题或链路。
+
+    在控制台中，选择同一个项目，以及包含该测试信号的时间范围。确认服务、环境和版本筛选条件与该信号一致。
+  </Step>
+</Steps>
+
+## <span id="diagnose-project-setup">诊断项目接入</span>
+
+用项目 doctor 读取接入状态。不要根据本地文件或空的日志查询推断接入状态。
+
+```bash
+: "${LOGBREW_PROJECT_ID:?set a project UUID}"
+
+logbrew doctor --project "$LOGBREW_PROJECT_ID" --json
+```
+
+CLI 返回一份包含 `status`、`checks` 和 `next` 的报告。退出码为 `0` 并不表示所有检查都已通过。逐项查看 `checks` 中的内容。参见[读取项目 doctor 报告](/zh-Hans/reference/cli#read-a-project-doctor-report)。
+
+### 直接调用 API 的响应
+
+API 客户端使用账号身份验证调用 `GET /api/projects/{project_id}/doctor`。该端点没有查询参数，也没有请求体。不要用项目接入密钥进行这项读取。
+
+`200` 响应包含以下键：`project_id`、`state`、`setup_status`、`setup_acknowledged`、`has_active_ingest_key`、`first_telemetry_seen_at`、`last_seen_at`、`last_signal`、`next` 和 `next_action`。时间戳为 RFC3339 格式或 `null`。`last_signal` 是可安全显示的摘要，不是原始信号。
+
+| `state` | `next_action.code` | `next_action.target` |
+| --- | --- | --- |
+| `needs_ingest_key` | `create_ingest_key` | `project_ingest_keys` |
+| `needs_setup` | `choose_setup_path` | `project_setup` |
+| `needs_telemetry` | `send_first_telemetry` | `telemetry_ingest` |
+| `ready` | `inspect_recent_telemetry` | `telemetry_reads` |
+
+doctor 会先检查接入密钥。没有有效接入密钥的项目，无论接入状态如何，都是 `needs_ingest_key`。
+
+`setup_status` 的值为 `created`、`setup_started`、`sdk_seen`、`first_telemetry_seen` 或 `active`。只有后 3 个值的 `setup_acknowledged` 为 `true`。`created` 对应 `needs_setup`。`setup_started` 和 `sdk_seen` 对应 `needs_telemetry`。`first_telemetry_seen` 和 `active` 对应 `ready`。
+
+| 响应 | 下一步 |
+| --- | --- |
+| `404`、`code: "not_found"` | 项目不存在、项目已归档、你的账号无权读取该项目，这几种情况返回相同的结果。从 `logbrew projects` 重新读取项目 ID。不要尝试其他 ID。 |
+| `405`、`code: "method_not_allowed"` | 使用 `GET`，不带请求体或查询参数。 |
+
+如果读取仍然失败，[报告问题](/zh-Hans/guides/report-a-problem)。不要在工单中包含凭据、请求头、信号正文、客户数据、本地路径或源代码。
+
+## <span id="archive-or-delete-a-project">归档或删除项目</span>
+
+归档项目可以将其从活动项目列表中移除：
+
+```bash
+logbrew projects archive "<project_id>" --yes --json
+```
+
+该命令需要 `--yes`。归档后，该项目的接入密钥就无法再发送新的遥测数据。对应的 API 路由是 `DELETE /api/projects/{project_id}`，返回 `204`，不带响应体。使用 `GET /api/projects/archived` 列出已归档的项目。使用 `POST /api/projects/{project_id}/restore` 恢复项目，该请求同样返回 `204`。
+
+只有在确定无误时，才永久删除项目：
+
+```bash
+logbrew projects delete "<project_id>" --confirm "<project_id>" --json
+```
+
+在 `--confirm` 后再次输入完全相同的项目 ID。请求被接受后，项目会立即停用，并安排永久删除。此后无法恢复该项目。
+
+## <span id="rotate-an-ingest-key-without-telemetry-loss">轮换接入密钥</span>
+
+[轮换接入密钥](/zh-Hans/guides/rotate-ingest-key)介绍了替换、部署、测试和撤销的完整流程。

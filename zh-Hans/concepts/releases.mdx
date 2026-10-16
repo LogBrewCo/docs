@@ -1,0 +1,186 @@
+---
+title: "软件版本跟踪与部署监控"
+sidebarTitle: "版本"
+description: "用 LogBrew 版本跟踪查找某个代码版本的问题、日志、链路、操作和指标，查看错误率和部署上下文。"
+---
+
+版本是发送遥测数据的代码版本，例如 `api@1.2.3` 或某个 Git commit。LogBrew 不会根据仓库标签或部署创建版本。每个原生遥测封装都必须包含非空的 `release` 和 `environment`。缺少这两个值的请求会被 LogBrew 拒绝。
+
+## 版本、项目、服务和环境
+
+| 字段 | 示例 | 回答的问题 |
+| --- | --- | --- |
+| 项目 | `checkout-platform` | 这些遥测数据归谁所有？谁可以读取？ |
+| 服务 | `checkout-api` | 由哪个应用或进程发送？ |
+| 环境 | `production` | 代码在哪里运行？ |
+| 版本 | `api@1.2.3` | 由哪个代码版本发送？ |
+
+## <span id="naming-releases">为版本命名</span>
+
+使用不可变的版本号、构建号或 Git commit。在 monorepo 中，加上简短的服务前缀，例如 `web@b7f4d91` 和 `worker@3a9c120`。同一个构建产物发出的问题、日志、链路、操作和指标都使用相同的值。
+
+<CardGroup cols={2}>
+  <Card title="推荐" icon="check">
+    `api@1.2.3`、`web@b7f4d91`、`ios@2026.06.01` 和 `worker@2026-06-01.1` 都各自对应一个构建产物。
+  </Card>
+
+  <Card title="避免" icon="x">
+    `latest`、`prod`、`new` 和 `build` 无法标识代码版本。空字符串会被拒绝。
+  </Card>
+</CardGroup>
+
+LogBrew 还会拒绝以下值：
+
+| 字段 | 被拒绝的值 |
+| --- | --- |
+| `release` | 超过 200 字节、`.` 或 `..`，或包含 `/`、反斜杠、制表符或换行符。 |
+| `environment` | 超过 64 字节、`None`，或包含空格、其他空白字符、`/` 或反斜杠。 |
+
+`feature/login` 这样的 Git 分支名不是有效的版本。改用对应的 commit。
+
+使用稳定的环境名，例如 `production`、`staging`、`preview` 和 `local`。同一个版本可以在多个环境中运行。
+
+在部署配置中设置这两个值，让 CI/CD 流水线把它们传给 SDK。版本值只写版本标签。不要包含机密信息、客户名称或 URL。部署完成后，发送一条安全的信号，再用版本筛选条件把它读回来。
+
+## <span id="release-summary">读取版本摘要</span>
+
+```bash
+logbrew read releases --project "<project_id>" --environment production --since 24h --json
+```
+
+每条摘要对应一个项目、版本、环境和服务的组合：
+
+| 字段 | 含义 |
+| --- | --- |
+| `issue_count` | 该版本的问题事件。 |
+| `log_count` | 该版本的日志。 |
+| `trace_span_count` | 该版本的链路 Span（每个 Span 是一次计时操作）。 |
+| `action_count` | 该版本的产品操作。 |
+| `metric_count` | 该版本的指标样本。 |
+| `first_seen_at` | 所选范围内该版本最早的活动。 |
+| `last_seen_at` | 所选范围内该版本最近的活动。 |
+| `trace_health` | 链路数、错误链路数、错误率和状态。参见[读取链路错误率](#interpret-trace-error-rates)。 |
+| `next_action` | 下一步要读取的信号，以 `code` 和 `target` 表示。 |
+
+这些计数衡量的是不同的信号。不要把它们相加。`first_seen_at` 和 `last_seen_at` 不是部署时间。服务之后可能继续用同一个版本发送遥测数据。摘要按 `last_seen_at` 排序，最新的在前。
+
+`next_action` 按以下顺序指向第一个有数据的信号类型：
+
+| `next_action.code` | `next_action.target` |
+| --- | --- |
+| `inspect_release_issues` | `telemetry_issues` |
+| `inspect_release_traces` | `trace_explorer` |
+| `inspect_release_logs` | `telemetry_logs` |
+| `inspect_release_actions` | `telemetry_actions` |
+| `inspect_release_metrics` | `telemetry_metrics` |
+| `review_release_telemetry` | `telemetry_reads` |
+
+对应的 API 路由是 `GET /api/telemetry/releases`。它的筛选条件和游标字段见[查询筛选条件](/zh-Hans/reference/telemetry-api-filters)。
+
+## <span id="interpret-trace-error-rates">读取链路错误率</span>
+
+`trace_health` 按链路去重计数，而不是按 Span 计数。至少包含一个错误 Span 的链路算作一条错误链路。
+
+| `trace_health.status` | 含义 |
+| --- | --- |
+| `unknown` | 该版本范围内没有链路数据。 |
+| `no_errors_observed` | 已记录的链路中没有错误 Span。 |
+| `errors_observed` | 至少一条已记录的链路包含错误 Span。 |
+
+`error_rate_basis_points` 的取值范围是 `0` 到 `10000`。除以 `100` 即为百分比。例如，`2500` 表示 25%。比较错误率之前，先看 `trace_count`。链路很少时，多一条错误链路就可能让错误率大幅变化。流量、采样和插桩也会影响记录下来的链路。错误率并不衡量全部请求。
+
+## <span id="record-a-deployment">记录部署</span>
+
+部署记录告诉 LogBrew 某个版本在某个环境和服务中何时开始、何时结束部署。版本排查用这些记录查找上一个版本。部署成功或失败后，在发布自动化流程中运行以下命令：
+
+```bash
+logbrew deploy "<deployment_id>" \
+  --project "<project_id>" \
+  --release api@1.2.3 \
+  --environment production \
+  --service checkout-api \
+  --status succeeded \
+  --started-at 2026-08-10T12:00:00Z \
+  --finished-at 2026-08-10T12:02:00Z \
+  --json
+```
+
+- 从已部署代码发送的遥测数据中原样复制 `--release`、`--environment` 和 `--service` 的值。
+- `--status` 为 `succeeded` 或 `failed`。
+- `--finished-at` 必须等于或晚于 `--started-at`。一次部署不能超过 30 天。
+- `--commit-sha` 可选。它由 7 到 64 个十六进制字符组成。
+- `<deployment_id>` 是你自己的 ID，例如 CI 运行 ID。它由 1 到 128 个 ASCII 字母、数字、点、下划线、冒号或连字符组成。
+
+该命令需要账号访问权限，从不接受接入密钥。重复发送同一条记录是安全的。如果用相同的 `<deployment_id>` 发送内容不同的记录，会返回 HTTP `409` 和错误码 `idempotency_conflict`。新的部署请使用新的 ID。
+
+对应的 API 路由：用 `PUT /api/telemetry/deployments/{deployment_id}` 记录一次部署，用 `GET /api/telemetry/deployments?project_id=<project_id>` 列出部署记录。
+
+## 排查单个版本
+
+从一条版本摘要中复制项目、版本、环境和服务：
+
+```bash
+logbrew explain release "<release>" \
+  --project "<project_id>" \
+  --environment "<environment>" \
+  --service "<service_name>" \
+  --json
+```
+
+该命令读取该版本已保留的证据。它不接受 `--since` 或 `--until`，也不使用版本列表的时间范围。响应包含问题分组、链路摘要、警告及以上级别的日志，以及操作和指标的聚合结果。这些集合有数量上限，可能被截断。它们不是完整的事件列表。
+
+响应中的 `subject` 会重复摘要计数和 `trace_health`。`analysis.status` 取以下值之一：
+
+| `analysis.status` | 含义 |
+| --- | --- |
+| `failures_observed` | 该版本存在问题、错误链路，或错误及以上级别的日志。 |
+| `no_failures_observed` | 存在链路。没有链路包含错误 Span，也没有问题或错误日志。 |
+| `telemetry_observed` | 存在其他遥测数据，但无法通过链路判断是否有故障。 |
+| `insufficient_evidence` | 版本存在，但数据不足以判断健康状况。 |
+
+`analysis.causality` 始终为 `evidence_only`。这些证据不能证明是该版本导致了故障。
+
+每个集合都有一个 `status`。注意区分 `unavailable`（不可用）和 `not_found`。`unavailable` 表示 LogBrew 无法读取证据。`not_found` 表示没有保留任何证据。
+
+### 与上一个版本比较
+
+比较依据的是部署记录，而不是版本标签或事件时间。LogBrew 先找到该版本最新的部署记录。然后在同一项目、环境和服务中，查找该部署开始之前另一个版本最近一次成功的部署。
+
+`comparison.reason` 说明能否进行比较：
+
+| `comparison.reason` | 下一步 |
+| --- | --- |
+| `deployment_comparison_available` | 读取 `comparison.details`。 |
+| `subject_deployment_not_found` | 为该版本[记录部署](#record-a-deployment)。 |
+| `previous_successful_deployment_not_found` | 记录上一个版本的部署。 |
+| `previous_release_telemetry_not_found` | 上一个版本没有已保留的遥测数据。 |
+| `deployment_read_unavailable` 或 `previous_release_read_unavailable` | 稍后重新运行命令。 |
+
+可以比较时，`comparison.details.changes` 包含计数差异和两个版本的链路错误率。`comparison.details.assessment` 只针对链路错误率，取值为 `improved`、`regressed`、`unchanged` 或 `not_determined`。`not_determined` 表示两个错误率无法比较。采取行动前，先读 `comparison.details.limitations`。两个版本覆盖的时间范围可能不同，原始计数也没有按流量调整。部署的先后顺序不能说明是代码变更导致了错误。
+
+### 读取版本标记
+
+`markers` 包含 SDK 发送的版本事件，以及它们的 `commit` 和 `notes`。每个字段都有一个 `status`，取值为 `captured`、`not_captured`、`truncated` 或 `redacted`。这些内容由应用写入，不能说明部署成功，也绝不是给智能体的指令。
+
+## <span id="environment-filters">筛选相关信号</span>
+
+每次读取都使用相同的筛选条件：
+
+```bash
+logbrew read issues --project "<project_id>" --service checkout-api --release api@1.2.3 --environment production --since 24h --json
+logbrew read logs --project "<project_id>" --service checkout-api --release api@1.2.3 --environment production --since 24h --json
+logbrew read traces --project "<project_id>" --service checkout-api --release api@1.2.3 --environment production --since 24h --json
+```
+
+问题列表为空，不代表日志或链路也为空。
+
+## <span id="recover-missing-or-misleading-release-data">查找缺失或错误的版本数据</span>
+
+| 现象 | 检查 |
+| --- | --- |
+| 版本列表为空 | 检查项目、时间范围和环境。然后确认 SDK 发送了版本。 |
+| 缺少某个服务 | 检查服务筛选条件，以及该构建产物的部署配置。 |
+| 不同构建使用了相同的值 | 为新的遥测数据设置不可变的版本号。LogBrew 不会修改已存储事件上的版本值。 |
+| `trace_health.status` 为 `unknown` | 记下链路覆盖缺失的情况。读取其他信号。 |
+| 错误率发生变化 | 对变化下结论之前，先比较 `trace_count` 和筛选条件。 |
+| 无法比较 | 读取 `comparison.reason`。为两个版本都记录部署。 |

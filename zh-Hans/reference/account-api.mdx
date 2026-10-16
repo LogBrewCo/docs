@@ -1,0 +1,349 @@
+---
+title: "账号 API 与 API 用量限制"
+sidebarTitle: "账号 API"
+description: "读取 LogBrew 账号的用量限制、配额历史、订阅就绪状态和退出登录响应。"
+---
+
+使用账号 API 读取用量、配额状态、用量历史和订阅就绪状态，以及退出登录。账号读取使用账号 Bearer 令牌或浏览器会话。切勿在账号请求中使用项目接入密钥。切勿把账号凭据用作 SDK 或数据接收配置。
+
+| 任务 | 端点 |
+| --- | --- |
+| 读取当前用量和配额状态 | `GET /api/account/usage` |
+| 读取随时间变化的用量 | `GET /api/account/usage/history` |
+| 读取订阅和组织就绪状态 | `GET /api/account/subscription` |
+| 退出一个应用或 CLI 登录 | `POST /api/auth/logout` |
+| 撤销所有 LogBrew 登录 | `POST /api/auth/logout-all` |
+| 清除浏览器会话 | `POST /api/auth/web/logout` |
+
+错误使用标准的 [API 错误响应格式](/zh-Hans/reference/api-errors)。没有有效账号身份验证的读取请求会返回 `401` 和 `code: "unauthorized"`。不要把这种失败显示为零用量、空图表或免费套餐。不受支持的方法会返回 `405` 和 `code: "method_not_allowed"`，`next` 会指出受支持的请求。
+
+账号 API 报告的是遥测用量，而不是金额。它不报告费用、发票或付款状态。
+
+## <span id="account-usage">账号用量</span>
+
+`GET /api/account/usage` 是规范的用量和配额端点。用它获取用量总数、重置时间、配额状态，以及按项目和遥测数据流划分的明细。不要根据 SDK 文件、CLI 文件或客户端计数器计算用量。CLI 命令 `logbrew usage` 读取的就是这个端点。请参阅 [CLI 参考](/zh-Hans/reference/cli)。
+
+```bash
+curl "https://api.logbrew.co/api/account/usage" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER"
+```
+
+以下示例响应使用模拟值。这个免费账号有 1 个项目，在当前周期内只发送了日志：
+
+```json
+{
+  "period_start": "2026-06-01T00:00:00Z",
+  "period_end": "2026-07-01T00:00:00Z",
+  "reset_at": "2026-07-01T00:00:00Z",
+  "plan": { "tier": "free", "status": "free" },
+  "limits": { "events": null, "bytes": null, "projects": null, "retention_days": 30 },
+  "usage": { "events": 27000, "bytes": 10485760, "projects": 1 },
+  "state": "ok",
+  "warning_threshold": 0.8,
+  "percent_used": 0.2,
+  "warning": false,
+  "blocked": false,
+  "limit": null,
+  "next": "continue sending telemetry",
+  "next_action": {
+    "code": "continue_sending_telemetry",
+    "target": "telemetry_ingest",
+    "state": "ok",
+    "limit": null,
+    "reset_at": "2026-07-01T00:00:00Z"
+  },
+  "by_project": [
+    { "project_id": "00000000-0000-4000-8000-000000000001", "events": 27000, "bytes": 10485760 }
+  ],
+  "by_stream": [
+    { "kind": "logs", "events": 27000, "bytes": 10485760 }
+  ]
+}
+```
+
+| 字段 | 含义 |
+| --- | --- |
+| `period_start`、`period_end` | 当前用量周期。结束时间不包含在内。 |
+| `reset_at` | 用量额度重置的时间，与 `period_end` 相同。 |
+| `plan.tier` | 套餐标识符：`free`、`pro` 或 `scale`。 |
+| `plan.status` | `free`、`trial`、`active`、`past_due` 或 `disabled`。 |
+| `limits.events`、`limits.bytes`、`limits.projects` | 兼容字段，值为 `null`。`null` 不表示无限制。配额状态请使用 `state`、`limit` 和 `percent_used`。 |
+| `limits.retention_days` | 该套餐的数据保留天数，或 `null`。 |
+| `usage.events`、`usage.bytes` | 该周期内所有遥测数据流的总数。 |
+| `usage.projects` | 该账号拥有的项目数。 |
+| `state` | `ok`、`warning` 或 `blocked`。 |
+| `warning_threshold` | 触发 `warning` 状态的额度占比，以小数表示。 |
+| `percent_used` | 各项额度中最高的已用占比，以百分数表示。例如，`80` 表示 80%。 |
+| `warning`、`blocked` | `state` 的兼容形式。 |
+| `limit` | 导致当前状态的额度：`events`、`bytes` 或 `null`。 |
+| `next`、`next_action` | 当前状态的恢复说明文本和结构化的下一步。 |
+| `by_project` | 每个项目的用量。账号拥有的每个项目各占 1 行，用量为零时也是如此。按 `project_id` 匹配各行，不要按数组位置匹配。 |
+| `by_stream` | 按遥测数据流 `kind` 划分的用量，例如 `logs`、`issues`、`actions` 或 `traces`。 |
+
+### 配额状态
+
+以 `state` 作为主要的分支依据。只有当 `state` 为 `ok` 时，`limit` 才为 `null`。
+
+| `state` | `warning` | `blocked` | `limit` | `next_action.code` | `next_action.target` |
+| --- | --- | --- | --- | --- | --- |
+| `ok` | `false` | `false` | `null` | `continue_sending_telemetry` | `telemetry_ingest` |
+| `warning` | `true` | `false` | `events` 或 `bytes` | `reduce_usage_or_upgrade` | `pricing` |
+| `blocked` | `false` | `true` | `events` 或 `bytes` | `wait_until_reset_or_upgrade` | `pricing` |
+
+`next_action.state`、`next_action.limit` 和 `next_action.reset_at` 重复顶层的值。`next_action.code` 的值还包括 `check_usage_limits`，其目标为 `account_usage`。如果客户端收到这一组值，重新读取用量并显示 `next`。
+
+LogBrew 会把每种遥测类型与它自己的额度分别比较。`limit` 将它们归为两组：
+
+- `events` 涵盖问题事件和链路 Span（一次计时操作）。
+- `bytes` 涵盖日志字节数和指标字节数。
+
+如果一项额度已被阻止，另一项处于警告状态，`limit` 会指出被阻止的那项额度。用量达到某项额度的 `warning_threshold` 时，进入 `warning` 状态。用量达到额度时，进入 `blocked` 状态。
+
+`next` 文本可能会变化，例如在套餐暂停销售时。`next_action` 的值不会变化。根据 `next_action` 做本地化。不要解析 `next`。
+
+账号用量限制不是 API 速率限制。数据接收超出某项额度时，数据接收请求会返回 `429` 和 `usage_limit_exceeded`，并在响应体中添加 `limit` 和 `reset_at`。在该错误中，`limit` 指出具体的额度：`issue_events`、`log_bytes`、`metric_bytes` 或 `trace_spans`。LogBrew 会拒绝整个请求。在到达 `reset_at` 或套餐变更之前，不要再发送该类型的遥测数据。客户端发送的请求过多时，API 会返回 `rate_limited`。请参阅 [API 错误](/zh-Hans/reference/api-errors#retry-rules)。
+
+响应是一个快照。账号发生变化后，重新读取。
+
+<Note>
+  `GET /api/logs/usage` 是旧版移动端兼容响应，包含 `bytes_used`、`limit_bytes` 和 `month`。新的集成请使用 `GET /api/account/usage`。
+</Note>
+
+## 用量历史
+
+`GET /api/account/usage/history` 返回数量有限、空缺补零的用量时间桶，用于图表和报告。将 `interval` 设为一个受支持的值。如果省略 `interval`，API 使用 `monthly`。该路由不接受其他查询键。
+
+```bash
+curl --get "https://api.logbrew.co/api/account/usage/history" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "interval=daily"
+```
+
+| `interval` | 时间桶数 | 时间桶起点 |
+| --- | ---: | --- |
+| `daily` | 30 | 00:00 UTC |
+| `weekly` | 12 | 周一 00:00 UTC |
+| `monthly` | 12 | 每月第 1 天 00:00 UTC |
+| `yearly` | 5 | 1 月 1 日 00:00 UTC |
+
+| 字段 | 含义 |
+| --- | --- |
+| `interval` | 请求的间隔。 |
+| `period_start`、`period_end` | 历史窗口的开始时间和结束时间，结束时间不包含在内。 |
+| `current` | 当前周期完整的 `GET /api/account/usage` 响应。 |
+| `buckets` | 按时间排序的时间桶，最早的在前。每个时间桶包含 `period_start`、`period_end`、`usage`、`by_project` 和 `by_stream`。 |
+
+这个 `yearly` 响应使用模拟数据，请求时间为 2026 年 6 月。所有用量都发生在 6 月：
+
+```json
+{
+  "interval": "yearly",
+  "period_start": "2022-01-01T00:00:00Z",
+  "period_end": "2027-01-01T00:00:00Z",
+  "current": {
+    "period_start": "2026-06-01T00:00:00Z",
+    "period_end": "2026-07-01T00:00:00Z",
+    "reset_at": "2026-07-01T00:00:00Z",
+    "plan": { "tier": "free", "status": "free" },
+    "limits": { "events": null, "bytes": null, "projects": null, "retention_days": 30 },
+    "usage": { "events": 27000, "bytes": 10485760, "projects": 1 },
+    "state": "ok",
+    "warning_threshold": 0.8,
+    "percent_used": 0.2,
+    "warning": false,
+    "blocked": false,
+    "limit": null,
+    "next": "continue sending telemetry",
+    "next_action": {
+      "code": "continue_sending_telemetry",
+      "target": "telemetry_ingest",
+      "state": "ok",
+      "limit": null,
+      "reset_at": "2026-07-01T00:00:00Z"
+    },
+    "by_project": [
+      { "project_id": "00000000-0000-4000-8000-000000000001", "events": 27000, "bytes": 10485760 }
+    ],
+    "by_stream": [{ "kind": "logs", "events": 27000, "bytes": 10485760 }]
+  },
+  "buckets": [
+    { "period_start": "2022-01-01T00:00:00Z", "period_end": "2023-01-01T00:00:00Z", "usage": { "events": 0, "bytes": 0, "projects": 0 }, "by_project": [], "by_stream": [] },
+    { "period_start": "2023-01-01T00:00:00Z", "period_end": "2024-01-01T00:00:00Z", "usage": { "events": 0, "bytes": 0, "projects": 0 }, "by_project": [], "by_stream": [] },
+    { "period_start": "2024-01-01T00:00:00Z", "period_end": "2025-01-01T00:00:00Z", "usage": { "events": 0, "bytes": 0, "projects": 0 }, "by_project": [], "by_stream": [] },
+    { "period_start": "2025-01-01T00:00:00Z", "period_end": "2026-01-01T00:00:00Z", "usage": { "events": 0, "bytes": 0, "projects": 0 }, "by_project": [], "by_stream": [] },
+    {
+      "period_start": "2026-01-01T00:00:00Z",
+      "period_end": "2027-01-01T00:00:00Z",
+      "usage": { "events": 27000, "bytes": 10485760, "projects": 1 },
+      "by_project": [
+        { "project_id": "00000000-0000-4000-8000-000000000001", "events": 27000, "bytes": 10485760 }
+      ],
+      "by_stream": [{ "kind": "logs", "events": 27000, "bytes": 10485760 }]
+    }
+  ]
+}
+```
+
+用 `current.reset_at` 获取额度重置时间。不要使用历史窗口的结束时间。`current` 不是各时间桶之和，它的日期也可能与窗口日期不同。
+
+最后一个时间桶包含当前的日历周期，该周期尚未结束。它的结束时间在未来，并不代表 LogBrew 统计了未来的用量。值全为零的时间桶表示 LogBrew 在该时间桶内没有统计到用量。
+
+在时间桶中，`usage.projects` 统计的是在该时间桶内有用量的项目。不要把这些计数相加来得出项目数。账号拥有的项目数请使用 `current.usage.projects`。
+
+事件数和字节数的单位不同，因此要分别绘制成不同的序列。时间桶包含的是用量，而不是成本。不要把图表标注为支出、发票或 API 请求。
+
+不受支持的间隔会返回 `422`：
+
+```json
+{
+  "error": "Unsupported usage history interval",
+  "code": "validation_failed",
+  "next": "use interval=daily, weekly, monthly, or yearly",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+未知的查询键也会返回 `422` 和 `validation_failed`。
+
+## 订阅就绪状态
+
+`GET /api/account/subscription` 是只读的。用它判断是否启用付费套餐或组织相关控件。配额状态请使用用量端点。
+
+```bash
+curl "https://api.logbrew.co/api/account/subscription" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER"
+```
+
+免费账号会返回以下响应。其中的 `account_id` 是模拟值：
+
+```json
+{
+  "account_id": "00000000-0000-4000-8000-0000000000aa",
+  "tier": "free",
+  "billing_interval": "none",
+  "state": "free",
+  "access_state": "active",
+  "current_period_start": null,
+  "current_period_end": null,
+  "renews_at": null,
+  "cancels_at": null,
+  "organization_creation_allowed": false,
+  "organization_creation_blocker": "subscription_required",
+  "limits": {
+    "organizations": 0,
+    "members_per_organization": 0,
+    "projects_per_organization": 0,
+    "invitations_per_day": 0
+  },
+  "next": "<display text>",
+  "next_action": {
+    "code": "choose_plan",
+    "target": "pricing"
+  }
+}
+```
+
+`next` 是显示文本。付费套餐开始或停止销售时，它会变化。显示返回的文本，或根据 `next_action` 做本地化。不要从 `next` 中硬编码套餐名称。
+
+枚举值：
+
+| 字段 | 值 |
+| --- | --- |
+| `tier` | `free`、`pro`、`scale` |
+| `billing_interval` | `none`、`monthly`、`yearly` |
+| `state` | `free`、`trialing`、`active`、`past_due`、`paused`、`canceled` |
+| `access_state` | 对于 `free`、`trialing` 和 `active`，值为 `active`。对于 `past_due`、`paused` 和 `canceled`，值为 `paused`。 |
+| `organization_creation_blocker` | `subscription_required`、`subscription_inactive`、`organization_limit_exceeded` 或 `null` |
+
+每种阻止原因都对应一组 `next_action` 值：
+
+| `organization_creation_blocker` | `next_action.code` | `next_action.target` |
+| --- | --- | --- |
+| `null` | `create_or_manage_organization` | `organization` |
+| `subscription_required` | `choose_plan` | `pricing` |
+| `subscription_inactive` | `resume_subscription` | `billing` |
+| `organization_limit_exceeded` | `manage_organization_limit` | `organization` |
+
+套餐层级值是标识符，不是显示名称。在本地化客户端中保持它们不变。付费账号也可能被阻止。启用创建组织功能之前，先检查 `organization_creation_allowed`。
+
+该端点不会创建组织、发送邀请、更改角色或修改账单。
+
+## 退出登录
+
+选择与任务相符的最小范围。这些端点不会删除账号或其项目，不会轮换接入密钥，也不会撤销第三方登录提供方的授权。
+
+| 范围 | 端点 | 凭据 |
+| --- | --- | --- |
+| 一个应用或 CLI 登录 | `POST /api/auth/logout` | JSON 请求体中该客户端的刷新令牌。不使用 Bearer 令牌。 |
+| 所有 LogBrew 登录 | `POST /api/auth/logout-all` | 账号 Bearer 令牌或浏览器会话。无请求体。 |
+| 当前浏览器会话 | `POST /api/auth/web/logout` | 无。响应会清除浏览器 Cookie。 |
+
+### 一个应用或 CLI 登录
+
+从持有刷新令牌的客户端发送请求。设置 `Content-Type: application/json`：
+
+```json
+{
+  "refresh_token": "<current refresh token>"
+}
+```
+
+切勿要求用户或智能体打印或粘贴刷新令牌。成功的响应为 `200`：
+
+```json
+{
+  "revoked": true,
+  "next_action": {
+    "code": "clear_local_session",
+    "target": "local_credentials"
+  }
+}
+```
+
+这会撤销一个刷新令牌系列。LogBrew 会拒绝该登录之后的刷新。账号上的其他登录不受影响。客户端已持有的访问令牌在过期前仍然有效。如果账号凭据可能已泄露，请使用[所有 LogBrew 登录](#every-logbrew-login)。
+
+收到响应后，客户端会删除本地凭据。如果再次发送同一个有效的刷新令牌，会得到相同的 `200` 响应。如果令牌无效、已过期或是访问令牌，响应为 `401`，并带有 `code: "unauthorized"` 和 `next_action.code: "authorize_request"`。这种情况下也要删除本地凭据。`logbrew logout` 使用的就是这个端点。
+
+### <span id="every-logbrew-login">所有 LogBrew 登录</span>
+
+<Warning>
+  此请求会让账号上的所有客户端退出登录。智能体发送此请求之前，先获得账号所有者的批准。
+</Warning>
+
+成功的响应为 `200`：
+
+```json
+{
+  "revoked": true,
+  "revoked_before": "2026-09-07T12:00:00.123Z",
+  "next_action": {
+    "code": "clear_local_session",
+    "target": "local_credentials"
+  }
+}
+```
+
+`revoked_before` 包含该时刻本身，精确到毫秒。对于在该时间点或之前完成的登录，LogBrew 会拒绝其访问令牌、浏览器会话和刷新令牌。由这类登录在之后刷新得到的令牌也会被拒绝。当前的实时动态会话会结束，响应会清除浏览器会话 Cookie。在该时间之后完成的登录仍然有效。每个客户端都必须删除本地的 LogBrew 凭据，然后重新登录。
+
+不要在重新登录后自动重复此请求。新的请求也会撤销新的登录。
+
+如果没有收到响应，不要报告所有登录都已撤销。之后旧凭据返回的 `401` 不能代替成功响应。更多恢复步骤请阅读[保护可能已泄露的账号](/zh-Hans/guides/troubleshooting#secure-a-compromised-account)。
+
+### 浏览器会话
+
+`POST /api/auth/web/logout` 会清除浏览器的 `logbrew_session` Cookie，并返回不带响应体的 `204 No Content`。从浏览器中调用它。不要把会话 Cookie 复制到命令中。此请求不会让其他客户端退出登录，也不会撤销 Cookie 值的副本。要撤销所有会话，请使用[所有 LogBrew 登录](#every-logbrew-login)。
+
+### 从退出登录错误中恢复
+
+| 结果 | 恢复方法 |
+| --- | --- |
+| `POST /api/auth/logout` 返回 `401` | 删除该客户端的本地凭据。不要改用其他类型的凭据发送。 |
+| `POST /api/auth/logout-all` 返回 `401` | 如果用户仍需要访问，从受信任的客户端登录。重复请求之前，再次获得批准。 |
+| `405` | 使用 `next` 指出的方法，且只用于用户批准的范围。 |
+| `POST /api/auth/logout` 返回 `invalid_json` | 发送一个 JSON 对象，其中 `refresh_token` 为字符串，并设置 `Content-Type: application/json`。不要打印令牌。 |
+| 超时或 `5xx` 状态 | 不要报告成功。不要开始自动登录、退出登录的循环。按照[写入重试规则](/zh-Hans/reference/api-errors#writes)处理。 |
+
+遥测路由、筛选条件和分页请阅读[遥测 API](/zh-Hans/reference/telemetry-api)。
