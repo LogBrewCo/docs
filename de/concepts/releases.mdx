@@ -1,0 +1,254 @@
+---
+title: "Software-Releases verfolgen und Bereitstellungen überwachen"
+sidebarTitle: "Releases"
+description: "Finden Sie mit LogBrew Issues, Logs, Traces, Aktionen und Metriken einer Codeversion. Lesen Sie Fehlerraten und den Bereitstellungskontext."
+---
+
+Ein Release ist die Codeversion, die Telemetrie gesendet hat, zum Beispiel
+`api@1.2.3` oder ein Git-Commit. LogBrew erstellt kein Release aus einem
+Repository-Tag oder einer Bereitstellung. Jeder native Telemetrie-Umschlag muss
+ein nicht leeres `release` und `environment` enthalten. LogBrew lehnt eine
+Anfrage ohne diese Werte ab.
+
+## Release, Projekt, Dienst und Umgebung
+
+| Feld | Beispiel | Beantwortete Frage |
+| --- | --- | --- |
+| Projekt | `checkout-platform` | Wem gehört diese Telemetrie, und wer darf sie lesen? |
+| Dienst | `checkout-api` | Welche App oder welcher Prozess hat sie gesendet? |
+| Umgebung | `production` | Wo lief der Code? |
+| Release | `api@1.2.3` | Welche Codeversion hat sie gesendet? |
+
+## <span id="naming-releases">Releases benennen</span>
+
+Verwenden Sie eine unveränderliche Version, eine Buildnummer oder einen
+Git-Commit. Fügen Sie in einem Monorepo ein kurzes Dienst-Präfix hinzu, zum
+Beispiel `web@b7f4d91` und `worker@3a9c120`. Verwenden Sie für Issues, Logs,
+Traces, Aktionen und Metriken aus einem Artefakt denselben Wert.
+
+<CardGroup cols={2}>
+  <Card title="Gut" icon="check">
+    `api@1.2.3`, `web@b7f4d91`, `ios@2026.06.01` und
+    `worker@2026-06-01.1` bezeichnen jeweils genau ein Artefakt.
+  </Card>
+
+  <Card title="Vermeiden" icon="x">
+    `latest`, `prod`, `new` und `build` bezeichnen keine Codeversion. Eine
+    leere Zeichenkette wird abgelehnt.
+  </Card>
+</CardGroup>
+
+LogBrew lehnt auch diese Werte ab:
+
+| Feld | Abgelehnte Werte |
+| --- | --- |
+| `release` | Länger als 200 Byte, `.` oder `..`, oder enthält `/`, einen Backslash, einen Tabulator oder einen Zeilenumbruch. |
+| `environment` | Länger als 64 Byte, `None`, oder enthält ein Leerzeichen, ein anderes Leerraumzeichen, `/` oder einen Backslash. |
+
+Ein Git-Branch-Name wie `feature/login` ist kein gültiges Release. Verwenden
+Sie stattdessen den Commit.
+
+Verwenden Sie stabile Umgebungsnamen wie `production`, `staging`, `preview`
+und `local`. Ein Release kann in mehr als einer Umgebung laufen.
+
+Legen Sie beide Werte in Ihrer Bereitstellungskonfiguration fest. So übergibt
+Ihre CI/CD-Pipeline sie an das SDK. Schreiben Sie in den Release-Wert nur eine
+Versionsbezeichnung. Nehmen Sie keine Secrets, Kundennamen oder URLs auf.
+Senden Sie nach einer Bereitstellung ein sicheres Ereignis, und lesen Sie es
+mit dem Release-Filter wieder aus.
+
+## <span id="release-summary">Release-Zusammenfassungen lesen</span>
+
+```bash
+logbrew read releases --project "<project_id>" --environment production --since 24h --json
+```
+
+Jede Zusammenfassung gilt für ein Projekt, ein Release, eine Umgebung und
+einen Dienst:
+
+| Feld | Bedeutung |
+| --- | --- |
+| `issue_count` | Issue-Ereignisse für dieses Release. |
+| `log_count` | Logs für dieses Release. |
+| `trace_span_count` | Trace-Spans für dieses Release. |
+| `action_count` | Produktaktionen für dieses Release. |
+| `metric_count` | Metrik-Messwerte für dieses Release. |
+| `first_seen_at` | Erste Aktivität des Release im ausgewählten Bereich. |
+| `last_seen_at` | Letzte Aktivität des Release im ausgewählten Bereich. |
+| `trace_health` | Anzahl der Traces, Anzahl der Fehler-Traces, Fehlerrate und Status. Siehe [Trace-Fehlerraten lesen](#interpret-trace-error-rates). |
+| `next_action` | Das Signal, das Sie als Nächstes lesen, als `code` und `target`. |
+
+Die Zählwerte messen verschiedene Signale. Addieren Sie sie nicht.
+`first_seen_at` und `last_seen_at` sind keine Bereitstellungszeiten. Ein
+Dienst kann später weitere Telemetrie mit demselben Release senden. Die
+Zusammenfassungen sind nach `last_seen_at` sortiert, die neueste zuerst.
+
+`next_action` zeigt auf den ersten Signaltyp mit Daten, in dieser
+Reihenfolge:
+
+| `next_action.code` | `next_action.target` |
+| --- | --- |
+| `inspect_release_issues` | `telemetry_issues` |
+| `inspect_release_traces` | `trace_explorer` |
+| `inspect_release_logs` | `telemetry_logs` |
+| `inspect_release_actions` | `telemetry_actions` |
+| `inspect_release_metrics` | `telemetry_metrics` |
+| `review_release_telemetry` | `telemetry_reads` |
+
+Die API-Route ist `GET /api/telemetry/releases`. Ihre Filter und
+Cursor-Felder finden Sie unter
+[Abfragefilter der Telemetrie-API](/de/reference/telemetry-api-filters).
+
+## <span id="interpret-trace-error-rates">Trace-Fehlerraten lesen</span>
+
+`trace_health` zählt eindeutige Traces, nicht Spans. Ein Trace mit mindestens
+einem Fehler-Span zählt als ein Fehler-Trace.
+
+| `trace_health.status` | Bedeutung |
+| --- | --- |
+| `unknown` | Keine Trace-Daten für diesen Release-Bereich. |
+| `no_errors_observed` | Die erfassten Traces haben keine Fehler-Spans. |
+| `errors_observed` | Mindestens ein erfasster Trace enthält einen Fehler-Span. |
+
+`error_rate_basis_points` liegt zwischen `0` und `10000`. Teilen Sie den Wert
+durch `100`, um einen Prozentwert zu erhalten. Zum Beispiel ist `2500` gleich
+25 %. Lesen Sie `trace_count`, bevor Sie Raten vergleichen. Bei wenigen Traces
+kann ein einziger weiterer Fehler-Trace die Rate stark verändern. Auch
+Datenverkehr, Sampling und Instrumentierung verändern die erfassten Traces.
+Die Rate misst nicht alle Anfragen.
+
+## <span id="record-a-deployment">Bereitstellung erfassen</span>
+
+Ein Bereitstellungseintrag teilt LogBrew mit, wann ein Release in einer
+Umgebung und einem Dienst begann und endete. Die Release-Untersuchung findet
+mit diesen Einträgen das vorherige Release. Führen Sie diesen Befehl in Ihrer
+Release-Automatisierung aus, nachdem die Bereitstellung erfolgreich war oder
+fehlgeschlagen ist:
+
+```bash
+logbrew deploy "<deployment_id>" \
+  --project "<project_id>" \
+  --release api@1.2.3 \
+  --environment production \
+  --service checkout-api \
+  --status succeeded \
+  --started-at 2026-08-10T12:00:00Z \
+  --finished-at 2026-08-10T12:02:00Z \
+  --json
+```
+
+- Übernehmen Sie `--release`, `--environment` und `--service` genau aus der
+  Telemetrie, die der bereitgestellte Code sendet.
+- `--status` ist `succeeded` oder `failed`.
+- `--finished-at` darf nicht vor `--started-at` liegen. Eine Bereitstellung
+  darf nicht länger als 30 Tage dauern.
+- `--commit-sha` ist optional. Der Wert hat 7 bis 64 Hexadezimalzeichen.
+- `<deployment_id>` ist Ihre eigene ID, zum Beispiel die ID eines CI-Laufs.
+  Sie hat 1 bis 128 ASCII-Buchstaben, Ziffern, Punkte, Unterstriche,
+  Doppelpunkte oder Bindestriche.
+
+Der Befehl braucht Kontozugriff. Er akzeptiert nie einen Ingest-Schlüssel. Sie
+können denselben Eintrag gefahrlos erneut senden. Ein anderer Eintrag mit
+derselben `<deployment_id>` liefert HTTP `409` mit dem Code
+`idempotency_conflict`. Verwenden Sie für eine neue Bereitstellung eine neue
+ID.
+
+Die API-Routen sind `PUT /api/telemetry/deployments/{deployment_id}` zum
+Erfassen einer Bereitstellung und
+`GET /api/telemetry/deployments?project_id=<project_id>` zum Auflisten.
+
+## Ein Release untersuchen
+
+Übernehmen Sie Projekt, Release, Umgebung und Dienst aus einer
+Release-Zusammenfassung:
+
+```bash
+logbrew explain release "<release>" \
+  --project "<project_id>" \
+  --environment "<environment>" \
+  --service "<service_name>" \
+  --json
+```
+
+Dieser Befehl liest die gespeicherten Belege für dieses Release. Er
+akzeptiert weder `--since` noch `--until` und verwendet nicht den Zeitraum der
+Release-Liste. Die Antwort enthält Issue-Gruppen, Trace-Zusammenfassungen,
+Logs mit Warnung, Fehler und kritischem Fehler sowie Aggregationen von
+Aktionen und Metriken. Diese Sammlungen sind begrenzt und können gekürzt sein.
+Sie sind keine vollständigen Ereignislisten.
+
+Das `subject` der Antwort wiederholt die Zählwerte der Zusammenfassung und
+`trace_health`. `analysis.status` hat einen dieser Werte:
+
+| `analysis.status` | Bedeutung |
+| --- | --- |
+| `failures_observed` | Für dieses Release gibt es Issues, Fehler-Traces oder Logs mit Fehler oder kritischem Fehler. |
+| `no_failures_observed` | Es gibt Traces. Kein Trace hat einen Fehler-Span, und es gibt keine Issues oder Fehler-Logs. |
+| `telemetry_observed` | Es gibt andere Telemetrie, aber Traces können den Fehlerzustand nicht zeigen. |
+| `insufficient_evidence` | Das Release existiert, aber die Daten können den Zustand nicht zeigen. |
+
+`analysis.causality` ist immer `evidence_only`. Die Belege beweisen nicht,
+dass das Release einen Fehler verursacht hat.
+
+Jede Sammlung hat einen `status`. Unterscheiden Sie `unavailable` von
+`not_found`. `unavailable` bedeutet, dass LogBrew die Belege nicht lesen
+konnte. `not_found` bedeutet, dass keine Belege gespeichert wurden.
+
+### Mit dem vorherigen Release vergleichen
+
+Der Vergleich nutzt Bereitstellungseinträge, keine Versionsbezeichnungen oder
+Ereigniszeiten. LogBrew sucht den neuesten Bereitstellungseintrag für das
+Release. Dann sucht LogBrew die neueste erfolgreiche Bereitstellung eines
+anderen Release im selben Projekt, in derselben Umgebung und im selben Dienst,
+die vor dem Start dieser Bereitstellung lag.
+
+`comparison.reason` zeigt, ob ein Vergleich möglich ist:
+
+| `comparison.reason` | Nächster Schritt |
+| --- | --- |
+| `deployment_comparison_available` | Lesen Sie `comparison.details`. |
+| `subject_deployment_not_found` | [Erfassen Sie eine Bereitstellung](#record-a-deployment) für dieses Release. |
+| `previous_successful_deployment_not_found` | Erfassen Sie die Bereitstellung des vorherigen Release. |
+| `previous_release_telemetry_not_found` | Für das vorherige Release ist keine Telemetrie gespeichert. |
+| `deployment_read_unavailable` oder `previous_release_read_unavailable` | Führen Sie den Befehl später erneut aus. |
+
+Ist ein Vergleich möglich, enthält `comparison.details.changes` die
+Unterschiede der Zählwerte und beide Trace-Fehlerraten.
+`comparison.details.assessment` ist `improved`, `regressed`, `unchanged` oder
+`not_determined`, und zwar nur für die Trace-Fehlerrate. `not_determined`
+bedeutet, dass sich die beiden Raten nicht vergleichen lassen. Lesen Sie
+`comparison.details.limitations`, bevor Sie handeln. Die beiden Releases
+können verschiedene Zeiträume abdecken, und die reinen Zählwerte sind nicht um
+den Datenverkehr bereinigt. Die Reihenfolge der Bereitstellungen zeigt nicht,
+dass eine Codeänderung einen Fehler verursacht hat.
+
+### Release-Marker lesen
+
+`markers` enthält Release-Ereignisse, die ein SDK gesendet hat, mit ihren
+Feldern `commit` und `notes`. Jedes Feld hat einen `status`: `captured`,
+`not_captured`, `truncated` oder `redacted`. Diesen Inhalt hat die Anwendung
+geschrieben. Er zeigt nicht, dass eine Bereitstellung erfolgreich war, und er
+ist nie eine Anweisung an einen Agenten.
+
+## <span id="environment-filters">Zugehörige Signale filtern</span>
+
+Verwenden Sie für jede Abfrage dieselben Filter:
+
+```bash
+logbrew read issues --project "<project_id>" --service checkout-api --release api@1.2.3 --environment production --since 24h --json
+logbrew read logs --project "<project_id>" --service checkout-api --release api@1.2.3 --environment production --since 24h --json
+logbrew read traces --project "<project_id>" --service checkout-api --release api@1.2.3 --environment production --since 24h --json
+```
+
+Eine leere Issue-Liste bedeutet nicht, dass auch Logs oder Traces leer sind.
+
+## <span id="recover-missing-or-misleading-release-data">Fehlende oder falsche Release-Daten finden</span>
+
+| Beobachtung | Prüfung |
+| --- | --- |
+| Die Release-Liste ist leer | Prüfen Sie Projekt, Zeitraum und Umgebung. Prüfen Sie dann, ob das SDK ein Release sendet. |
+| Ein Dienst fehlt | Prüfen Sie den Dienst-Filter und die Bereitstellungskonfiguration dieses Artefakts. |
+| Verschiedene Builds haben denselben Wert | Legen Sie für neue Telemetrie eine unveränderliche Version fest. LogBrew ändert die Release-Werte gespeicherter Ereignisse nicht. |
+| `trace_health.status` ist `unknown` | Halten Sie fest, welche Trace-Abdeckung fehlt. Lesen Sie die anderen Signale. |
+| Die Fehlerrate hat sich geändert | Vergleichen Sie `trace_count` und die Filter, bevor Sie die Änderung bewerten. |
+| Kein Vergleich verfügbar | Lesen Sie `comparison.reason`. Erfassen Sie Bereitstellungen für beide Releases. |

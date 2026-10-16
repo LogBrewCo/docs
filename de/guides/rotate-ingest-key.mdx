@@ -1,0 +1,182 @@
+---
+title: "API-Schlüssel rotieren: LogBrew-Ingest-Schlüssel ersetzen"
+sidebarTitle: "Ingest-Schlüssel rotieren"
+description: "Rotieren Sie einen LogBrew-Ingest-Schlüssel. Testen Sie den Ersatz vor dem geplanten Widerruf. Beheben Sie Fehler, ohne Zugangsdaten preiszugeben."
+---
+
+Beim Rotieren ersetzen Sie einen Ingest-Schlüssel eines Projekts. Das
+Projekt und seine gespeicherte Telemetrie ändern sich nicht. Verwalten Sie
+Schlüssel mit Kontoauthentifizierung. Ein Ingest-Schlüssel kann nur
+Telemetrie senden. Er kann keine Schlüssel verwalten.
+
+[Installieren Sie vorher die CLI und melden Sie sich an](/de/guides/cli). Setzen
+Sie `LOGBREW_PROJECT_ID` auf die UUID des Projekts. Setzen Sie
+`LOGBREW_API_URL` auf `https://api.logbrew.co`. Die Beispiele nutzen Bash,
+curl 7.76.0 oder neuer und jq.
+
+Bei einer geplanten Rotation erstellen, bereitstellen und testen Sie den
+Ersatz, bevor Sie den alten Schlüssel widerrufen. Legen Sie das
+Rotationsintervall in Ihrer Sicherheitsrichtlinie fest. Wenn ein Schlüssel
+ein Ablaufdatum hat, ersetzen Sie ihn vor diesem Datum.
+
+<Warning>
+  Ein offengelegter Schlüssel ist ein Sicherheitsvorfall. Widerrufen Sie ihn
+  sofort, auch bevor der Ersatz bereitgestellt ist. Anwendungen, die noch
+  einen widerrufenen Schlüssel nutzen, können keine Telemetrie senden.
+</Warning>
+
+<Steps>
+  <Step title="Ersatzschlüssel erstellen">
+    `POST /api/projects/{project_id}/ingest-keys` nimmt ein nicht leeres
+    `label` mit bis zu 120 Zeichen an. `kind` ist `cli`, `sdk`, `browser`,
+    `server` oder `artifact`. Ein `artifact`-Schlüssel kann keine Telemetrie
+    senden. Ein optionales `expires_at` muss eine künftige RFC3339-Zeit sein.
+
+    Verwenden Sie denselben `kind`-Wert wie beim alten Schlüssel. Ohne `--kind`
+    nutzt die CLI `sdk`, ohne `--label` nutzt sie `CLI-created SDK key`. Die
+    CLI hat kein Flag für das Ablaufdatum. Um `expires_at` zu setzen,
+    verwenden Sie die API.
+
+    Die CLI speichert das einmalige Token in einer neuen Datei außerhalb der
+    Versionsverwaltung, die nur Sie lesen können. Sie gibt Metadaten aus,
+    nicht das Token:
+
+    ```bash
+    : "${LOGBREW_PROJECT_ID:?set LOGBREW_PROJECT_ID}" &&
+    : "${LOGBREW_REPLACEMENT_KEY_FILE:?choose a new private key file}" &&
+    logbrew projects keys create "$LOGBREW_PROJECT_ID" \
+      --ingest-key-file "$LOGBREW_REPLACEMENT_KEY_FILE" \
+      --label "checkout production rotation" --kind server --json
+    ```
+
+    Machen Sie erst weiter, wenn der Befehl erfolgreich war. Setzen Sie
+    `NEW_KEY_ID` auf die zurückgegebene `ingest_key.id`.
+
+    Wenn das Ergebnis unsicher ist, führen Sie genau denselben Befehl noch
+    einmal aus. Die CLI verwendet ihren ausstehenden Wiederholungsschlüssel
+    erneut. Verwenden Sie für diese Wiederholung nicht `--abandon-retry`.
+
+    Ein direkter API-Client erhält das Token einmal in der Antwort. Für eine
+    Wiederholung senden Sie denselben `Idempotency-Key`-Header mit demselben
+    Body. 24 Stunden lang gibt diese Wiederholung denselben Schlüssel zurück.
+    Geben Sie das Token nie aus, committen Sie es nie und teilen Sie es nie.
+  </Step>
+
+  <Step title="Neuen Schlüssel bereitstellen, alten Schlüssel aktiv lassen">
+    Legen Sie das neue Token in die geschützte Bereitstellungseinstellung.
+    Stellen Sie die App bereit. Lassen Sie den alten Schlüssel aktiv. Halten
+    Sie beide Tokens aus Quellcode, Build-Ausgabe und Logs heraus.
+  </Step>
+
+  <Step title="Ein synthetisches Ereignis senden">
+    Laden Sie das neue Token in die Shell-Variable `new_ingest_key`. Geben
+    Sie es nicht aus. Senden Sie ein synthetisches Log mit dem neuen
+    Schlüssel und lesen Sie es dann zurück:
+
+    ```bash
+    occurred_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+
+    curl --fail-with-body -sS "$LOGBREW_API_URL/api/telemetry/ingest" \
+      -H "Authorization: Bearer $new_ingest_key" \
+      -H "Content-Type: application/json" \
+      --data @- <<JSON &&
+    {
+      "project_id": "$LOGBREW_PROJECT_ID",
+      "environment": "production",
+      "release": "ingest-key-rotation@1",
+      "service_name": "checkout-api",
+      "sdk_name": "native-api",
+      "sdk_version": "0.1.0",
+      "items": [
+        {
+          "type": "log",
+          "data": {
+            "level": "info",
+            "message": "ingest key rotation check",
+            "source": "setup",
+            "attributes": {},
+            "occurred_at": "$occurred_at"
+          }
+        }
+      ]
+    }
+    JSON
+
+    logbrew read logs --project "$LOGBREW_PROJECT_ID" \
+      --release ingest-key-rotation@1 \
+      --environment production \
+      --since "$occurred_at" \
+      --json
+    ```
+
+    Machen Sie erst weiter, wenn das Lesen dieses Log mit demselben
+    `occurred_at` zurückgibt. Ein älteres Prüf-Log einer früheren Rotation
+    beweist nicht, dass der neue Schlüssel funktioniert. Bestätigen Sie
+    außerdem, dass die bereitgestellte App Telemetrie sendet. Wenn ein Befehl
+    fehlschlägt, halten Sie an und lesen Sie die Antwort. Lassen Sie den
+    alten Schlüssel aktiv, außer er ist offengelegt.
+  </Step>
+
+  <Step title="Schlüssel-Metadaten ohne Geheimnisse auflisten">
+    Setzen Sie `LOGBREW_ACCOUNT_BEARER` aus Ihrer Kontoauthentifizierung.
+    Suchen Sie die ID des alten Schlüssels. Bestätigen Sie, dass
+    `NEW_KEY_ID` den Status `active` hat:
+
+    ```bash
+    (
+      set -o pipefail
+      curl --fail-with-body -sS "$LOGBREW_API_URL/api/projects/$LOGBREW_PROJECT_ID/ingest-keys" \
+        -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+        | jq -e 'select(type == "array") | map({id, label, kind, token_prefix, status, created_at, expires_at, revoked_at})'
+    )
+    ```
+
+    Die Antwort ist ein Array mit Schlüssel-Metadaten ohne Tokens. Der Status
+    ist `active`, `expired` oder `revoked`. Ein Schlüssel ist `expired`, wenn
+    seine Zeit in `expires_at` vorbei ist.
+  </Step>
+
+  <Step title="Nur den alten Schlüssel widerrufen">
+    Setzen Sie `OLD_KEY_ID` aus der Liste. Der Befehl widerruft den alten
+    Schlüssel nur, wenn sich die beiden IDs unterscheiden:
+
+    ```bash
+    if [ -n "${OLD_KEY_ID:-}" ] && [ -n "${NEW_KEY_ID:-}" ] \
+      && [ "$OLD_KEY_ID" != "$NEW_KEY_ID" ]; then
+      (
+        set -o pipefail
+        curl --fail-with-body -sS -X DELETE \
+          "$LOGBREW_API_URL/api/projects/$LOGBREW_PROJECT_ID/ingest-keys/$OLD_KEY_ID" \
+          -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+          | jq -e --arg id "$OLD_KEY_ID" \
+            'select(.id == $id and .status == "revoked") | {id, label, kind, token_prefix, status, created_at, expires_at, revoked_at}'
+      )
+    else
+      printf '%s\n' 'Set different old and replacement key IDs before revocation.' >&2
+      false
+    fi
+    ```
+
+    `DELETE` ist idempotent. Es gibt die Schlüssel-Metadaten mit
+    `status: "revoked"` und gesetztem `revoked_at` zurück. Nach einer
+    unsicheren Antwort können Sie es gefahrlos wiederholen.
+
+    Führen Sie `unset new_ingest_key` aus. Behandeln Sie die Schlüsseldatei
+    gemäß Ihrer Richtlinie für Geheimnisse.
+  </Step>
+</Steps>
+
+## Sicher wiederherstellen
+
+| Antwort | Nächster Schritt |
+| --- | --- |
+| `404`, `code: "not_found"` | Bestätigen Sie, dass Projekt- und Schlüssel-IDs zum Konto gehören. Folgen Sie `next_action.code: "check_resource"`. Probieren Sie keine anderen IDs aus. |
+| `code: "validation_failed"` | Korrigieren Sie das genannte Feld, den Wert oder den Zeitstempel. Folgen Sie `next` und `next_action`. |
+| `401` oder `403` bei der Schlüsselverwaltung | Verwenden Sie Kontoauthentifizierung, keinen Ingest-Schlüssel. |
+| `401`, `code: "ingest_key_invalid"` bei der Ingest-Anfrage | Der Schlüssel ist widerrufen, abgelaufen oder für Telemetrie ungültig. Verwenden Sie den neuen aktiven Schlüssel für das gewählte Projekt. Folgen Sie `next_action.code: "configure_ingest_key"`. |
+| `401` oder `403` bei der Ingest-Anfrage | Verwenden Sie den neuen Ingest-Schlüssel für das gewählte Projekt. Verwenden Sie keine Konto-Zugangsdaten. |
+
+Wenn die Rotation weiter fehlschlägt, nutzen Sie
+[Problem melden](/de/guides/report-a-problem). Teilen Sie nur
+Schlüssel-Metadaten. Geben Sie keine Zugangsdaten, Header, rohe Telemetrie,
+Kundendaten, lokale Pfade oder Quellcode weiter.
