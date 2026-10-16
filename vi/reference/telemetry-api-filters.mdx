@@ -1,0 +1,472 @@
+---
+title: "Tham số truy vấn API và phân trang bằng cursor"
+sidebarTitle: "Bộ lọc truy vấn"
+description: "Lọc telemetry LogBrew theo dự án, dịch vụ, bản phát hành, môi trường, mức độ nghiêm trọng, trace, trạng thái vấn đề, mức ưu tiên, người phụ trách và thời gian. Đọc tiếp kết quả bằng cursor."
+---
+
+Mỗi route đọc nhận một bộ tham số truy vấn riêng. Route trong
+[bảng bộ lọc](#filter-matrix) từ chối tham số không xác định hoặc giá trị sai
+kiểu bằng `422` và `validation_failed`, trừ khi bảng có ghi chú khác. Các bí
+danh thân thiện như `project`, `trace` và `user` không phải là tham số truy vấn. Không chuyển bộ lọc của route
+này sang route khác.
+
+## Tạo yêu cầu có bộ lọc
+
+Đặt query string sau đường dẫn. Dùng `--data-urlencode` để các ký tự đặc biệt
+được mã hóa an toàn. Yêu cầu này đọc các log `critical` của một dự án trong 24
+giờ qua:
+
+```bash
+curl --get "https://api.logbrew.co/api/logs" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "severity=critical" \
+  --data-urlencode "since=24h"
+```
+
+Thêm bộ lọc theo thứ tự sau:
+
+1. Chọn dự án bằng `project_id` hoặc `project_ids`.
+2. Thêm khoảng thời gian bằng `since`, và `until` nếu cần.
+3. Thêm bộ lọc dịch vụ, bản phát hành, môi trường, trạng thái hoặc bộ lọc riêng
+   của từng tín hiệu.
+4. Đặt `limit` để có trang nhỏ hơn.
+5. Chỉ thêm các trường cursor sau khi một phản hồi cursor trả về chúng.
+
+Mỗi dòng được trả về đều khớp với mọi bộ lọc trong yêu cầu. Bộ lọc không được
+gửi sẽ dùng giá trị mặc định của route. Ví dụ, `GET /api/logs` dùng
+`status=active` khi bạn không gửi `status`.
+
+## <span id="filter-matrix">Bảng bộ lọc</span>
+
+Các tham số trong cột “Bắt buộc” phải có trong yêu cầu. Mọi tham số khác là tùy
+chọn.
+
+| Route | Bắt buộc | Tham số truy vấn tùy chọn |
+| --- | --- | --- |
+| `GET /api/logs` | Không có | `project_id` hoặc `project_ids`, `severity`, `level` (bí danh để tương thích), `status`, `search`, `trace_id`, `service_name`, `release`, `environment`, `since`, `until`, `attribute_filters`, `pagination`, `cursor_time`, `cursor_id`, `limit` |
+| `GET /api/logs/attributes` | `since` | `project_id` hoặc `project_ids`, `type`, `search`, `severity`, `level`, `service_name`, `release`, `environment`, `until`, `cursor_count`, `cursor_path`, `cursor_type`, `limit` |
+| `GET /api/telemetry/issues` | Không có | `project_id` hoặc `project_ids`, `status`, `severity`, `priority`, `assignee`, `service_name`, `release`, `environment`, `since`, `until`, `pagination`, `cursor_time`, `cursor_id`, `limit`, `response_version` |
+| `GET /api/telemetry/issues/{issue_id}` | Không có | `response_version`. Route này bỏ qua các tham số khác. |
+| `GET /api/telemetry/issues/{issue_id}/events` | Không có | `pagination`, `cursor_time`, `cursor_id`, `limit` |
+| `GET /api/telemetry/issues/assignees` | `project_id` | Không có |
+| `GET /api/telemetry/actions` | Không có | `project_id` hoặc `project_ids`, `name`, `distinct_id`, `service_name`, `release`, `environment`, `since`, `until`, `pagination`, `cursor_time`, `cursor_id`, `limit` |
+| `GET /api/telemetry/metrics` | Không có | `project_id` hoặc `project_ids`, `name`, `service_name`, `release`, `environment`, `since`, `until`, `pagination`, `cursor_time`, `cursor_id`, `limit` |
+| `GET /api/telemetry/metrics/series` | `project_id`, `name`, `since` | `until`, `interval`, `group_by`, `service_name`, `release`, `environment`, `series_limit` |
+| `GET /api/telemetry/releases` | Không có | `project_id` hoặc `project_ids`, `service_name`, `release`, `environment`, `since`, `until`, `pagination`, `cursor_time`, `cursor_project_id`, `cursor_release`, `cursor_environment`, `cursor_service_name`, `limit` |
+| `GET /api/telemetry/traces` | Không có | `project_id` hoặc `project_ids`, `service_name`, `release`, `environment`, `status`, `since`, `until`, `min_duration_ms`, `pagination`, `cursor_time`, `cursor_trace_id`, `limit` |
+| `GET /api/telemetry/traces/{trace_id}` và `.../summary` | Không có | `project_id`, `release`, `environment` |
+| `GET /api/telemetry/summary/volume` | `project_id`, `since` | `until`, `interval`, `service_name`, `release`, `environment`, `response_version` |
+| `GET /api/telemetry/deployments` | `project_id` | `release`, `environment`, `service_name`, `status`, `since`, `until`, `pagination`, `cursor_time`, `cursor_id`, `limit` |
+| `GET /api/telemetry/deployments/{deployment_id}` | `project_id` | Không có |
+| `GET /api/telemetry/traces/{trace_id}/investigation` | Không có | `project_id`, `release`, `environment`, `response_version` |
+| `GET /api/telemetry/traces/{trace_id}/spans/{span_id}/investigation` | `project_id`, `release`, `environment` | Không có |
+| `GET /api/telemetry/issues/{issue_id}/investigation` | Không có | `response_version`, và `selection` hoặc `occurrence_id` |
+| `GET /api/telemetry/issues/{issue_id}/correction-verification` | `baseline_occurrence_id`, `candidate_deployment_id` | Không có |
+| `GET /api/telemetry/releases/investigation` | `project_id`, `release`, `environment`, `service_name` | `response_version` |
+| `GET /api/telemetry/metrics/investigation` | `project_id`, `name`, `since` | `until`, `interval`, `group_by`, `service_name`, `release`, `environment`, `series_limit`, `response_version` |
+| `GET /api/telemetry/analytics/overview` | `project_id`, `since` | `until`, `interval`, `top_limit`, `service_name`, `release`, `environment`, `response_version` |
+| `GET /api/telemetry/analytics/properties` | `project_id`, `since` | `until`, `limit`, `service_name`, `release`, `environment`, `response_version` |
+
+Với điều tra vấn đề, `selection` là `first`, `latest` hoặc `recommended`.
+Gửi `selection` hoặc `occurrence_id`, không gửi cả hai. Cả hai đều cần
+`response_version` từ 2 đến 13. Với phiên bản 2 trở lên và không có tham số
+chọn, LogBrew dùng `recommended`. Lấy `occurrence_id` từ
+`GET /api/telemetry/issues/{issue_id}/events`.
+
+Các route phân tích dùng `POST` nhận body JSON. Xem
+[Phân tích sản phẩm](/vi/concepts/product-analytics).
+
+## Bộ lọc dùng chung và bộ lọc riêng của tín hiệu
+
+`service_name`, `release` và `environment` thu hẹp mọi danh sách telemetry. Dùng
+đúng các giá trị mà SDK của bạn gửi.
+
+Một số bộ lọc chỉ thuộc về một loại tín hiệu:
+
+- Log nhận `search`, `trace_id`, `severity` và `attribute_filters`.
+- Log nhận `status`: `active` (mặc định), `ignored` hoặc `all`. `ignored`
+  chọn các log mà một quy tắc log ẩn khỏi danh sách đang hoạt động.
+- Vấn đề nhận `status` của vấn đề: `unresolved`, `resolved` hoặc `archived`.
+  `ignored` là tên cũ của `archived` và chọn cùng các vấn đề.
+- Vấn đề nhận `severity`: `info`, `warning`, `error` hoặc `critical`.
+- Vấn đề nhận `priority`: `high`, `medium` hoặc `low`.
+- Vấn đề nhận `assignee`: `me` cho các vấn đề được giao cho tài khoản đang đăng
+  nhập, `none` cho các vấn đề chưa có người phụ trách, hoặc một user ID.
+- Hành động và chỉ số nhận `name`.
+- Hành động nhận `distinct_id`.
+- Trace nhận `status` của trace và `min_duration_ms`.
+- Danh sách triển khai nhận `status`: `succeeded` hoặc `failed`.
+
+Bộ lọc `severity` của log và vấn đề so sánh mức độ nghiêm trọng hiệu lực. Nếu
+một quy tắc đã đổi mức độ nghiêm trọng, bộ lọc dùng giá trị theo quy tắc. Xem
+[Giá trị mức độ nghiêm trọng](/vi/reference/telemetry-response-shapes#severity-values).
+
+## Khoảng thời gian
+
+`since` nhận số giờ hoặc số ngày là số nguyên dương, chẳng hạn `24h` hoặc
+`7d`, hoặc một dấu thời gian RFC3339. Thời lượng dạng rút gọn được tính tương
+đối so với thời điểm của từng yêu cầu.
+
+`until` chỉ nhận dấu thời gian RFC3339. Đây là thời điểm kết thúc không bao gồm:
+dòng có thời điểm đúng bằng `until` không nằm trong kết quả. `since` thì bao
+gồm. Ví dụ, `since=2026-10-01T00:00:00Z` và `until=2026-10-02T00:00:00Z` chọn
+trọn 1 ngày. LogBrew so sánh thời gian đến từng mili giây.
+
+`until` phải muộn hơn `since`. Nếu không, hoặc nếu `until` không phải dấu thời
+gian RFC3339, yêu cầu thất bại với `422` và `validation_failed`.
+
+Khi đọc nhiều trang, chọn một thời điểm bắt đầu RFC3339 và giữ nguyên ở mọi
+trang. Cũng giữ nguyên `until` ở mọi trang.
+
+Yêu cầu này đọc các log lỗi trong 1 ngày:
+
+```bash
+curl --get "https://api.logbrew.co/api/logs" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "severity=error" \
+  --data-urlencode "since=2026-10-01T00:00:00Z" \
+  --data-urlencode "until=2026-10-02T00:00:00Z"
+```
+
+<Note>
+  Danh sách triển khai dùng quy tắc thời gian khác. `since` và `until` của danh
+  sách này chỉ nhận dấu thời gian RFC3339, và cả hai đều bao gồm. Chúng được so
+  sánh với thời điểm lần triển khai hoàn tất.
+</Note>
+
+## Phiên bản phản hồi của vấn đề
+
+Danh sách vấn đề và chi tiết vấn đề nhận `response_version=1`,
+`response_version=2` hoặc `response_version=3`. Phiên bản 1 là mặc định.
+Giá trị khác sẽ thất bại với `422` và `validation_failed`.
+
+- Phiên bản 1 hiển thị trạng thái đã lưu trữ là `ignored`. Phiên bản này không
+  hiển thị mức ưu tiên.
+- Phiên bản 2 hiển thị trạng thái đã lưu trữ là `archived`. Phiên bản này thêm
+  `priority` và `priority_source`.
+- Phiên bản 3 có mọi trường của phiên bản 2. Phiên bản này thêm `assignee`.
+
+Mọi phiên bản đều nhận `status=archived`, `priority` và `assignee`. Xem
+[phản hồi vấn đề](/vi/reference/telemetry-response-shapes#issue-response).
+
+## Bộ lọc mức độ nghiêm trọng
+
+Dùng `severity=info|warning|error|critical` với `GET /api/logs`. Tham số
+`level` cũ hơn là bí danh để tương thích. Cả hai tham số đều nhận các giá trị
+chuẩn và các bí danh `trace`, `debug`, `warn` và `fatal`. LogBrew đổi bí danh
+thành giá trị chuẩn trước khi so sánh.
+
+Nếu yêu cầu gửi cả `severity` và `level`, LogBrew chuẩn hóa cả hai trước. Các
+giá trị xung đột bị từ chối với thông điệp:
+
+```text
+log severity and level filters conflict; use one value
+```
+
+## <span id="trace-filters">Bộ lọc trace</span>
+
+Khi khám phá trace, `status` là `error` hoặc `ok`. Bỏ tham số này để lấy cả hai.
+`min_duration_ms` phải lớn hơn hoặc bằng 0. Tham số này chỉ áp dụng khi
+khám phá trace.
+
+Yêu cầu này tìm các trace lỗi kéo dài ít nhất 500 mili giây:
+
+```bash
+curl --get "https://api.logbrew.co/api/telemetry/traces" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "status=error" \
+  --data-urlencode "min_duration_ms=500" \
+  --data-urlencode "since=7d"
+```
+
+Với chi tiết và tóm tắt trace, mã hóa phần trăm (percent-encode) `trace_id` để
+dùng làm một đoạn của đường dẫn. Không gửi nó dưới dạng tham số truy vấn.
+
+## <span id="project-scope">Phạm vi dự án</span>
+
+Dùng `project_id=<project-uuid>` để đọc một dự án. Trên các route có
+`project_ids` trong bảng bộ lọc, dùng `project_ids=<uuid>,<uuid>` cho một tập
+chính xác gồm 2 đến 50 dự án. Trên các route đó, bỏ cả hai tham số để đọc mọi
+dự án mà tài khoản có quyền đọc. Route bắt buộc `project_id` chỉ nhận 1 dự án.
+
+```text
+project_id=00000000-0000-4000-8000-000000000001
+project_ids=00000000-0000-4000-8000-000000000001,00000000-0000-4000-8000-000000000002
+```
+
+LogBrew từ chối các lựa chọn sau với `422` và `validation_failed`:
+
+- Yêu cầu có cả `project_id` và `project_ids`.
+- Giá trị `project_ids` có ít hơn 2 hoặc nhiều hơn 50 ID.
+- ID bị trùng hoặc ID không phải UUID.
+
+Nếu một ID trong `project_ids` là dự án mà tài khoản không có quyền đọc, yêu cầu
+thất bại với `404` và `not_found`. Đừng bỏ ID đó rồi tiếp tục. Đề nghị người
+dùng chọn một tập dự án mới.
+
+Giữ nguyên phạm vi dự án ở mọi trang cursor. Đừng bỏ bộ lọc dự án sau khi nhận
+kết quả trống, vì làm vậy là đặt một câu hỏi khác.
+
+## Chuỗi theo khoảng gộp
+
+`GET /api/telemetry/metrics/series` trả về một chỉ số theo các khoảng gộp thời
+gian. `GET /api/telemetry/summary/volume` trả về số lượng tín hiệu theo các
+khoảng gộp thời gian. Cả hai route dùng các quy tắc sau:
+
+- `since` là bắt buộc. `until` là tùy chọn và mặc định là thời điểm gửi yêu
+  cầu.
+- Khoảng từ `since` đến `until` dài tối đa 31 ngày.
+- `interval` là `auto`, `1m`, `5m`, `15m`, `1h`, `6h` hoặc `1d`. Mặc định là
+  `auto`. Giá trị interval tạo ra hơn 500 khoảng gộp sẽ thất bại.
+- `service_name`, `release` và `environment` là bộ lọc khớp chính xác.
+
+Với chuỗi chỉ số, `name` là tên chỉ số chính xác lấy từ
+`GET /api/telemetry/metrics`. `group_by` là `none`, `service_name`, `release`
+hoặc `environment`. `series_limit` từ 1 đến 20.
+
+Với số lượng tín hiệu, `until` không được nằm ở tương lai, và `response_version`
+chỉ nhận `1`.
+
+## Lọc thuộc tính log
+
+Dùng `GET /api/logs/attributes` để tìm các đường dẫn thuộc tính và kiểu dữ liệu
+mà bạn có thể tìm kiếm. Sau đó gửi `attribute_filters` đến `GET /api/logs`. Cả
+hai yêu cầu đều cần `since`.
+
+### Đọc danh mục thuộc tính
+
+Yêu cầu này tìm các đường dẫn kiểu số có chứa `status` trong một dự án:
+
+```bash
+curl --get "https://api.logbrew.co/api/logs/attributes" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "since=2026-06-01T00:00:00Z" \
+  --data-urlencode "type=number" \
+  --data-urlencode "search=status" \
+  --data-urlencode "limit=2"
+```
+
+Phản hồi là một đối tượng, không phải mảng trần. Ví dụ giả lập này có 2 thuộc
+tính và còn một trang nữa:
+
+```json
+{
+  "attributes": [
+    { "path": "/http/status_code", "type": "number", "observed_count": 50, "last_seen_at": "2026-06-01T12:00:03.789Z" },
+    { "path": "/response/status", "type": "number", "observed_count": 42, "last_seen_at": "2026-06-01T12:00:02.456Z" }
+  ],
+  "coverage": {
+    "total_logs": 60,
+    "fully_indexed_logs": 50,
+    "partially_indexed_logs": 2,
+    "unindexed_logs": 8
+  },
+  "next_cursor": { "observed_count": 42, "path": "/response/status", "type": "number" }
+}
+```
+
+`type` là `string`, `number` hoặc `boolean`. `observed_count` là số log trong
+khoảng thời gian có đường dẫn và kiểu đó. `last_seen_at` là thời điểm của log
+mới nhất trong số đó. Một log có thể có nhiều đường dẫn. Đừng cộng các con số
+này để ra số log.
+
+`coverage` cho biết bộ lọc thuộc tính có thể tìm trong những log nào:
+
+| Trường | Ý nghĩa |
+| --- | --- |
+| `total_logs` | Các log khớp với bộ lọc dự án, thời gian, mức độ nghiêm trọng, dịch vụ, bản phát hành và môi trường của danh mục. |
+| `fully_indexed_logs` | Các log có mọi giá trị thuộc tính được hỗ trợ đều tìm kiếm được. |
+| `partially_indexed_logs` | Các log có một số giá trị không được đưa vào chỉ mục. Bộ lọc có thể bỏ sót giá trị không có trong chỉ mục. |
+| `unindexed_logs` | Các log mà bộ lọc thuộc tính có kiểu không tìm được. |
+
+Tổng của 3 nhóm này bằng `total_logs`. `type`, `search` và cursor của danh mục
+không làm thay đổi độ bao phủ. Danh sách `attributes` trống không có nghĩa là
+`total_logs` bằng 0.
+
+Danh mục không có tham số `status`. Bộ lọc mức độ nghiêm trọng của danh mục so
+sánh mức độ nghiêm trọng đã ghi nhận, không phải mức độ nghiêm trọng hiệu lực.
+
+`search` là chuỗi con của đường dẫn, dài từ 1 đến 128 byte và không chứa ký tự
+điều khiển. `limit` đặt số thuộc tính trên một trang.
+
+### Đọc tiếp danh mục
+
+Danh mục không dùng `pagination=cursor`. Lặp lại mọi bộ lọc, và chép cả 3 trường
+từ `next_cursor`:
+
+| Trường được trả về | Tham số của yêu cầu tiếp theo |
+| --- | --- |
+| `next_cursor.observed_count` | `cursor_count` |
+| `next_cursor.path` | `cursor_path` |
+| `next_cursor.type` | `cursor_type` |
+
+Dừng khi `next_cursor` là `null`.
+
+### Áp dụng bộ lọc có kiểu
+
+Chép đường dẫn và kiểu từ danh mục. Đường dẫn dùng cú pháp JSON Pointer, không
+dùng khóa nối bằng dấu chấm. Giữ nguyên mọi chuỗi thoát `~0` hoặc `~1` trong
+đường dẫn.
+
+Yêu cầu này đọc các log có trạng thái phản hồi dạng số từ 500 trở lên:
+
+```bash
+curl --get "https://api.logbrew.co/api/logs" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "since=2026-06-01T00:00:00Z" \
+  --data-urlencode 'attribute_filters=[{"path":"/response/status","type":"number","operator":"gte","value":500}]'
+```
+
+`attribute_filters` là một mảng JSON gồm 1 đến 4 bộ lọc. Log phải khớp với mọi
+bộ lọc. Mỗi bộ lọc có `path`, `type`, `operator` và `value`. Kiểu JSON của
+`value` phải khớp với `type`: số `500` không phải là chuỗi `"500"`.
+
+| `type` | Giá trị `operator` |
+| --- | --- |
+| `string` | `eq`, `ne`, `contains`, `starts_with` |
+| `number` | `eq`, `ne`, `gt`, `gte`, `lt`, `lte` |
+| `boolean` | `eq`, `ne` |
+
+`ne` chỉ khớp với các log có đường dẫn đó. Log không có đường dẫn đó không khớp
+với `ne`. Với `string`, `case_sensitive` là tùy chọn và mặc định là `false`.
+LogBrew từ chối `"case_sensitive": true` với `number` và `boolean`.
+
+Các giới hạn sau được áp dụng:
+
+- Mảng JSON dài tối đa 4.096 byte.
+- Giá trị chuỗi dài tối đa 1.024 byte.
+- `contains` và `starts_with` cần một chuỗi không rỗng.
+- Số phải hữu hạn và nằm trong khoảng từ -9.007.199.254.740.992 đến
+  9.007.199.254.740.992.
+
+Log mà chỉ mục không tìm được sẽ không khớp với bộ lọc. Log đó vẫn có thể xuất
+hiện trong yêu cầu không có `attribute_filters`. Về phản hồi log, xem
+[Phản hồi log](/vi/reference/telemetry-response-shapes#log-response).
+
+### Sửa lỗi thuộc tính
+
+Mỗi lỗi dưới đây trả về `422` kèm `validation_failed`:
+
+| `error` | Cách sửa |
+| --- | --- |
+| `log attribute queries require since` | Thêm `since` vào yêu cầu danh mục, hoặc vào yêu cầu log có `attribute_filters`. |
+| `invalid log attribute filters` | Gửi một mảng JSON gồm 1 đến 4 bộ lọc, mỗi bộ lọc có đường dẫn, kiểu, toán tử và giá trị lấy từ danh mục. |
+| `invalid log attribute cursor` | Gửi cùng lúc `cursor_count`, `cursor_path` và `cursor_type` lấy từ `next_cursor`. |
+| `invalid log attribute search` | Gửi chuỗi con của đường dẫn không rỗng, dài tối đa 128 byte. |
+
+Sửa yêu cầu trước khi thử lại. Đừng bỏ bộ lọc, vì làm vậy sẽ thay đổi kết quả.
+
+## <span id="cursor-pagination">Phân trang bằng cursor</span>
+
+Chế độ cursor phải được bật chủ động. Khi không bật, các route danh sách trả về
+mảng trần. Với trang đầu tiên, gửi `pagination=cursor` mà không kèm trường
+cursor. Với mỗi trang tiếp theo, lặp lại mọi bộ lọc và gửi đầy đủ bộ trường
+cursor:
+
+| Route | Trường cursor để đọc tiếp |
+| --- | --- |
+| Log, vấn đề, lần xảy ra của vấn đề, hành động, chỉ số và lần triển khai | `cursor_time` và `cursor_id` |
+| Bản phát hành | `cursor_time`, `cursor_project_id`, `cursor_release`, `cursor_environment` và `cursor_service_name` |
+| Khám phá trace | `cursor_time` và `cursor_trace_id` |
+
+Ánh xạ các trường `next_cursor` được trả về sang yêu cầu tiếp theo:
+
+- `next_cursor.time` chuyển thành `cursor_time`.
+- `next_cursor.id` chuyển thành `cursor_id`.
+- Với trace, `next_cursor.trace_id` chuyển thành `cursor_trace_id`.
+- Với bản phát hành, thêm `cursor_` vào trước mỗi tên trường được trả về, ví dụ
+  `next_cursor.release` chuyển thành `cursor_release`.
+
+Dừng khi `next_cursor` là `null`. Đừng tự tính cursor từ dòng cuối cùng.
+Cursor của bản phát hành không thay đổi các dự án đã chọn. Giữ nguyên
+`project_id` hoặc `project_ids` ban đầu.
+
+```bash
+curl --get "https://api.logbrew.co/api/logs" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "severity=error" \
+  --data-urlencode "since=2026-06-01T00:00:00Z" \
+  --data-urlencode "pagination=cursor" \
+  --data-urlencode "limit=50"
+```
+
+`limit` đặt kích thước trang. Một trang có thể chứa ít dòng hơn. Các route này
+không nhận `page` hay `page_number`.
+
+| Route | `limit` mặc định | `limit` tối đa |
+| --- | ---: | ---: |
+| Log, thuộc tính log, vấn đề, hành động, chỉ số, bản phát hành và khám phá trace | 100 | 500 |
+| Lần xảy ra của vấn đề | 25 | 100 |
+| Lần triển khai | 50 | 100 |
+
+Trên phần lớn các route, LogBrew đổi `limit` vượt mức tối đa thành mức tối đa.
+Danh sách triển khai từ chối `limit` nằm ngoài khoảng 1 đến 100 bằng `422`.
+Danh sách triển khai luôn trả về đối tượng trang có `next_cursor`, kể cả khi
+không có `pagination=cursor`.
+
+LogBrew từ chối các yêu cầu sau với `422` và `validation_failed`:
+
+- Giá trị `pagination` khác `cursor`.
+- Trường cursor khi không có `pagination=cursor`.
+- Bộ trường cursor không đầy đủ.
+- `cursor_time` không phải dấu thời gian RFC3339.
+
+Cursor đánh dấu một vị trí; nó không cố định dữ liệu. Bắt đầu lại từ trang đầu
+tiên khi bạn cần dữ liệu mới.
+
+CLI dùng các trường tương tự:
+
+```bash
+logbrew read logs --severity error --pagination cursor --limit 50 --json
+logbrew read logs --severity error --pagination cursor --limit 50 \
+  --cursor-time <time> --cursor-id <id> --json
+```
+
+## Chẩn đoán kết quả trống
+
+Danh sách trống nghĩa là không có dòng nào khớp với mọi bộ lọc. Nó không nói gì
+về các tín hiệu khác. Kiểm tra yêu cầu theo thứ tự sau:
+
+1. Xác nhận ID dự án.
+2. Bỏ từng bộ lọc tùy chọn một.
+3. Mở rộng `since` nếu sự kiện cần tìm cũ hơn. Bỏ `until` hoặc dời `until` về
+   sau nếu sự kiện cần tìm mới hơn.
+4. So sánh `service_name`, `release` và `environment` với các giá trị mà SDK
+   của bạn gửi.
+5. Với log, thêm `status=all` nếu một quy tắc log có thể đang ẩn log cần tìm.
+6. Xác nhận route nhận từng bộ lọc.
+
+## Khắc phục khi truy vấn bị từ chối
+
+Truy vấn bị từ chối trả về envelope lỗi chuẩn. Tham số không xác định hoặc giá
+trị sai kiểu trả về `422`:
+
+```json
+{
+  "error": "invalid query parameters",
+  "code": "validation_failed",
+  "next": "check query parameter names and value types, then retry",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+Cách sửa thường gặp:
+
+- Thay bí danh thân thiện bằng tham số trong [bảng bộ lọc](#filter-matrix).
+- Gửi mọi trường cursor để đọc tiếp mà route cần.
+- Bỏ các trường cursor khỏi yêu cầu trang đầu tiên.
+- Chỉ dùng một tham số chọn dự án.
+- Thay mức độ nghiêm trọng hoặc trạng thái trace không được hỗ trợ bằng giá trị
+  chuẩn.
+
+Về mã lỗi và cách khắc phục, xem [Lỗi API](/vi/reference/api-errors). Về body
+của phản hồi, xem [Định dạng phản hồi](/vi/reference/telemetry-response-shapes).

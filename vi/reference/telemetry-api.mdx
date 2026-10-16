@@ -1,0 +1,279 @@
+---
+title: "Yêu cầu, phản hồi và mã lỗi của Telemetry API"
+sidebarTitle: "Telemetry API"
+description: "Dùng API observability (khả năng quan sát) của LogBrew để gửi telemetry, đọc theo phạm vi, phân tích, cập nhật vấn đề và nhận lỗi máy đọc được."
+---
+
+Telemetry API dùng JSON qua HTTP tại `https://api.logbrew.co`. Các SDK công
+khai gửi các batch do SDK quản lý đến `POST /v1/events`. Client tùy chỉnh gửi
+envelope gốc đến `POST /api/telemetry/ingest`. Cả hai route gửi dữ
+liệu đều cần bearer token gửi dữ liệu theo phạm vi dự án.
+
+Các lần đọc và các thay đổi thuộc tài khoản dùng bearer token của tài khoản.
+Không bao giờ dùng bearer token của tài khoản hoặc phiên trình duyệt làm cấu
+hình SDK hoặc cấu hình gửi dữ liệu. Không bao giờ gửi bearer token gửi dữ liệu
+đến route đọc.
+
+## Gửi yêu cầu có phạm vi giới hạn
+
+Dùng danh sách kiểm tra này trước khi client gửi yêu cầu:
+
+1. Chọn route và phương thức HTTP từ bảng endpoint.
+2. Dùng đúng bearer token: bearer token gửi dữ liệu cho việc gửi dữ liệu, bearer
+   token của tài khoản cho mọi việc khác.
+3. Chọn phạm vi dự án mà route hỗ trợ. Không mở rộng phạm vi sau khi nhận phản
+   hồi trống.
+4. Chỉ thêm các tham số truy vấn mà route chấp nhận. Xem
+   [Bộ lọc truy vấn](/vi/reference/telemetry-api-filters).
+5. Gửi `Content-Type: application/json` khi route có body JSON.
+6. Đọc mã trạng thái HTTP và body phản hồi trước khi thử lại.
+7. Không để bearer token, ticket luồng trực tiếp và toàn bộ body phản hồi lọt
+   vào log và prompt của agent.
+
+## Endpoint
+
+### Gửi dữ liệu
+
+| Phương thức | Đường dẫn URL | Mục đích |
+| --- | --- | --- |
+| `POST` | `/v1/events` | Tiếp nhận các batch do SDK LogBrew công khai tạo và gửi. |
+| `POST` | `/api/telemetry/ingest` | Tiếp nhận envelope telemetry gốc từ client tùy chỉnh. |
+
+Để SDK tạo các batch `/v1/events`. Không tự tạo các batch này. Về envelope gốc,
+xem [Tích hợp SDK](/vi/guides/sdk-ingestion).
+
+### Đọc telemetry
+
+| Phương thức | Đường dẫn URL | Mục đích |
+| --- | --- | --- |
+| `GET` | `/api/logs` | Liệt kê log có cấu trúc. |
+| `GET` | `/api/logs/{log_id}` | Đọc một log. |
+| `GET` | `/api/logs/attributes` | Liệt kê đường dẫn và kiểu của các thuộc tính log mà bộ lọc có thể tìm kiếm. |
+| `GET` | `/api/telemetry/issues` | Liệt kê các vấn đề đã gộp nhóm. |
+| `GET` | `/api/telemetry/issues/{issue_id}` | Đọc một vấn đề đã gộp nhóm. |
+| `GET` | `/api/telemetry/issues/{issue_id}/events` | Liệt kê các lần xảy ra của một vấn đề đã gộp nhóm. |
+| `PATCH` | `/api/telemetry/issues/{issue_id}` | Cập nhật trạng thái, mức ưu tiên hoặc người phụ trách của một vấn đề. |
+| `POST` | `/api/telemetry/issues/bulk` | Cập nhật trạng thái, mức ưu tiên hoặc người phụ trách của 1 đến 100 vấn đề trong một dự án. |
+| `GET` | `/api/telemetry/issues/assignees` | Liệt kê các tài khoản có thể được giao vấn đề trong một dự án. |
+| `PUT` | `/api/telemetry/issues/{issue_id}/triage-rule` | Đặt quy tắc mức độ nghiêm trọng cho một vấn đề. |
+| `PUT` | `/api/logs/{log_id}/triage-rule` | Đặt quy tắc mức độ nghiêm trọng và trạng thái bỏ qua cho các log khớp với một log. |
+| `GET` | `/api/telemetry/traces` | Khám phá trace trong phạm vi dự án. |
+| `GET` | `/api/telemetry/traces/{trace_id}` | Liệt kê span của một trace. |
+| `GET` | `/api/telemetry/traces/{trace_id}/summary` | Đọc bản tóm tắt có giới hạn của một trace. |
+| `GET` | `/api/telemetry/actions` | Liệt kê hành động sản phẩm. |
+| `GET` | `/api/telemetry/metrics` | Liệt kê mẫu chỉ số. |
+| `GET` | `/api/telemetry/metrics/series` | Đọc một chỉ số theo các khoảng gộp thời gian. |
+| `GET` | `/api/telemetry/releases` | Liệt kê bản tóm tắt bản phát hành. |
+| `GET` | `/api/telemetry/summary/volume` | Đọc số đếm tín hiệu của một dự án theo các khoảng gộp thời gian. |
+
+### Triển khai
+
+| Phương thức | Đường dẫn URL | Lệnh CLI |
+| --- | --- | --- |
+| `PUT` | `/api/telemetry/deployments/{deployment_id}` | `logbrew deploy` |
+| `GET` | `/api/telemetry/deployments/{deployment_id}?project_id=<project-uuid>` | Không có |
+| `GET` | `/api/telemetry/deployments?project_id=<project-uuid>` | Không có |
+
+Ghi lại một lần triển khai từ quy trình tự động hóa bản phát hành sau khi lần
+triển khai thành công hoặc thất bại. Body của `PUT` có `project_id`, `release`,
+`environment`, `service_name`, `status` (`succeeded` hoặc `failed`),
+`started_at`, `finished_at` và `commit_sha` không bắt buộc. Dùng cùng các giá
+trị `release`, `environment` và `service_name` mà SDK của bạn gửi. Tài khoản
+phải sở hữu dự án.
+
+`deployment_id` là ID do bạn tự đặt cho lần triển khai. Lần thử lại với cùng ID
+và cùng body trả về lần triển khai đã lưu. Cùng ID nhưng body khác sẽ thất bại
+với `409` và `idempotency_conflict`. Dùng ID mới cho lần triển khai khác.
+
+### Điều tra
+
+Mỗi route điều tra trả về một gói bằng chứng có giới hạn cho một đối tượng. Lệnh
+`logbrew explain` của [CLI](/vi/reference/cli) đọc các route này và kiểm tra hợp
+lệ phản hồi.
+
+| Phương thức | Đường dẫn URL | Lệnh CLI |
+| --- | --- | --- |
+| `GET` | `/api/logs/{log_id}/investigation` | `logbrew explain log` |
+| `GET` | `/api/telemetry/issues/{issue_id}/investigation` | `logbrew explain issue` |
+| `GET` | `/api/telemetry/issues/{issue_id}/correction-verification` | `logbrew investigate issue <issue_id> verify` |
+| `GET` | `/api/telemetry/traces/{trace_id}/investigation` | `logbrew explain trace` |
+| `GET` | `/api/telemetry/traces/{trace_id}/spans/{span_id}/investigation` | `logbrew explain span` |
+| `GET` | `/api/telemetry/actions/{action_id}/investigation` | `logbrew explain action` |
+| `GET` | `/api/telemetry/metrics/investigation` | `logbrew explain metric` |
+| `GET` | `/api/telemetry/releases/investigation` | `logbrew explain release` |
+
+### Phân tích sản phẩm
+
+| Phương thức | Đường dẫn URL | Lệnh CLI |
+| --- | --- | --- |
+| `GET` | `/api/telemetry/analytics/overview` | `logbrew analytics overview` |
+| `GET` | `/api/telemetry/analytics/properties` | `logbrew analytics properties` |
+| `POST` | `/api/telemetry/analytics/funnel` | `logbrew analytics funnel` |
+| `POST` | `/api/telemetry/analytics/retention` | `logbrew analytics retention` |
+| `POST` | `/api/telemetry/analytics/lifecycle` | `logbrew analytics lifecycle` |
+| `POST` | `/api/telemetry/analytics/paths` | `logbrew analytics paths` |
+| `POST` | `/api/telemetry/analytics/segments/compare` | `logbrew analytics compare` |
+
+Các route phân tích `POST` nhận body JSON, không nhận tham số truy vấn. Xem
+[Phân tích sản phẩm](/vi/concepts/product-analytics).
+
+### Luồng trực tiếp
+
+| Phương thức | Đường dẫn URL | Mục đích |
+| --- | --- | --- |
+| `POST` | `/api/feed/ticket` | Tạo ticket luồng trực tiếp ngắn hạn bằng bearer token của tài khoản. |
+| `GET` | `/api/feed/live?ticket=<ticket>` | Mở kết nối WebSocket bằng ticket đó. |
+
+### Tài khoản và đăng nhập
+
+Các route về mức sử dụng, hạn mức, gói đăng ký và đăng xuất nằm trong
+[Account API](/vi/reference/account-api).
+
+## Mã trạng thái thành công
+
+| Thao tác | Trạng thái thành công |
+| --- | --- |
+| Gửi dữ liệu, đọc, cập nhật vấn đề, quy tắc, triển khai, phân tích và ticket luồng trực tiếp | `200 OK` |
+| Kết nối luồng trực tiếp | `101 Switching Protocols`, sau đó là các thông điệp WebSocket |
+
+Phản hồi `200` không chứng minh bằng chứng đã đầy đủ. Đọc các trường độ bao phủ,
+cắt bớt và trạng thái trong phản hồi.
+
+## Bộ lọc truy vấn và phân trang
+
+Mỗi route đọc nhận các tham số truy vấn riêng. Các bí danh thân thiện như
+`project`, `trace` và `user` không phải là tham số truy vấn. Theo mặc định, route
+danh sách trả về một mảng trần, và trả về envelope cursor khi có `pagination=cursor`. Danh sách
+triển khai luôn trả về một đối tượng trang. Xem
+[Bộ lọc truy vấn](/vi/reference/telemetry-api-filters).
+
+## Phản hồi và lỗi
+
+- [Định dạng phản hồi](/vi/reference/telemetry-response-shapes) cho thấy
+  một ví dụ cho mỗi nhóm phản hồi.
+- [Lỗi API](/vi/reference/api-errors) liệt kê các mã lỗi và cách khôi phục.
+
+Đọc `code` trước thông điệp dành cho người đọc. Dùng `next_action` cho hành vi
+của chương trình và `next` cho hướng dẫn dành cho người đọc. Không phân tích cú
+pháp câu chữ của `error` hoặc `next`.
+
+## Cập nhật vấn đề
+
+Các yêu cầu này dùng bearer token của tài khoản. Token này cố ý khác với
+`LOGBREW_INGEST_BEARER`. Tài khoản phải có quyền quản lý vấn đề trong dự án chứa
+vấn đề đó. Nếu không, yêu cầu thất bại với `403` và `forbidden`. Cùng quyền này
+áp dụng cho việc thay đổi trạng thái, mức ưu tiên và người phụ trách, cũng như
+quy tắc cho vấn đề và log.
+
+Mỗi yêu cầu đặt 1 hoặc nhiều trường sau:
+
+| Trường | Giá trị |
+| --- | --- |
+| `status` | `unresolved`, `resolved` hoặc `archived`. `ignored` là tên cũ của `archived`. |
+| `priority` | `high`, `medium` hoặc `low`. |
+| `assignee` | ID người dùng, `me` cho tài khoản đang đăng nhập, hoặc `none` để bỏ người phụ trách. |
+
+Yêu cầu không có trường nào trong số này sẽ thất bại với `422` và
+`validation_failed`.
+
+Một vấn đề có 0 hoặc 1 người phụ trách. Người phụ trách phải có quyền đọc dự án.
+Nếu không, yêu cầu thất bại với `422` và `validation_failed`, và LogBrew
+không thay đổi gì. Lấy danh sách tài khoản mà bạn có thể giao từ
+[Liệt kê người phụ trách](#list-assignees). Mọi giá trị `assignee` khác cũng
+thất bại với `422` và `validation_failed`.
+
+Mức ưu tiên do bạn đặt sẽ giữ cố định. Nếu bạn không đặt mức ưu tiên, mức ưu
+tiên theo mức độ nghiêm trọng của vấn đề: `error` và `critical` là `high`,
+`warning` là `medium`, và `info` là `low`.
+
+Trường đã có giá trị được yêu cầu sẽ không thay đổi. Bạn có thể gửi lại cùng
+yêu cầu sau khi hết thời gian chờ. Hết thời gian chờ không chứng minh rằng thay
+đổi chưa diễn ra. Đọc lại vấn đề trước khi gửi một thay đổi khác.
+
+### <span id="update-one-issue">Cập nhật một vấn đề</span>
+
+Thêm `response_version=3` để nhận `archived`, mức ưu tiên và người phụ trách
+trong phản hồi:
+
+```bash
+curl -X PATCH "$LOGBREW_API_URL/api/telemetry/issues/$ISSUE_ID?response_version=3" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  -H "Content-Type: application/json" \
+  --data '{ "status": "archived", "priority": "low", "assignee": "me" }'
+```
+
+Phản hồi là vấn đề đã cập nhật. Xem
+[ví dụ phản hồi khi đổi trạng thái vấn đề](/vi/reference/telemetry-response-shapes#issue-status-response-examples).
+
+### <span id="update-issues-in-bulk">Cập nhật hàng loạt vấn đề</span>
+
+Gửi `project_id` và 1 đến 100 ID vấn đề khác nhau thuộc dự án đó:
+
+```bash
+curl -X POST "$LOGBREW_API_URL/api/telemetry/issues/bulk" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  -H "Content-Type: application/json" \
+  --data '{
+    "project_id": "<project-uuid>",
+    "issue_ids": ["<issue-uuid-1>", "<issue-uuid-2>"],
+    "assignee": "<user-uuid>"
+  }'
+```
+
+Yêu cầu áp dụng cùng một thay đổi cho mọi vấn đề. Phản hồi có `project_id` và
+`results`, với 1 kết quả cho mỗi ID vấn đề, theo thứ tự trong yêu cầu. Mỗi kết
+quả có `issue_id`, `outcome` và `issue`. `issue` là vấn đề hiện tại ở phiên bản
+phản hồi 3, hoặc `null` với `not_found`.
+
+| `outcome` | Ý nghĩa |
+| --- | --- |
+| `updated` | LogBrew đã áp dụng thay đổi. |
+| `unchanged` | Vấn đề đã có sẵn các giá trị được yêu cầu. |
+| `not_found` | Dự án không có vấn đề nào với ID này. LogBrew không thay đổi gì cho ID đó. |
+
+Danh sách trống, nhiều hơn 100 ID hoặc ID bị lặp sẽ thất bại với `422` và
+`validation_failed`. Chia tập lớn hơn thành nhiều yêu cầu. Nếu tài khoản không
+đọc được dự án, yêu cầu thất bại với `404` và `not_found`.
+
+### <span id="list-assignees">Liệt kê người phụ trách</span>
+
+Gửi ID dự án để lấy mọi tài khoản có thể được giao vấn đề trong dự án đó:
+
+```bash
+curl "$LOGBREW_API_URL/api/telemetry/issues/assignees?project_id=$PROJECT_ID" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER"
+```
+
+Danh sách có mọi tài khoản đọc được dự án. Mỗi mục có `user_id`, `name` và
+`email`. `name` là `null` khi tài khoản không có tên. Xem
+[phản hồi danh sách người phụ trách](/vi/reference/telemetry-response-shapes#assignee-list-response).
+Mọi tài khoản đọc được dự án đều lấy được danh sách này. Nếu tài khoản không
+đọc được dự án, yêu cầu thất bại với `404` và `not_found`.
+
+Khi một thành viên mất quyền truy cập dự án, các vấn đề đã giao cho thành viên
+đó sẽ hiển thị là chưa có người phụ trách. Nếu thành viên được cấp lại quyền,
+các vấn đề lại hiển thị thành viên đó, trừ khi trong thời gian đó có người đã
+đổi hoặc bỏ người phụ trách.
+
+### Đặt quy tắc cho vấn đề và log
+
+Quy tắc thay đổi cách LogBrew hiển thị các tín hiệu khớp với quy tắc. Quy tắc
+không xóa dữ liệu. `severity` đã ghi nhận được giữ nguyên, và phản hồi hiển thị
+quy tắc trong `triage`.
+
+| Yêu cầu | Body JSON |
+| --- | --- |
+| `PUT /api/telemetry/issues/{issue_id}/triage-rule` | `{ "severity": "<value>" }` |
+| `PUT /api/logs/{log_id}/triage-rule` | `{ "severity": "<value>", "ignored": true }` |
+
+`severity` là `info`, `warning`, `error`, `critical` hoặc `source`. `source`
+xóa giá trị ghi đè và hiển thị lại mức độ nghiêm trọng đã ghi nhận. Với quy tắc
+log, `ignored: true` ẩn các log khớp khỏi danh sách log mặc định. Đọc các log đó
+bằng `status=ignored` hoặc `status=all`. Quy tắc áp dụng cho các tín hiệu khớp
+đang được giữ lại và các tín hiệu khớp trong tương lai. Giá trị khác sẽ thất bại
+với `422` và `validation_failed`.
+
+<Warning>
+  Không gửi bản phát hành trống. LogBrew từ chối chúng để việc theo dõi bản phát
+  hành luôn đáng tin cậy.
+</Warning>

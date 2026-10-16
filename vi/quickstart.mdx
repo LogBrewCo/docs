@@ -1,0 +1,283 @@
+---
+title: "Observability với LogBrew: bắt đầu nhanh với log Node.js"
+sidebarTitle: "Bắt đầu nhanh"
+description: "Tạo dự án, thiết lập ghi log Node.js, gửi một sự kiện SDK an toàn và đọc log đã lưu mà không làm lộ thông tin xác thực."
+---
+
+Tạo một dự án cho môi trường phát triển. Gửi một log Node.js. Đọc lại log đó
+từ LogBrew. CLI tạo dự án và lưu khóa gửi dữ liệu của dự án. Bạn chỉ cần đăng
+nhập qua trình duyệt khi CLI chưa có quyền truy cập tài khoản hợp lệ.
+
+<Note>
+  Dùng `--json` cho quy trình của agent. Giữ thông tin xác thực trong cấu hình
+  cục bộ được bảo vệ. Giữa người, công cụ và agent, chỉ truyền tên biến.
+</Note>
+
+## <span id="first-project-success-path">Trước khi bắt đầu</span>
+
+Chuẩn bị:
+
+- Node.js 18 trở lên.
+- LogBrew CLI v0.1.30 trở lên.
+- `jq`.
+- Bash hoặc Zsh.
+- Một thư mục package cho ứng dụng Node.js phía máy chủ.
+
+Mẫu này dùng dự án `quickstart-node`, môi trường `development` và bản phát hành
+`quickstart@1`. Tách lần thử này khỏi production. Với runtime khác, dùng hướng dẫn
+[Tích hợp SDK](/vi/guides/sdk-ingestion).
+
+<Warning>
+  Giữ tệp khóa gửi dữ liệu bên ngoài repository và chỉ mình bạn đọc được. Không
+  đặt khóa máy chủ này vào mã chạy trên trình duyệt, bundle công khai hay
+  prompt.
+</Warning>
+
+## Gửi và đọc log đầu tiên
+
+<Steps>
+  <Step title="Đọc trạng thái tài khoản" id="confirm-account-access">
+    Cài đặt CLI bằng lệnh trong trang [Dùng CLI](/vi/guides/cli). Sau đó đọc
+    trạng thái tài khoản của CLI.
+
+    ```bash
+    logbrew status --json
+    ```
+
+    **Điểm kiểm tra:** trạng thái cho thấy quyền truy cập tài khoản đã được
+    xác thực. Nếu không, một người tự chạy `logbrew login` một lần. Sau đó chạy
+    lại `logbrew status --json`. Agent không được bắt đầu đăng nhập mới khi
+    phiên xác thực hiện tại vẫn hoạt động.
+  </Step>
+
+  <Step title="Tạo một dự án từ CLI">
+    Chọn một tệp mới trong thư mục chỉ chủ sở hữu truy cập được. CLI ghi khóa
+    gửi dữ liệu của dự án vào tệp đó trước khi báo thành công. CLI không bao
+    giờ in khóa hay đường dẫn tệp.
+
+    ```bash
+    install -d -m 700 "$HOME/.logbrew"
+
+    project_result="$(
+      logbrew projects create quickstart-node \
+        --runtime node \
+        --environment development \
+        --ingest-key-file "$HOME/.logbrew/quickstart-node.ingest" \
+        --json
+    )"
+    export LOGBREW_PROJECT_ID="$(jq -er '.project.id' <<<"$project_result")"
+    jq '{status, setup_status: .setup.status, ingest_key_kind: .ingest_key.kind, next}' \
+      <<<"$project_result"
+    unset project_result
+    ```
+
+    Việc tạo dự án làm thay đổi trạng thái tài khoản. Tệp đích phải chưa tồn
+    tại. Nếu kết quả không rõ ràng, chạy lại đúng lệnh đó. CLI dùng lại định
+    danh của yêu cầu đang chờ. Chỉ dùng `--abandon-retry` để bắt đầu một lần
+    thử khác.
+
+    **Điểm kiểm tra:** đầu ra báo `status: "created"`, trạng thái thiết lập
+    `created` và một loại khóa gửi dữ liệu. Dự án đã tồn tại và khóa đã được
+    lưu. Điều này chưa cho thấy telemetry đã được gửi. Xem
+    [Dự án và thiết lập](/vi/concepts/projects).
+  </Step>
+
+  <Step title="Cài đặt SDK Node.js">
+    ```bash
+    npm install @logbrew/sdk @logbrew/node
+    ```
+
+    Không bao giờ dùng thông tin xác thực tài khoản làm cấu hình SDK. Không để
+    khóa dự án xuất hiện trong đầu ra lệnh, prompt, yêu cầu hỗ trợ, tệp mã
+    nguồn hay cấu hình package.
+  </Step>
+
+  <Step title="Gửi một log SDK an toàn">
+    Gửi điểm đánh dấu bản phát hành và môi trường cùng một log `info` chỉ chứa
+    dữ liệu giữ chỗ. Khóa chỉ được đặt cho tiến trình Node.js này. Định danh
+    ứng dụng nằm trong `context`.
+
+    Mỗi lần chạy tạo ID sự kiện mới. Nếu SDK thử gửi lại trong cùng lần chạy,
+    SDK gửi cùng nội dung với cùng ID. LogBrew không lưu lại sự kiện đã được
+    chấp nhận khi một lần thử lại gửi sự kiện đó thêm lần nữa.
+
+    ```bash
+    LOGBREW_SERVER_API_KEY="$(< "$HOME/.logbrew/quickstart-node.ingest")" \
+      node --input-type=module <<'JS'
+    import { randomUUID } from "node:crypto";
+    import { SdkError } from "@logbrew/sdk";
+    import { createLogBrewNodeClient } from "@logbrew/node";
+
+    const client = createLogBrewNodeClient({
+      context: {
+        schemaVersion: 1,
+        resource: { service: { name: "quickstart-node", version: "quickstart@1" } }
+      }
+    });
+    const occurredAt = new Date().toISOString();
+
+    client.release(randomUUID(), occurredAt, {
+      version: "quickstart@1",
+      metadata: { service: "quickstart-node" }
+    });
+    client.environment(randomUUID(), occurredAt, { name: "development" });
+    client.log(randomUUID(), occurredAt, {
+      message: "LogBrew quickstart check",
+      level: "info",
+      logger: "quickstart-node"
+    });
+
+    try {
+      const response = await client.shutdown();
+      console.log(JSON.stringify({
+        ok: true,
+        status_code: response.statusCode,
+        attempts: response.attempts
+      }));
+    } catch (error) {
+      console.error(JSON.stringify({
+        ok: false,
+        error: error instanceof SdkError ? error.code : "delivery_failed"
+      }));
+      process.exitCode = 1;
+    }
+    JS
+    ```
+
+    Không đưa thông tin xác thực, header, nội dung yêu cầu, dữ liệu khách hàng
+    hay đường dẫn cục bộ vào sự kiện.
+
+    **Điểm kiểm tra:** script in `"ok":true` với `status_code` dạng `2xx`.
+    `attempts` lớn hơn `1` sau một lần thử lại. Gửi thành công chưa phải bước
+    kiểm tra cuối cùng.
+
+    Nếu gửi thất bại, script thoát với mã `1` và in một lỗi JSON ngắn, chẳng
+    hạn `{"ok":false,"error":"unauthenticated"}`. Script không in nội dung yêu
+    cầu hay khóa. Nếu khóa dự án bị từ chối, script báo
+    `unauthenticated`. Đăng nhập lại CLI không khắc phục được lỗi này.
+  </Step>
+
+  <Step title="Đọc báo cáo doctor của dự án" id="verify-readiness-with-the-project-doctor">
+    CLI dùng quyền truy cập tài khoản đã lưu cho thao tác đọc này. Không dùng
+    khóa gửi dữ liệu của dự án.
+
+    ```bash
+    : "${LOGBREW_PROJECT_ID:?set the project UUID}"
+
+    logbrew doctor --project "$LOGBREW_PROJECT_ID" --json
+    ```
+
+    **Điểm kiểm tra:** báo cáo có `status: "ready"`. Đọc thêm từng mục trong
+    `checks`. Mã thoát `0` không cho thấy mọi mục kiểm tra đều đạt. Với trạng
+    thái khác, làm theo `next` và
+    [Đọc báo cáo doctor của dự án](/vi/reference/cli#read-a-project-doctor-report).
+    Dự án ở trạng thái `ready` không cho thấy log thử này đã đến.
+  </Step>
+
+  <Step title="Đọc log thử">
+    Dùng dự án, bản phát hành và môi trường từ batch của SDK.
+
+    ```bash
+    logbrew read logs --project "$LOGBREW_PROJECT_ID" \
+      --release quickstart@1 \
+      --environment development \
+      --since 1h \
+      --json
+    ```
+
+    **Điểm kiểm tra:** `LogBrew quickstart check` xuất hiện cho dự án, bản
+    phát hành và môi trường đó. Điều này chỉ cho thấy log thử đã đến nơi.
+  </Step>
+</Steps>
+
+## <span id="understand-the-test-result">Đọc kết quả thử</span>
+
+Mẫu gửi ba sự kiện. Chỉ một sự kiện là log. Điểm đánh dấu bản phát hành và môi
+trường cung cấp ngữ cảnh cho log.
+
+| Trường trong mẫu | Dữ liệu được ghi lại |
+| --- | --- |
+| `message` | Thao tác mà lần thử ghi lại, `LogBrew quickstart check`. |
+| `level: "info"` | Một sự kiện thử bình thường, không phải lỗi. |
+| `logger` | Logger của ứng dụng đã tạo bản ghi. |
+| `occurredAt` | Thời điểm lần chạy này tạo sự kiện, dưới dạng dấu thời gian UTC. |
+| `context.resource.service` | Dịch vụ ứng dụng và phiên bản của dịch vụ, không phải định danh SDK. |
+
+Giữ lần thử ở mức `info`. Không đổi sang `error` để dễ tìm hơn. Thay vào đó,
+dùng bộ lọc dự án và thời gian. Xem
+[Giá trị mức độ nghiêm trọng](/vi/concepts/telemetry#severity-values).
+
+Dòng `console.log` in kết quả gửi ra terminal. Lệnh gọi `client.log` gửi log
+đến LogBrew. Lần gửi đầu tiên thành công sẽ in:
+
+```json
+{ "ok": true, "status_code": 200, "attempts": 1 }
+```
+
+Khóa gửi dữ liệu chọn dự án nhận log. Bộ lọc `--project` của CLI không di
+chuyển sự kiện.
+
+Log này không có ngữ cảnh trace vì mẫu không tạo span yêu cầu. Điều đó không
+cho thấy log bị lỗi. Kết quả đọc của CLI là một snapshot (dữ liệu tại thời điểm
+đọc). Chạy lại lệnh để đọc các sự kiện đến sau, hoặc dùng
+`logbrew watch logs --json` để xem luồng trực tiếp.
+
+## Cách xử lý các tình huống thường gặp
+
+| Kết quả | Bước tiếp theo |
+| --- | --- |
+| Trạng thái CLI chưa được xác thực | Một người tự chạy `logbrew login`. Sau đó chạy lại lệnh kiểm tra trạng thái. |
+| Tệp khóa gửi dữ liệu đã tồn tại | Chọn một đường dẫn chưa dùng. Không ghi đè một thông tin xác thực không rõ nguồn gốc. |
+| Kết quả tạo dự án không rõ ràng | Chạy lại đúng lệnh tạo. |
+| `unauthenticated` | Kiểm tra khóa gửi dữ liệu của dự án, không phải thông tin xác thực tài khoản của CLI. Đăng nhập lại không khắc phục được lỗi này. |
+| `rate_limited` | Chờ rồi mới gửi lại. Không chạy lặp và không tạo khóa mới. |
+| `transport_error` hoặc `network_failure` | Kiểm tra kết nối mạng. Phản hồi thất bại không cho thấy yêu cầu trước đó chưa có tác dụng. |
+| `delivery_failed` | Dừng lại và kiểm tra lỗi. Không in thông tin bí mật hay nội dung yêu cầu. |
+| `status` của doctor không phải `ready` | Đọc `checks` và `next` trong [báo cáo doctor](/vi/reference/cli#read-a-project-doctor-report). Giữ nguyên dự án. |
+| Kết quả đọc log trống | So sánh dự án, môi trường, bản phát hành và khoảng thời gian với batch đã gửi. |
+
+Nếu telemetry vẫn bị thiếu, xem
+[Khôi phục telemetry đầu tiên bị thiếu](/vi/guides/troubleshooting#recover-missing-first-telemetry).
+Nếu các bước đó không giúp được, [báo cáo sự cố](/vi/guides/report-a-problem).
+Không đính kèm thông tin xác thực, telemetry thô, dữ liệu khách hàng, đường dẫn
+cục bộ hay mã nguồn.
+
+## Chuyển sang ứng dụng của bạn
+
+- Tạo client một lần trong mã thiết lập của ứng dụng.
+- Ghim phiên bản SDK trong các tệp package. Thử nâng cấp bên ngoài
+  production.
+- Nạp khóa gửi dữ liệu từ cấu hình bí mật sẵn có. Xoay vòng khóa khi khóa có
+  thể đã bị lộ. Xem [Xoay vòng khóa gửi dữ liệu](/vi/guides/rotate-ingest-key).
+- Dùng tên dịch vụ, môi trường và bản phát hành ổn định từ cấu hình triển
+  khai. Xem [Bản phát hành](/vi/concepts/releases).
+- Viết thông điệp log nêu tên thao tác và kết quả của nó, chẳng hạn
+  `Report generation completed`. Không đưa giá trị riêng tư vào thông điệp.
+  Không sao chép toàn bộ yêu cầu hay bản ghi người dùng vào log.
+- Mỗi log của ứng dụng chỉ dùng một nơi gửi để tránh bản ghi trùng. Tìm tích
+  hợp đang gửi từng bản ghi trước khi thêm LogBrew.
+- Trước khi triển khai lên production, gửi một sự kiện an toàn qua luồng mã
+  thật và đọc lại. Kiểm tra thông điệp, dịch vụ, bản phát hành và môi trường.
+  Một mẫu chạy độc lập không kiểm tra được luồng mã của ứng dụng.
+
+Mẫu này không thiết lập ghi nhận trên trình duyệt, source map hay ghi nhận trên
+thiết bị di động. Với các phần đó, bắt đầu từ hướng dẫn
+[Tích hợp SDK](/vi/guides/sdk-ingestion).
+
+<CardGroup cols={2}>
+  <Card title="Dự án và thiết lập" icon="folder-kanban" href="/vi/concepts/projects">
+    Đọc trạng thái thiết lập và quản lý khóa gửi dữ liệu của dự án.
+  </Card>
+
+  <Card title="Tích hợp SDK" icon="cloud-upload" href="/vi/guides/sdk-ingestion">
+    Chọn gói SDK cho runtime của bạn.
+  </Card>
+
+  <Card title="Điều tra một vấn đề" icon="bug" href="/vi/guides/investigate-an-issue">
+    Lần theo bằng chứng từ trace và log liên quan của một vấn đề.
+  </Card>
+
+  <Card title="Báo cáo sự cố" icon="life-buoy" href="/vi/guides/report-a-problem">
+    Gửi báo cáo hỗ trợ an toàn và riêng tư.
+  </Card>
+</CardGroup>

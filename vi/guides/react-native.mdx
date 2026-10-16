@@ -1,0 +1,259 @@
+---
+title: "Ghi log React Native với LogBrew"
+sidebarTitle: "React Native"
+description: "Cài SDK React Native, gửi một log thử nghiệm và tìm log đó trong đúng dự án LogBrew. Cấu hình Expo an toàn và xử lý lỗi gửi dữ liệu."
+---
+
+Gửi log từ ứng dụng React Native đến LogBrew. Bắt đầu với một log thử nghiệm,
+rồi dùng CLI để tìm log đó trong đúng dự án. Hướng dẫn này dùng Expo. Ứng dụng
+React Native thuần (bare) tải khóa qua cấu hình riêng của nó.
+
+Trước khi bắt đầu, bạn cần:
+
+- Một ứng dụng React Native mà bạn chạy được trên máy cục bộ.
+- Một dự án LogBrew. Xem [Dự án và thiết lập](/vi/concepts/projects).
+- CLI đã đăng nhập. Xem [Dùng CLI](/vi/guides/cli).
+
+## Cài SDK
+
+Cài cả hai gói trong thư mục ứng dụng. Giữ nguyên các dependency React và React
+Native của ứng dụng:
+
+```bash
+npm install @logbrew/sdk@0.1.28 @logbrew/react-native@0.1.35
+```
+
+## Tạo khóa SDK của dự án
+
+Cấp cho ứng dụng một khóa SDK theo phạm vi dự án và chỉ có quyền ghi. Expo đưa
+mọi giá trị `EXPO_PUBLIC_*` vào bundle của ứng dụng. Không bao giờ đặt thông
+tin xác thực của tài khoản hoặc của máy chủ vào biến đó.
+
+CLI v0.1.32 trở lên tạo khóa cho một dự án có sẵn. Lệnh này không tạo dự án
+mới. Tìm ID dự án:
+
+```bash
+logbrew projects --json
+```
+
+Tạo khóa. Dùng một đường dẫn tệp mới trong thư mục chỉ chủ sở hữu truy cập
+được:
+
+```bash
+install -d -m 700 "$HOME/.logbrew" &&
+logbrew projects keys create "<project_id>" \
+  --ingest-key-file "$HOME/.logbrew/my-mobile-app.ingest" \
+  --label "My mobile app" \
+  --kind sdk \
+  --json
+```
+
+Chỉ tiếp tục sau khi lệnh thành công. Nếu kết quả không rõ ràng, chạy lại đúng
+lệnh đó với cùng tham số. Không dùng `--abandon-retry`.
+
+Không đưa tệp khóa vào hệ thống quản lý mã nguồn. Không dùng thông tin xác thực
+tài khoản đã cấp quyền cho CLI. Khi phát triển Expo trên máy cục bộ, đặt khóa
+vào tệp `.env.local` được bỏ qua (ignored) ở thư mục gốc của ứng dụng:
+
+```dotenv
+EXPO_PUBLIC_LOGBREW_CLIENT_KEY=<your_project_sdk_key>
+```
+
+Giữ nguyên tham chiếu trực tiếp `process.env.EXPO_PUBLIC_LOGBREW_CLIENT_KEY`
+trong module thiết lập bên dưới. Tải lại hoàn toàn ứng dụng sau khi đổi giá
+trị. Xem
+[biến môi trường Expo](https://docs.expo.dev/guides/environment-variables/)
+để cấu hình lúc build. Ứng dụng React Native thuần thì tải khóa qua cấu hình
+riêng của nó.
+
+## Tạo client
+
+Đặt phần thiết lập này trong một module mà ứng dụng tải khi khởi động. Không
+tạo client ở mỗi lần render. Đặt dịch vụ, môi trường và bản phát hành trong
+`context`:
+
+```js
+import { AppState } from "react-native";
+import {
+  createAppStateListener,
+  createLogBrewReactNativeClient,
+  createReactNativeFetchTransport
+} from "@logbrew/react-native";
+
+const clientKey = process.env.EXPO_PUBLIC_LOGBREW_CLIENT_KEY;
+if (!clientKey) {
+  throw new Error("Set EXPO_PUBLIC_LOGBREW_CLIENT_KEY");
+}
+
+const client = createLogBrewReactNativeClient({
+  clientKey,
+  context: {
+    schemaVersion: 1,
+    resource: {
+      service: { name: "my-mobile-app" },
+      deployment: {
+        environment: __DEV__ ? "development" : "production",
+        release: "mobile@1.0.0"
+      }
+    }
+  },
+  transport: createReactNativeFetchTransport()
+});
+
+const stopAppStateListener = createAppStateListener(client, AppState, {
+  flushOnBackground: true
+});
+
+export async function verifyLogBrewSetup() {
+  client.log(`evt_react_native_setup_${Date.now()}`, new Date().toISOString(), {
+    level: "info",
+    message: "React Native setup check"
+  });
+
+  const receipt = await client.flush();
+  if (receipt.statusCode < 200 || receipt.statusCode >= 300) {
+    throw new Error("LogBrew did not accept the setup event");
+  }
+  return {
+    status_code: receipt.statusCode,
+    attempts: receipt.attempts,
+    batches: receipt.batches
+  };
+}
+```
+
+Fetch transport bật tính năng tự động gửi, kèm hàng đợi và số lần thử lại có
+giới hạn. Không thêm bộ hẹn giờ flush thứ hai. AppState listener yêu cầu flush
+lần cuối khi ứng dụng chuyển sang không hoạt động hoặc chạy nền. Gọi
+`stopAppStateListener()` khi ứng dụng dọn dẹp lúc tắt.
+
+Với hàng đợi native, mỗi khóa chỉ dùng được cho một client đang hoạt động.
+Client thứ hai cho cùng khóa sẽ thất bại với `configuration_error`. Đây là thêm
+một lý do để chỉ tạo client một lần.
+
+## Gửi và tìm log thử nghiệm
+
+Gọi `verifyLogBrewSetup()` một lần từ một thao tác thử nghiệm chỉ dành cho môi
+trường phát triển. Chờ (await) kết quả và xử lý promise bị reject. Không in
+khóa hoặc batch sự kiện.
+
+Kết quả `2xx` có `batches` lớn hơn 0 cho thấy LogBrew đã chấp nhận batch.
+Lần flush rỗng trả về `204` với 0 lần thử và 0 batch, vì tính năng tự động gửi có
+thể đã gửi sự kiện trước đó. Trong cả hai trường hợp, đọc log đã lưu bằng CLI:
+
+```bash
+logbrew read logs --project "<project_id>" \
+  --search "React Native setup check" --since 1h --json
+```
+
+Kiểm tra thời điểm sự kiện và dịch vụ trong kết quả. Kết quả trống không cho
+biết nguyên nhân. Kiểm tra dự án, khóa và khoảng thời gian.
+
+`RecordingTransport.alwaysAccept()` chỉ dùng cho kiểm thử cục bộ. Nó trả về
+`202` giả lập và không gửi yêu cầu nào.
+
+## Gửi khi ngoại tuyến và sau khi khởi động lại
+
+Đọc `client.deliveryHealth().storage` trong ứng dụng đang chạy:
+
+- `persistent`: client dùng hàng đợi native. Các sự kiện đang chờ được tải lại
+  sau khi ứng dụng khởi động lại.
+- `memory`: các sự kiện đang chờ bị mất khi runtime JavaScript khởi động lại.
+
+Giá trị mặc định `persistentQueue: "auto"` dùng hàng đợi native khi binary của
+ứng dụng chứa module native của LogBrew. Expo Go và các binary cũ hơn dùng hàng
+đợi trong bộ nhớ. Bản cập nhật chỉ có JavaScript không thể thêm module native.
+
+Nếu ứng dụng production cần gửi được sau khi khởi động lại, đặt
+`persistentQueue: "required"`. Khi đó, việc tạo client sẽ thất bại với
+`configuration_error` nếu thiếu hàng đợi native. Build lại ứng dụng với module
+native. Chỉ dùng `persistentQueue: "disabled"` khi bạn muốn dùng hàng đợi trong
+bộ nhớ.
+
+Hàng đợi native chứa tối đa 1.000 sự kiện và 4 MiB dữ liệu sự kiện. Các giới
+hạn nhỏ hơn của client cũng được áp dụng. Sự kiện trong hàng đợi native giữ
+nguyên ID sự kiện sau khi khởi động lại.
+
+Việc gửi đảm bảo ít nhất một lần (at least once), nên một lần thử lại có thể
+gửi một sự kiện hai lần. Khi ID và nội dung sự kiện khớp với một sự kiện
+LogBrew đã chấp nhận, LogBrew không lưu sự kiện đó lần nữa. Flush khi chạy nền
+chỉ là một lần thử, không phải bằng chứng đã gửi thành công. Kiểm tra việc ghi
+nhận khi ngoại tuyến và khi khởi động lại ứng dụng. Sau đó, tìm sự kiện đã lưu
+trong dự án.
+
+### Đọc trạng thái gửi
+
+`client.deliveryHealth()` trả về trạng thái hàng đợi và trạng thái gửi, không
+kèm nội dung sự kiện. Đọc các trường này trước:
+
+| Trường | Ý nghĩa |
+| --- | --- |
+| `storage` | `persistent` hoặc `memory`. |
+| `deliveryState` | Trạng thái hiện tại của tính năng tự động gửi. |
+| `lastOutcome` | Kết quả của lần gửi gần nhất. |
+| `lastStatusClass` | Nhóm của mã trạng thái phản hồi gần nhất, hoặc lỗi mạng. |
+| `pausedReason` | `authentication` sau `401`. `rate_limit` sau `429`. |
+| `queueEvents` | Số sự kiện đang chờ gửi. |
+| `acceptedEvents` | Số sự kiện mà LogBrew đã chấp nhận. |
+| `droppedByReason` | Số sự kiện mà client đã loại bỏ, theo từng lý do. |
+
+## Chọn nội dung log
+
+Giữ mỗi thông điệp ngắn và cụ thể. Mô tả kết quả trong ứng dụng, như một yêu
+cầu thất bại hoặc một lần thử lại đã lên lịch. Không đưa vào tên, địa chỉ
+email, access token, giá trị biểu mẫu hoặc body yêu cầu.
+
+Dùng mức độ nghiêm trọng phù hợp với sự kiện: `info`, `warning`, `error` hoặc
+`critical`. Giữ dịch vụ, môi trường và bản phát hành nhất quán để bạn tìm được
+các bản ghi liên quan.
+
+`npx react-native log-ios` và `npx react-native log-android` hiển thị log của
+thiết bị cục bộ. Các lệnh này không truy vấn LogBrew. Xem
+[gỡ lỗi native trong React Native](https://reactnative.dev/docs/debugging-native-code).
+
+## Khôi phục khi kiểm tra thất bại
+
+Lệnh gọi `flush()` thất bại sẽ reject với một mã lỗi SDK. Không đưa khóa và
+body sự kiện vào báo cáo lỗi.
+
+| Kết quả | Bước tiếp theo |
+| --- | --- |
+| Thiếu khóa client | Quá trình thiết lập dừng trước khi gửi. Tải khóa SDK của dự án qua cấu hình ứng dụng. |
+| `401`, `unauthenticated` | LogBrew đã từ chối khóa. Tính năng tự động gửi tạm dừng với `pausedReason: "authentication"`. Sửa hoặc thay khóa SDK của dự án trước khi tạo client mới. Không bao giờ dùng thông tin xác thực tài khoản. |
+| `429`, `rate_limited` | SDK giữ batch và tạm dừng tự động gửi với `pausedReason: "rate_limit"`. Không thêm vòng lặp thử lại. |
+| `400`, `transport_error` | LogBrew đã từ chối yêu cầu. Kiểm tra các trường sự kiện và phiên bản gói. |
+| `network_failure` | SDK không có kết quả gửi. LogBrew có thể đã chấp nhận sự kiện. Kiểm tra kết nối mạng và `deliveryHealth()`. |
+| `5xx`, `transport_error` | SDK đã thử lại. Đọc log đã lưu trước khi thử lại thủ công. |
+| Kết quả CLI trống | Kiểm tra dự án, khóa, thời điểm sự kiện và bộ lọc. |
+
+Xem [Khắc phục sự cố](/vi/guides/troubleshooting) để biết thêm các bước kiểm
+tra.
+
+## Giữ Debug ID của Expo trong bundle phát hành
+
+Tạo cấu hình Metro cho Expo qua LogBrew. Khi đó, bundle runtime có cùng Debug ID
+với source map của nó:
+
+```js
+// metro.config.js
+const { getLogBrewExpoConfig } = require("@logbrew/react-native/metro");
+
+module.exports = getLogBrewExpoConfig(__dirname);
+```
+
+Nếu ứng dụng dùng chế độ bundle của React Native Worklets, áp dụng phép biến
+đổi đó sau hàm hỗ trợ của LogBrew:
+
+```js
+// metro.config.js
+const { getLogBrewExpoConfig } = require("@logbrew/react-native/metro");
+const { getBundleModeMetroConfig } = require("react-native-worklets/bundleMode");
+
+module.exports = getBundleModeMetroConfig(getLogBrewExpoConfig(__dirname));
+```
+
+Hàm hỗ trợ giữ nguyên các plugin pre-serialization hiện có của Expo.
+
+Ứng dụng React Native thuần thì bọc cấu hình Metro hoàn chỉnh bằng
+`withLogBrewMetroConfig()`. Không dùng hàm bọc đó với Expo. Nếu dùng, bản build
+production sẽ dừng với thông điệp chỉ đến `getLogBrewExpoConfig()`.

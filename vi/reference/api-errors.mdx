@@ -1,0 +1,531 @@
+---
+title: "Xử lý lỗi API và mã lỗi API"
+sidebarTitle: "Lỗi API"
+description: "Đọc mã lỗi, trạng thái HTTP và ví dụ JSON của API LogBrew. Dùng hướng dẫn khôi phục được trả về để sửa yêu cầu và thử lại an toàn."
+---
+
+Lỗi API của LogBrew dùng một envelope JSON chung. Dùng `code` và
+`next_action` để điều khiển hành vi chương trình. Hiển thị `error` và `next`
+dưới dạng văn bản thuần. Không so khớp theo câu chữ của `error` hay `next`.
+
+```json
+{
+  "error": "invalid since value",
+  "code": "validation_failed",
+  "next": "use since=24h, since=7d, or an RFC3339 timestamp",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+| Trường | Ý nghĩa |
+| --- | --- |
+| `error` | Mô tả lỗi ngắn gọn cho người đọc. |
+| `code` | Mã lỗi ổn định. Dùng mã này để chọn nhánh xử lý phía client. |
+| `next` | Bước khôi phục dành cho người đọc. Nội dung khác nhau theo từng route. |
+| `next_action.code` | Bước khôi phục ổn định để chương trình định tuyến xử lý. |
+| `next_action.target` | Đối tượng mà bước khôi phục áp dụng, chẳng hạn `auth` hoặc `request`. |
+
+Một số phản hồi có thêm trường, chẳng hạn `limit`, `reset_at` hoặc
+`retry_after_seconds`. Bảng [mã lỗi](#error-codes) nêu tên các trường này.
+
+## Xử lý phản hồi lỗi
+
+1. Đọc trạng thái HTTP.
+2. Kiểm tra rằng nội dung phản hồi là JSON trước khi đọc `code`.
+3. Dùng cả trạng thái và `code` để chọn nhánh xử lý phía client.
+4. Hiển thị `error` và `next` dưới dạng văn bản thuần. Không render chúng thành HTML và không chạy chúng như lệnh.
+5. Dùng `next_action` để khôi phục tự động. Nếu client không nhận ra bước này, dừng lại và hiển thị lỗi.
+6. Lưu các giá trị `limit`, `reset_at` và `retry_after_seconds` được trả về cùng với yêu cầu thất bại.
+7. Trước khi thử lại, áp dụng [quy tắc thử lại](#retry-rules).
+
+Nếu phản hồi không có envelope JSON, giữ trạng thái HTTP và ghi mã là không
+khả dụng. Không tự đặt ra `code` của LogBrew. Lỗi proxy hoặc lỗi mạng có thể
+gây ra kết quả này.
+
+Không thay `code` của LogBrew bằng tên trạng thái HTTP. Ví dụ, phản hồi
+`400` có thể chứa `invalid_json` hoặc `invalid_path`. Mỗi mã cần một cách sửa
+khác nhau.
+
+Khi ghi log, ghi lại trạng thái HTTP và `code`. Không ghi log toàn bộ nội dung
+phản hồi, thông tin xác thực hay token khôi phục.
+
+## <span id="error-codes">Mã lỗi</span>
+
+Cùng một `code` có thể xuất hiện trên nhiều route. Nội dung `next` và các giá
+trị `next_action` có thể thay đổi theo route. Dùng các giá trị được trả về. Mỗi
+endpoint chỉ trả về những mã áp dụng cho cách xác thực, phương thức, nội dung yêu
+cầu và giới hạn của nó.
+
+| HTTP | `code` | Ý nghĩa | Việc client cần làm |
+| --- | --- | --- | --- |
+| `400`, `413`, `415` hoặc `422` | `invalid_json` | Nội dung yêu cầu không phải JSON hợp lệ, quá lớn, sai content type hoặc không khớp với cấu trúc JSON của route. | Gửi JSON hợp lệ với `Content-Type: application/json` và các trường mà route cần. |
+| `400`, `413` hoặc `500` | `invalid_multipart` | Máy chủ không đọc được tệp tải lên dạng `multipart/form-data`. | Với `400` hoặc `413`, sửa form hoặc kích thước của form. Với `500`, áp dụng [quy tắc thử lại](#retry-rules). |
+| `400` hoặc `500` | `invalid_path` | Máy chủ không đọc được một giá trị trong đường dẫn URL, chẳng hạn ID dự án hoặc ID vấn đề. | Với `400`, sửa ID và kiểu của ID. Với `500`, áp dụng [quy tắc thử lại](#retry-rules). |
+| `400`, `405` hoặc `426` | `invalid_websocket_upgrade` | Kết nối luồng trực tiếp không phải yêu cầu nâng cấp WebSocket hợp lệ. | Kết nối bằng `GET` kèm header nâng cấp WebSocket. Xem [định dạng sự kiện trực tiếp](/vi/reference/telemetry-response-shapes#live-event-response-format). |
+| `401` | `unauthorized` | Xác thực tài khoản bị thiếu, không hợp lệ hoặc đã hết hạn. | Đăng nhập lại. Với CLI, chạy `logbrew login`. |
+| `401` | `ingest_key_invalid` | Yêu cầu gửi telemetry không có khóa gửi dữ liệu hợp lệ theo phạm vi dự án. | Cấu hình khóa gửi dữ liệu hiện hành cho dự án đó. |
+| `402` | `subscription_required` | Thao tác này cần gói trả phí. | Làm theo `next`. Nội dung này nêu bước cần làm với gói hoặc yêu cầu bạn liên hệ hỗ trợ. |
+| `403` | `forbidden` | Tài khoản không có quyền truy cập tài nguyên hoặc thao tác này. | Dùng tài khoản có quyền truy cập. Không thử các ID khác. |
+| `403` | `role_forbidden` | Tài khoản không thể thực hiện thay đổi vai trò này trong tổ chức. | Nhờ chủ sở hữu hoặc quản trị viên của tổ chức thực hiện thay đổi. |
+| `404` | `not_found` | Tài nguyên hoặc route API không khả dụng với tài khoản. | Đọc lại một danh sách thuộc tài khoản. Sau đó kiểm tra ID, đường dẫn và bộ lọc. |
+| `405` | `method_not_allowed` | Route tồn tại, nhưng không hỗ trợ phương thức HTTP này. | Dùng phương thức mà `next` nêu. |
+| `408` | `request_timeout` | Yêu cầu không hoàn tất kịp thời. | Thu hẹp phạm vi, hoặc chờ rồi gửi lại yêu cầu. |
+| `409` | `idempotency_conflict` | Một `Idempotency-Key` hoặc `deployment_id` đã được dùng lại cho một yêu cầu khác. | Thử lại yêu cầu ban đầu mà không thay đổi gì, hoặc dùng khóa mới cho việc mới. |
+| `409` | `account_link_conflict` | Danh tính đăng nhập thuộc về một tài khoản khác. | Xử lý liên kết tài khoản trong cài đặt tài khoản. Không tạo tài khoản thứ hai cho cùng danh tính. |
+| `409` | `account_recovery_available` | Tài khoản đang trong thời hạn khôi phục. | Làm theo bước khôi phục được trả về. Giữ bí mật token khôi phục. |
+| `410` | `account_recovery_expired` | Thời hạn khôi phục tài khoản đã kết thúc. | Đăng nhập để tạo tài khoản mới. |
+| `422` | `validation_failed` | Giá trị truy vấn, trường, bộ lọc, cursor, header hoặc khoảng thời gian không hợp lệ. | Sửa giá trị được nêu tên. Sau đó gửi lại yêu cầu. |
+| `422` | `invite_invalid` | Lời mời vào tổ chức có địa chỉ email hoặc vai trò không hợp lệ. | Sửa lời mời. Sau đó gửi lại. |
+| `422` | `member_limit_exceeded` | Tổ chức đã đạt số thành viên tối đa. | Nhờ chủ sở hữu tổ chức xóa một thành viên hoặc đổi gói. |
+| `422` | `organization_limit_exceeded` | Tài khoản đã đạt số tổ chức tối đa. | Xóa một tổ chức, đổi gói hoặc liên hệ hỗ trợ. |
+| `423` | `organization_paused` | Tổ chức bị tạm dừng vì gói đăng ký trả phí không còn hoạt động. | Kích hoạt lại một gói đăng ký trả phí. |
+| `429` | `rate_limited` | Bên gọi đã gửi quá nhiều yêu cầu. Có thêm `retry_after_seconds`. | Chờ `retry_after_seconds`. Sau đó thử lại với backoff. |
+| `429` | `usage_limit_exceeded` | Việc gửi dữ liệu đã chạm hạn mức của tài khoản trong kỳ thanh toán. Có thêm `limit` và `reset_at`. | Dừng gửi dữ liệu đến `reset_at`, hoặc đổi gói. |
+| `429` | `artifact_storage_limit_exceeded` | Việc tải lên artifact (tệp bản dựng) của bản phát hành hoặc tệp gỡ lỗi đã chạm giới hạn dung lượng. Có thêm `limit`. | Chờ rồi mới tải lên lại. Nếu vẫn chạm giới hạn, liên hệ hỗ trợ. |
+| `429` | `invitation_limit_exceeded` | Tổ chức đã dùng hết hạn mức lời mời trong ngày. Có thêm `limit` và `reset_at`. | Chờ đến `reset_at` hoặc đổi gói. |
+| `500` | `storage_error`, `json_error` hoặc `internal_error` | Máy chủ không hoàn tất yêu cầu. | Áp dụng [quy tắc thử lại](#retry-rules). Nếu lỗi vẫn tiếp diễn, [báo cáo sự cố](/vi/guides/report-a-problem). |
+| `503` | `service_unavailable` | API hiện không thể nhận yêu cầu. | Chờ. Sau đó gửi lại yêu cầu. |
+| `503` | `artifact_storage_unavailable` | Việc tải lên artifact của bản phát hành và tệp gỡ lỗi tạm thời không khả dụng. | Chờ rồi mới tải lên lại. Không bắt đầu các lần tải lên song song. |
+| `503` | `billing_unavailable` | Trang thanh toán hoặc phần quản lý gói tạm thời không khả dụng. | Chờ. Sau đó thử lại thao tác thanh toán. |
+
+ID không tồn tại và ID mà bạn không có quyền truy cập có thể trả về cùng một
+phản hồi. Không dùng nội dung lỗi để tìm xem tài khoản nào sở hữu một ID. Đường
+dẫn API không xác định trả về `404` với `not_found`.
+
+### Trường giới hạn
+
+| `code` | Giá trị `limit` | Trường khác |
+| --- | --- | --- |
+| `usage_limit_exceeded` | `issue_events`, `log_bytes`, `metric_bytes` hoặc `trace_spans` | `reset_at`: thời điểm kết thúc kỳ thanh toán (RFC3339). |
+| `invitation_limit_exceeded` | `invitations_per_day` | `reset_at`: thời điểm bắt đầu ngày UTC tiếp theo (RFC3339). |
+| `artifact_storage_limit_exceeded` | Tên một ngưỡng dung lượng, chẳng hạn `artifact_completed_project_bytes` | Không có. |
+| `rate_limited` | Không có | `retry_after_seconds`: số giây nguyên cần chờ, tối thiểu `1`. |
+
+Đọc hạn mức và mức sử dụng hiện tại từ
+[Account API](/vi/reference/account-api#account-usage).
+
+## <span id="retry-rules">Quy tắc thử lại</span>
+
+Dùng mã lỗi và loại thao tác để quyết định có thử lại hay không. Chỉ dựa vào
+trạng thái là chưa đủ.
+
+| Phản hồi | Quy tắc thử lại |
+| --- | --- |
+| `validation_failed`, `invalid_json`, `invalid_path` (`400`), `invalid_multipart` (`400` hoặc `413`) hoặc `invalid_websocket_upgrade` | Sửa giá trị được nêu tên trong yêu cầu trước. Không gửi lại cùng yêu cầu. |
+| `unauthorized` hoặc `ingest_key_invalid` | Thay hoặc làm mới đúng thông tin xác thực trước. |
+| `forbidden`, `role_forbidden` hoặc `not_found` | Không thử lại với ID khác. Đọc lại một danh sách thuộc tài khoản, hoặc xin quyền truy cập từ chủ sở hữu. |
+| `method_not_allowed` | Dùng phương thức trong `next`. Không gửi lại phương thức đã bị từ chối. |
+| `idempotency_conflict` | Thử lại yêu cầu ban đầu mà không thay đổi gì, hoặc dùng khóa mới cho việc mới. |
+| `rate_limited` | Chờ `retry_after_seconds`. Sau đó dùng exponential backoff có jitter. |
+| `usage_limit_exceeded` hoặc `invitation_limit_exceeded` | Chờ đến `reset_at`, hoặc đổi gói. |
+| `artifact_storage_limit_exceeded` | Chờ rồi mới tải lên lại. Nếu vẫn chạm giới hạn, liên hệ hỗ trợ. |
+| `subscription_required`, `organization_paused`, `member_limit_exceeded` hoặc `organization_limit_exceeded` | Làm theo `next`. Thử lại mà không thay đổi gói hoặc thành viên sẽ lại thất bại. |
+| `request_timeout`, `service_unavailable`, `artifact_storage_unavailable` hoặc `billing_unavailable` | Chờ. Sau đó gửi lại thao tác đọc với cùng phạm vi. Với thao tác ghi, áp dụng [quy tắc cho thao tác ghi](#writes). |
+| `storage_error`, `json_error`, `internal_error` hoặc một lỗi `5xx` khác | Chờ. Sau đó gửi lại thao tác đọc. Với thao tác ghi, áp dụng [quy tắc cho thao tác ghi](#writes). Nếu lỗi vẫn tiếp diễn, [báo cáo sự cố](/vi/guides/report-a-problem). |
+
+- Không bắt đầu nhiều lần thử lại song song cho một yêu cầu thất bại.
+- Với `rate_limited`, phản hồi cũng có header `Retry-After` và
+  `X-RateLimit-After`. Cả hai chứa cùng số giây với `retry_after_seconds`.
+- Hết thời gian chờ không chứng minh kết quả là trống.
+
+Giới hạn tốc độ kiểm soát tần suất yêu cầu. Hạn mức sử dụng kiểm soát mức
+tài khoản được phép dùng trong một kỳ thanh toán. Cả hai đều dùng `429`. Giữ các
+trường của chúng tách biệt. Khi chạm một trong hai giới hạn, cho người dùng
+thấy rằng việc thu thập dữ liệu hoặc thao tác đọc đang bị trì hoãn. Không hiển
+thị dữ liệu cũ như thể đó là kết quả của lần đọc mới.
+
+### <span id="writes">Thao tác ghi</span>
+
+Hết thời gian chờ, phản hồi `5xx` hoặc lỗi mạng không chứng minh thao tác ghi
+đã thất bại. Trước khi gửi lại một thao tác ghi:
+
+1. Nếu route hỗ trợ khóa idempotency (gửi lại cùng yêu cầu không tạo bản ghi
+   trùng), gửi lại cùng khóa và cùng nội dung. Chỉ dùng khóa mới cho việc mới.
+2. Nếu route không có khóa idempotency, đọc tài nguyên trước. Chỉ gửi lại thao
+   tác ghi nếu thay đổi chưa có.
+3. Nếu không tìm thấy kết quả, dừng thử lại tự động và báo cho người dùng.
+
+Các route sau nhận khóa thử lại:
+
+| Route | Khóa thử lại |
+| --- | --- |
+| `POST /api/projects` | Header `Idempotency-Key` tùy chọn. |
+| `POST /api/projects/{project_id}/ingest-keys` | Header `Idempotency-Key` tùy chọn. |
+| `POST /api/support/tickets` | Header `Idempotency-Key` tùy chọn. |
+| `POST /api/support/tickets/{ticket_id}/context` | Header `Idempotency-Key` bắt buộc. |
+| `PUT /api/telemetry/deployments/{deployment_id}` | `deployment_id` trong đường dẫn. |
+
+Giá trị `Idempotency-Key` có 1 đến 128 ký tự ASCII hiển thị được. Giá trị khác
+trả về `422` với `validation_failed`.
+
+`idempotency_conflict` nghĩa là khóa thuộc về một yêu cầu khác. Không thay đổi
+nội dung của lần thử lại dùng khóa ban đầu.
+
+## Lỗi cấu trúc yêu cầu
+
+`invalid_json` nghĩa là máy chủ không thể nhận nội dung yêu cầu theo cấu trúc
+JSON của route. Kiểm tra content type, kích thước nội dung, cú pháp JSON, các
+trường bắt buộc và kiểu của trường. Trạng thái HTTP cho biết phần nào bị lỗi:
+
+| HTTP | Nguyên nhân |
+| --- | --- |
+| `400` | Nội dung không phải JSON hợp lệ. |
+| `413` | Nội dung quá lớn. |
+| `415` | Header `Content-Type` không phải `application/json`. |
+| `422` | JSON hợp lệ, nhưng một trường bị thiếu hoặc sai kiểu. |
+
+`validation_failed` với lỗi `invalid query parameters` nghĩa là máy chủ không
+đọc được query string. Kiểm tra tên tham số và kiểu giá trị. Không gửi tham số
+truy vấn không xác định.
+Trang [Bộ lọc truy vấn](/vi/reference/telemetry-api-filters) liệt kê tham số
+của từng route.
+
+`invalid_path` với trạng thái `400` nghĩa là một giá trị trong đường dẫn, chẳng
+hạn ID dự án, sai định dạng. Không chuyển giá trị đường dẫn sang tham số truy
+vấn.
+
+Phản hồi `500` với `invalid_path` hoặc `invalid_multipart` không chứng minh yêu
+cầu bị sai. Áp dụng [quy tắc thử lại](#retry-rules).
+
+## Lỗi xác thực và quyền truy cập
+
+- `unauthorized` nghĩa là xác thực tài khoản bị thiếu, không hợp lệ hoặc đã hết
+  hạn. Gửi `Authorization: Bearer <token>`, hoặc đăng nhập lại. Một số route
+  trả về `next_action.code` là `authorize_request` với nội dung `next` riêng
+  cho route đó, chẳng hạn kết nối luồng trực tiếp không có ticket hợp lệ.
+- `ingest_key_invalid` chỉ áp dụng cho việc gửi telemetry. Cấu hình khóa hiện
+  hành cho đúng dự án.
+- `forbidden` nghĩa là tài khoản không thể thực hiện thao tác đó. Không thử lại
+  với ID tài nguyên khác.
+- `not_found` nghĩa là tài nguyên không khả dụng với tài khoản.
+
+Không dùng khóa gửi dữ liệu thay cho bearer token của tài khoản. Không dùng
+bearer token của tài khoản thay cho khóa gửi dữ liệu.
+
+## Giữ an toàn cho chi tiết lỗi
+
+- Phản hồi `account_recovery_available` chứa một `recovery_token` có thời hạn
+  ngắn. Giữ token này trong trạng thái client được bảo vệ. Không đưa token vào
+  log, URL, ảnh chụp màn hình, báo cáo hỗ trợ hay prompt của agent.
+- Các mã `500` luôn dùng thông điệp `Internal error`. Phản hồi không nêu tên
+  thành phần bị lỗi. Không đoán nguyên nhân.
+- Không thêm thông tin xác thực, thông tin chẩn đoán riêng tư hay dữ liệu khách
+  hàng vào lỗi mà bạn hiển thị.
+- Phản hồi API không cho phép mua hàng, xóa dữ liệu hay thay đổi tài khoản khác.
+  Xin sự đồng ý của người dùng trước khi thực hiện các thao tác đó.
+
+## Ví dụ
+
+Các ví dụ này cho thấy cấu trúc envelope. Nội dung `error` và `next` có thể
+khác nhau trên mỗi route.
+
+### Kiểm tra hợp lệ thất bại
+
+```json
+{
+  "error": "issue status must be unresolved, resolved, or archived",
+  "code": "validation_failed",
+  "next": "use status=unresolved, status=resolved, or status=archived",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+### <span id="invalid-query-parameters">Tham số truy vấn không hợp lệ</span>
+
+```json
+{
+  "error": "invalid query parameters",
+  "code": "validation_failed",
+  "next": "check query parameter names and value types, then retry",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+### <span id="invalid-json">JSON không hợp lệ</span>
+
+```json
+{
+  "error": "invalid JSON request body",
+  "code": "invalid_json",
+  "next": "send Content-Type: application/json with a body matching this endpoint",
+  "next_action": {
+    "code": "send_valid_json",
+    "target": "request"
+  }
+}
+```
+
+### <span id="invalid-path-value">Giá trị đường dẫn không hợp lệ</span>
+
+```json
+{
+  "error": "invalid URL path parameters",
+  "code": "invalid_path",
+  "next": "check path resource IDs and value types, then retry",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+### Tệp tải lên multipart không hợp lệ
+
+```json
+{
+  "error": "invalid multipart form-data request",
+  "code": "invalid_multipart",
+  "next": "send multipart/form-data with a valid boundary and expected parts",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+### Yêu cầu nâng cấp WebSocket không hợp lệ
+
+```json
+{
+  "error": "invalid WebSocket upgrade request",
+  "code": "invalid_websocket_upgrade",
+  "next": "connect with GET /api/feed/live?ticket=<ticket> using WebSocket upgrade headers",
+  "next_action": {
+    "code": "connect_live_feed",
+    "target": "live_feed"
+  }
+}
+```
+
+### <span id="authentication-failure">Xác thực thất bại</span>
+
+```json
+{
+  "error": "Invalid or expired token",
+  "code": "unauthorized",
+  "next": "send Authorization: Bearer <token>, include the logbrew_session cookie, or sign in again",
+  "next_action": {
+    "code": "sign_in",
+    "target": "auth"
+  }
+}
+```
+
+### Khóa gửi dữ liệu không hợp lệ
+
+Phản hồi này áp dụng cho việc gửi telemetry, không áp dụng cho thao tác đọc
+tài khoản. Khóa phải thuộc về dự án trong yêu cầu.
+
+```json
+{
+  "error": "Invalid ingest key",
+  "code": "ingest_key_invalid",
+  "next": "create a project-scoped ingest key, then retry ingestion with that key",
+  "next_action": {
+    "code": "configure_ingest_key",
+    "target": "project_ingest_key"
+  }
+}
+```
+
+### <span id="resource-not-found">Không tìm thấy tài nguyên</span>
+
+```json
+{
+  "error": "issue not found",
+  "code": "not_found",
+  "next": "check the resource id or filters and retry",
+  "next_action": {
+    "code": "check_resource",
+    "target": "resource"
+  }
+}
+```
+
+### Truy cập bị từ chối
+
+```json
+{
+  "error": "Insufficient permissions",
+  "code": "forbidden",
+  "next": "use an account with access to this resource",
+  "next_action": {
+    "code": "request_access",
+    "target": "auth"
+  }
+}
+```
+
+### <span id="unsupported-method">Phương thức không được hỗ trợ</span>
+
+```json
+{
+  "error": "Method not allowed",
+  "code": "method_not_allowed",
+  "next": "send GET /api/account/usage with Authorization or the logbrew_session cookie",
+  "next_action": {
+    "code": "use_supported_method",
+    "target": "api_method"
+  }
+}
+```
+
+### Hết thời gian chờ yêu cầu
+
+```json
+{
+  "error": "Request timed out",
+  "code": "request_timeout",
+  "next": "retry read-only requests later or narrow the request scope. Before repeating a write, check whether it succeeded and follow this endpoint's idempotency guidance",
+  "next_action": {
+    "code": "retry_or_narrow_scope",
+    "target": "request"
+  }
+}
+```
+
+### Xung đột idempotency
+
+```json
+{
+  "error": "Idempotency key was already used",
+  "code": "idempotency_conflict",
+  "next": "retry the original support request or use a new Idempotency-Key",
+  "next_action": {
+    "code": "use_new_idempotency_key",
+    "target": "request"
+  }
+}
+```
+
+### Giới hạn tốc độ
+
+```json
+{
+  "error": "Rate limit exceeded",
+  "code": "rate_limited",
+  "next": "wait for retry_after_seconds, then retry with exponential backoff and jitter",
+  "next_action": {
+    "code": "retry_with_backoff",
+    "target": "request"
+  },
+  "retry_after_seconds": 1
+}
+```
+
+### Hạn mức sử dụng
+
+Nội dung `next` và `next_action` phụ thuộc vào việc có thể đổi gói hay không.
+Nếu không thể, `next_action.code` là `wait_or_contact_support` và target là
+`support`.
+
+```json
+{
+  "error": "Usage limit exceeded",
+  "code": "usage_limit_exceeded",
+  "next": "wait until reset_at or upgrade your plan before retrying ingestion",
+  "next_action": {
+    "code": "wait_or_upgrade",
+    "target": "billing"
+  },
+  "limit": "log_bytes",
+  "reset_at": "2026-11-01T00:00:00+00:00"
+}
+```
+
+### Giới hạn dung lượng artifact
+
+```json
+{
+  "error": "Release artifact storage limit exceeded",
+  "code": "artifact_storage_limit_exceeded",
+  "next": "wait before retrying the upload, or contact LogBrew support if the limit persists",
+  "next_action": {
+    "code": "wait_or_contact_support",
+    "target": "support"
+  },
+  "limit": "artifact_completed_project_bytes"
+}
+```
+
+### Có thể khôi phục tài khoản
+
+Phản hồi này có thêm `deleted_at` và một `recovery_token` có thời hạn ngắn.
+Giữ token trong trạng thái client được bảo vệ.
+
+```json
+{
+  "error": "Account recovery available",
+  "code": "account_recovery_available",
+  "next": "restore account with POST /api/auth/restore",
+  "next_action": {
+    "code": "restore_account",
+    "target": "account_recovery"
+  },
+  "deleted_at": "2026-09-04T09:00:00Z",
+  "recovery_token": "<recovery token>"
+}
+```
+
+### Hết thời hạn khôi phục tài khoản
+
+```json
+{
+  "error": "Account recovery window expired",
+  "code": "account_recovery_expired",
+  "next": "create a new account after deletion completes",
+  "next_action": {
+    "code": "create_account",
+    "target": "auth"
+  }
+}
+```
+
+### Tổ chức bị tạm dừng
+
+```json
+{
+  "error": "Organization paused",
+  "code": "organization_paused",
+  "next": "resume an active paid subscription before using this organization",
+  "next_action": {
+    "code": "resume_subscription",
+    "target": "billing"
+  }
+}
+```
+
+### Lỗi máy chủ
+
+`storage_error`, `json_error` và `internal_error` dùng cùng thông điệp
+`error`. Các giá trị `code`, `next` và `next_action` thì khác nhau.
+
+```json
+{
+  "error": "Internal error",
+  "code": "internal_error",
+  "next": "retry read-only requests later. Before repeating a write, check whether it succeeded and follow this endpoint's idempotency guidance. Contact LogBrew support if the problem persists",
+  "next_action": {
+    "code": "retry_or_contact_support",
+    "target": "support"
+  }
+}
+```
+
+| `code` | `next_action.code` | `next_action.target` |
+| --- | --- | --- |
+| `storage_error` | `retry_or_check_storage` | `backend_status` |
+| `json_error` | `send_valid_json` | `request` |
+| `internal_error` | `retry_or_contact_support` | `support` |
+
+Để biết endpoint, cách xác thực và bộ lọc, đọc
+[Telemetry API](/vi/reference/telemetry-api).

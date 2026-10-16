@@ -1,0 +1,248 @@
+---
+title: "Source map JavaScript với Vite"
+sidebarTitle: "Source map JavaScript"
+description: "Tải source map JavaScript lên từ bản dựng Vite. Không để thông tin xác thực trong ứng dụng. Ánh xạ khung ngăn xếp đã minify về vị trí mã nguồn gốc."
+---
+
+Tệp JavaScript đã minify có thể gộp nhiều dòng mã nguồn vào một dòng. Khung ngăn
+xếp (stack frame) từ tệp đó trỏ đến dòng và cột trong mã được sinh ra.
+[Source map](https://ecma-international.org/publications-and-standards/standards/ecma-426/)
+nối vị trí đó với tệp, dòng và cột gốc.
+
+Hướng dẫn này dùng plugin Vite trong `@logbrew/sdk` 0.1.28. Bạn cần một ứng dụng
+Vite, quyền truy cập vào đầu ra build của ứng dụng và quyền tạo khóa dự án. Với
+tệp gỡ lỗi của Apple, xem [Crash và treo trên Apple](/vi/guides/apple-crashes-and-hangs).
+
+## Giữ bản dựng và sự kiện đi cùng nhau
+
+Dùng cùng dự án, bản phát hành, môi trường và dịch vụ cho lần tải lên và cho các
+sự kiện runtime của ứng dụng. Xem [Bản phát hành](/vi/concepts/releases) để biết
+cách đặt tên phiên bản. Hướng dẫn này dùng `web@1.2.3`, `staging` và
+`checkout-web`.
+
+Đổi bản phát hành khi mã đã build thay đổi. Tải bản dựng đã chuẩn bị lên, rồi
+triển khai đúng bản dựng đó. Không build lại hoặc sửa JavaScript của bản dựng sau
+khi tải lên.
+
+## Thêm plugin Vite
+
+Cài SDK trong thư mục ứng dụng:
+
+```bash
+npm install @logbrew/sdk@0.1.28
+```
+
+Thêm plugin vào `vite.config.js`. Giữ nguyên các plugin và thiết lập build khác.
+Thay ID dự án:
+
+```js
+import { createLogBrewViteReleaseArtifactsPlugin } from "@logbrew/sdk/vite-release-artifacts";
+
+export default {
+  plugins: [
+    createLogBrewViteReleaseArtifactsPlugin({
+      projectId: "<project_id>",
+      release: "web@1.2.3",
+      environment: "staging",
+      service: "checkout-web",
+      minifiedPathPrefix: "https://app.example.com"
+    })
+  ]
+};
+```
+
+`minifiedPathPrefix` là URL đã triển khai của thư mục build. Plugin nối thêm
+đường dẫn của từng tệp trong thư mục đó. Ví dụ, `dist/assets/app.js` trở thành
+`https://app.example.com/assets/app.js`. Nếu bản dựng được phục vụ tại `/web`,
+đưa `/web` vào tiền tố. Không thêm `/assets` vào tiền tố.
+
+Khi không có tùy chọn `upload`, plugin không gửi gì đến LogBrew. Plugin cũng:
+
+- Đặt `build.sourcemap` thành `"hidden"` khi bạn chưa đặt giá trị này. Nếu bạn
+  đặt là `false`, đổi thành `"hidden"`.
+- Giữ tên hàm khi bạn không đặt tùy chọn cho minifier. Nếu bạn tự đặt tùy chọn,
+  giữ tên hàm trong đó.
+
+Source map ẩn vẫn nằm trong đầu ra build như các tệp thông thường. Chúng không
+được kiểm soát truy cập. Không dùng source map inline. Plugin không chấp nhận
+map nằm bên trong tệp JavaScript.
+
+## Build và kiểm tra trên máy cục bộ
+
+Chạy build production:
+
+```bash
+npm run build
+```
+
+Plugin gán cùng một Debug ID cho mỗi tệp JavaScript và source map của nó. Plugin
+xóa `sourcesContent` được nhúng và đường dẫn gốc của ứng dụng trên máy cục bộ.
+Plugin ghi ra `dist/logbrew-release-artifacts.json`.
+
+Mở manifest. Đảm bảo `validation.status` là `ready` và manifest liệt kê các tệp
+của bản dựng này cùng URL đã triển khai. Map ẩn gây ra cảnh báo
+`sourceMappingURL comment missing`. Cảnh báo đó là bình thường.
+
+Không tải lên map chứa đường dẫn riêng tư hoặc mã nguồn mà bạn không muốn chia
+sẻ. Gói tải lên cũng chứa JavaScript đã biên dịch, nên không để secret trong
+bundle của ứng dụng.
+
+Kiểm tra lần tải lên trên máy cục bộ. Lệnh này không gửi yêu cầu nào và không
+cần khóa:
+
+```bash
+npx --no-install logbrew-release-artifacts upload-js \
+  --build-dir dist \
+  --manifest dist/logbrew-release-artifacts.json \
+  --endpoint https://api.logbrew.co/api/release-artifacts \
+  --allow-hosted \
+  --dry-run
+```
+
+Chỉ tiếp tục khi lệnh thoát với mã `0` và in ra `"status": "dry_run"`. Bước này
+kiểm tra các tệp cục bộ và manifest. Nó không kiểm tra máy chủ. Nếu bản dựng của
+bạn dùng thư mục đầu ra khác, đổi cả hai đường dẫn.
+
+Để kiểm tra một ánh xạ, chạy ứng dụng đã build và chép một khung ngăn xếp được
+sinh ra, kèm tệp, dòng và cột của nó:
+
+```bash
+npx --no-install logbrew-release-artifacts symbolicate-js \
+  --build-dir dist \
+  --manifest dist/logbrew-release-artifacts.json \
+  --stack-frame "at checkoutTotal (https://app.example.com/assets/index-a1b2c3.js:2:780)"
+```
+
+Đảm bảo kết quả có `"status": "resolved"`. Đối tượng `original` cho biết tệp
+nguồn, dòng và cột. Lệnh này chạy trên máy cục bộ và không tải lên gì.
+
+## <span id="create-an-artifact-key">Tạo khóa artifact</span>
+
+Đăng nhập bằng [LogBrew CLI](/vi/guides/cli). Tìm ID dự án:
+
+```bash
+logbrew projects --json
+```
+
+Tạo khóa artifact (tệp bản dựng) cho dự án. Dùng một đường dẫn tệp mới trong thư
+mục mà chỉ chủ sở hữu truy cập được:
+
+```bash
+install -d -m 700 "$HOME/.logbrew" &&
+logbrew projects keys create "<project_id>" \
+  --ingest-key-file "$HOME/.logbrew/checkout-web.artifact" \
+  --label "Checkout web build" \
+  --kind artifact \
+  --json
+```
+
+Chỉ tiếp tục sau khi lệnh thành công. Nếu kết quả không rõ ràng, chạy lại cùng
+lệnh với cùng đối số. Không dùng `--abandon-retry`.
+
+Khóa artifact có phạm vi theo dự án và chỉ có quyền ghi. Khóa này tải source map
+và tệp gỡ lỗi lên. Nó không gửi được telemetry và không đọc được metadata của
+artifact. Không dùng thông tin xác thực tài khoản hoặc khóa SDK runtime thay cho
+nó.
+
+Lưu khóa thành `LOGBREW_RELEASE_ARTIFACT_TOKEN` trong phần cài đặt secret của
+môi trường build. Không in ra hoặc commit khóa. Không đặt khóa vào biến mà phía
+client nhìn thấy được, chẳng hạn `VITE_*` hoặc `EXPO_PUBLIC_*`.
+
+Đặt biến trong tiến trình chạy lệnh tải lên. Helper không đọc tệp `.env`. Vite
+không nạp các tệp đó vào `process.env` trong lúc
+[đánh giá cấu hình](https://vite.dev/config/#using-environment-variables-in-config).
+
+## Tải lên bản dựng đã chuẩn bị
+
+Dùng chính các tệp và manifest đã kiểm tra. Lệnh này tải dữ liệu lên
+LogBrew:
+
+```bash
+npx --no-install logbrew-release-artifacts upload-js \
+  --build-dir dist \
+  --manifest dist/logbrew-release-artifacts.json \
+  --endpoint https://api.logbrew.co/api/release-artifacts \
+  --allow-hosted
+```
+
+`"status": "uploaded"` cho thấy LogBrew đã chấp nhận lần tải lên. Nếu lệnh thoát
+với lỗi, dừng lại và dùng bảng bên dưới.
+
+Helper thử lại tối đa 2 lần khi gặp lỗi mạng hoặc phản hồi `408`, `429` hay
+`5xx`. Mỗi lần, helper gửi đúng các tệp đã chuẩn bị. Dùng `--max-retries` để
+đổi số lần thử lại.
+
+Sau khi tải lên thủ công thành công, bạn có thể chuyển sang tải lên ngay trong
+lúc build Vite. Thêm tùy chọn này vào cấu hình plugin:
+
+```js
+upload: {
+  endpoint: "https://api.logbrew.co/api/release-artifacts",
+  allowHostedUpload: true,
+  tokenEnv: "LOGBREW_RELEASE_ARTIFACT_TOKEN"
+}
+```
+
+Chỉ dùng một cách tải lên. Plugin dừng build khi gặp lỗi chuẩn bị hoặc lỗi tải
+lên. Thêm `dryRun: true` để thử mà không tải lên.
+
+Plugin không xóa source map khỏi thư mục đầu ra. Không triển khai tệp `.map`
+hoặc manifest lên trang web công khai hay CDN.
+
+Để ánh xạ một khung từ vấn đề đã ghi nhận, chạy `symbolicate-js` với khung đó
+trên cùng bản dựng đã chuẩn bị.
+
+## <span id="verify-a-new-issue">Đọc vấn đề mới</span>
+
+Triển khai cùng bản dựng đã chuẩn bị lên môi trường thử nghiệm. Gây ra một lỗi
+thử an toàn qua luồng ghi nhận vấn đề của bạn. Không gửi dữ liệu người dùng
+nhập, thông tin xác thực hoặc stack thô cho lần thử này.
+
+Tìm vấn đề mới với cùng dự án và ngữ cảnh bản dựng:
+
+```bash
+logbrew read issues --project "<project_id>" \
+  --release "web@1.2.3" --environment staging \
+  --service checkout-web --since 1h --json
+```
+
+Chép ID vấn đề từ kết quả. Đọc lần xảy ra mới nhất của vấn đề đó:
+
+```bash
+logbrew investigate issue "<issue_id>" --occurrence latest --json
+```
+
+Đọc thời điểm sự kiện, dự án, dịch vụ, môi trường và bản phát hành trước. Sau đó
+đọc `event.stack_frames`. Khung có `source: "symbolicated"` là khung đã
+symbolicate (đã chuyển về vị trí mã nguồn gốc): khung này có tệp, dòng và cột
+gốc lấy từ lần tải lên của bạn. Khung có `source: "captured"` có vị trí mà ứng
+dụng đã gửi.
+
+`logbrew read issue "<issue_id>" --json` cũng trả về đối tượng `symbolication`.
+Mỗi khung trong đó có `status`: `resolved`, `artifact_not_found`,
+`source_not_resolved`, `invalid_metadata` hoặc `unavailable`. Chỉ khung
+`resolved` mới có vị trí gốc.
+
+LogBrew ánh xạ các khung khi bạn đọc vấn đề. Lần tải lên sau khi lỗi xảy ra vẫn
+có thể ánh xạ sự kiện trước đó có cùng Debug ID. Khung đã ánh xạ chỉ ra đoạn mã
+cần xem xét. Nó không cho biết điều gì đã gây ra lỗi. Xem
+[Điều tra một vấn đề](/vi/guides/investigate-an-issue) để biết các trường khác.
+
+## Khắc phục khi bước kiểm tra thất bại
+
+| Kết quả | Bước tiếp theo |
+| --- | --- |
+| Trạng thái manifest không phải `ready` | Đọc `validation.errors`. Sửa thiết lập build và build lại. Không sửa manifest. |
+| Build dừng vì source map bị thiếu hoặc là inline | Đặt `build.sourcemap` thành `"hidden"` hoặc `true`. Build lại. |
+| `auth_missing` | Đặt `LOGBREW_RELEASE_ARTIFACT_TOKEN` trong tiến trình tải lên. Chạy thử (dry run) không kiểm tra khóa. |
+| `auth_failed` (`401` hoặc `403`) | Dùng khóa artifact của cùng dự án. Không dùng khóa runtime hoặc khóa tài khoản. |
+| `validation_failed` (`400` hoặc `413`) | Kiểm tra các tệp đã chuẩn bị và kích thước của chúng. Không gửi lại cùng lần tải lên đó. |
+| `validation_failed` kèm lỗi cục bộ | Đọc `validation.errors`. Nếu có tệp thay đổi sau khi build, build và kiểm tra lại. |
+| `retryable_error` | Mọi lần thử lại đều thất bại sau lỗi mạng, `408`, `429` hoặc lỗi máy chủ. Thử lại sau với cùng các tệp đã chuẩn bị. |
+| `upload_failed` | Máy chủ trả về trạng thái khác. Kiểm tra giá trị `--endpoint`. |
+| Khung không được ánh xạ về vị trí gốc | Kiểm tra Debug ID, tiền tố URL đã triển khai và bản dựng. Không dùng map của bản dựng hoặc bản phát hành khác. |
+| Không thấy vấn đề mới | Kiểm tra việc ghi nhận vấn đề, khóa runtime và bộ lọc thời gian trước khi thử source map. |
+
+Không đưa tệp nguồn, khóa và đường dẫn riêng tư vào tin nhắn hỗ trợ. Xem
+[Khắc phục sự cố](/vi/guides/troubleshooting) và
+[Lỗi API](/vi/reference/api-errors).

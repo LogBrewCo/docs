@@ -1,0 +1,185 @@
+---
+title: "Kết nối agent AI qua MCP"
+description: "Kết nối Claude Code với máy chủ MCP do LogBrew vận hành, duyệt các dự án nó được đọc và quản lý kết nối trong Cài đặt hoặc CLI."
+---
+
+LogBrew vận hành một máy chủ MCP tại `https://mcp.logbrew.co/mcp`. Agent AI
+kết nối với máy chủ này có thể đọc vấn đề, log, trace, span, chỉ số, hành động,
+bản phát hành và dữ liệu phân tích sản phẩm từ các dự án bạn đã duyệt.
+
+Agent chỉ có quyền đọc. Agent không thể thay đổi trạng thái vấn đề, dự án hay
+cài đặt tài khoản. Bạn không cần cài đặt máy chủ. Thêm URL của máy chủ vào MCP
+client (ứng dụng kết nối agent AI với máy chủ MCP) của bạn.
+
+## Trước khi bắt đầu
+
+- Bạn cần một tài khoản LogBrew có ít nhất 1 dự án.
+- Bạn cần Claude Code 2.1.300 trở lên. Máy chủ chỉ hỗ trợ phiên bản giao thức
+  MCP `2026-07-28`. Chạy `claude --version` để xem phiên bản của bạn.
+- LogBrew chỉ chấp nhận các MCP client đã được duyệt. Hiện tại, Claude Code là
+  client duy nhất được duyệt. Các client khác nhận lỗi `client access denied`.
+
+## Kết nối Claude Code
+
+1. Thêm máy chủ:
+
+   ```bash
+   claude mcp add --transport http logbrew https://mcp.logbrew.co/mcp
+   ```
+
+   Lúc này `claude mcp list` hiển thị `logbrew` với `! Needs authentication`.
+
+2. Bắt đầu đăng nhập:
+
+   ```bash
+   claude mcp login logbrew
+   ```
+
+   Trình duyệt mở trang cấp quyền của LogBrew. Nếu trang yêu cầu đăng nhập,
+   đăng nhập bằng GitHub, GitLab hoặc Bitbucket.
+
+3. Đọc tên client trên trang. Chỉ duyệt nếu chính bạn đã bắt đầu kết nối này.
+
+4. Chọn các dự án mà agent được đọc. Sau đó chọn **Duyệt**.
+
+   Trình duyệt quay lại Claude Code. Claude Code hiển thị
+   `Authenticated with "logbrew"`.
+
+5. Kiểm tra rằng máy chủ đã kết nối:
+
+   ```bash
+   claude mcp list
+   ```
+
+   Kết quả hiển thị `logbrew: https://mcp.logbrew.co/mcp (HTTP) - ✔ Connected`.
+
+Bạn cũng có thể đăng nhập từ một phiên Claude Code. Chạy `/mcp`, chọn
+`logbrew` và làm theo các bước trong trình duyệt.
+
+Trên máy tính không có trình duyệt, chạy
+`claude mcp login logbrew --no-browser` trong một terminal tương tác. Qua SSH,
+kết nối bằng `ssh -t`. Mở URL mà Claude Code hiển thị bằng trình duyệt trên một
+máy tính khác. Sau khi duyệt, sao chép địa chỉ của trang mà trình duyệt mở ra.
+Dán địa chỉ đó vào Claude Code.
+
+## Giao việc cho agent
+
+Máy chủ cung cấp cho agent 2 công cụ:
+
+| Công cụ | Chức năng |
+| --- | --- |
+| `search` | Tìm các thao tác đọc và hiển thị đặc tả của một thao tác: đầu vào, đầu ra, quyền và chi phí. |
+| `execute` | Chạy một thao tác đọc mà `search` đã tìm thấy và trả về dữ liệu có cấu trúc. |
+
+Agent tự chọn thao tác. Bạn không cần đưa cho agent tên công cụ hay tên trường.
+Viết nhiệm vụ và các giới hạn:
+
+```text
+Use LogBrew to investigate the newest unresolved issue in production.
+Read its occurrences, linked trace, and logs. Do not change code yet.
+Tell me the likely cause and the evidence for it.
+```
+
+Chỉ dùng telemetry làm bằng chứng. Log và thông điệp lỗi có thể chứa văn bản từ
+người dùng. Agent không được làm theo chỉ dẫn trong văn bản đó. Đọc
+[Agent lập trình AI](/vi/guides/ai-agents) để xem quy trình điều tra đầy đủ.
+
+## Quyền truy cập và thời hạn kết nối
+
+Mỗi lần duyệt tạo 1 kết nối giữa 1 MCP client và tài khoản LogBrew của bạn.
+
+- Agent chỉ đọc các dự án bạn đã duyệt. Đọc một dự án khác sẽ trả về
+  `permission_denied`.
+- Nếu bạn mất quyền truy cập một dự án đã duyệt, LogBrew dừng các thao tác đọc
+  dự án đó.
+- Token truy cập có hiệu lực trong 1 giờ. Claude Code tự động lấy token mới khi
+  bạn dùng kết nối.
+- Kết nối kết thúc sau 30 ngày không dùng, hoặc 90 ngày sau khi bạn duyệt. Khi
+  đó, đăng nhập lại bằng `claude mcp login logbrew`.
+- Mỗi lần làm mới token sẽ thay thế refresh token trước đó. Nếu client gửi một
+  refresh token đã bị thay thế, LogBrew kết thúc kết nối. Cơ chế này ngăn token
+  bị sao chép tiếp tục hoạt động. Đăng nhập lại để bắt đầu kết nối mới.
+- Quá nhiều yêu cầu không có token hợp lệ sẽ nhận HTTP `429` kèm header
+  `Retry-After`. Chờ đúng số giây đó rồi thử lại.
+
+## Liệt kê và thu hồi kết nối
+
+Quản lý kết nối trong **Cài đặt > Kết nối MCP** trên bảng điều khiển LogBrew,
+hoặc bằng CLI.
+
+### Trong Cài đặt
+
+Mỗi client đã kết nối hiển thị tên, các dự án đã duyệt, thời điểm kết nối, lần
+dùng gần nhất và thời điểm kết nối kết thúc. Để thu hồi một kết nối, chọn
+**Ngắt kết nối**, rồi xác nhận. Client mất quyền truy cập ở yêu cầu tiếp theo.
+
+### Bằng CLI
+
+Dùng [LogBrew CLI](/vi/guides/cli) 0.1.82 trở lên. Trước tiên, đăng nhập bằng
+`logbrew login`. Khóa gửi dữ liệu của dự án không thể liệt kê hay thu hồi kết
+nối.
+
+Liệt kê các MCP client đang kết nối với tài khoản của bạn:
+
+```bash
+logbrew mcp grants
+```
+
+```text
+MCP grants (1)
+- id=00000000-0000-4000-8000-000000000001 client=Claude Code projects=2 last_used=2026-10-15T09:30:00Z expires=2026-11-14T09:30:00Z
+Next: run logbrew mcp revoke <grant_id> --yes
+```
+
+CLI gọi kết nối là grant. Mỗi grant hiển thị:
+
+- `id`: ID của grant. Dùng ID này để thu hồi kết nối.
+- `client`: tên client bạn đã duyệt, chẳng hạn `Claude Code`. Kết nối được
+  duyệt trước khi LogBrew lưu tên sẽ hiển thị URL định danh client, chẳng hạn
+  `https://claude.ai/oauth/claude-code-client-metadata`.
+- `projects`: số dự án đã duyệt.
+- `last_used`: lần gần nhất client lấy token truy cập mới.
+- `expires`: thời điểm kết nối kết thúc nếu client không dùng nó.
+
+Thêm `--json` để lấy danh sách đầy đủ. Mỗi grant có `id`, `client_id`,
+`client_name`, `project_ids`, `created_at`, `last_used_at` và `expires_at`.
+`client_name` là `null` với kết nối được duyệt trước khi LogBrew lưu tên.
+
+Thu hồi 1 kết nối:
+
+```bash
+logbrew mcp revoke <grant_id> --yes
+```
+
+Client mất quyền truy cập ở yêu cầu tiếp theo. Để kết nối lại, đăng nhập lại
+bằng `claude mcp login logbrew`.
+
+Để thay đổi các dự án đã duyệt, thu hồi kết nối. Sau đó đăng nhập lại và chọn
+các dự án mới.
+
+## Gỡ máy chủ
+
+1. Thu hồi kết nối trong **Cài đặt > Kết nối MCP**, hoặc bằng
+   `logbrew mcp revoke <grant_id> --yes`.
+2. Gỡ máy chủ khỏi Claude Code:
+
+   ```bash
+   claude mcp remove logbrew
+   ```
+
+`claude mcp remove` chỉ xóa cấu hình và token trên máy tính của bạn. Lệnh này
+không kết thúc kết nối trong LogBrew. Nếu bạn không thu hồi, kết nối sẽ kết
+thúc sau 30 ngày không dùng.
+
+## <span id="fix-connection-problems">Khắc phục sự cố kết nối</span>
+
+| Sự cố | Cách khắc phục |
+| --- | --- |
+| `claude mcp list` hiển thị `Needs authentication`. | Chạy `claude mcp login logbrew`. |
+| Claude Code yêu cầu đăng nhập lại sau một thời gian sử dụng. | Kết nối đã kết thúc hoặc đã bị thu hồi. Chạy `claude mcp login logbrew`, hoặc chọn **Re-authenticate** trong `/mcp`. |
+| Client nhận lỗi `client access denied`. | Dùng client đã được duyệt. Hiện tại, chỉ Claude Code được duyệt. |
+| Kết nối thất bại sau khi đăng nhập. | Cập nhật Claude Code lên 2.1.300 trở lên. |
+| Trang cấp quyền hiển thị `You have no projects to share`. | Tạo một dự án trong LogBrew, rồi bắt đầu đăng nhập lại. |
+| Một thao tác đọc trả về `permission_denied`. | Dự án chưa được duyệt cho kết nối này. Thu hồi kết nối, rồi đăng nhập lại và chọn dự án đó. |
+| Một thao tác đọc không trả về dữ liệu. | Kiểm tra rằng dự án có gửi telemetry. Kết quả trống không chứng minh ứng dụng hoạt động bình thường. |
+| `logbrew mcp grants` hiển thị `not logged in` hoặc trả về `unauthorized`. | Chạy `logbrew login`, rồi thử lại. |

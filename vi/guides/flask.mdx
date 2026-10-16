@@ -1,0 +1,338 @@
+---
+title: "Logging và xử lý ngoại lệ Flask với LogBrew"
+sidebarTitle: "Flask"
+description: "Cấu hình logging cho Flask, ghi nhận ngoại lệ chưa xử lý và trace của yêu cầu, rồi dùng LogBrew CLI xác minh từng tín hiệu đã lưu."
+---
+
+Dùng `logbrew-flask` 0.1.5 trở lên. Gói này ghi nhận span của yêu cầu và ngoại lệ
+chưa xử lý. Logging handler tùy chọn nối log Python với trace của yêu cầu. Chỉ
+số thời lượng yêu cầu cũng là tùy chọn.
+
+Gói này cần Python 3.10 trở lên và Flask 3.1 trở lên.
+
+<Note>
+  Trong ứng dụng, dùng khóa gửi dữ liệu phía máy chủ theo phạm vi dự án. Không
+  dùng thông tin xác thực tài khoản mà CLI dùng.
+</Note>
+
+Thay `<project_id>`, `<trace_id>` và `<issue_id>` bằng ID lấy từ LogBrew. Dùng
+một dự án phát triển cho các yêu cầu thử. Các ví dụ shell dùng Bash.
+
+## Gửi yêu cầu đầu tiên
+
+<Steps>
+  <Step title="Tạo hoặc chọn khóa dự án">
+    Đăng nhập bằng [CLI](/vi/guides/cli). Sau đó dùng một dự án mới hoặc một
+    dự án đã có. Đừng chạy cả hai ví dụ. Với dự án mới, lưu khóa gửi dữ liệu
+    của nó vào một tệp mới mà chỉ chủ sở hữu truy cập được:
+
+    ```bash
+    install -d -m 700 "$HOME/.logbrew"
+    logbrew projects create my-flask-app \
+      --runtime flask \
+      --environment development \
+      --ingest-key-file "$HOME/.logbrew/my-flask-app.ingest" \
+      --json
+    ```
+
+    Với dự án đã có, lấy ID của dự án từ `logbrew projects --json`. Sau đó tạo
+    một khóa phía máy chủ riêng:
+
+    ```bash
+    logbrew projects keys create "<project_id>" \
+      --kind server \
+      --label "Flask server" \
+      --ingest-key-file "$HOME/.logbrew/my-flask-app.ingest" \
+      --json
+    ```
+
+    CLI lưu khóa gửi dữ liệu với quyền chỉ chủ sở hữu truy cập. CLI không in
+    khóa hay đường dẫn tệp. Trong production, dùng trình quản lý secret của nền
+    tảng triển khai thay cho tệp cục bộ này.
+
+    Nếu không rõ yêu cầu tạo đã thành công hay chưa, chạy lại đúng lệnh đó.
+  </Step>
+
+  <Step title="Cài đặt bản tích hợp đã phát hành">
+    Tạo hoặc kích hoạt môi trường ảo của ứng dụng, rồi cài gói dành cho
+    framework. Gói này tự cài SDK lõi tương thích làm phụ thuộc.
+
+    ```bash
+    python3 -m pip install "logbrew-flask>=0.1.5,<0.2"
+    ```
+  </Step>
+
+  <Step title="Cấu hình danh tính triển khai">
+    Nạp khóa dự án trên máy cục bộ mà không in ra. Đặt dịch vụ, môi trường và
+    bản phát hành ổn định để mọi tín hiệu đều có ngữ cảnh triển khai hữu ích.
+
+    ```bash
+    export LOGBREW_SERVER_API_KEY="$(tr -d '\r\n' < "$HOME/.logbrew/my-flask-app.ingest")"
+    export LOGBREW_SERVICE_NAME="my-flask-app"
+    export LOGBREW_ENVIRONMENT="development"
+    export LOGBREW_RELEASE="my-flask-app@1.0.0"
+    ```
+
+    `init_logbrew()` kiểm tra các đối số truyền trực tiếp trước, sau đó đến cấu
+    hình ứng dụng Flask, rồi đến các biến môi trường này. Nếu chưa cấu hình tên
+    dịch vụ, hàm này dùng import name của Flask.
+  </Step>
+
+  <Step title="Khởi tạo Flask một lần">
+    Với ứng dụng mới, lưu ví dụ thành `app.py`. Thêm phần khởi tạo sau khi tạo
+    ứng dụng Flask. Logging handler là tùy chọn. Handler này giúp log của ứng
+    dụng dùng chung trace và span của yêu cầu đang hoạt động.
+
+    ```python
+    import logging
+
+    from flask import Flask
+    from logbrew_flask import init_logbrew
+    from logbrew_sdk import LogBrewLoggingHandler
+
+    app = Flask(__name__)
+    logbrew = init_logbrew(app, capture_request_metrics=True)
+
+    logger = logging.getLogger("my-flask-app")
+    logger.setLevel(logging.INFO)
+    logger.addHandler(LogBrewLoggingHandler(logbrew.client))
+
+
+    @app.get("/health")
+    def health() -> dict[str, bool]:
+        logger.info("health check completed")
+        return {"ok": True}
+    ```
+
+    Gọi `init_logbrew(app)` nhiều lần vẫn trả về cùng một extension Flask. Các
+    lần gọi đó không cài trùng hook cho yêu cầu hoặc ngoại lệ. Phần khởi tạo
+    không thêm logging handler. Thêm handler vào logger của ứng dụng một lần.
+  </Step>
+
+  <Step title="Chạy một yêu cầu">
+    Khởi động ứng dụng và gọi route từ một terminal khác. Thay `app` trong lệnh
+    nếu ứng dụng của bạn dùng tên module khác.
+
+    ```bash
+    flask --app app run
+    ```
+
+    ```bash
+    curl -fsS http://127.0.0.1:5000/health
+    ```
+
+    Việc gửi dữ liệu chạy trên một worker nền, nên phản hồi không phải chờ.
+  </Step>
+
+  <Step title="Xác minh bằng chứng đã lưu trên LogBrew">
+    Đọc đúng phạm vi dự án và triển khai. Tìm trace của yêu cầu health và log
+    tương quan từ logging handler trong ví dụ.
+
+    ```bash
+    logbrew read traces \
+      --project "<project_id>" \
+      --service my-flask-app \
+      --environment development \
+      --release my-flask-app@1.0.0 \
+      --since 1h \
+      --json
+
+    logbrew read logs \
+      --project "<project_id>" \
+      --service my-flask-app \
+      --environment development \
+      --release my-flask-app@1.0.0 \
+      --search "health check completed" \
+      --since 1h \
+      --json
+    ```
+
+    Chép trace ID trả về vào lệnh điều tra có giới hạn:
+
+    ```bash
+    logbrew explain trace "<trace_id>" --json
+    ```
+
+    Kết quả đọc khớp xác nhận rằng LogBrew đã lưu tín hiệu. Phản hồi `200` trên
+    máy cục bộ chỉ chứng minh rằng Flask đã xử lý yêu cầu.
+  </Step>
+</Steps>
+
+## Chọn tín hiệu bạn cần
+
+Phần khởi tạo bật sẵn trace của yêu cầu và ghi nhận ngoại lệ chưa xử lý. Chỉ số
+yêu cầu và chuyển tiếp log Python là các lựa chọn riêng.
+
+| Tùy chọn | Mặc định | Dùng khi |
+| --- | --- | --- |
+| `capture_successful_requests` | `True` | Bạn muốn có một span cho mỗi yêu cầu đã hoàn tất. Phản hồi có trạng thái `500` trở lên vẫn tạo span khi tùy chọn này tắt. |
+| `capture_exceptions` | `True` | Bạn muốn có một vấn đề ghi rõ kiểu ngoại lệ và span lỗi tương ứng cho các ngoại lệ mà Flask báo là chưa xử lý. |
+| `capture_request_metrics` | `False` | Bạn muốn có histogram thời lượng cho các yêu cầu đã hoàn tất. |
+| `LogBrewLoggingHandler` | Chưa gắn | Bạn muốn các bản ghi log Python được chọn trở thành log LogBrew. |
+| `flush_on_response` | `False` | Giữ mặc định này để gửi dữ liệu ở nền. Chỉ bật khi chẩn đoán có kiểm soát và cần thấy việc gửi dữ liệu ngay trên đường xử lý phản hồi. |
+
+Bắt đầu với các giá trị mặc định. Thêm chỉ số yêu cầu khi cần xem độ trễ. Chỉ
+thêm logging handler vào những logger giúp ích cho việc điều tra.
+
+Theo mặc định, phần khởi tạo tự quản lý một transport HTTP. Transport này đưa
+từng sự kiện vào hàng đợi, và một worker nền bắt đầu gửi ngay khi có một sự kiện
+trong hàng đợi. Việc gửi không làm phản hồi phải chờ. Lỗi transport không làm hỏng
+phản hồi của Flask.
+
+`flush_on_response=True` thay vào đó gửi các sự kiện trong hàng đợi trên đường
+xử lý phản hồi. Khi dùng tùy chọn đó, `raise_flush_errors=True` sẽ ném ra lỗi gửi
+dữ liệu. Chỉ dùng cả hai cho một lần chẩn đoán có kiểm soát.
+
+## Kiểm soát nội dung log
+
+Thêm một `LogBrewLoggingHandler` vào logger tạo ra các thông điệp bạn cần.
+Handler này không thay thế handler console hoặc handler tệp của ứng dụng. Nó
+không patch Flask hay module logging của Python. Thêm cùng một handler 2 lần sẽ
+làm log bị trùng. Nếu ứng dụng cũng dùng root logger, kiểm tra cơ chế
+propagation trước khi gắn handler thứ hai.
+
+Log ghi bên trong một yêu cầu kế thừa trace và span đang hoạt động. Log ghi bên
+ngoài yêu cầu không có trace của yêu cầu.
+
+Handler gửi thông điệp đã định dạng, tên logger và mức log LogBrew. Handler cũng
+gửi tên tệp nguồn, module, hàm, dòng, tên thread và tên tiến trình, nhưng không
+gửi đường dẫn đầy đủ của tệp nguồn. Các giá trị nguyên thủy trong `extra={...}`
+trở thành metadata. Xem lại các giá trị đó trước khi ghi log từ một yêu cầu của
+người dùng.
+
+Bản ghi `DEBUG` của Python trở thành `info` trong LogBrew. `WARNING` trở thành
+`warning`, và `CRITICAL` trở thành `critical`. Tên và số của mức log gốc trong
+Python được giữ trong metadata. Để gửi ít bản ghi hơn, đặt mức riêng cho
+handler, chẳng hạn
+`LogBrewLoggingHandler(logbrew.client, level=logging.WARNING)`.
+
+Console và LogBrew có thể nhận cùng một bản ghi. Ví dụ, cấu hình console trước
+khi tạo ứng dụng Flask:
+
+```python
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+)
+```
+
+Console nhận văn bản đã định dạng. LogBrew giữ thông điệp, mức log, logger và
+metadata thành các trường riêng.
+
+Bản ghi log có `exc_info` chứa kiểu và thông điệp của ngoại lệ. Toàn bộ nội dung
+ngoại lệ chỉ được gửi khi handler có `include_exception_text=True`. Việc này
+tách biệt với tính năng tự động ghi nhận ngoại lệ, vốn không bao giờ gửi
+thông điệp của ngoại lệ. Không đưa thông tin xác thực, dữ liệu cá nhân hoặc body của
+yêu cầu vào thông điệp log hay thông điệp ngoại lệ.
+
+## Những gì tích hợp ghi nhận
+
+| Tín hiệu | Hành vi mặc định |
+| --- | --- |
+| Trace của yêu cầu | Một span phía máy chủ với phương thức, mẫu route của Flask, mã trạng thái và thời lượng. |
+| Vấn đề từ ngoại lệ | Tiêu đề `<METHOD> <route template> failed`, kiểu ngoại lệ chưa xử lý, tóm tắt cố định `Unhandled exception`, cơ chế `flask.middleware`, trạng thái đã xử lý hay chưa, và tối đa 32 khung ngăn xếp (stack frame) đã làm sạch. |
+| Log ứng dụng | Bật bằng `LogBrewLoggingHandler`; log trong yêu cầu kế thừa trace và span đang hoạt động. |
+| Chỉ số yêu cầu | Bật bằng `capture_request_metrics=True`; phát histogram delta `http.server.duration` với mô tả `Duration of one completed server request.` |
+| Trace gửi đến | Tiếp tục một `traceparent` W3C hợp lệ bằng một span con mới. |
+
+Tên span gồm phương thức HTTP và mẫu route đã khớp. Ví dụ, `/orders/100` và
+`/orders/200` dùng chung tên `GET /orders/<int:order_id>`. Yêu cầu không khớp
+route nào dùng nhãn cố định `<unmatched>`. Nếu `traceparent` bị thiếu hoặc không
+hợp lệ, một trace mới sẽ được bắt đầu.
+
+Metadata của span chứa phương thức, mẫu route, endpoint, mã trạng thái và thời lượng.
+Metadata không chứa đường dẫn cụ thể hay query string.
+
+Từ 0.1.6 trở lên, span của yêu cầu bao trọn toàn bộ quá trình dispatch của
+Flask. Hook before-request, error handler và teardown dùng chung trace của yêu
+cầu. Với phản hồi dạng stream, span kết thúc khi body hoàn tất hoặc bị đóng.
+
+### Kiểm tra việc ghi nhận ngoại lệ
+
+Trạng thái `4xx` hoặc `5xx` xuất hiện trên span của yêu cầu. Riêng trạng thái đó
+không chứng minh rằng đã có ngoại lệ. Đọc cả trace và vấn đề trước khi chẩn đoán
+lỗi. LogBrew không thay thế error handler của Flask và không đổi trạng thái phản
+hồi.
+
+Trong một dự án phát triển, thêm một route tạm thời. Gọi route đó một lần. Xóa
+nó trước khi triển khai:
+
+```python
+@app.get("/logbrew-test-error")
+def handle_test_error() -> None:
+    raise RuntimeError("local capture check")
+```
+
+Yêu cầu trả về trạng thái `500`. Tìm vấn đề mới và chỉ số yêu cầu:
+
+```bash
+logbrew read issues --project "<project_id>" --since 1h --json
+logbrew explain issue "<issue_id>" --json
+
+logbrew explain metric http.server.duration \
+  --project "<project_id>" \
+  --service my-flask-app \
+  --environment development \
+  --release my-flask-app@1.0.0 \
+  --since 1h \
+  --json
+```
+
+Kiểm tra dịch vụ, môi trường, bản phát hành, kiểu ngoại lệ và trace yêu cầu của
+vấn đề. Vấn đề không được chứa văn bản `local capture check`.
+
+### Nối công việc gửi ra ngoài với yêu cầu
+
+SDK Python có các helper do ứng dụng tự gọi cho `requests`, `urllib`, `httpx`,
+`aiohttp`, cơ sở dữ liệu, cache và hàng đợi. Mỗi helper tạo một span con trong
+trace của yêu cầu đang hoạt động. SDK không patch toàn cục các thư viện này.
+[Gói `logbrew-flask`](https://pypi.org/project/logbrew-flask/) có ví dụ.
+
+Đặt cho mỗi helper một tên thao tác ổn định và một mẫu route hoặc mẫu câu lệnh.
+Không đưa ID bản ghi, giá trị của khách hàng, giá trị bind SQL hoặc payload của
+message vào các tên đó. Chỉ thêm span con ở những chỗ mà phụ thuộc đó quan trọng
+với yêu cầu. Tạo span cho mọi lệnh gọi nhỏ sẽ làm trace khó đọc hơn. Helper HTTP
+gửi ra ngoài thêm một header W3C `traceparent`. Chúng không ghi nhận URL đầy đủ,
+query string, body, cookie hoặc header tùy ý. Helper cho cơ sở dữ liệu, cache và
+hàng đợi không ghi nhận giá trị bind, kết quả, giá trị cache hoặc payload của
+hàng đợi.
+
+## Quyền riêng tư và vòng đời tiến trình
+
+Tính năng tự động ghi nhận của Flask lược bỏ đường dẫn yêu cầu cụ thể, query
+string, body của yêu cầu và phản hồi, cookie, header tùy ý, giá trị
+`traceparent` thô, baggage và tracestate.
+
+Tính năng tự động ghi nhận ngoại lệ không bao giờ đọc hoặc gửi `str(error)`. Nó
+dùng bản tóm tắt cố định `Unhandled exception` và đánh dấu mọi thông điệp trong
+chuỗi ngoại lệ là đã che. Các khung ngăn xếp chứa tên tệp (không kèm thư mục) và
+thông tin nhận diện mã có giới hạn. Chúng không chứa văn bản traceback thô, mã
+nguồn, biến cục bộ hay đường dẫn tuyệt đối.
+
+Tạo ứng dụng và client LogBrew bên trong từng tiến trình worker. Cách mặc định
+của Gunicorn là nạp ứng dụng riêng cho từng worker, và cách này hoạt động tốt.
+Không dùng `--preload` của Gunicorn với client được tạo trong tiến trình cha.
+Với uWSGI, dùng cách nạp ứng dụng theo từng worker, chẳng hạn `--lazy-apps`.
+Client Python không cho phép dùng lại sau khi tiến trình fork.
+
+Gọi `logbrew.client.shutdown()` từ hook tắt worker của trình quản lý tiến trình.
+Lệnh này gửi các sự kiện còn lại trong hàng đợi và đóng client. Không gọi lệnh
+này sau mỗi yêu cầu. Sau khi tắt, client từ chối sự kiện mới từ worker đó.
+
+Phản hồi có thể hoàn tất trước khi worker gửi xong các sự kiện cuối cùng trong
+hàng đợi. Khi triển khai hoặc giảm quy mô, việc tắt tiến trình đúng
+cách (graceful shutdown) cho các sự kiện đó thêm một lần gửi cuối.
+
+## Khắc phục lỗi thiết lập
+
+| Triệu chứng | Kiểm tra | Bước tiếp theo |
+| --- | --- | --- |
+| `LOGBREW_SERVER_API_KEY is required` | Phần khởi tạo không nhận được khóa dự án nào có giá trị. | Cấu hình khóa phía máy chủ theo phạm vi dự án qua cấu hình Flask, đối số truyền trực tiếp hoặc biến môi trường. |
+| Không thấy trace | Bộ lọc dự án, dịch vụ, môi trường, bản phát hành hoặc thời gian không khớp. | Chạy `logbrew doctor --project "<project_id>" --json`, rồi đọc lại trace theo phạm vi. |
+| Có trace nhưng không có log | Instrumentation cho yêu cầu không tự gắn logging handler của Python. | Thêm một `LogBrewLoggingHandler` vào logger của ứng dụng. |
+| Yêu cầu chạy được nhưng thiếu các sự kiện cuối khi tắt | Tiến trình thoát trước khi worker nền gửi hết phần sự kiện còn giữ lại. | Gọi `logbrew.client.shutdown()` từ hook tắt worker. |
+| Worker báo `process_ownership_error` | Client được tạo trước khi tiến trình worker fork. | Nạp ứng dụng theo từng worker và tạo client mới trong tiến trình đó. |
+
+Với lỗi truy cập tài khoản, lỗi khóa và lỗi đọc lại, xem
+[Khắc phục sự cố](/vi/guides/troubleshooting). Với các runtime khác, xem
+[Tích hợp SDK](/vi/guides/sdk-ingestion).
