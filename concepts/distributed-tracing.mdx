@@ -7,10 +7,16 @@ description: "Learn how distributed traces and spans connect requests, logs, iss
 Distributed tracing follows one request or operation through instrumented
 services. A trace groups the spans for that work. Each span is one timed
 operation, such as an HTTP request, a database call, a queue operation, or a
-background job.
+background job. A missing span leaves part of the path unknown.
 
 Use a trace when a log reports a failure but not the path of the operation.
-A trace can show where the request spent time and which dependency failed.
+A trace can show:
+
+- Which operation started the request.
+- Where the request spent time.
+- Which child operation returned an error.
+- Which logs, issues, actions, and metrics have the same trace ID.
+- Which service, environment, and release sent each span.
 
 ## Trace and span fields
 
@@ -18,14 +24,18 @@ A trace can show where the request spent time and which dependency failed.
 | --- | --- |
 | `trace_id` | Identifies the trace that owns the span. |
 | `span_id` | Identifies one operation in the trace. |
-| Parent span | Connects a child operation to the operation that started it. |
-| Operation | The type of work, such as `http.server` or `db.query`. |
-| Status | The reported result of the operation. |
-| Duration | How long the operation ran. |
+| `parent_span_id` | Connects a child operation to the operation that started it. A root span has none. |
+| `name` | Names the operation, such as a route template. |
+| `operation` | The type of work, such as `http.server` or `db.query`. |
+| `status` | The reported result, such as `ok`, `error`, or `cancelled`. |
+| `started_at` | When the operation started. |
+| `duration_ms` | How long the operation ran, in milliseconds. |
+| `service_name`, `environment`, `release` | The scope of the service that sent the span. |
 
 A root span starts a trace and has no parent. Child spans have the same trace
 ID, their own span IDs, and a parent ID. Only these IDs connect operations.
-Timestamps alone do not.
+Timestamps alone do not. LogBrew counts a span as an error span only when its
+`status` is `error`.
 
 ## A request across services
 
@@ -50,10 +60,41 @@ that you configure, such as `tracePropagationTargets`. Send trace context only
 to trusted, instrumented services. A trace ID correlates operations. It is not
 authentication.
 
-The SDKs do not record request or response bodies, query strings, arbitrary
-headers, or the raw `traceparent` value in spans. Name spans after route
-templates, not concrete URLs. For the integrations of your runtime, read the
+A queue message can also carry trace context. In Node.js, call
+`createLogBrewQueueTraceHeaders()` in the producer operation to add a
+`traceparent` header to the message. In the consumer, pass that header to
+`queueOperationWithLogBrewSpan()` as `traceparent`. See
+[JavaScript queue tracing](/guides/sdk-ingestion#javascript-queue-tracing).
+
+The Node.js and Python request and outbound integrations do not record request
+or response bodies, query strings, arbitrary headers, or the raw `traceparent`
+value in spans. Name spans after route templates, not concrete URLs. For the
+integrations of your runtime, read the
 [SDK ingestion guide](/guides/sdk-ingestion).
+
+## <span id="capture-spans">Capture spans</span>
+
+LogBrew stores every new log, issue, action, and metric with a trace ID. If a
+signal does not refer to a span in the same delivery, LogBrew adds one capture
+span for it:
+
+| Field | Value |
+| --- | --- |
+| `name` | `log capture`, `issue capture`, `action capture`, or `metric capture` |
+| `operation` | `logbrew.log`, `logbrew.issue`, `logbrew.action`, or `logbrew.metric` |
+| `duration_ms` | `0` |
+| `parent_span_id` | The span that was active when the app captured the signal. Empty when no span was active. |
+| `status` | `error` for an issue, an `error` or `critical` log, or a failed action. Otherwise empty. |
+| `attributes.logbrew.evidence` | `signal_capture` |
+
+The signal's `span_id` then identifies its capture span. If the signal had no
+trace context, LogBrew creates a new trace ID for it. That trace shows that
+LogBrew stored the signal. It does not show a request path. Do not read the
+capture spans in one trace as one request.
+
+Capture spans count in `span_count` and `error_span_count`. Thus an error log
+can make `--status error` select a trace in which no application operation
+failed. Read the `operation` of each error span before you draw a conclusion.
 
 ## Read a trace
 
@@ -64,27 +105,89 @@ logbrew read traces --project "<project_id>" --status error --since 24h --json
 logbrew read trace "<trace_id>" --project "<project_id>" --json
 ```
 
+`--status error` selects traces with at least one error span. `--status ok`
+selects traces with no error span. `--min-duration-ms 500` selects traces
+that ran for 500 milliseconds or more.
+
 Read the root span duration first. Then examine the longest child spans and
 error statuses. Keep the project, service, environment, and release in view,
 so that a staging trace does not become evidence about production.
 
 One trace shows one execution, not a performance baseline. Before you propose
 a performance change, compare several traces with the related metric trend.
-If the root span is missing, do not use the earliest span as the root.
+
+### Trace summary
+
+`GET /api/telemetry/traces/{trace_id}/summary` returns a summary without span
+attributes:
+
+| Field | Meaning |
+| --- | --- |
+| `root_span` | The earliest span whose parent is not in the trace. If every span has a parent in the trace, the earliest span. |
+| `slowest_child_span` | The longest span that has a parent. |
+| `slowest_path` | The known chain of parents from a root to the slowest child span. |
+| `error_spans` | Up to 5 of the longest spans with status `error`. |
+| `services` | The span count, error span count, and longest span duration of each service. |
+| `duration_ms` | The time from the earliest span start to the latest span end. |
+
+If `root_span.parent_span_id` has a value, the real root span is not in the
+trace. Do not read `root_span` as the start of the request.
+
+### Explain a trace
+
+`logbrew explain trace` returns a trace investigation:
+
+```bash
+logbrew explain trace "<trace_id>" --json
+```
+
+| Field | Meaning |
+| --- | --- |
+| `analysis.status` | `errors_observed`, `latency_focus`, or `no_error_observed`. |
+| `analysis.first_error_span`, `analysis.first_error_path` | The earliest error span and its known chain of parents. |
+| `analysis.bottleneck_span`, `analysis.bottleneck_path` | The longest span that has a parent, and its known chain of parents. |
+| `correlations` | The issues, logs, actions, and metrics with the same trace ID. Each list has a `status` and `truncated`. |
+| `evidence` | The captured, missing, redacted, and truncated fields. |
+| `next_actions` | The next reads, in priority order. |
+
+`analysis.causality` is `evidence_only`. The analysis does not prove a root
+cause. The CLI requests response version 3, in which each related issue,
+action, and metric also has its exact `span_id`.
+
+To examine one span with its parent, children, and service boundaries, run:
+
+```bash
+logbrew explain span "<trace_id>" "<span_id>" --project "<project_id>" \
+  --environment production --release "<release>" --json
+```
+
+`topology.parent_chain_status` tells you if the chain of parents is complete:
+
+| Value | Meaning |
+| --- | --- |
+| `root` | The span has no parent ID. |
+| `complete` | Every parent up to a root span is in the trace. |
+| `missing` | A parent ID refers to a span that is not in the trace. |
+| `cycle` | The parent IDs form a loop. |
+| `truncated` | A response limit prevents a complete chain. |
+| `unavailable` | The trace read could not complete. |
 
 ## Missing trace context
 
-Not every event has a trace. Read the trace state:
+Not every event has a trace of its request. Read the trace state:
 
 | State | Meaning |
 | --- | --- |
 | `available` | Exact trace evidence can be read. |
-| `not_linked` | The event was captured without active trace context. |
-| `not_found` | A trace reference exists, but no trace matched the selected scope. |
+| `not_linked` | The event has no trace ID. Some older events have no trace ID. |
+| `not_found` | The event has a trace ID, but no trace matched the selected scope. |
 | `unavailable` | Trace evidence could not be read at that time. |
 
-`not_linked` is not an error. Background work outside a request scope is often
-`not_linked`. To find a missing relationship:
+`not_linked` is not an error. An `available` trace can also show that the
+event had no request context. If the event's capture span has no
+`parent_span_id`, no span was active when the app captured the event.
+Background work outside a request scope often gives this result. To find a
+missing relationship:
 
 1. Read the event's project, service, environment, release, and time.
 2. Check that the work ran inside an instrumented request or operation.
@@ -109,3 +212,10 @@ boundary at a time:
 
 Add the next boundary only after this check passes. A shared trace shows
 correlation. It does not prove that one span caused an issue.
+
+To check span names, run
+`logbrew traces --project "<project_id>" --pagination cursor --json`. The
+`naming_quality` object counts the traces on that page with a generic root
+name (`generic_name_traces`) or an unmatched route (`unmatched_route_traces`).
+If naming needs attention, `naming_quality.next_action.code` is
+`improve_trace_naming`.
