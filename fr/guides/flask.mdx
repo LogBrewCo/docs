@@ -1,0 +1,368 @@
+---
+title: "Logs et gestion des exceptions Flask avec LogBrew"
+sidebarTitle: "Flask"
+description: "Configurez les logs Flask, capturez les exceptions non gérées et les traces de requête, puis vérifiez chaque signal stocké avec la CLI LogBrew."
+---
+
+Utilisez `logbrew-flask` 0.1.5 ou une version plus récente. Il capture les
+spans de requête et les exceptions non gérées. Le handler de logging,
+facultatif, relie les logs Python à la trace de la requête. Les métriques de
+durée des requêtes sont aussi facultatives.
+
+Le paquet exige Python 3.10 ou plus récent et Flask 3.1 ou plus récent.
+
+<Note>
+  Dans l’application, utilisez une clé d’ingestion serveur limitée au projet.
+  N’utilisez pas l’identifiant de compte qui autorise la CLI.
+</Note>
+
+Remplacez `<project_id>`, `<trace_id>` et `<issue_id>` par des ID issus de
+LogBrew. Utilisez un projet de développement pour les requêtes de test. Les
+exemples shell utilisent Bash.
+
+## Envoyer la première requête
+
+<Steps>
+  <Step title="Créer ou sélectionner une clé de projet">
+    Connectez-vous avec la [CLI](/fr/guides/cli). Utilisez ensuite un nouveau
+    projet ou un projet existant. N’exécutez pas les deux exemples. Pour un
+    nouveau projet, stockez sa clé d’ingestion dans un nouveau fichier que
+    seul son propriétaire peut lire :
+
+    ```bash
+    install -d -m 700 "$HOME/.logbrew"
+    logbrew projects create my-flask-app \
+      --runtime flask \
+      --environment development \
+      --ingest-key-file "$HOME/.logbrew/my-flask-app.ingest" \
+      --json
+    ```
+
+    Pour un projet existant, récupérez son ID avec `logbrew projects --json`.
+    Créez ensuite une clé serveur distincte :
+
+    ```bash
+    logbrew projects keys create "<project_id>" \
+      --kind server \
+      --label "Flask server" \
+      --ingest-key-file "$HOME/.logbrew/my-flask-app.ingest" \
+      --json
+    ```
+
+    La CLI stocke la clé d’ingestion avec des permissions réservées au
+    propriétaire. Elle n’affiche ni la clé ni le chemin de son fichier. En
+    production, utilisez le gestionnaire de secrets de votre plateforme de
+    déploiement plutôt que ce fichier local.
+
+    Si le résultat d’une requête de création est incertain, exécutez de
+    nouveau exactement la même commande.
+  </Step>
+
+  <Step title="Installer l’intégration publiée">
+    Créez ou activez l’environnement virtuel de l’application, puis installez
+    le paquet du framework. Il installe la dépendance compatible du SDK de
+    base.
+
+    ```bash
+    python3 -m pip install "logbrew-flask>=0.1.5,<0.2"
+    ```
+  </Step>
+
+  <Step title="Configurer l’identité de déploiement">
+    Chargez la clé du projet en local sans l’afficher. Définissez un service,
+    un environnement et une version stables pour que chaque signal ait un
+    contexte de déploiement utile.
+
+    ```bash
+    export LOGBREW_SERVER_API_KEY="$(tr -d '\r\n' < "$HOME/.logbrew/my-flask-app.ingest")"
+    export LOGBREW_SERVICE_NAME="my-flask-app"
+    export LOGBREW_ENVIRONMENT="development"
+    export LOGBREW_RELEASE="my-flask-app@1.0.0"
+    ```
+
+    `init_logbrew()` lit d’abord les arguments explicites, puis la
+    configuration de l’application Flask, puis ces variables
+    d’environnement. Si aucun nom de service n’est configuré, il utilise le
+    nom d’import Flask.
+  </Step>
+
+  <Step title="Initialiser Flask une seule fois">
+    Pour une nouvelle application, enregistrez l’exemple sous `app.py`. Ajoutez
+    la fonction d’initialisation après avoir créé l’application Flask. Le
+    handler de logging est facultatif. Il permet aux logs de l’application de
+    partager la trace et le span de la requête active.
+
+    ```python
+    import logging
+
+    from flask import Flask
+    from logbrew_flask import init_logbrew
+    from logbrew_sdk import LogBrewLoggingHandler
+
+    app = Flask(__name__)
+    logbrew = init_logbrew(app, capture_request_metrics=True)
+
+    logger = logging.getLogger("my-flask-app")
+    logger.setLevel(logging.INFO)
+    logger.addHandler(LogBrewLoggingHandler(logbrew.client))
+
+
+    @app.get("/health")
+    def health() -> dict[str, bool]:
+        logger.info("health check completed")
+        return {"ok": True}
+    ```
+
+    Des appels répétés à `init_logbrew(app)` renvoient la même extension
+    Flask. Ils n’installent pas de hooks de requête ou d’exception en double.
+    La fonction d’initialisation n’ajoute pas de handlers de logging. Ajoutez
+    le handler une seule fois au logger de l’application.
+  </Step>
+
+  <Step title="Exécuter une requête">
+    Démarrez l’application et appelez la route depuis un autre terminal.
+    Remplacez `app` dans la commande si votre application utilise un autre nom
+    de module.
+
+    ```bash
+    flask --app app run
+    ```
+
+    ```bash
+    curl -fsS http://127.0.0.1:5000/health
+    ```
+
+    L’envoi s’exécute dans un worker en arrière-plan et ne bloque pas la
+    réponse.
+  </Step>
+
+  <Step title="Vérifier les preuves stockées">
+    Lisez exactement le périmètre du projet et du déploiement. Cherchez la
+    trace de la requête de health check et le log corrélé émis par le handler de
+    logging de l’exemple.
+
+    ```bash
+    logbrew read traces \
+      --project "<project_id>" \
+      --service my-flask-app \
+      --environment development \
+      --release my-flask-app@1.0.0 \
+      --since 1h \
+      --json
+
+    logbrew read logs \
+      --project "<project_id>" \
+      --service my-flask-app \
+      --environment development \
+      --release my-flask-app@1.0.0 \
+      --search "health check completed" \
+      --since 1h \
+      --json
+    ```
+
+    Copiez l’ID de trace renvoyé dans la commande d’investigation limitée :
+
+    ```bash
+    logbrew explain trace "<trace_id>" --json
+    ```
+
+    Une lecture qui correspond confirme que LogBrew a stocké le signal. Une
+    réponse locale `200` prouve seulement que Flask a traité la requête.
+  </Step>
+</Steps>
+
+## Choisir les signaux nécessaires
+
+La fonction d’initialisation démarre avec les traces de requête et les
+exceptions non gérées activées. Les métriques de requête et le transfert des
+logs Python sont des choix distincts.
+
+| Option | Valeur par défaut | À utiliser quand |
+| --- | --- | --- |
+| `capture_successful_requests` | `True` | Vous voulez un span pour chaque requête terminée. Une réponse avec un statut `500` ou supérieur crée quand même un span si cette option est désactivée. |
+| `capture_exceptions` | `True` | Vous voulez un problème typé et un span d’erreur correspondant pour les exceptions que Flask signale comme non gérées. |
+| `capture_request_metrics` | `False` | Vous voulez un histogramme de durée pour les requêtes terminées. |
+| `LogBrewLoggingHandler` | Non attaché | Vous voulez que certains enregistrements de logs Python deviennent des logs LogBrew. |
+| `flush_on_response` | `False` | Gardez cette valeur par défaut pour l’envoi en arrière-plan. Activez-la uniquement pour un diagnostic contrôlé qui doit faire apparaître l’envoi sur le chemin de la réponse. |
+
+Commencez avec les valeurs par défaut. Ajoutez les métriques de requête quand
+vous avez besoin d’une vue de la latence. Ajoutez le handler de logging
+uniquement aux loggers utiles à une investigation.
+
+Par défaut, la fonction d’initialisation possède son propre transport HTTP.
+Elle met chaque signal en file d’attente, et un worker en arrière-plan
+commence l’envoi dès qu’un signal est dans la file. L’envoi ne bloque pas
+la réponse. Les échecs de transport ne cassent pas la réponse Flask.
+
+`flush_on_response=True` envoie plutôt les signaux en attente sur le chemin
+de la réponse. Avec cette option, `raise_flush_errors=True` lève les erreurs
+d’envoi. Utilisez ces 2 options uniquement pour un diagnostic contrôlé.
+
+## Contrôler le contenu des logs
+
+Ajoutez un seul `LogBrewLoggingHandler` au logger qui émet les messages dont
+vous avez besoin. Le handler ne remplace pas les handlers de console ou de
+fichier de l’application. Il ne modifie ni Flask ni le module de logging de
+Python. Ajouter 2 fois le même handler duplique les logs. Si l’application
+utilise aussi le logger racine, vérifiez la propagation avant d’attacher un
+second handler.
+
+Un log émis dans une requête hérite de la trace et du span actifs. Un log émis
+hors d’une requête n’a pas de trace de requête.
+
+Le handler envoie le message formaté, le nom du logger et le niveau LogBrew. Il
+envoie aussi le nom du fichier source, le module, la fonction, la ligne, ainsi
+que les noms du thread et du processus, mais pas le chemin complet du fichier
+source. Les valeurs primitives de `extra={...}` deviennent des métadonnées.
+Relisez ces valeurs avant de logger depuis une requête exposée aux
+utilisateurs.
+
+Les enregistrements Python `DEBUG` deviennent `info` dans LogBrew. `WARNING`
+devient `warning`, et `CRITICAL` devient `critical`. Le nom et le numéro du
+niveau Python d’origine restent dans les métadonnées. Pour envoyer moins
+d’enregistrements, donnez au handler son propre niveau, par exemple
+`LogBrewLoggingHandler(logbrew.client, level=logging.WARNING)`.
+
+La console et LogBrew peuvent recevoir le même enregistrement. Par exemple,
+configurez la console avant de créer l’application Flask :
+
+```python
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+)
+```
+
+La console reçoit du texte formaté. LogBrew conserve le message, le niveau, le
+logger et les métadonnées dans des champs séparés.
+
+Un enregistrement de log avec `exc_info` inclut le type et le message de
+l’exception. Le texte complet de l’exception est envoyé uniquement si le
+handler a `include_exception_text=True`. Cette option est distincte de la capture
+automatique des exceptions, qui n’envoie jamais le message de l’exception.
+Ne mettez pas d’identifiants, de données personnelles ni de corps de requête
+dans les messages de log ou d’exception.
+
+## Ce que capture l’intégration
+
+| Signal | Comportement par défaut |
+| --- | --- |
+| Trace de requête | Un span serveur avec la méthode, le modèle de route Flask, le code de statut et la durée. |
+| Problème d’exception | Titre `<METHOD> <route template> failed`, type non géré, résumé fixe `Unhandled exception`, mécanisme `flask.middleware`, état géré ou non, et jusqu’à 32 frames nettoyés. |
+| Log de l’application | À activer avec `LogBrewLoggingHandler` ; un log émis dans une requête hérite de la trace et du span actifs. |
+| Métrique de requête | À activer avec `capture_request_metrics=True` ; émet l’histogramme delta `http.server.duration` avec la description `Duration of one completed server request.` |
+| Trace entrante | Poursuit un `traceparent` W3C valide avec un nouveau span enfant. |
+
+Les noms de span utilisent la méthode HTTP et le modèle de route reconnu. Par
+exemple, `/orders/100` et `/orders/200` partagent `GET /orders/<int:order_id>`.
+Une requête sans route reconnue utilise l’étiquette fixe `<unmatched>`. Un
+`traceparent` manquant ou non valide démarre une nouvelle trace.
+
+Les métadonnées du span contiennent la méthode, le modèle de route, le point
+de terminaison Flask, le code de statut et la durée. Elles ne contiennent ni le chemin
+concret ni la chaîne de requête.
+
+À partir de la version 0.1.6, le span de requête couvre tout le traitement
+Flask. Les hooks avant requête, les gestionnaires d’erreurs et le teardown
+partagent la trace de la requête. Une réponse en streaming termine son span
+quand le corps se termine ou se ferme.
+
+### Tester la capture des exceptions
+
+Un statut `4xx` ou `5xx` apparaît sur le span de requête. Le statut seul ne
+prouve pas qu’une exception s’est produite. Lisez à la fois les traces et les
+problèmes avant de diagnostiquer un échec. LogBrew ne remplace pas les
+gestionnaires d’erreurs de Flask et ne modifie pas le statut de la réponse.
+
+Dans un projet de développement, ajoutez une route temporaire. Appelez-la une
+fois. Retirez-la avant de déployer :
+
+```python
+@app.get("/logbrew-test-error")
+def handle_test_error() -> None:
+    raise RuntimeError("local capture check")
+```
+
+La requête renvoie le statut `500`. Trouvez le nouveau problème et la métrique
+de requête :
+
+```bash
+logbrew read issues --project "<project_id>" --since 1h --json
+logbrew explain issue "<issue_id>" --json
+
+logbrew explain metric http.server.duration \
+  --project "<project_id>" \
+  --service my-flask-app \
+  --environment development \
+  --release my-flask-app@1.0.0 \
+  --since 1h \
+  --json
+```
+
+Vérifiez le service, l’environnement, la version, le type d’exception et la
+trace de requête du problème. Le problème ne doit pas contenir le texte
+`local capture check`.
+
+### Relier le travail sortant à la requête
+
+Le SDK Python fournit des helpers, appelés par l’application, pour `requests`,
+`urllib`, `httpx`, `aiohttp`, les bases de données, le cache et les files de
+messages. Chaque helper crée un span enfant de la trace de la requête active.
+Le SDK ne modifie pas ces bibliothèques globalement. Le
+[paquet `logbrew-flask`](https://pypi.org/project/logbrew-flask/) contient des
+exemples.
+
+Donnez à chaque helper un nom d’opération stable et un modèle de route ou de
+requête SQL. Ne mettez pas d’ID d’enregistrement, de valeurs client, de
+valeurs de paramètres SQL ni de contenu de message dans ces noms. Ajoutez des
+spans enfants uniquement là où la dépendance compte pour la requête. Un span
+pour chaque petit appel rend la trace plus difficile à lire. Les helpers HTTP
+sortants ajoutent un seul en-tête W3C `traceparent`. Ils ne capturent ni les
+URL complètes, ni les chaînes de requête, ni les corps, ni les cookies, ni des
+en-têtes arbitraires. Les helpers de base de données, de cache et de file de
+messages ne capturent ni les valeurs de paramètres, ni les résultats, ni les
+valeurs du cache, ni le contenu des messages.
+
+## Confidentialité et cycle de vie des processus
+
+La capture automatique de Flask omet les chemins de requête concrets, les
+chaînes de requête, les corps de requête et de réponse, les cookies, les
+en-têtes arbitraires, les valeurs brutes de `traceparent`, le baggage et le
+tracestate.
+
+La capture automatique des exceptions ne lit et n’envoie jamais
+`str(error)`. Elle utilise le résumé fixe `Unhandled exception` et marque
+chaque message de la chaîne d’exceptions comme masqué. Les frames contiennent
+le nom de base du fichier et une identité de code limitée. Ils ne contiennent
+ni le texte brut du traceback, ni le code source, ni les variables locales, ni
+des chemins absolus.
+
+Créez l’application et le client LogBrew dans chaque processus worker. Le
+chargement de l’application par worker, comportement par défaut de Gunicorn,
+fonctionne. N’utilisez pas l’option Gunicorn `--preload` avec un client créé
+dans le processus parent. Avec uWSGI, chargez l’application dans chaque
+worker, par exemple avec `--lazy-apps`. Le client Python refuse d’être
+réutilisé après un fork du processus.
+
+Appelez `logbrew.client.shutdown()` depuis le hook d’arrêt par worker de votre
+gestionnaire de processus. Cet appel envoie les signaux restants en attente
+et ferme le client. Ne l’appelez pas après chaque requête. Après l’arrêt, le
+client refuse les nouveaux signaux de ce worker.
+
+Une réponse peut se terminer avant que le worker envoie ses derniers signaux
+en attente. Pendant un déploiement ou une réduction du nombre d’instances, un
+arrêt propre donne à ces signaux une dernière tentative d’envoi.
+
+## Corriger les erreurs de configuration
+
+| Symptôme | Vérification | Prochaine étape |
+| --- | --- | --- |
+| `LOGBREW_SERVER_API_KEY is required` | La fonction d’initialisation n’a pas reçu de clé de projet non vide. | Configurez la clé serveur limitée au projet dans la configuration Flask, par un argument explicite ou par l’environnement. |
+| Aucune trace n’apparaît | Les filtres de projet, de service, d’environnement, de version ou de période ne correspondent pas. | Exécutez `logbrew doctor --project "<project_id>" --json`, puis relancez la lecture des traces sur le même périmètre. |
+| Les traces apparaissent, mais pas les logs | L’instrumentation des requêtes n’attache pas automatiquement de handler de logging Python. | Ajoutez un seul `LogBrewLoggingHandler` au logger de l’application. |
+| Les requêtes fonctionnent, mais les derniers signaux manquent à l’arrêt | Le processus se termine avant que le worker en arrière-plan envoie les derniers signaux en attente. | Appelez `logbrew.client.shutdown()` depuis le hook d’arrêt du worker. |
+| Le worker signale `process_ownership_error` | Le client a été créé avant le fork du processus worker. | Chargez l’application dans chaque worker et créez un nouveau client dans ce processus. |
+
+Pour les erreurs d’accès au compte, de clé et de relecture, consultez
+[Dépannage](/fr/guides/troubleshooting). Pour les autres environnements
+d’exécution, consultez [Intégration du SDK](/fr/guides/sdk-ingestion).

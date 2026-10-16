@@ -1,0 +1,274 @@
+---
+title: "Configurer le suivi des événements produit dans Node.js"
+sidebarTitle: "Capture d’événements produit"
+description: "Envoyez des événements produit classifiés depuis Node.js, avec utilisateurs et sessions typés. Testez en local, puis lisez les résultats avec la CLI."
+---
+
+Utilisez les événements produit pour enregistrer des actions utilisateur
+nommées dans votre application, comme l’ouverture de la page de paiement ou la
+finalisation d’un achat. Le SDK
+n’installe pas d’écouteurs de clics et ne collecte pas le contenu des
+formulaires. C’est votre code qui enregistre chaque événement.
+
+Pour les règles de comptage et les types de rapports, consultez
+[Analyses produit](/fr/concepts/product-analytics).
+
+## Préparer le test
+
+Utilisez une application Node.js 18 ou plus récente et un projet LogBrew que
+vous pouvez lire. Si vous n’avez encore jamais envoyé de télémétrie, commencez
+par le [démarrage rapide](/fr/quickstart). Gardez ce test à l’écart de l’activité
+de vos clients.
+
+Installez les paquets dans le dossier de l’application :
+
+```bash
+npm install @logbrew/sdk@0.1.28 @logbrew/node@0.1.12
+```
+
+Utilisez une clé d’ingestion serveur pour le projet. Placez-la dans
+`LOGBREW_SERVER_API_KEY`, hors du dépôt de code. Ne mettez jamais une
+clé serveur dans un bundle navigateur. Un jeton d’accès au compte sert à lire
+les résultats. Il ne configure pas le SDK.
+
+## Définir le sens de chaque événement
+
+Partez d’une question produit. Par exemple : les utilisateurs qui ouvrent la
+page de paiement valident-ils ensuite leur commande ? Donnez à chaque événement un nom fixe, un
+déclencheur précis et un seul endroit de l’application qui l’enregistre.
+
+| Nom de l’événement | Déclencheur |
+| --- | --- |
+| `checkout.opened` | L’application ouvre la page de paiement. Ce n’est pas un achat. |
+| `checkout.submitted` | L’application accepte la validation de la commande. Ce n’est pas un paiement réussi. |
+| `checkout.completed` | L’application confirme la finalisation. Ne l’enregistrez pas à chaque clic ni à chaque nouvelle tentative réseau. |
+
+Gardez des noms d’événements stables d’une version à l’autre et d’une langue à
+l’autre. Ne construisez pas de noms à partir d’une adresse e-mail, d’un numéro
+de commande, d’une URL ou d’un texte saisi par l’utilisateur.
+
+Utilisez des propriétés personnalisées avec un petit ensemble de valeurs
+approuvées. Par exemple, `checkout_mode` peut valoir `guest` ou `signed_in`.
+N’ajoutez pas un nouveau nom d’événement pour chaque valeur. N’envoyez pas le
+contenu des formulaires.
+
+Enregistrez chaque action métier à un seul endroit. Si le navigateur et le
+serveur enregistrent tous deux la même action, les totaux doublent.
+
+## Utiliser le bon type d’activité
+
+| Type | Signification | Méthode de capture |
+| --- | --- | --- |
+| `interaction` | Une action produit définie par l’application. | `createProductActionAttributes`, comme ci-dessous. |
+| `page_view` | Une vue de page dans le navigateur. | La capture des vues de page du SDK navigateur. |
+| `screen_view` | Une vue d’écran dans l’application. | Un helper mobile de vue d’écran. |
+
+`createProductActionAttributes` définit `analyticsSchemaVersion: 1` et
+`analyticsKind: "interaction"` dans les métadonnées de l’événement. Son modèle
+de route ou son nom d’écran définit `analyticsSurface`. Utilisez un modèle de
+route, comme `/orders/:id`, et non une URL réelle.
+
+Le nom de l’événement ne définit pas le type. Une interaction nommée
+`page_view` reste une interaction. Les logs, les problèmes et les spans ne sont
+pas des événements produit. Pour les autres runtimes,
+consultez [Intégration du SDK](/fr/guides/sdk-ingestion).
+
+## <span id="set-users-and-sessions-on-each-event">Définir l’utilisateur et la session de chaque événement</span>
+
+- Pour un utilisateur connecté, définissez `context.subject` avec un
+  ID stable et `kind: "user"`.
+- Pour un visiteur anonyme, utilisez un ID distinct avec
+  `kind: "anonymous"`.
+- Placez l’ID de session de l’application dans `context.session.id`.
+  Réutilisez-le pendant toute la session.
+
+N’utilisez jamais de noms, d’adresses e-mail, d’adresses IP ou de jetons
+d’accès comme ID. Un ID stable relie les actions d’un
+utilisateur. Il ne rend pas les données anonymes.
+
+Ne définissez pas d’utilisateur ni de session par défaut sur un client serveur
+partagé. Transmettez le sujet et la session de la requête qui a produit chaque
+événement. Le SDK ne crée pas ces ID et ne détecte ni les
+connexions, ni les déconnexions, ni les changements de compte. LogBrew ne
+fusionne pas un sujet anonyme avec un utilisateur après la connexion.
+
+## Exécuter l’exemple en local
+
+Enregistrez cet exemple sous le nom `product-events.mjs`. Il enregistre cinq
+actions de test réparties entre des visites anonymes, des connexions et deux
+utilisateurs. Le client ne contient que le contexte partagé du service et du
+déploiement. L’envoi automatique est désactivé pour ce test.
+
+```js
+import { randomUUID } from "node:crypto";
+import { createProductActionAttributes, SdkError } from "@logbrew/sdk";
+import { createLogBrewNodeClient } from "@logbrew/node";
+
+try {
+  const client = createLogBrewNodeClient({
+    automaticDelivery: false,
+    context: {
+      schemaVersion: 1,
+      resource: {
+        service: { name: "analytics-check", version: "analytics@1" },
+        deployment: { environment: "development", release: "analytics@1" }
+      }
+    }
+  });
+  const startedAt = new Date().toISOString();
+  client.release(randomUUID(), startedAt, { version: "analytics@1" });
+  client.environment(randomUUID(), startedAt, { name: "development" });
+
+  function record(name, subject, sessionId) {
+    client.action(randomUUID(), new Date().toISOString(), {
+      ...createProductActionAttributes({
+        name,
+        routeTemplate: "/checkout",
+        metadata: { checkout_mode: subject.kind === "user" ? "signed_in" : "guest" }
+      }),
+      context: { schemaVersion: 1, subject, session: { id: sessionId } }
+    });
+  }
+
+  record("checkout.opened", { id: "anon_demo_a", kind: "anonymous" }, randomUUID());
+  const userSession = randomUUID();
+  record("checkout.submitted", { id: "user_demo_a", kind: "user" }, userSession);
+  record("checkout.completed", { id: "user_demo_a", kind: "user" }, userSession);
+  record("checkout.opened", { id: "anon_demo_b", kind: "anonymous" }, randomUUID());
+  record("checkout.submitted", { id: "user_demo_b", kind: "user" }, randomUUID());
+
+  if (process.argv.includes("--send")) {
+    const response = await client.shutdown();
+    console.log(JSON.stringify({
+      mode: "sent",
+      status_code: response.statusCode,
+      attempts: response.attempts
+    }));
+  } else {
+    const batch = JSON.parse(client.previewJson());
+    const actions = batch.events.filter(event => event.type === "action");
+    console.log(JSON.stringify({
+      mode: "local_preview",
+      actions: actions.length,
+      kinds: [...new Set(actions.map(event => event.attributes.metadata.analyticsKind))],
+      dropped: client.droppedEvents()
+    }));
+  }
+} catch (error) {
+  console.error(JSON.stringify({
+    ok: false,
+    error: error instanceof SdkError ? error.code : "capture_failed"
+  }));
+  process.exitCode = 1;
+}
+```
+
+Exécutez le script sans `--send`. Cette commande n’envoie aucune requête :
+
+```bash
+LOGBREW_SERVER_API_KEY=local-preview-only node product-events.mjs
+```
+
+Résultat attendu :
+
+```json
+{"mode":"local_preview","actions":5,"kinds":["interaction"],"dropped":0}
+```
+
+Les marqueurs de version et d’environnement ne sont pas des actions produit. Ce
+résultat montre seulement la file d’attente locale. Il ne montre pas que
+LogBrew a reçu les événements. N’affichez pas `previewJson()` dans une
+application qui contient un vrai contexte client.
+
+## Gérer la connexion et la déconnexion
+
+- Avant la connexion, envoyez le sujet anonyme actuel avec chaque événement.
+- Après la connexion, envoyez l’ID stable de l’utilisateur avec le
+  type `user`.
+- À la déconnexion, cessez d’utiliser le contexte de cet utilisateur. Créez un
+  nouveau sujet anonyme selon votre politique de confidentialité.
+- Lors d’un changement de compte, utilisez l’ID du nouvel utilisateur.
+
+L’exemple démarre une nouvelle session quand l’identité change. Choisissez
+votre propre règle de session et appliquez-la à chaque événement. Le contexte
+de l’événement remplace le sujet et la session du client pour cet événement. Si
+l’événement omet l’un des deux, il utilise la valeur du client. C’est pourquoi
+l’exemple ne définit ni sujet ni session sur le client. Pour un traitement
+exécuté plus tard, conservez l’identité de l’utilisateur qui l’a lancé.
+
+## Envoyer une fois et lire les résultats
+
+Définissez la clé serveur du projet de test dans l’environnement du processus.
+Exécutez cette commande une seule fois :
+
+```bash
+node product-events.mjs --send
+```
+
+Chaque exécution crée de nouveaux ID d’événement : une deuxième
+exécution ajoute donc cinq événements de plus. Si le processus échoue, la
+sortie contient le code d’erreur du SDK. Une clé refusée donne :
+
+```json
+{"ok":false,"error":"unauthenticated"}
+```
+
+Vérifiez que la clé d’ingestion est active et qu’elle appartient au projet de
+test. Se connecter à votre compte ne corrige pas une clé SDK. Consultez
+[Erreurs de l’API](/fr/reference/api-errors) et
+[Dépannage](/fr/guides/troubleshooting) pour les autres échecs.
+
+Une fois le lot accepté par LogBrew, retrouvez les événements dans le tableau
+de bord :
+
+1. Ouvrez **Analyses**.
+2. Sous **Projet**, sélectionnez le projet de test.
+3. Sous **Période**, sélectionnez **24 heures**.
+4. Repérez les 3 noms d’événements sous **Principaux événements** et
+   `/checkout` sous **Principales surfaces**.
+
+Toute autre activité du projet modifie ces totaux. Pour vérifier un service,
+une version et un environnement exacts, lisez la vue d’ensemble avec la
+[CLI](/fr/guides/cli) connectée :
+
+```bash
+logbrew analytics overview --project "<project_id>" --since 1h \
+  --service analytics-check --release analytics@1 \
+  --environment development --json
+```
+
+Pour une seule exécution sur une période sans autre activité, attendez-vous à :
+
+- 5 interactions, toutes avec un contexte de session, sur la surface `/checkout`.
+- 3 événements venant d’utilisateurs et 2 venant de sujets anonymes.
+- 2 utilisateurs, 2 sujets anonymes et 4 sessions.
+
+Les nombres d’utilisateurs, de sujets et de sessions uniques sont
+approximatifs. Les totaux d’événements sont exacts sur la période sélectionnée.
+Ce test ne mesure ni la conversion ni la rétention.
+
+| Résultat | Vérification suivante |
+| --- | --- |
+| Aucune activité produit | Vérifiez le résultat de l’envoi, le projet, la période, le service, la version et l’environnement. |
+| Activité non classifiée | Utilisez `createProductActionAttributes`. Le nom de l’événement seul ne définit pas le type. |
+| Nombres d’utilisateurs différents | Vérifiez `context.subject` sur chaque événement. Les sujets anonymes ne comptent pas comme utilisateurs. |
+| Nombres de sessions différents | Vérifiez `context.session.id` sur chaque événement et votre règle de session. |
+| Plus d’événements que prévu | Recherchez des exécutions répétées et des actions enregistrées à deux endroits. |
+
+## Tester les événements dans votre application
+
+Déplacez les appels de capture dans les gestionnaires de l’application. Gardez
+pour chaque événement le même sens, le même type et la même règle d’identité.
+Testez d’abord avec des comptes fictifs.
+
+| Test dans l’application | Capture attendue |
+| --- | --- |
+| Ouvrir la page de paiement sans valider | `checkout.opened` uniquement. |
+| Soumettre un formulaire qui ne passe pas la validation | Pas de `checkout.submitted`. N’envoyez jamais le contenu du formulaire. |
+| Accepter la validation, puis faire échouer le paiement | `checkout.submitted`, sans `checkout.completed`. |
+| Relancer une requête après une finalisation confirmée | Pas de deuxième `checkout.completed`. |
+| Se déconnecter, puis utiliser un autre compte | Les événements suivants utilisent le nouveau sujet et la nouvelle session. |
+
+Un aperçu local teste la capture. Un lot accepté teste l’envoi. Aucun des deux
+ne montre que l’appel de capture s’exécute au bon moment dans votre
+application.

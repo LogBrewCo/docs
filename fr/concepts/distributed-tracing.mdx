@@ -1,0 +1,242 @@
+---
+title: "Traçage distribué : traces, spans et contexte"
+sidebarTitle: "Traçage distribué"
+description: "Découvrez comment les traces distribuées et les spans relient requêtes, logs, problèmes, actions et métriques dans LogBrew."
+---
+
+Le traçage distribué suit une requête ou une opération à travers les services
+instrumentés. Une trace regroupe les spans de ce travail. Chaque span est une
+opération chronométrée, comme une requête HTTP, un appel à la base de données,
+une opération de file de messages ou une tâche en arrière-plan. Quand un span
+manque, une partie du chemin reste inconnue.
+
+Utilisez une trace quand un log signale un échec sans montrer le chemin de
+l’opération. Une trace peut montrer :
+
+- Quelle opération a démarré la requête.
+- Où la requête a passé du temps.
+- Quelle opération enfant a renvoyé une erreur.
+- Quels logs, problèmes, actions et métriques ont le même ID de trace.
+- Quel service, quel environnement et quelle version ont envoyé chaque span.
+
+## Champs des traces et des spans
+
+| Champ | Signification |
+| --- | --- |
+| `trace_id` | Identifie la trace à laquelle appartient le span. |
+| `span_id` | Identifie une opération dans la trace. |
+| `parent_span_id` | Relie une opération enfant à l’opération qui l’a démarrée. Un span racine n’en a pas. |
+| `name` | Nomme l’opération, par exemple avec un modèle de route. |
+| `operation` | Le type de travail, comme `http.server` ou `db.query`. |
+| `status` | Le résultat signalé, comme `ok`, `error` ou `cancelled`. |
+| `started_at` | Le moment où l’opération a démarré. |
+| `duration_ms` | La durée de l’opération, en millisecondes. |
+| `service_name`, `environment`, `release` | Le périmètre du service qui a envoyé le span. |
+
+Un span racine démarre une trace et n’a pas de parent. Les spans enfants ont le
+même ID de trace, leur propre ID de span et un ID de parent. Seuls ces ID
+relient les opérations. Les horodatages seuls ne suffisent pas. LogBrew compte
+un span comme span d’erreur uniquement quand son `status` vaut `error`.
+
+## Une requête à travers plusieurs services
+
+1. Le service web démarre un span serveur pour la route de paiement.
+2. Un client de paiement crée un span enfant pour sa requête HTTP sortante.
+3. Le service de paiement poursuit la trace avec son propre span serveur.
+4. Un helper de base de données enregistre un span enfant pour l’écriture.
+5. L’application envoie un log d’erreur sans risque dans le span de paiement actif.
+
+Ces 5 enregistrements ont le même ID de trace. Si un service ne reçoit pas le
+contexte de trace, son travail ne rejoint pas la trace, même si leurs horaires
+se chevauchent.
+
+## Propager le contexte
+
+Les SDK LogBrew utilisent le contexte de trace W3C. Par exemple, le SDK
+Node.js poursuit un en-tête `traceparent` entrant valide avec un nouveau span
+de requête. Si l’en-tête manque ou n’est pas valide, il démarre une nouvelle
+racine. Les logs, problèmes, actions et métriques capturés dans le périmètre de
+cette requête portent la trace de la requête.
+
+L’instrumentation sortante écrit un en-tête `traceparent` uniquement vers les
+cibles que vous configurez, par exemple avec `tracePropagationTargets`.
+Envoyez le contexte de trace uniquement à des services de confiance et
+instrumentés. Un ID de trace met des opérations en corrélation. Ce n’est pas
+une authentification.
+
+Un message de file de messages peut aussi porter le contexte de trace. En
+Node.js, appelez `createLogBrewQueueTraceHeaders()` dans l’opération du
+producteur pour ajouter un en-tête `traceparent` au message. Dans le
+consommateur, passez cet en-tête à `queueOperationWithLogBrewSpan()` comme
+`traceparent`. Consultez
+[Traçage des files de messages en JavaScript](/fr/guides/sdk-ingestion#javascript-queue-tracing).
+
+Les intégrations Node.js et Python pour les requêtes entrantes et sortantes
+n’enregistrent dans les spans ni le corps des requêtes ou des réponses, ni les
+chaînes de requête, ni des en-têtes arbitraires, ni la valeur brute de
+`traceparent`. Nommez les spans d’après des modèles de route, pas d’après des
+URL concrètes. Pour les intégrations de votre runtime, lisez
+le guide [Intégration du SDK](/fr/guides/sdk-ingestion).
+
+## <span id="capture-spans">Spans de capture</span>
+
+LogBrew stocke chaque nouveau log, problème, action et métrique avec un ID de
+trace. Si un signal ne fait référence à aucun span dans le même envoi, LogBrew
+ajoute pour lui un span de capture :
+
+| Champ | Valeur |
+| --- | --- |
+| `name` | `log capture`, `issue capture`, `action capture` ou `metric capture` |
+| `operation` | `logbrew.log`, `logbrew.issue`, `logbrew.action` ou `logbrew.metric` |
+| `duration_ms` | `0` |
+| `parent_span_id` | Le span actif quand l’application a capturé le signal. Vide si aucun span n’était actif. |
+| `status` | `error` pour un problème, un log `error` ou `critical`, ou une action en échec. Sinon vide. |
+| `attributes.logbrew.evidence` | `signal_capture` |
+
+Le `span_id` du signal identifie alors son span de capture. Si le signal
+n’avait pas de contexte de trace, LogBrew crée un nouvel ID de trace pour lui.
+Cette trace montre que LogBrew a stocké le signal. Elle ne montre pas le chemin
+d’une requête. Ne lisez pas les spans de capture d’une trace comme une seule
+requête.
+
+Les spans de capture comptent dans `span_count` et `error_span_count`. Un log
+d’erreur peut donc amener `--status error` à sélectionner une trace dans
+laquelle aucune opération de l’application n’a échoué. Lisez l’`operation` de
+chaque span d’erreur avant de tirer une conclusion.
+
+## Lire une trace
+
+Utilisez un ID de trace exact, issu d’un log, d’un problème ou d’une liste de
+traces :
+
+```bash
+logbrew read traces --project "<project_id>" --status error --since 24h --json
+logbrew read trace "<trace_id>" --project "<project_id>" --json
+```
+
+`--status error` sélectionne les traces qui ont au moins un span d’erreur.
+`--status ok` sélectionne les traces sans span d’erreur.
+`--min-duration-ms 500` sélectionne les traces qui ont duré 500 millisecondes
+ou plus.
+
+Lisez d’abord la durée du span racine. Examinez ensuite les spans enfants les
+plus longs et les statuts d’erreur. Gardez en vue le projet, le service,
+l’environnement et la version, pour qu’une trace de staging ne devienne pas une
+preuve sur la production.
+
+Une trace montre une seule exécution, pas une référence de performance. Avant
+de proposer une modification de performance, comparez plusieurs traces avec la
+tendance de la métrique associée.
+
+### Résumé d’une trace
+
+`GET /api/telemetry/traces/{trace_id}/summary` renvoie un résumé sans les
+attributs des spans :
+
+| Champ | Signification |
+| --- | --- |
+| `root_span` | Le premier span dont le parent n’est pas dans la trace. Si chaque span a un parent dans la trace, le premier span. |
+| `slowest_child_span` | Le span le plus long qui a un parent. |
+| `slowest_path` | La chaîne connue de parents, d’une racine jusqu’au span enfant le plus lent. |
+| `error_spans` | Jusqu’à 5 des spans les plus longs avec le statut `error`. |
+| `services` | Pour chaque service : le nombre de spans, le nombre de spans d’erreur et la durée du span le plus long. |
+| `duration_ms` | Le temps entre le début du premier span et la fin du dernier span. |
+
+Si `root_span.parent_span_id` a une valeur, le vrai span racine n’est pas dans
+la trace. Ne lisez pas `root_span` comme le début de la requête.
+
+### Expliquer une trace
+
+`logbrew explain trace` renvoie une investigation de trace :
+
+```bash
+logbrew explain trace "<trace_id>" --json
+```
+
+| Champ | Signification |
+| --- | --- |
+| `analysis.status` | `errors_observed`, `latency_focus` ou `no_error_observed`. |
+| `analysis.first_error_span`, `analysis.first_error_path` | Le premier span d’erreur et sa chaîne connue de parents. |
+| `analysis.bottleneck_span`, `analysis.bottleneck_path` | Le span le plus long qui a un parent, et sa chaîne connue de parents. |
+| `correlations` | Les problèmes, logs, actions et métriques qui ont le même ID de trace. Chaque liste a un `status` et un `truncated`. |
+| `evidence` | Les champs capturés, manquants, masqués et tronqués. |
+| `next_actions` | Les prochaines lectures, par ordre de priorité. |
+
+`analysis.causality` vaut `evidence_only`. L’analyse ne prouve pas la cause
+racine. La CLI demande la version 3 de la réponse, dans laquelle chaque
+problème, action et métrique associé a aussi son `span_id` exact.
+
+Pour examiner un span avec son parent, ses enfants et les limites entre
+services, exécutez :
+
+```bash
+logbrew explain span "<trace_id>" "<span_id>" --project "<project_id>" \
+  --environment production --release "<release>" --json
+```
+
+`topology.parent_chain_status` indique si la chaîne de parents est complète :
+
+| Valeur | Signification |
+| --- | --- |
+| `root` | Le span n’a pas d’ID de parent. |
+| `complete` | Chaque parent jusqu’à un span racine est dans la trace. |
+| `missing` | Un ID de parent fait référence à un span absent de la trace. |
+| `cycle` | Les ID de parent forment une boucle. |
+| `truncated` | Une limite de réponse empêche d’obtenir une chaîne complète. |
+| `unavailable` | La lecture de la trace n’a pas pu aboutir. |
+
+## Contexte de trace manquant
+
+Certains signaux n’ont pas de trace de leur requête. Lisez l’état de la
+trace :
+
+| État | Signification |
+| --- | --- |
+| `available` | Des preuves de trace exactes peuvent être lues. |
+| `not_linked` | Le signal n’a pas d’ID de trace. Certains signaux anciens n’ont pas d’ID de trace. |
+| `not_found` | Le signal a un ID de trace, mais aucune trace ne correspond au périmètre sélectionné. |
+| `unavailable` | Les preuves de trace n’ont pas pu être lues à ce moment-là. |
+
+`not_linked` n’est pas une erreur. Une trace `available` peut aussi montrer que
+le signal n’avait pas de contexte de requête. Si le span de capture du
+signal n’a pas de `parent_span_id`, aucun span n’était actif quand
+l’application a capturé le signal. Le travail en arrière-plan hors du
+périmètre d’une requête donne souvent ce résultat. Pour trouver un lien
+manquant :
+
+1. Lisez le projet, le service, l’environnement, la version et l’heure du
+   signal.
+2. Vérifiez que le travail s’est exécuté dans une requête ou une opération
+   instrumentée.
+3. Vérifiez que les intégrations client et serveur propagent le contexte à
+   travers cette limite.
+4. Après avoir corrigé l’instrumentation, capturez un nouveau signal et
+   lisez-le.
+
+Une nouvelle version du SDK n’ajoute pas de contexte de trace aux signaux
+envoyés plus tôt. Ne reliez pas un signal à une trace par l’horodatage, la
+route, le message ou la version.
+
+## Planifier le traçage d’un projet
+
+Commencez par une requête ou une tâche importante, comme le paiement.
+Instrumentez une limite à la fois :
+
+1. Créez un span pour la requête entrante ou l’opération en arrière-plan.
+2. Ajoutez des spans enfants pour les appels sortants importants.
+3. Poursuivez le contexte de trace W3C à travers les limites entre services de
+   confiance.
+4. Envoyez un log sans risque dans le span actif.
+5. Lisez ce log, ouvrez son ID de trace et vérifiez la racine, les enfants, le
+   service, l’environnement, la version, le statut et la durée.
+
+Ajoutez la limite suivante seulement quand cette vérification réussit. Une
+trace partagée montre une corrélation. Elle ne prouve pas qu’un span a causé un
+problème.
+
+Pour vérifier les noms des spans, exécutez
+`logbrew traces --project "<project_id>" --pagination cursor --json`. L’objet
+`naming_quality` compte les traces de cette page qui ont un nom racine
+générique (`generic_name_traces`) ou une route non reconnue
+(`unmatched_route_traces`). Si le nommage doit être amélioré,
+`naming_quality.next_action.code` vaut `improve_trace_naming`.

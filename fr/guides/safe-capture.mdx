@@ -1,0 +1,205 @@
+---
+title: "Masquage des logs : exclure les données sensibles"
+sidebarTitle: "Contrôler les données capturées"
+description: "Sélectionnez les champs de log approuvés. Vérifiez en local l’absence de données sensibles. Lisez les limites des contrôles de capture JavaScript, Node.js et navigateur."
+---
+
+Choisissez ce que votre application envoie avant d’activer la capture. Gardez
+les mots de passe, les jetons d’accès, le contenu des formulaires et les
+données privées des utilisateurs hors des signaux.
+
+Construisez chaque signal à partir de champs approuvés. Ne copiez pas une
+requête, une réponse ou un objet d’erreur complet dans les métadonnées. Le
+masquage remplace une valeur sensible. Un filtre écarte un signal entier. Un
+signal SDK valide peut quand même contenir des données que votre application
+ne doit pas envoyer.
+
+Ce guide s’applique à ces versions de paquets :
+
+- `@logbrew/sdk` 0.1.28
+- `@logbrew/node` 0.1.12
+- `@logbrew/browser` 0.1.11
+
+Pour les autres runtimes, lisez le guide du paquet indiqué
+dans [Intégration du SDK](/fr/guides/sdk-ingestion).
+
+## Sélectionner les champs à capturer
+
+Pour un paiement échoué, enregistrez un message fixe, un modèle de route et un
+code de statut. N’enregistrez ni noms, ni adresses e-mail, ni données de
+paiement.
+
+| Champ | Règle de capture |
+| --- | --- |
+| Message | Utilisez un texte fixe comme `checkout.failed`. N’y insérez ni texte de formulaire ni identifiants. |
+| Route | Utilisez un modèle comme `/orders/:id`. Le chemin, les paramètres de requête ou le fragment d’une URL peuvent contenir des valeurs privées. |
+| Statut | N’acceptez qu’un code de statut valide, pas une chaîne issue d’une saisie utilisateur. |
+| Métadonnées | Sélectionnez des champs nommés. Ne copiez pas toutes les propriétés d’une requête, d’une réponse ou d’une erreur. |
+| Sujet et session | Utilisez des ID de télémétrie approuvés, pas un jeton de connexion ni un cookie de session. |
+
+Pour le contexte de l’utilisateur et de la session, consultez
+[Capture d’événements produit](/fr/guides/product-events#set-users-and-sessions-on-each-event).
+Un ID peut identifier une personne même s’il ne contient pas de nom.
+
+## Tester la sélection des champs en local
+
+Utilisez Node.js 18 ou plus récent. Dans un dossier vide, installez le paquet :
+
+```bash
+npm install --save-exact @logbrew/sdk@0.1.28
+```
+
+Ce test n’utilise aucune vraie clé et n’envoie aucune requête. Enregistrez-le
+sous le nom `safe-capture.mjs` :
+
+```js
+import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import { LogBrewClient, SdkError } from "@logbrew/sdk";
+
+try {
+  const client = LogBrewClient.create({
+    apiKey: "local-preview-only",
+    sdkName: "privacy-check",
+    sdkVersion: "0.1.28",
+    automaticDelivery: false
+  });
+
+  function recordCheckoutFailure(input) {
+    const status = input?.status;
+    if (!Number.isInteger(status) || status < 400 || status > 599) {
+      return false;
+    }
+    client.log(randomUUID(), new Date().toISOString(), {
+      message: "checkout.failed",
+      level: "error",
+      metadata: { route: "/checkout", status }
+    });
+    return true;
+  }
+
+  const excludedValue = "SYNTHETIC_PRIVATE_VALUE";
+  assert.equal(recordCheckoutFailure({
+    status: 503,
+    authorization: excludedValue,
+    body: excludedValue
+  }), true);
+  assert.equal(recordCheckoutFailure({ status: excludedValue }), false);
+
+  const preview = client.previewJson();
+  const batch = JSON.parse(preview);
+  assert.equal(batch.events.length, 1);
+  assert.equal(preview.includes(excludedValue), false);
+  assert.deepEqual(batch.events[0].attributes.metadata, {
+    route: "/checkout",
+    status: 503
+  });
+  client.purgePendingEvents();
+  console.log(JSON.stringify({
+    ok: true,
+    checked_events: 1,
+    excluded_value_found: false
+  }));
+} catch (error) {
+  console.error(JSON.stringify({
+    ok: false,
+    error: error instanceof SdkError ? error.code : "privacy_check_failed"
+  }));
+  process.exitCode = 1;
+}
+```
+
+
+Exécutez le test :
+
+```bash
+node safe-capture.mjs
+```
+
+Résultat attendu :
+
+```json
+{"ok":true,"checked_events":1,"excluded_value_found":false}
+```
+
+Une assertion qui échoue affiche `"ok":false` et quitte avec le code 1. Une
+erreur de validation du SDK affiche son code d’erreur SDK. N’affichez pas et
+n’importez pas un aperçu qui contient de vraies données.
+
+Utilisez le même modèle dans votre code de capture et gardez les assertions
+dans vos tests. Ajoutez une vérification pour chaque champ et chaque valeur que
+votre application ne doit pas envoyer. Si vous utilisez un masquage basé sur
+des motifs, relancez les vérifications après chaque modification de règle. Ce
+test vérifie un seul log en file d’attente. Il ne remplace pas un examen de
+confidentialité.
+
+## Messages d’erreur et piles
+
+| Méthode de capture | Comportement |
+| --- | --- |
+| `createIssueAttributesFromError` (core) | Garde le texte de l’erreur dans le message du problème et dans `metadata.errorMessage`. N’ajoute `metadata.errorStack` qu’avec `includeErrorStack: true`. Les entrées de la chaîne d’exceptions marquent chaque message comme `redacted` et n’en contiennent pas le texte. |
+| Conversion de la console (core) | Peut garder le texte de l’erreur dans le message et les métadonnées du log. |
+| `createBrowserErrorEvent` (navigateur) | Utilise un résumé d’erreur fixe, retire `metadata.errorMessage` et marque comme masqués les messages de la chaîne d’exceptions. |
+
+Un `options.message` personnalisé ne retire pas `metadata.errorMessage`.
+Vérifiez le signal complet, pas seulement son titre. Gardez les valeurs
+sensibles hors des messages d’erreur dès leur source.
+
+## Utiliser chaque contrôle dans son périmètre
+
+### JavaScript (core) et Node.js
+
+`LogBrewClient.create` accepte `eventFilter`. Renvoyez `false` pour écarter un
+signal avant son entrée dans la file d’attente. Toute autre valeur de retour
+garde le signal. Le filtre reçoit une copie du signal : la modifier ne masque
+donc rien. `createLogBrewNodeClient` et `createLogBrewBrowserClient`
+n’appliquent pas `eventFilter` dans ces versions.
+
+`droppedEvents()` compte les signaux abandonnés à cause des limites de taille
+ou de file d’attente. Il ne compte pas les signaux écartés par `eventFilter`.
+
+Le client Node ajoute le contexte d’exécution, comme la version de Node, le
+système d’exploitation et l’architecture. Définissez
+`captureRuntimeContext: false` pour l’omettre. Ce paramètre ne retire pas le
+contexte fourni par votre application et n’arrête pas la capture.
+
+### Navigateur
+
+Par défaut, le client navigateur capture les erreurs globales, les rejets non
+gérés et une première vue de page. Définissez `captureGlobalErrors`,
+`captureUnhandledRejections` ou `capturePageViews` à `false` pour désactiver
+l’une de ces captures.
+
+Les vues de page incluent le chemin (pathname). Elles omettent la chaîne de requête,
+le fragment, le titre du document et le user agent complet, sauf si vous
+définissez `includeQueryString`, `includeHash`, `includeDocumentTitle` ou
+`includeUserAgent`. Si un chemin peut contenir des valeurs privées, désactivez
+les vues de page automatiques et envoyez votre propre vue de page avec un nom
+de route sans risque.
+
+`sanitizeMetadata` ne modifie que les métadonnées. Il ne modifie pas les noms
+des vues de page ni des actions. Le nom d’une vue de page contient le chemin
+réel, comme `page_view /orders/1234`. Un `routeTemplate` dans les métadonnées
+définit la surface affichée dans Analyses, mais il ne modifie pas le
+nom. `shouldCaptureError` écarte uniquement les problèmes du navigateur. Il ne
+filtre pas les logs ni les autres signaux.
+
+Définissez `captureRuntimeContext: false` pour omettre la marque du navigateur,
+la plateforme et la famille d’appareil. Ce paramètre ne contrôle pas
+`includeUserAgent`.
+
+## Avant la capture réelle
+
+Testez chaque méthode de capture activée avec des données synthétiques, y
+compris les chemins d’erreur et les intégrations de logging.
+
+Les modifications de la capture ne s’appliquent qu’aux nouveaux signaux.
+`purgePendingEvents()` vide une file d’attente locale inactive et échoue
+pendant un envoi en cours. Il n’arrête pas la capture ultérieure et ne retire
+pas les signaux déjà acceptés par LogBrew. `uninstall()` dans le navigateur
+retire les écouteurs mais garde les signaux en file d’attente. Ces méthodes ne
+sont pas un processus de consentement ou de suppression.
+
+Envoyez ensuite un signal synthétique avec le [démarrage rapide](/fr/quickstart).
+S’il n’apparaît pas, consultez [Dépannage](/fr/guides/troubleshooting). Pour les
+erreurs HTTP, consultez [Erreurs de l’API](/fr/reference/api-errors).

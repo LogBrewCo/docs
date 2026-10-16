@@ -1,0 +1,259 @@
+---
+title: "Source maps JavaScript avec Vite"
+sidebarTitle: "Source maps JavaScript"
+description: "Importez les source maps JavaScript d’un build Vite. Gardez les identifiants hors de l’application. Retrouvez l’emplacement d’origine des frames minifiés."
+---
+
+Un fichier JavaScript minifié peut regrouper de nombreuses lignes de code sur
+une seule ligne. Un frame de pile issu de ce fichier pointe vers une ligne et
+une colonne générées. Une
+[source map](https://ecma-international.org/publications-and-standards/standards/ecma-426/)
+relie cette position au fichier, à la ligne et à la colonne d’origine.
+
+Ce guide utilise le plugin Vite de `@logbrew/sdk` 0.1.28. Il vous faut une
+application Vite, un accès à son répertoire de build et l’autorisation de
+créer une clé de projet. Pour les fichiers de débogage Apple, consultez
+[Plantages et blocages Apple](/fr/guides/apple-crashes-and-hangs).
+
+## Garder le même contexte pour le build et les signaux
+
+Utilisez le même projet, la même version, le même environnement et le même
+service pour l’import et pour les signaux que l’application envoie à l’exécution. Consultez
+[Versions](/fr/concepts/releases) pour nommer les versions. Ce guide utilise
+`web@1.2.3`, `staging` et `checkout-web`.
+
+Changez de version quand le code compilé change. Importez le build préparé,
+puis déployez exactement ce build. Ne recompilez pas et ne modifiez pas son
+JavaScript après l’import.
+
+## Ajouter le plugin Vite
+
+Installez le SDK dans le répertoire de l’application :
+
+```bash
+npm install @logbrew/sdk@0.1.28
+```
+
+Ajoutez le plugin à `vite.config.js`. Conservez vos autres plugins et vos
+paramètres de build. Remplacez l’ID du projet :
+
+```js
+import { createLogBrewViteReleaseArtifactsPlugin } from "@logbrew/sdk/vite-release-artifacts";
+
+export default {
+  plugins: [
+    createLogBrewViteReleaseArtifactsPlugin({
+      projectId: "<project_id>",
+      release: "web@1.2.3",
+      environment: "staging",
+      service: "checkout-web",
+      minifiedPathPrefix: "https://app.example.com"
+    })
+  ]
+};
+```
+
+`minifiedPathPrefix` est l’URL déployée du répertoire de build. Le plugin
+ajoute le chemin de chaque fichier dans ce répertoire. Par exemple,
+`dist/assets/app.js` devient `https://app.example.com/assets/app.js`. Si vous
+servez le build sous `/web`, incluez `/web` dans le préfixe. N’ajoutez pas
+`/assets` au préfixe.
+
+Sans option `upload`, le plugin n’envoie rien à LogBrew. Il fait aussi ceci :
+
+- Il règle `build.sourcemap` sur `"hidden"` si vous ne le définissez pas. Si
+  vous l’avez réglé sur `false`, remplacez cette valeur par `"hidden"`.
+- Il conserve les noms de fonction si vous ne définissez pas d’options de
+  minification. Si vous définissez les vôtres, conservez-y les noms.
+
+Les source maps masquées restent dans le répertoire de build comme des
+fichiers normaux. Leur accès n’est pas contrôlé. N’utilisez pas de source maps
+intégrées. Le plugin n’accepte pas de source map à l’intérieur du fichier
+JavaScript.
+
+## Compiler et vérifier en local
+
+Lancez le build de production :
+
+```bash
+npm run build
+```
+
+Le plugin donne le même Debug ID à chaque fichier JavaScript et à sa source
+map. Il retire le `sourcesContent` intégré et le chemin local de la racine de
+l’application. Il écrit `dist/logbrew-release-artifacts.json`.
+
+Ouvrez le manifeste. Vérifiez que `validation.status` vaut `ready` et que le
+manifeste liste les fichiers et les URL déployées de ce build. Les source maps
+masquées provoquent un avertissement `sourceMappingURL comment missing`. Cet
+avertissement est attendu.
+
+N’importez pas une source map qui contient un chemin privé ou du code source
+que vous ne voulez pas partager. L’import contient aussi le JavaScript compilé :
+ne mettez donc aucun secret dans le bundle de l’application.
+
+Vérifiez l’import en local. Cette commande n’envoie aucune requête et n’a
+besoin d’aucune clé :
+
+```bash
+npx --no-install logbrew-release-artifacts upload-js \
+  --build-dir dist \
+  --manifest dist/logbrew-release-artifacts.json \
+  --endpoint https://api.logbrew.co/api/release-artifacts \
+  --allow-hosted \
+  --dry-run
+```
+
+Continuez seulement si la commande se termine avec le code `0` et affiche
+`"status": "dry_run"`. Cette vérification porte sur les fichiers locaux et le
+manifeste. Elle ne teste pas le serveur. Si votre build utilise un autre
+répertoire de sortie, modifiez les 2 chemins.
+
+Pour vérifier une correspondance, lancez l’application compilée et copiez un
+frame de pile généré avec son fichier, sa ligne et sa colonne :
+
+```bash
+npx --no-install logbrew-release-artifacts symbolicate-js \
+  --build-dir dist \
+  --manifest dist/logbrew-release-artifacts.json \
+  --stack-frame "at checkoutTotal (https://app.example.com/assets/index-a1b2c3.js:2:780)"
+```
+
+Vérifiez que le résultat contient `"status": "resolved"`. L’objet `original`
+indique le fichier source, la ligne et la colonne. Cette commande s’exécute en
+local et n’importe rien.
+
+## <span id="create-an-artifact-key">Créer une clé d’artefact</span>
+
+Connectez-vous avec la [CLI LogBrew](/fr/guides/cli). Trouvez l’ID du projet :
+
+```bash
+logbrew projects --json
+```
+
+Créez une clé d’artefact pour le projet. Utilisez un nouveau chemin de fichier
+dans un répertoire que seul son propriétaire peut lire :
+
+```bash
+install -d -m 700 "$HOME/.logbrew" &&
+logbrew projects keys create "<project_id>" \
+  --ingest-key-file "$HOME/.logbrew/checkout-web.artifact" \
+  --label "Checkout web build" \
+  --kind artifact \
+  --json
+```
+
+Continuez seulement si la commande réussit. Si le résultat n’est pas clair,
+relancez la même commande avec les mêmes arguments. N’utilisez pas
+`--abandon-retry`.
+
+Une clé d’artefact est limitée au projet et sert uniquement à écrire. Elle
+importe les source maps et les fichiers de débogage. Elle ne peut ni envoyer
+de télémétrie ni lire les métadonnées des artefacts. N’utilisez pas à sa place
+un identifiant de compte ou une clé SDK d’exécution.
+
+Stockez la clé sous le nom `LOGBREW_RELEASE_ARTIFACT_TOKEN` dans les paramètres
+de secrets de votre environnement de build. Ne l’affichez pas et ne la
+commitez pas. Ne la placez pas dans une variable visible côté client, comme
+`VITE_*` ou `EXPO_PUBLIC_*`.
+
+Définissez la variable dans le processus qui exécute l’import. L’outil ne lit
+pas les fichiers `.env`. Vite ne les charge pas dans `process.env` pendant
+l’[évaluation de la configuration](https://vite.dev/config/#using-environment-variables-in-config).
+
+## Importer le build préparé
+
+Utilisez les mêmes fichiers vérifiés et le même manifeste. Cette commande
+envoie l’import à LogBrew :
+
+```bash
+npx --no-install logbrew-release-artifacts upload-js \
+  --build-dir dist \
+  --manifest dist/logbrew-release-artifacts.json \
+  --endpoint https://api.logbrew.co/api/release-artifacts \
+  --allow-hosted
+```
+
+`"status": "uploaded"` montre que LogBrew a accepté l’import. Si la commande se
+termine avec une erreur, arrêtez-vous et utilisez le tableau ci-dessous.
+
+L’outil réessaie jusqu’à 2 fois après une erreur réseau ou une réponse `408`,
+`429` ou `5xx`. Il envoie chaque fois les mêmes fichiers préparés. Utilisez
+`--max-retries` pour changer ce nombre.
+
+Une fois que l’import manuel fonctionne, vous pouvez importer pendant le build
+Vite à la place. Ajoutez cette option à la configuration du plugin :
+
+```js
+upload: {
+  endpoint: "https://api.logbrew.co/api/release-artifacts",
+  allowHostedUpload: true,
+  tokenEnv: "LOGBREW_RELEASE_ARTIFACT_TOKEN"
+}
+```
+
+Utilisez une seule méthode d’import. Le plugin arrête le build en cas d’erreur
+de préparation ou d’import. Ajoutez `dryRun: true` pour tester sans importer.
+
+Le plugin ne supprime pas les source maps du répertoire de sortie. Ne déployez
+pas les fichiers `.map` ni le manifeste sur le site web public ou le CDN.
+
+Pour retrouver l’emplacement d’origine d’un frame issu d’un problème capturé,
+exécutez `symbolicate-js` avec ce frame sur le même build préparé.
+
+## <span id="verify-a-new-issue">Lire un nouveau problème</span>
+
+Déployez le même build préparé dans l’environnement de test. Provoquez une
+erreur de test sans risque par votre chemin de capture des problèmes.
+N’envoyez pas de saisie utilisateur, d’identifiants ni de trace de pile brute
+pour ce test.
+
+Trouvez le nouveau problème avec le même projet et le même contexte de build :
+
+```bash
+logbrew read issues --project "<project_id>" \
+  --release "web@1.2.3" --environment staging \
+  --service checkout-web --since 1h --json
+```
+
+Copiez l’ID du problème depuis le résultat. Lisez sa dernière occurrence :
+
+```bash
+logbrew investigate issue "<issue_id>" --occurrence latest --json
+```
+
+Lisez d’abord l’heure de l’événement, le projet, le service, l’environnement et
+la version. Lisez ensuite `event.stack_frames`. Un frame avec
+`source: "symbolicated"` contient le fichier, la ligne et la colonne d’origine
+issus de votre import. Un frame avec `source: "captured"` contient
+l’emplacement envoyé par l’application.
+
+`logbrew read issue "<issue_id>" --json` renvoie aussi un objet
+`symbolication`. Chaque frame de cet objet a un `status` : `resolved`,
+`artifact_not_found`, `source_not_resolved`, `invalid_metadata` ou
+`unavailable`. Seul un frame `resolved` a un emplacement d’origine.
+
+LogBrew symbolise les frames quand vous lisez le problème. Un import fait après
+l’erreur peut donc symboliser un événement antérieur qui a le même Debug ID.
+Un frame symbolisé indique du code à examiner. Il ne montre pas la cause de
+l’erreur. Consultez [Investiguer un problème](/fr/guides/investigate-an-issue)
+pour les autres champs.
+
+## Corriger une vérification en échec
+
+| Résultat | Étape suivante |
+| --- | --- |
+| Le statut du manifeste n’est pas `ready` | Lisez `validation.errors`. Corrigez les paramètres de build et relancez le build. Ne modifiez pas le manifeste. |
+| Le build s’arrête car une source map manque ou est intégrée | Réglez `build.sourcemap` sur `"hidden"` ou `true`. Relancez le build. |
+| `auth_missing` | Définissez `LOGBREW_RELEASE_ARTIFACT_TOKEN` dans le processus d’import. Une exécution à blanc ne teste pas la clé. |
+| `auth_failed` (`401` ou `403`) | Utilisez une clé d’artefact du même projet. N’utilisez pas de clé d’exécution ni de clé de compte. |
+| `validation_failed` (`400` ou `413`) | Vérifiez les fichiers préparés et leur taille. N’envoyez pas de nouveau le même import. |
+| `validation_failed` avec une erreur locale | Lisez `validation.errors`. Si un fichier a changé après le build, relancez le build et la vérification. |
+| `retryable_error` | Toutes les nouvelles tentatives ont échoué après une erreur réseau, une réponse `408`, `429` ou une erreur serveur. Réessayez plus tard avec les mêmes fichiers préparés. |
+| `upload_failed` | Le serveur a renvoyé un autre statut. Vérifiez la valeur de `--endpoint`. |
+| Le frame n’est pas résolu | Vérifiez le Debug ID, le préfixe de l’URL déployée et le build. N’utilisez pas une source map d’un autre build ou d’une autre version. |
+| Aucun nouveau problème n’apparaît | Vérifiez la capture des problèmes, la clé d’exécution et le filtre de période avant de tester les source maps. |
+
+N’incluez pas de fichiers source, de clés ni de chemins privés dans vos
+messages au support. Consultez [Dépannage](/fr/guides/troubleshooting) et
+[Erreurs de l’API](/fr/reference/api-errors).
