@@ -1,0 +1,338 @@
+---
+title: "Triaje y resolución de incidencias en LogBrew"
+sidebarTitle: "Gestionar incidencias"
+description: "Gestiona incidencias en LogBrew. Lee la evidencia de las ocurrencias y resuelve, archiva, reabre, prioriza o asigna incidencias de una en una o en bloque."
+---
+
+Una incidencia agrupa ocurrencias de errores que comparten una huella. Lee el
+resumen del grupo y una ocurrencia antes de cambiar el estado, la prioridad o
+el responsable. Un cambio de estado, prioridad o responsable registra una
+decisión del equipo. No repara el software ni reescribe los eventos
+capturados.
+
+Instala la [CLI de LogBrew](/es/guides/cli) y ejecuta `logbrew login` antes de
+empezar.
+
+## Incidencias y ocurrencias
+
+Una lista de incidencias devuelve un resumen del grupo, no un evento completo.
+Lee estos campos antes de abrir el detalle:
+
+| Campo | Significado |
+| --- | --- |
+| `title` | Título capturado del fallo. |
+| `severity` | Severidad capturada. |
+| `triage.effective_severity` | Severidad que usa LogBrew después de aplicar las reglas de incidencias. `severity` conserva el valor capturado. `triage.rule_applied` es `true` cuando se aplica una regla. |
+| `occurrence_count` | Número de ocurrencias conservadas en el grupo. |
+| `first_seen_at` | Hora de la ocurrencia conservada más antigua. |
+| `last_seen_at` | Hora de la ocurrencia conservada más reciente. |
+| `project_id` | Proyecto que contiene la incidencia. |
+| `service_name` | Servicio de la ocurrencia más reciente. |
+| `release` | Release de la ocurrencia más reciente. |
+| `environment` | Entorno de la ocurrencia más reciente. |
+| `status` | Estado de la incidencia en el flujo de trabajo. Consulta [Valores de estado](#status-values). |
+| `priority` | Orden de triaje de la incidencia. Consulta [Prioridad](#priority). |
+| `priority_source` | `manual` cuando una persona definió la prioridad. `derived` cuando sigue a la severidad. |
+| `assignee` | Cuenta responsable del siguiente paso, o `null`. Consulta [Asigna incidencias](#assign-issues). |
+
+El número de ocurrencias no es el número de usuarios afectados. Los recuentos
+y las horas se aplican al alcance devuelto, no a todo el historial de errores.
+Un filtro `--since` o `--until` limita las ocurrencias que cuenta LogBrew.
+Cuando informes de un recuento, indica también los filtros que lo produjeron.
+
+## <span id="status-values">Valores de estado</span>
+
+| Estado | Significado |
+| --- | --- |
+| `unresolved` | La incidencia necesita una decisión. |
+| `resolved` | El equipo marcó la incidencia como corregida. El estado no demuestra la corrección. |
+| `archived` | El equipo sacó la incidencia del triaje activo. |
+
+`archived` antes se llamaba `ignored`. Los dos nombres seleccionan las mismas
+incidencias y ambos se aceptan como entrada. `logbrew read`, `logbrew issues`
+y las versiones 2 y 3 de la API muestran `archived`. La versión 1 de la API
+(la predeterminada), el flujo de la observación en vivo y la respuesta de
+investigación de incidencias muestran `ignored`. El panel muestra los estados
+como Sin resolver, Resuelta y Archivada.
+
+El estado se aplica a toda la incidencia, no a una ocurrencia. La severidad
+indica la urgencia, y el estado registra la decisión. Mantén las dos cosas
+separadas. Una incidencia `critical` puede estar `resolved` después de una
+corrección verificada. Una incidencia `archived` conserva su severidad
+capturada.
+
+LogBrew no reabre automáticamente una incidencia resuelta. Cuando llega una
+ocurrencia nueva después de la resolución, la investigación informa
+`lifecycle.effective_status` como `regressed`. El `status` sigue siendo
+`resolved` hasta que una persona reabre la incidencia.
+
+## <span id="priority">Prioridad</span>
+
+La prioridad define el orden en que el equipo tría las incidencias:
+
+| Prioridad | Significado |
+| --- | --- |
+| `high` | Examina la incidencia primero. |
+| `medium` | Examina la incidencia después de las `high`. |
+| `low` | La incidencia puede esperar. |
+
+Cada incidencia tiene una prioridad. Si nadie la define, sigue a la severidad
+de la incidencia: `error` y `critical` son `high`, `warning` es `medium` e
+`info` es `low`. Cuando una regla de incidencias cambia la severidad, la
+prioridad sigue a `triage.effective_severity`. En ese caso, `priority_source`
+es `derived`. Cuando una persona define la prioridad, esta queda fija y
+`priority_source` es `manual`.
+
+Para listar las incidencias que debes examinar primero:
+
+```bash
+logbrew read issues --project "<project_id>" --status unresolved \
+  --priority high --since 24h --json
+```
+
+## <span id="assign-issues">Asigna incidencias</span>
+
+Asigna una incidencia para mostrar quién es responsable del siguiente paso.
+Una incidencia tiene 0 o 1 responsable.
+
+<Steps>
+  <Step title="Averigua a quién puedes asignarla">
+    ```bash
+    logbrew issues assignees --project "<project_id>" --json
+    ```
+
+    La lista incluye todas las cuentas que pueden leer el proyecto. Cada
+    entrada tiene `user_id`, `name` y `email`. Copia el `user_id`. No puedes
+    asignar una cuenta que no puede leer el proyecto.
+  </Step>
+
+  <Step title="Asigna la incidencia">
+    ```bash
+    logbrew issues assign "<user_id>" "<issue_id>" --json
+    ```
+
+    Usa `me` en lugar de un ID de usuario para asignarte la incidencia a ti.
+    Usa `logbrew issues unassign "<issue_id>" --json` para quitar el
+    responsable. Añade `--project` para cambiar hasta 100 incidencias de un
+    proyecto.
+  </Step>
+
+  <Step title="Lee tus incidencias">
+    ```bash
+    logbrew read issues --project "<project_id>" --assignee me \
+      --status unresolved --json
+    ```
+
+    Usa `--assignee none` para encontrar las incidencias que no tienen
+    responsable.
+  </Step>
+</Steps>
+
+Para asignar incidencias, necesitas permiso para gestionar incidencias en el
+proyecto. Ese mismo permiso te deja cambiar el estado, la prioridad y las
+reglas de incidencias y de logs. Cualquier cuenta que pueda leer el proyecto
+puede ser responsable.
+
+Cuando un miembro pierde el acceso al proyecto, las incidencias que tenía
+asignadas aparecen sin responsable. Esas incidencias aparecen en las lecturas
+con `--assignee none`. Si el miembro recupera el acceso, las incidencias
+vuelven a mostrarlo, salvo que alguien haya cambiado o quitado el responsable
+mientras tanto.
+
+## Flujo de trabajo recomendado
+
+<Steps>
+  <Step title="Lista las incidencias sin resolver de un alcance">
+    ```bash
+    logbrew read issues --project "<project_id>" --environment production \
+      --release api@1.2.3 --status unresolved --since 24h --json
+    ```
+
+    Mantén los mismos filtros en las lecturas de listas posteriores. Un
+    resultado vacío significa que ninguna incidencia coincide con este
+    alcance. No demuestra que el proyecto no tenga errores. Copia el ID exacto
+    de la incidencia, no el título.
+  </Step>
+
+  <Step title="Lee el detalle de la incidencia">
+    ```bash
+    logbrew read issue "<issue_id>" --json
+    ```
+
+    Confirma que el proyecto devuelto es el correcto antes de continuar. Las
+    lecturas devuelven una instantánea. Vuelve a leer la incidencia antes de
+    cambiar el estado.
+  </Step>
+
+  <Step title="Investiga una ocurrencia">
+    ```bash
+    logbrew investigate issue "<issue_id>" --occurrence recommended --json
+    ```
+
+    Las lecturas de detalle y de investigación no usan los filtros de lista.
+    Compara `subject.project_id`, `event.occurred_at`, el release y el entorno
+    con tu alcance. La ocurrencia recomendada puede ser más antigua que la más
+    reciente. Sigue [Investigar una incidencia](/es/guides/investigate-an-issue)
+    para revisar toda la evidencia.
+  </Step>
+
+  <Step title="Sigue la evidencia de la traza solo si está disponible">
+    Lee la traza solo cuando `correlations.trace.status` sea `available`. Usa
+    el ID de traza de la respuesta. Nunca te lo inventes.
+
+    ```bash
+    logbrew read trace "<trace_id>" --project "<project_id>" --json
+    logbrew read logs --trace "<trace_id>" --project "<project_id>" \
+      --since 24h --json
+    ```
+
+    La lectura de la traza no tiene filtro de tiempo. Si el estado es
+    `not_linked`, continúa con la evidencia de la incidencia.
+  </Step>
+
+  <Step title="Verifica el despliegue candidato">
+    Usa la ocurrencia investigada como base. Obtén el ID del despliegue de la
+    evidencia del despliegue o de tu proceso de releases.
+
+    ```bash
+    logbrew investigate issue "<issue_id>" verify \
+      --baseline-occurrence "<occurrence_id>" \
+      --candidate-deployment "<deployment_id>" \
+      --json
+    ```
+
+    Que no haya recurrencia en el intervalo de tiempo de observación no
+    demuestra una corrección permanente. Si `status` es `insufficient_traffic` o
+    `unavailable`, deja la incidencia en `unresolved`. Sigue la siguiente
+    acción devuelta.
+  </Step>
+
+  <Step title="Cambia el estado, la prioridad o el responsable">
+    Ejecuta un comando. Estos comandos no piden confirmación, así que
+    comprueba antes el ID de la incidencia.
+
+    ```bash
+    logbrew issues resolve "<issue_id>" --json
+    logbrew issues archive "<issue_id>" --json
+    logbrew issues reopen "<issue_id>" --json
+    logbrew issues priority low "<issue_id>" --json
+    logbrew issues assign me "<issue_id>" --json
+    ```
+
+    Sin `--project`, cada comando acepta 1 ID de incidencia. Comprueba el
+    código de salida y los valores devueltos de `status`, `priority` y
+    `assignee`. Si falta el resultado, vuelve a leer la incidencia antes del
+    siguiente cambio.
+
+    Los scripts antiguos pueden usar `logbrew set issue "<issue_id>" resolved`
+    y los atajos `resolve`, `ignore` y `reopen`. `ignore` define `archived`.
+  </Step>
+</Steps>
+
+## Cambia muchas incidencias a la vez
+
+Añade `--project` para cambiar hasta 100 incidencias de un proyecto con un
+solo comando:
+
+```bash
+logbrew issues archive "<issue_id_1>" "<issue_id_2>" "<issue_id_3>" \
+  --project "<project_id>" --json
+```
+
+El comando aplica un mismo cambio a todas las incidencias. Cada ID de
+incidencia solo puede aparecer una vez. La CLI rechaza más de 100 ID o un ID
+repetido antes de enviar la solicitud. El resultado tiene 1 entrada por
+incidencia, en el orden del comando:
+
+| Resultado | Significado |
+| --- | --- |
+| `updated` | LogBrew aplicó el cambio. |
+| `unchanged` | La incidencia ya tenía el valor solicitado. |
+| `not_found` | El proyecto no tiene ninguna incidencia con este ID. LogBrew no cambió nada para ella. |
+
+Cada entrada tiene `issue_id`, `outcome` e `issue`. `issue` es la incidencia
+actual, o `null` para `not_found`. Puedes volver a ejecutar el mismo comando
+tras un fallo de red. Las incidencias que ya cambiaron muestran `unchanged`.
+Para más de 100 incidencias, ejecuta más comandos. Con un resultado
+`not_found`, vuelve a copiar el ID de una lista de incidencias de ese
+proyecto. Consulta
+[Actualiza incidencias en bloque](/es/reference/telemetry-api#update-issues-in-bulk)
+para ver la solicitud a la API.
+
+## Elige el siguiente estado
+
+- **Déjala en `unresolved`** cuando el fallo esté activo o la corrección no
+  esté verificada. Que falte una traza no es motivo para archivar una
+  incidencia.
+- **Define `resolved`** cuando el equipo acepte la evidencia de la corrección.
+  Una corrección propuesta no es evidencia.
+- **Define `archived`** para una condición aceptada o una señal que solo
+  procede de pruebas. La decisión se aplica a todas las ocurrencias de la
+  incidencia. El comando no tiene campo de motivo, así que anota el motivo en
+  el registro de trabajo de tu equipo.
+- **Reábrela con `unresolved`** cuando llegue una ocurrencia nueva después de
+  la resolución. `lifecycle.regression.first_reappeared_occurrence` la
+  identifica. Compárala con la ocurrencia que se usó para la resolución. No
+  crees otra incidencia.
+
+## Entrega la investigación
+
+Da a la siguiente persona referencias, no un volcado de eventos sin procesar:
+
+- ID, estado, prioridad, responsable y severidad de la incidencia.
+- Proyecto, servicio, entorno y release.
+- Hora en que se vio por primera vez, hora en que se vio por última vez y
+  número de ocurrencias.
+- ID de la ocurrencia seleccionada y `occurrence_selection.reason`.
+- `fix.status`, `cause.status` y su `provenance`.
+- Estado de la traza e ID de traza, si está disponible.
+- Estado de la reproducción y evidencia ausente.
+- Resultado de la verificación del despliegue candidato.
+- La siguiente acción que devolvió la respuesta.
+
+Etiqueta las causas y correcciones propuestas como propuestas.
+
+## Soluciona los errores de la CLI
+
+Comprueba el código de salida del proceso antes de analizar la salida. Si todo
+va bien, el JSON va a la salida estándar. Un error de análisis termina con el
+código `2`. Un error de ejecución termina con el código `1`. Los errores JSON
+van a la salida de error estándar y contienen `ok: false`, `error`, `message`
+y `next`. Muestra `next` como orientación. No lo ejecutes automáticamente.
+
+Por ejemplo, `logbrew issues archive "<issue_id_1>" "<issue_id_2>" --json` no
+tiene `--project`. Termina con el código `2` antes de enviar la solicitud, con
+el error `invalid_issue_command`.
+
+Cuando la API rechaza una solicitud, `error` es `api_error`. Lee `status` para
+el estado HTTP y `api_code` para el código de error de la API.
+
+| Resultado | Recuperación |
+| --- | --- |
+| `not_logged_in` | Pide a una persona que ejecute `logbrew login` y reintenta la lectura. |
+| `invalid_issue_command` | Corrige el comando. Usa `--project` para más de 1 incidencia, como máximo 100 ID y cada ID una sola vez. |
+| ID de incidencia no válido | Copia el ID exacto de una lista de incidencias o de una respuesta de detalle. |
+| Incidencia no encontrada | Confirma la cuenta con la que iniciaste sesión y el proyecto. |
+| Un cambio falla con `status` `403` | La cuenta no puede gestionar incidencias en este proyecto. Pídeselo a una persona con acceso. |
+| `invalid_assignee` | El filtro `--assignee` acepta `me`, `none` o un ID de usuario. |
+| Una asignación falla con `status` `422` y `api_code` `validation_failed` | El responsable no puede leer el proyecto. Elige una cuenta de `logbrew issues assignees` o da antes acceso al proyecto a ese miembro. |
+| `investigation_response_invalid` | La respuesta no superó la validación de la CLI. Reintenta una vez. Si se repite, actualiza la CLI o informa del problema. No te saltes la validación. |
+| Estado de traza `not_linked` | Continúa con la evidencia de la incidencia. No leas ninguna traza. |
+| Estado de traza `unavailable` | Reintenta la lectura de investigación más tarde. |
+| Verificación `insufficient_traffic` | Deja la incidencia en `unresolved`. Espera a que haya tráfico en el release candidato y vuelve a verificar. |
+
+Una respuesta fallida no demuestra que un cambio de estado, prioridad o
+responsable no haya tenido efecto. Lee la incidencia antes de volver a
+intentarlo.
+
+## Qué hace útil a una incidencia
+
+- Un título claro y un mensaje legible.
+- Una huella estable.
+- Marcos de pila, cuando estén disponibles.
+- Contexto de release, entorno y servicio.
+- Contexto de la traza, cuando se capturó con la ocurrencia.
+- Atributos pequeños y relevantes, no volcados completos del contenido.
+
+Consulta [API de telemetría](/es/reference/telemetry-api)
+para los filtros de lista y los contratos de respuesta.

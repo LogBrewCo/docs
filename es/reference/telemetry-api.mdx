@@ -1,0 +1,288 @@
+---
+title: "API de telemetría: solicitudes, respuestas y códigos de error"
+sidebarTitle: "API de telemetría"
+description: "Usa la API de observabilidad de LogBrew para la ingesta de telemetría, las lecturas con alcance, las analíticas, la actualización de incidencias y los errores legibles por máquina."
+---
+
+La API de telemetría es JSON sobre HTTP en `https://api.logbrew.co`. Los SDK
+públicos envían sus lotes gestionados a `POST /v1/events`. Los clientes
+nativos personalizados envían sobres nativos a `POST /api/telemetry/ingest`.
+Las dos rutas de ingesta requieren un token bearer de ingesta limitado al
+proyecto.
+
+Las lecturas y los cambios propios de la cuenta usan un token bearer de cuenta.
+Nunca uses un token bearer de cuenta ni una sesión del navegador en la
+configuración del SDK o de la ingesta. Nunca envíes un token bearer de ingesta
+a una ruta de lectura.
+
+## Envía una solicitud acotada
+
+Usa esta lista de comprobación antes de que un cliente envíe una solicitud:
+
+1. Elige la ruta y el método HTTP en la tabla de endpoints.
+2. Usa el token bearer correcto: uno de ingesta para la ingesta y uno de cuenta
+   para todo lo demás.
+3. Selecciona el alcance de proyecto que admite la ruta. No amplíes el alcance
+   después de una respuesta vacía.
+4. Añade solo las claves de consulta que acepta la ruta. Consulta
+   [Filtros de consulta](/es/reference/telemetry-api-filters).
+5. Envía `Content-Type: application/json` cuando la ruta tenga un cuerpo JSON.
+6. Lee el estado HTTP y el cuerpo de la respuesta antes de reintentar.
+7. Mantén los tokens bearer, los tickets de actividad en vivo y los cuerpos
+   completos de las respuestas fuera de los logs y de los prompts de los
+   agentes.
+
+## Endpoints
+
+### Ingesta
+
+| Método | Ruta | Propósito |
+| --- | --- | --- |
+| `POST` | `/v1/events` | Ingerir los lotes que construyen y envían los SDK públicos de LogBrew. |
+| `POST` | `/api/telemetry/ingest` | Ingerir sobres nativos de telemetría desde un cliente personalizado. |
+
+Deja que el SDK construya los lotes de `/v1/events`. No los construyas a mano.
+Para el sobre nativo, consulta [Integración del SDK](/es/guides/sdk-ingestion).
+
+### Lecturas de telemetría
+
+| Método | Ruta | Propósito |
+| --- | --- | --- |
+| `GET` | `/api/logs` | Listar logs estructurados. |
+| `GET` | `/api/logs/{log_id}` | Leer un log. |
+| `GET` | `/api/logs/attributes` | Listar las rutas y los tipos de atributos de logs en los que puede buscar un filtro. |
+| `GET` | `/api/telemetry/issues` | Listar incidencias agrupadas. |
+| `GET` | `/api/telemetry/issues/{issue_id}` | Leer una incidencia agrupada. |
+| `GET` | `/api/telemetry/issues/{issue_id}/events` | Listar las ocurrencias de una incidencia agrupada. |
+| `PATCH` | `/api/telemetry/issues/{issue_id}` | Actualizar el estado, la prioridad o el responsable de una incidencia. |
+| `POST` | `/api/telemetry/issues/bulk` | Actualizar el estado, la prioridad o el responsable de 1 a 100 incidencias de un proyecto. |
+| `GET` | `/api/telemetry/issues/assignees` | Listar las cuentas a las que se pueden asignar incidencias en un proyecto. |
+| `PUT` | `/api/telemetry/issues/{issue_id}/triage-rule` | Definir la regla de severidad de una incidencia. |
+| `PUT` | `/api/logs/{log_id}/triage-rule` | Definir la regla de severidad y el estado ignorado de los logs que coinciden con un log. |
+| `GET` | `/api/telemetry/traces` | Descubrir trazas en el alcance de un proyecto. |
+| `GET` | `/api/telemetry/traces/{trace_id}` | Listar los spans de una traza. |
+| `GET` | `/api/telemetry/traces/{trace_id}/summary` | Leer un resumen acotado de una traza. |
+| `GET` | `/api/telemetry/actions` | Listar acciones de producto. |
+| `GET` | `/api/telemetry/metrics` | Listar muestras de métricas. |
+| `GET` | `/api/telemetry/metrics/series` | Leer una métrica por intervalos. |
+| `GET` | `/api/telemetry/releases` | Listar resúmenes de releases. |
+| `GET` | `/api/telemetry/summary/volume` | Leer los recuentos de señales de un proyecto por intervalos. |
+
+### Despliegues
+
+| Método | Ruta | Comando de la CLI |
+| --- | --- | --- |
+| `PUT` | `/api/telemetry/deployments/{deployment_id}` | `logbrew deploy` |
+| `GET` | `/api/telemetry/deployments/{deployment_id}?project_id=<project-uuid>` | Ninguno |
+| `GET` | `/api/telemetry/deployments?project_id=<project-uuid>` | Ninguno |
+
+Registra un despliegue desde la automatización de releases cuando termine bien
+o falle. El cuerpo de `PUT` tiene `project_id`, `release`, `environment`,
+`service_name`, `status` (`succeeded` o `failed`), `started_at`, `finished_at`
+y un `commit_sha` opcional. Usa los mismos valores de `release`,
+`environment` y `service_name` que envía tu SDK. La cuenta debe ser
+propietaria del proyecto.
+
+`deployment_id` es tu propio ID para el despliegue. Un reintento con el mismo
+ID y el mismo cuerpo devuelve el despliegue guardado. El mismo ID con un cuerpo
+distinto falla con `409` e `idempotency_conflict`. Usa un ID nuevo para un
+despliegue distinto.
+
+### Investigaciones
+
+Cada ruta de investigación devuelve un paquete de evidencia acotado de un
+sujeto. El comando `logbrew explain` de la [CLI](/es/reference/cli) lee estas
+rutas y valida la respuesta.
+
+| Método | Ruta | Comando de la CLI |
+| --- | --- | --- |
+| `GET` | `/api/logs/{log_id}/investigation` | `logbrew explain log` |
+| `GET` | `/api/telemetry/issues/{issue_id}/investigation` | `logbrew explain issue` |
+| `GET` | `/api/telemetry/issues/{issue_id}/correction-verification` | `logbrew investigate issue <issue_id> verify` |
+| `GET` | `/api/telemetry/traces/{trace_id}/investigation` | `logbrew explain trace` |
+| `GET` | `/api/telemetry/traces/{trace_id}/spans/{span_id}/investigation` | `logbrew explain span` |
+| `GET` | `/api/telemetry/actions/{action_id}/investigation` | `logbrew explain action` |
+| `GET` | `/api/telemetry/metrics/investigation` | `logbrew explain metric` |
+| `GET` | `/api/telemetry/releases/investigation` | `logbrew explain release` |
+
+### Analíticas de producto
+
+| Método | Ruta | Comando de la CLI |
+| --- | --- | --- |
+| `GET` | `/api/telemetry/analytics/overview` | `logbrew analytics overview` |
+| `GET` | `/api/telemetry/analytics/properties` | `logbrew analytics properties` |
+| `POST` | `/api/telemetry/analytics/funnel` | `logbrew analytics funnel` |
+| `POST` | `/api/telemetry/analytics/retention` | `logbrew analytics retention` |
+| `POST` | `/api/telemetry/analytics/lifecycle` | `logbrew analytics lifecycle` |
+| `POST` | `/api/telemetry/analytics/paths` | `logbrew analytics paths` |
+| `POST` | `/api/telemetry/analytics/segments/compare` | `logbrew analytics compare` |
+
+Las rutas `POST` de analíticas reciben un cuerpo JSON, no claves de consulta.
+Consulta [Analíticas de producto](/es/concepts/product-analytics).
+
+### Actividad en vivo
+
+| Método | Ruta | Propósito |
+| --- | --- | --- |
+| `POST` | `/api/feed/ticket` | Crear un ticket de actividad en vivo de corta duración con un token bearer de cuenta. |
+| `GET` | `/api/feed/live?ticket=<ticket>` | Abrir una conexión WebSocket con ese ticket. |
+
+### Cuenta e inicio de sesión
+
+Las rutas de uso, cuota, suscripción y cierre de sesión están en la
+[API de cuenta](/es/reference/account-api).
+
+## Códigos de estado de éxito
+
+| Operación | Estado de éxito |
+| --- | --- |
+| Ingesta, lecturas, actualizaciones de incidencias, reglas, despliegues, analíticas y tickets de actividad en vivo | `200 OK` |
+| Conexión de actividad en vivo | `101 Switching Protocols` y después mensajes WebSocket |
+
+Una respuesta `200` no demuestra que la evidencia esté completa. Lee los campos
+de cobertura, truncado y estado de la respuesta.
+
+## Filtros de consulta y paginación
+
+Cada ruta de lectura acepta sus propias claves de consulta. Los alias cómodos
+como `project`, `trace` y `user` no son claves de consulta. Las rutas de lista
+devuelven por defecto un array simple, y un sobre con cursor con
+`pagination=cursor`. La lista de despliegues siempre devuelve un objeto de
+página. Consulta
+[Filtros de consulta](/es/reference/telemetry-api-filters).
+
+## Respuestas y errores
+
+- [Formatos de respuesta](/es/reference/telemetry-response-shapes)
+  muestra un ejemplo de cada familia de respuestas.
+- [Errores de la API](/es/reference/api-errors) enumera los códigos de error y las
+  acciones de recuperación.
+
+Lee `code` antes que el mensaje para personas. Usa `next_action` para el
+comportamiento del programa y `next` como guía para las personas. No analices
+el texto de `error` ni de `next`.
+
+## Actualiza incidencias
+
+Estas solicitudes usan un token bearer de cuenta. Es distinto a propósito de
+`LOGBREW_INGEST_BEARER`. La cuenta debe tener permiso para gestionar
+incidencias en el proyecto de la incidencia. Si no lo tiene, la solicitud falla
+con `403` y `forbidden`. El mismo permiso cubre los cambios de estado, de
+prioridad y de responsable, y las reglas de incidencias y de logs.
+
+Cada solicitud define 1 o más de estos campos:
+
+| Campo | Valores |
+| --- | --- |
+| `status` | `unresolved`, `resolved` o `archived`. `ignored` es un nombre antiguo de `archived`. |
+| `priority` | `high`, `medium` o `low`. |
+| `assignee` | Un ID de usuario, `me` para la cuenta con la sesión iniciada o `none` para quitar el responsable. |
+
+Una solicitud sin ninguno de estos campos falla con `422` y
+`validation_failed`.
+
+Una incidencia tiene 0 o 1 responsable. El responsable debe poder leer el
+proyecto. Si no puede, la solicitud falla con `422` y `validation_failed`, y
+LogBrew no cambia nada. Obtén las cuentas que puedes asignar con
+[Lista los responsables](#list-assignees). Cualquier otro valor de `assignee`
+también falla con `422` y `validation_failed`.
+
+Una prioridad que defines se mantiene fija. Sin una prioridad definida por ti,
+la prioridad sigue la severidad de la incidencia: `error` y `critical` son
+`high`, `warning` es `medium` e `info` es `low`.
+
+Un campo que ya tiene el valor solicitado no cambia. Puedes volver a enviar la
+misma solicitud después de un tiempo de espera agotado. Un tiempo de espera
+agotado no demuestra que el cambio no ocurriera. Vuelve a leer la incidencia
+antes de enviar un cambio distinto.
+
+### <span id="update-one-issue">Actualiza una incidencia</span>
+
+Añade `response_version=3` para obtener `archived`, la prioridad y el
+responsable en la respuesta:
+
+```bash
+curl -X PATCH "$LOGBREW_API_URL/api/telemetry/issues/$ISSUE_ID?response_version=3" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  -H "Content-Type: application/json" \
+  --data '{ "status": "archived", "priority": "low", "assignee": "me" }'
+```
+
+La respuesta es la incidencia actualizada. Consulta los
+[ejemplos de respuesta del estado de la incidencia](/es/reference/telemetry-response-shapes#issue-status-response-examples).
+
+### <span id="update-issues-in-bulk">Actualiza incidencias en bloque</span>
+
+Envía `project_id` y de 1 a 100 ID de incidencias distintos de ese proyecto:
+
+```bash
+curl -X POST "$LOGBREW_API_URL/api/telemetry/issues/bulk" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  -H "Content-Type: application/json" \
+  --data '{
+    "project_id": "<project-uuid>",
+    "issue_ids": ["<issue-uuid-1>", "<issue-uuid-2>"],
+    "assignee": "<user-uuid>"
+  }'
+```
+
+La solicitud aplica el mismo cambio a todas las incidencias. La respuesta
+tiene `project_id` y `results`, con 1 resultado por cada ID de incidencia, en
+el orden de la solicitud. Cada resultado tiene `issue_id`, `outcome` e `issue`.
+`issue` es la incidencia actual en la versión 3 de la respuesta, o `null` con
+`not_found`.
+
+| `outcome` | Significado |
+| --- | --- |
+| `updated` | LogBrew aplicó el cambio. |
+| `unchanged` | La incidencia ya tenía los valores solicitados. |
+| `not_found` | El proyecto no tiene ninguna incidencia con este ID. LogBrew no cambió nada para ella. |
+
+Una lista vacía, más de 100 ID o un ID repetido fallan con `422` y
+`validation_failed`. Divide un conjunto más grande en más solicitudes. Si la
+cuenta no puede leer el proyecto, la solicitud falla con `404` y `not_found`.
+
+### <span id="list-assignees">Lista los responsables</span>
+
+Envía el ID del proyecto para obtener todas las cuentas a las que se pueden
+asignar incidencias en ese proyecto:
+
+```bash
+curl "$LOGBREW_API_URL/api/telemetry/issues/assignees?project_id=$PROJECT_ID" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER"
+```
+
+La lista tiene todas las cuentas que pueden leer el proyecto. Cada entrada
+tiene `user_id`, `name` y `email`. `name` es `null` cuando la cuenta no tiene
+nombre. Consulta la
+[respuesta de la lista de responsables](/es/reference/telemetry-response-shapes#assignee-list-response).
+Cualquier cuenta que pueda leer el proyecto puede obtener esta lista. Si la
+cuenta no puede leer el proyecto, la solicitud falla con `404` y `not_found`.
+
+Cuando un miembro pierde el acceso al proyecto, las incidencias asignadas a ese
+miembro no muestran responsable. Si el miembro recupera el acceso, las
+incidencias vuelven a mostrarlo, salvo que alguien haya cambiado o quitado el
+responsable mientras tanto.
+
+### Define reglas de incidencias y de logs
+
+Una regla cambia cómo muestra LogBrew las señales que coinciden. No elimina
+datos. La `severity` capturada no cambia, y la respuesta muestra la regla en
+`triage`.
+
+| Solicitud | Cuerpo JSON |
+| --- | --- |
+| `PUT /api/telemetry/issues/{issue_id}/triage-rule` | `{ "severity": "<value>" }` |
+| `PUT /api/logs/{log_id}/triage-rule` | `{ "severity": "<value>", "ignored": true }` |
+
+`severity` es `info`, `warning`, `error`, `critical` o `source`. `source` quita
+la anulación y vuelve a mostrar la severidad capturada. En una regla de logs,
+`ignored: true` oculta los logs que coinciden de la lista de logs
+predeterminada. Léelos con `status=ignored` o `status=all`. La regla se aplica
+a las señales que coinciden, tanto conservadas como futuras. Cualquier otro
+valor falla con `422` y `validation_failed`.
+
+<Warning>
+  No envíes releases vacíos. LogBrew los rechaza para que el seguimiento de los
+  releases siga siendo fiable.
+</Warning>
