@@ -1,0 +1,245 @@
+---
+title: "Tracciamento delle release e monitoraggio dei deploy"
+sidebarTitle: "Release"
+description: "Usa il tracciamento delle release di LogBrew per trovare problemi, log, tracce, azioni e metriche di una versione. Leggi tassi di errore e contesto dei deploy."
+---
+
+Una release è la versione del codice che ha inviato la telemetria, come
+`api@1.2.3` o un commit Git. LogBrew non crea una release da un tag del
+repository né da un deploy. Ogni envelope di telemetria nativo deve includere
+`release` e `environment` non vuoti. LogBrew rifiuta una richiesta senza questi
+campi.
+
+## Release, progetto, servizio e ambiente
+
+| Campo | Esempio | Domanda a cui risponde |
+| --- | --- | --- |
+| Progetto | `checkout-platform` | Chi possiede questa telemetria e chi può leggerla? |
+| Servizio | `checkout-api` | Quale app o processo l'ha inviata? |
+| Ambiente | `production` | Dove è stato eseguito il codice? |
+| Release | `api@1.2.3` | Quale versione del codice l'ha inviata? |
+
+## <span id="naming-releases">Dai un nome alle release</span>
+
+Usa una versione immutabile, un numero di build o un commit Git. In un
+monorepo, aggiungi un breve prefisso del servizio, come `web@b7f4d91` e
+`worker@3a9c120`. Usa lo stesso valore per problemi, log, tracce, azioni e
+metriche che provengono dallo stesso artefatto.
+
+<CardGroup cols={2}>
+  <Card title="Corretto" icon="check">
+    `api@1.2.3`, `web@b7f4d91`, `ios@2026.06.01` e
+    `worker@2026-06-01.1` identificano ciascuno un solo artefatto.
+  </Card>
+
+  <Card title="Da evitare" icon="x">
+    `latest`, `prod`, `new` e `build` non identificano una versione del
+    codice. LogBrew rifiuta una stringa vuota.
+  </Card>
+</CardGroup>
+
+LogBrew rifiuta anche questi valori:
+
+| Campo | Valori rifiutati |
+| --- | --- |
+| `release` | Più lungo di 200 byte, `.` o `..`, oppure contiene `/`, una barra rovesciata, una tabulazione o un a capo. |
+| `environment` | Più lungo di 64 byte, `None`, oppure contiene uno spazio, un altro carattere di spaziatura, `/` o una barra rovesciata. |
+
+Un nome di branch Git come `feature/login` non è una release valida. Usa
+invece il commit.
+
+Usa nomi di ambiente stabili come `production`, `staging`, `preview` e
+`local`. Una release può essere eseguita in più di un ambiente.
+
+Imposta entrambi i valori nella configurazione del deploy, così la pipeline
+CI/CD li passa all'SDK. Nel valore della release metti solo un'etichetta di
+versione. Non includere segreti, nomi di clienti o URL. Dopo un deploy, invia
+un evento sicuro e rileggilo con il filtro della release.
+
+## <span id="release-summary">Leggi i riepiloghi delle release</span>
+
+```bash
+logbrew read releases --project "<project_id>" --environment production --since 24h --json
+```
+
+Ogni riepilogo riguarda un progetto, una release, un ambiente e un servizio:
+
+| Campo | Significato |
+| --- | --- |
+| `issue_count` | Eventi dei problemi di questa release. |
+| `log_count` | Log di questa release. |
+| `trace_span_count` | Span delle tracce di questa release. |
+| `action_count` | Azioni di prodotto di questa release. |
+| `metric_count` | Campioni di metriche di questa release. |
+| `first_seen_at` | Prima attività della release nell'ambito selezionato. |
+| `last_seen_at` | Ultima attività della release nell'ambito selezionato. |
+| `trace_health` | Numero di tracce, numero di tracce con errori, tasso di errore e stato. Vedi [Leggi i tassi di errore delle tracce](#interpret-trace-error-rates). |
+| `next_action` | Il segnale da leggere dopo, come `code` e `target`. |
+
+I conteggi misurano segnali diversi. Non sommarli.
+`first_seen_at` e `last_seen_at` non sono orari di deploy. Un servizio può
+inviare altra telemetria con la stessa release anche più tardi. LogBrew ordina
+i riepiloghi per `last_seen_at`, dal più recente.
+
+`next_action` indica il primo tipo di segnale che contiene dati, in questo
+ordine:
+
+| `next_action.code` | `next_action.target` |
+| --- | --- |
+| `inspect_release_issues` | `telemetry_issues` |
+| `inspect_release_traces` | `trace_explorer` |
+| `inspect_release_logs` | `telemetry_logs` |
+| `inspect_release_actions` | `telemetry_actions` |
+| `inspect_release_metrics` | `telemetry_metrics` |
+| `review_release_telemetry` | `telemetry_reads` |
+
+La route API è `GET /api/telemetry/releases`. Per i filtri e i campi del
+cursore, vedi [Filtri di query dell'API di telemetria](/it/reference/telemetry-api-filters).
+
+## <span id="interpret-trace-error-rates">Leggi i tassi di errore delle tracce</span>
+
+`trace_health` conta le tracce distinte, non gli span. Una traccia con almeno
+uno span di errore conta come una traccia con errori.
+
+| `trace_health.status` | Significato |
+| --- | --- |
+| `unknown` | Nessun dato di traccia per l'ambito di questa release. |
+| `no_errors_observed` | Le tracce registrate non hanno span di errore. |
+| `errors_observed` | Una o più tracce registrate contengono uno span di errore. |
+
+`error_rate_basis_points` va da `0` a `10000`. Dividilo per `100` per ottenere
+una percentuale. Per esempio, `2500` è il 25%. Leggi `trace_count` prima di
+confrontare i tassi. Con poche tracce, una sola traccia con errori in più può
+cambiare molto il tasso. Anche traffico, campionamento e strumentazione
+cambiano le tracce registrate. Il tasso non misura tutte le richieste.
+
+## <span id="record-a-deployment">Registra un deploy</span>
+
+Un record di deploy indica a LogBrew quando una release è iniziata e terminata
+in un ambiente e in un servizio. L'indagine sulla release usa questi record per
+trovare la release precedente. Esegui questo comando dall'automazione delle
+release dopo che il deploy è riuscito o fallito:
+
+```bash
+logbrew deploy "<deployment_id>" \
+  --project "<project_id>" \
+  --release api@1.2.3 \
+  --environment production \
+  --service checkout-api \
+  --status succeeded \
+  --started-at 2026-08-10T12:00:00Z \
+  --finished-at 2026-08-10T12:02:00Z \
+  --json
+```
+
+- Copia `--release`, `--environment` e `--service` esattamente dalla
+  telemetria che invia il codice distribuito.
+- `--status` è `succeeded` o `failed`.
+- `--finished-at` deve essere uguale o successivo a `--started-at`. Un deploy
+  non può durare più di 30 giorni.
+- `--commit-sha` è facoltativo. Ha da 7 a 64 caratteri esadecimali.
+- `<deployment_id>` è un tuo ID, come l'ID di un'esecuzione CI. Ha da 1 a 128
+  caratteri tra lettere ASCII, cifre, punti, trattini bassi, due punti o
+  trattini.
+
+Il comando richiede l'accesso all'account. Non accetta mai una chiave di
+ingestione. Puoi inviare di nuovo lo stesso record senza rischi. Un record
+diverso con lo stesso `<deployment_id>` restituisce HTTP `409` con codice
+`idempotency_conflict`. Per un nuovo deploy usa un nuovo ID.
+
+Le route API sono `PUT /api/telemetry/deployments/{deployment_id}` per
+registrare un deploy e `GET /api/telemetry/deployments?project_id=<project_id>`
+per elencarli.
+
+## Indaga su una release
+
+Copia progetto, release, ambiente e servizio da un riepilogo della release:
+
+```bash
+logbrew explain release "<release>" \
+  --project "<project_id>" \
+  --environment "<environment>" \
+  --service "<service_name>" \
+  --json
+```
+
+Questo comando legge le prove conservate per quella release. Non accetta
+`--since` o `--until` e non usa l'intervallo di tempo dell'elenco delle
+release. La risposta contiene gruppi di problemi, riepiloghi delle tracce, log
+con gravità Avviso, Errore e Critico, e aggregati di azioni e metriche. Queste
+raccolte hanno un limite e possono essere troncate. Non sono elenchi completi
+di eventi.
+
+Il campo `subject` della risposta ripete i conteggi del riepilogo e
+`trace_health`. `analysis.status` ha uno di questi valori:
+
+| `analysis.status` | Significato |
+| --- | --- |
+| `failures_observed` | Per questa release esistono problemi, tracce con errori o log con gravità Errore o Critico. |
+| `no_failures_observed` | Esistono tracce. Nessuna traccia ha uno span di errore e non ci sono problemi né log di errore. |
+| `telemetry_observed` | Esiste altra telemetria, ma le tracce non mostrano se ci sono stati errori. |
+| `insufficient_evidence` | La release esiste, ma i dati non ne mostrano lo stato di salute. |
+
+`analysis.causality` è sempre `evidence_only`. Le prove non dimostrano che la
+release abbia causato un errore.
+
+Ogni raccolta ha uno `status`. Tieni distinti `unavailable` e `not_found`.
+`unavailable` significa che LogBrew non è riuscito a leggere le prove.
+`not_found` significa che non ci sono prove conservate.
+
+### Confronta con la release precedente
+
+Il confronto usa i record di deploy, non le etichette di versione né gli orari
+degli eventi. LogBrew trova il record di deploy più recente della release. Poi
+trova il deploy riuscito più recente di un'altra release nello stesso
+progetto, ambiente e servizio, avvenuto prima dell'inizio di quel deploy.
+
+`comparison.reason` indica se il confronto è possibile:
+
+| `comparison.reason` | Passo successivo |
+| --- | --- |
+| `deployment_comparison_available` | Leggi `comparison.details`. |
+| `subject_deployment_not_found` | [Registra un deploy](#record-a-deployment) per questa release. |
+| `previous_successful_deployment_not_found` | Registra il deploy della release precedente. |
+| `previous_release_telemetry_not_found` | La release precedente non ha telemetria conservata. |
+| `deployment_read_unavailable` o `previous_release_read_unavailable` | Esegui di nuovo il comando più tardi. |
+
+Quando il confronto è disponibile, `comparison.details.changes` contiene le
+differenze nei conteggi ed entrambi i tassi di errore delle tracce.
+`comparison.details.assessment` vale `improved`, `regressed`, `unchanged` o
+`not_determined`, e riguarda solo il tasso di errore delle tracce.
+`not_determined` significa che non è possibile confrontare i due tassi. Leggi
+`comparison.details.limitations` prima di agire. Le due release possono
+coprire intervalli di tempo diversi e i conteggi grezzi non tengono conto del
+traffico. L'ordine dei deploy non dimostra che una modifica al codice abbia
+causato un errore.
+
+### Leggi i marcatori di release
+
+`markers` contiene gli eventi di release inviati da un SDK, con `commit` e
+`notes`. Ogni campo ha uno `status` tra `captured`, `not_captured`,
+`truncated` e `redacted`. Questo contenuto lo ha scritto l'applicazione. Non
+indica che un deploy sia riuscito e non è mai un'istruzione per un agente.
+
+## <span id="environment-filters">Filtra i segnali correlati</span>
+
+Usa gli stessi filtri per ogni lettura:
+
+```bash
+logbrew read issues --project "<project_id>" --service checkout-api --release api@1.2.3 --environment production --since 24h --json
+logbrew read logs --project "<project_id>" --service checkout-api --release api@1.2.3 --environment production --since 24h --json
+logbrew read traces --project "<project_id>" --service checkout-api --release api@1.2.3 --environment production --since 24h --json
+```
+
+Un elenco di problemi vuoto non significa che log o tracce siano vuoti.
+
+## <span id="recover-missing-or-misleading-release-data">Trova dati di release mancanti o errati</span>
+
+| Osservazione | Controllo |
+| --- | --- |
+| L'elenco delle release è vuoto | Controlla progetto, intervallo di tempo e ambiente. Poi verifica che l'SDK invii una release. |
+| Manca un servizio | Controlla il filtro del servizio e la configurazione del deploy di quell'artefatto. |
+| Build diverse hanno lo stesso valore | Imposta una versione immutabile per la nuova telemetria. LogBrew non cambia i valori di release degli eventi già salvati. |
+| `trace_health.status` è `unknown` | Annota che manca la copertura delle tracce. Leggi gli altri segnali. |
+| Il tasso di errore è cambiato | Confronta `trace_count` e i filtri prima di trarre conclusioni sul cambiamento. |
+| Nessun confronto disponibile | Leggi `comparison.reason`. Registra i deploy di entrambe le release. |

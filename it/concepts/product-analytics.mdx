@@ -1,0 +1,368 @@
+---
+title: "Che cos'è l'analisi di prodotto? Metriche e utenti di ritorno"
+sidebarTitle: "Analisi di prodotto"
+description: "Seleziona un progetto e le date. Leggi attività, funnel, fidelizzazione e variazioni del ciclo di vita. Verifica la copertura dei dati prima di agire sui risultati."
+---
+
+L'analisi di prodotto mostra come le persone usano la tua app. LogBrew legge
+le azioni di prodotto che la tua app invia, tra cui visualizzazioni di pagina,
+visualizzazioni di schermata e interazioni. Usa
+[Acquisizione eventi di prodotto](/it/guides/product-events) per inviare
+questi eventi con il contesto di utente e sessione.
+
+Ogni risultato riguarda un solo progetto e un solo intervallo di tempo. Un
+nome di servizio non seleziona un progetto. Log e problemi sono segnali
+separati. La loro presenza non significa che esistano dati di analisi per lo
+stesso intervallo.
+
+## Eventi, utenti e sessioni
+
+| Unità | Significato |
+| --- | --- |
+| Evento | Un'azione registrata. Una persona può inviare molti eventi. |
+| Utente identificato | Un ID soggetto stabile e opaco, fornito dall'app, con tipo `user`. |
+| Soggetto anonimo | Un ID soggetto tipizzato che non è un utente. LogBrew non lo conta mai come utente. |
+| Sessione | Un ID sessione esplicito, fornito dall'app. Una persona può avere molte sessioni. |
+
+Per esempio, 200 azioni in 20 sessioni non significano che 20 persone abbiano
+usato l'app. I totali degli eventi sono esatti per l'intervallo selezionato. I
+conteggi unici di utenti, sessioni e soggetti anonimi sono approssimativi.
+
+Usa ID opachi. Non usare nomi, indirizzi email o altri dati personali come ID.
+Le risposte di analisi non restituiscono mai gli ID grezzi di utenti o
+sessioni.
+
+## Apri la panoramica nella dashboard
+
+1. Apri **Analisi** nella dashboard di LogBrew.
+2. Seleziona un progetto.
+3. Seleziona **24 ore**, **7 giorni**, **14 giorni**, **30 giorni** o **Personalizzato**.
+4. Leggi il grafico dell'attività, poi **Eventi principali** e **Superfici principali**.
+5. Apri **Copertura e limiti** prima di leggere i conteggi degli utenti.
+
+Con **Personalizzato**, seleziona il primo e l'ultimo giorno, poi seleziona
+**Applica**. Entrambi i giorni fanno parte dell'intervallo. Per esempio, dal 12
+al 16 aprile sono cinque giorni. La dashboard usa date UTC. Un intervallo
+personalizzato dura al massimo 31 giorni e non può includere date future.
+
+La dashboard mostra anche due andamenti degli utenti per lo stesso progetto e
+le stesse date. **Gli utenti tornano?** mostra la fidelizzazione. **Come cambia
+la base di utenti?** mostra i gruppi del ciclo di vita. Entrambi gli andamenti
+usano tutta l'attività classificata degli utenti identificati. Non devi
+selezionare un evento.
+
+## <span id="use-the-analytics-api">Leggi la panoramica del progetto</span>
+
+```bash
+logbrew analytics overview --project "<project_id>" --since 7d --json
+```
+
+Aggiungi `--until <RFC3339>` per un orario di fine escluso dall'intervallo.
+`--interval` accetta `auto`, `1m`, `5m`, `15m`, `1h`, `6h` o `1d`.
+`--top-limit` imposta le righe di ogni classifica, da `1` a `20`. Il valore
+predefinito è `10`. Aggiungi `--service`, `--release` o `--environment` per
+filtrare per contesto esatto. L'endpoint dell'API è
+`GET /api/telemetry/analytics/overview`.
+
+La panoramica contiene i totali dell'attività, una serie temporale, le azioni
+principali e l'attività classificata. Questo estratto mostra i totali e la loro
+copertura:
+
+```json
+{
+  "schema_version": 3,
+  "analysis_level": "user_and_session",
+  "summary": {
+    "actions": 120,
+    "active_identified_users": 18,
+    "active_anonymous_subjects": 7,
+    "sessions": 24
+  },
+  "coverage": {
+    "identified_actions": 100,
+    "anonymous_actions": 20,
+    "subject_coverage": {
+      "index_version": 1,
+      "identified_user_events": 100,
+      "anonymous_subject_events": 8,
+      "legacy_unknown_kind_events": 4,
+      "missing_subject_events": 6,
+      "historical_unindexed_events": 2
+    },
+    "sessionized_actions": 90,
+    "traced_actions": 60,
+    "top_actions_truncated": true
+  },
+  "next_action": { "code": "build_product_funnel" }
+}
+```
+
+La somma dei cinque conteggi di `subject_coverage` è uguale a
+`summary.actions`. Solo `identified_user_events` conta per gli utenti.
+`anonymous_actions` include gli altri quattro stati. In questo esempio, 8
+eventi di soggetti anonimi provengono da circa 7 soggetti anonimi diversi.
+Nessuno dei due numeri è un conteggio di utenti. Una classifica troncata non
+dimostra che gli eventi con meno volume siano assenti.
+
+`analysis_level` vale `no_data`, `event_only`, `user_level` o
+`user_and_session`. Indica a quali domande i dati possono rispondere. Il
+livello è il più alto supportato da `summary` o da `classified_activity`. Non
+significa che entrambi i gruppi abbiano utenti o sessioni.
+
+### Tieni separati i due gruppi di attività
+
+| Campi della risposta | Eventi contati |
+| --- | --- |
+| `summary`, `coverage`, `series`, `top_actions` | Eventi di azione di prodotto, comprese le azioni senza una classificazione supportata. |
+| `classified_activity` | Visualizzazioni di pagina, visualizzazioni di schermata e interazioni. Le visualizzazioni di pagina non sono azioni. |
+
+Anche le visualizzazioni di schermata e le interazioni classificate sono
+azioni. Non sommare `summary.actions` a `classified_activity.summary.events`.
+Leggi la copertura del gruppo che usi. La somma dei conteggi dei soggetti in
+`classified_activity.coverage.subject_coverage` è uguale a
+`classified_activity.summary.events`.
+
+`summary.actions` può valere `0` mentre le visualizzazioni di pagina
+classificate forniscono i conteggi di utenti e sessioni. Controlla
+`classified_activity` prima di concludere che non c'è attività di prodotto.
+
+### Segui la prossima azione
+
+`next_action` ha un `code`, un `target` e un `reason`. Indica la lacuna di
+acquisizione più importante o il prossimo passo dell'analisi:
+
+| `next_action.code` | Significato |
+| --- | --- |
+| `capture_product_activity` | Nessun evento di prodotto corrisponde all'ambito. |
+| `classify_product_activity` | Ci sono eventi, ma nessuno è una visualizzazione di pagina, una visualizzazione di schermata o un'interazione. |
+| `identify_product_users` | Nessun evento ha un soggetto con tipo `user`. |
+| `sessionize_product_activity` | Nessun evento ha un ID sessione. |
+| `capture_funnel_steps` | Ci sono meno di due eventi classificati con un nome. |
+| `build_product_funnel` | I dati bastano per un funnel. |
+
+Modifica l'acquisizione nell'app, poi controlla un nuovo evento. Gli eventi
+precedenti non dimostrano che la modifica funziona.
+
+### Chiama direttamente l'API
+
+Invia un token bearer dell'account. Invia `response_version=3` per ottenere la
+stessa risposta che legge la CLI. Se ometti `response_version`, l'API
+restituisce la versione `1`, che non ha i conteggi dei soggetti anonimi né
+`subject_coverage`.
+
+```bash
+curl -sS -G "https://api.logbrew.co/api/telemetry/analytics/overview" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project_id>" \
+  --data-urlencode "since=7d" \
+  --data-urlencode "response_version=3"
+```
+
+`since` è una durata positiva, come `24h`, `7d` o `30d`, oppure un timestamp
+RFC3339. `until` è un timestamp RFC3339 facoltativo. L'intervallo include
+`since` ed esclude `until`. Se ometti `until`, l'intervallo termina all'orario
+della richiesta. Un intervallo non può superare 31 giorni.
+
+Per l'intervallo dal 12 al 16 aprile 2026, invia `2026-04-12T00:00:00Z` come
+`since` e `2026-04-17T00:00:00Z` come `until`.
+
+Un intervallo più lungo di 31 giorni restituisce HTTP `422`:
+
+```json
+{
+  "error": "product analytics range must not exceed 31 days",
+  "code": "validation_failed",
+  "next": "use a shorter range or query consecutive bounded windows",
+  "next_action": { "code": "fix_request", "target": "request" }
+}
+```
+
+Nella logica del programma, leggi `code` e `next_action`. Mostra `error` e
+`next` a una persona. [Errori API](/it/reference/api-errors) elenca le
+altre risposte di errore.
+
+Le route di analisi `POST` qui sotto accettano un corpo JSON con gli stessi
+campi `project_id`, `since`, `until`, `service_name`, `release` ed
+`environment`. L'API rifiuta i campi sconosciuti nel corpo.
+
+## <span id="measure-a-funnel">Misura un funnel</span>
+
+Un funnel misura la conversione lungo una serie ordinata di passaggi, da due a
+otto:
+
+```bash
+logbrew analytics funnel --project "<project_id>" --since 7d \
+  --step page-view /pricing \
+  --step interaction checkout_started \
+  --step interaction checkout_completed \
+  --json
+```
+
+Ogni passaggio deve avere un timestamp successivo a quello del passaggio
+precedente. Un evento non può completare due passaggi. L'unità predefinita è la
+sessione. Usa `--unit identified-user` per contare gli utenti su più sessioni.
+Copia i nomi degli eventi dalla panoramica. Il rapporto tra due totali non
+correlati non è un tasso di conversione.
+
+L'ultimo passaggio deve avvenire entro la finestra di conversione, che parte
+dal primo passaggio. Impostala con `--conversion-window`, per esempio `30m` o
+`1h`. Il valore predefinito è 24 ore, oppure l'intero intervallo se è più
+breve. La finestra non può superare l'intervallo.
+
+La route dell'API è `POST /api/telemetry/analytics/funnel`. La
+[risposta del funnel ordinato](/it/reference/telemetry-response-shapes#ordered-funnel-response)
+mostra il corpo della richiesta e la risposta.
+
+## Esplora i percorsi attorno a un evento
+
+I percorsi mostrano le sequenze più comuni di eventi con nome dopo o prima di
+un evento di ancoraggio:
+
+```bash
+logbrew analytics paths following --project "<project_id>" --since 24h \
+  --anchor-kind page-view --anchor-event /pricing \
+  --json
+```
+
+Usa `preceding` al posto di `following` per gli eventi prima dell'ancoraggio.
+`--depth` imposta il numero di eventi su quel lato, da `1` a `8`. Il valore
+predefinito è `4`. `--path-limit` imposta il numero di percorsi, da `1` a `20`.
+Il valore predefinito è `10`. Più eventi identici consecutivi contano come un
+solo evento. Aggiungi `--keep-repeated` per tenerli tutti.
+
+I percorsi usano gli ID sessione. Un percorso successivo parte dal primo
+ancoraggio di ogni sessione. Un percorso precedente termina all'ultimo
+ancoraggio. I percorsi non contano gli utenti e non mostrano perché un'azione
+non è riuscita. La route dell'API è `POST /api/telemetry/analytics/paths`.
+
+## Leggi la fidelizzazione
+
+La fidelizzazione mostra se gli utenti identificati tornano dopo un evento
+iniziale:
+
+```bash
+logbrew analytics retention --project "<project_id>" --since 30d \
+  --start-kind page-view --start-event /signup \
+  --return-kind interaction --return-event report_opened \
+  --json
+```
+
+`--interval` vale `hour`, `day`, `week` o `thirty-day`. `thirty-day`
+corrisponde a 30 giorni, non a un mese di calendario. `--interval-count` va da
+`1` a `31`. Il valore predefinito è `10`. `--mode return-on` conta i ritorni
+esattamente in ciascun periodo. `return-on-or-after` conta i ritorni in
+ciascun periodo o dopo.
+
+Un ritorno deve avvenire dopo l'evento iniziale dell'utente. Ogni utente
+inizia una sola volta, al primo evento iniziale nell'intervallo. Quell'evento
+non è sempre il primo evento in assoluto dell'utente. Un utente che torna più
+volte nello stesso periodo conta una sola volta per quel periodo.
+
+Per ogni periodo, leggi il numero di utenti tornati insieme al numero di
+utenti idonei. Gli utenti il cui periodo non è ancora finito non sono idonei.
+Non contano come utenti persi. Per esempio, 40 utenti tornati su 100 utenti
+idonei corrispondono a una fidelizzazione del 40%. Un tasso di ritorno più
+basso non spiega perché le persone se ne sono andate.
+
+### Richiedi la fidelizzazione per tutta l'attività
+
+La route dell'API è `POST /api/telemetry/analytics/retention`. Per misurare la
+fidelizzazione senza nomi di eventi, invia `response_version` `2` e ometti
+`start_event` e `return_event`:
+
+```bash
+curl -sS "https://api.logbrew.co/api/telemetry/analytics/retention" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "project_id": "<project_id>",
+    "since": "14d",
+    "response_version": 2,
+    "interval": "day",
+    "interval_count": 10,
+    "mode": "return_on",
+    "cohort_mode": "first_in_range"
+  }'
+```
+
+La risposta imposta `query.activity_scope` su `all_classified_activity`.
+Qualsiasi visualizzazione di pagina, visualizzazione di schermata o
+interazione successiva conta come ritorno. Per selezionare gli eventi, ometti
+`response_version` e invia sia `start_event` sia `return_event` nella forma
+`{ "kind": "page_view", "event_name": "/signup" }`.
+
+L'intervallo diviso per la granularità, moltiplicato per `interval_count`,
+deve essere al massimo 500. Per esempio, 14 giorni con `day` e `10` periodi
+danno 140. Se ometti `interval`, l'API usa `hour` per intervalli fino a 48 ore
+e `day` per intervalli più lunghi.
+
+## Leggi il ciclo di vita
+
+Il ciclo di vita assegna gli utenti identificati che hanno eseguito un dato
+evento a un solo gruppo per periodo:
+
+```bash
+logbrew analytics lifecycle --project "<project_id>" --since 30d \
+  --event-kind interaction --event report_opened \
+  --json
+```
+
+| Gruppo | Significato |
+| --- | --- |
+| Nuovo nella cronologia osservata | Attivo ora, senza eventi precedenti nell'intervallo della cronologia. |
+| Di ritorno | Attivo ora e nel periodo precedente. |
+| Riattivato | Attivo ora dopo una pausa. |
+| Inattivo | Attivo nel periodo precedente ma non ora. |
+
+«Nuovo nella cronologia osservata» non indica un cliente alla prima
+esperienza. L'attività precedente può trovarsi fuori dall'intervallo della
+cronologia, che imposti con `--history-periods`. Non sommare i totali dei
+periodi per contare gli utenti unici nell'intero intervallo.
+
+`--history-periods` va da `2` a `31` periodi prima di `since`. Il valore
+predefinito è `2`. La cronologia non può superare 62 giorni. L'intervallo può
+avere al massimo 100 periodi. Ogni periodo ha `fully_observed`, che vale
+`false` quando il periodo non è finito. «Inattivo» significa senza attività
+nel periodo corrente, non perso per sempre.
+
+La route dell'API è `POST /api/telemetry/analytics/lifecycle`. Per usare tutta
+l'attività classificata invece di un solo evento, invia `response_version` `2`
+e ometti `event`:
+
+```json
+{
+  "project_id": "<project_id>",
+  "since": "30d",
+  "response_version": 2,
+  "interval": "day",
+  "history_period_count": 7
+}
+```
+
+## Confronta due periodi
+
+Richiedi ogni periodo separatamente. Usa lo stesso progetto, la stessa durata,
+gli stessi nomi di eventi e gli stessi filtri. Prima di confrontare i conteggi
+degli utenti, confronta l'attività, la composizione degli eventi e la
+copertura di identità e sessioni. Un periodo incompleto può mostrare meno
+attività di uno completo.
+
+| Osservazione | Prossimo controllo | Limite |
+| --- | --- | --- |
+| Un evento è aumentato | Controlla le sue sessioni e la copertura. | Più eventi non dimostrano che ci siano più persone. |
+| Un tasso di conversione è cambiato | Usa gli stessi passaggi del funnel e la stessa unità per entrambi i periodi. | Non confrontare definizioni di funnel diverse. |
+| Gli utenti di ritorno sono diminuiti | Controlla gli utenti idonei e i periodi completi. | Una coorte recente può sembrare peggiore di una più vecchia. |
+| Gli utenti si fermano a un passaggio | Leggi i problemi e i log di quel passaggio. | Un intervallo di tempo in comune non dimostra la causa. |
+
+Quando un risultato indica un errore, leggi i problemi e i log correlati per
+lo stesso progetto e lo stesso periodo. Apri una traccia solo quando un evento
+ha un link esatto alla traccia. Un intervallo di tempo in comune non dimostra
+che un errore abbia causato un calo.
+
+Per ripetere un confronto, annota l'ID del progetto, entrambi gli intervalli
+UTC, la granularità, i filtri, l'unità, la copertura e gli stati di
+troncamento. Non annotare gli ID utente grezzi.
+
+Per i campi delle risposte e gli errori, leggi
+[API di telemetria](/it/reference/telemetry-api) ed
+[Errori API](/it/reference/api-errors).

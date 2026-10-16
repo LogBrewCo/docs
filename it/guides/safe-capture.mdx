@@ -1,0 +1,203 @@
+---
+title: "Oscuramento dei log: tieni i dati sensibili fuori dai log"
+sidebarTitle: "Controlla i dati acquisiti"
+description: "Scegli i campi di log approvati. Cerca dati sensibili con un test locale. Leggi i limiti dei controlli di LogBrew per JavaScript, Node.js e browser."
+---
+
+Scegli che cosa invia la tua app prima di attivare l'acquisizione. Tieni
+password, token di accesso, contenuto dei moduli e dati privati degli utenti
+fuori dagli eventi.
+
+Costruisci ogni evento a partire da campi approvati. Non copiare nei metadati
+un'intera richiesta, una risposta o un oggetto di errore. L'oscuramento
+sostituisce un valore sensibile. Un filtro omette un intero evento. Un evento
+SDK valido può comunque contenere dati che la tua app non deve inviare.
+
+Questa guida si applica a queste versioni dei pacchetti:
+
+- `@logbrew/sdk` 0.1.28
+- `@logbrew/node` 0.1.12
+- `@logbrew/browser` 0.1.11
+
+Per altri runtime, leggi la guida del pacchetto in
+[Invia telemetria con l'SDK](/it/guides/sdk-ingestion).
+
+## Scegli i campi da acquisire
+
+Per un checkout non riuscito, registra un messaggio fisso, un template di
+route e un codice di stato. Non registrare nomi, indirizzi email o dati di
+pagamento.
+
+| Campo | Regola di acquisizione |
+| --- | --- |
+| Messaggio | Usa un testo fisso come `checkout.failed`. Non inserire testo dei moduli o credenziali. |
+| Route | Usa un template come `/orders/:id`. Il percorso, la query o il frammento di un URL possono contenere valori privati. |
+| Stato | Accetta solo un codice di stato valido, non una stringa che arriva dall'input dell'utente. |
+| Metadati | Seleziona campi con un nome preciso. Non copiare tutte le proprietà di una richiesta, di una risposta o di un errore. |
+| Soggetto e sessione | Usa identificatori di telemetria approvati, non un token di accesso o un cookie di sessione. |
+
+Per il contesto di utente e sessione, consulta
+[Acquisizione eventi di prodotto](/it/guides/product-events#set-users-and-sessions-on-each-event).
+Un ID può identificare una persona anche quando non contiene un nome.
+
+## Prova in locale la selezione dei campi
+
+Usa Node.js 18 o successivo. In una directory vuota, installa il pacchetto:
+
+```bash
+npm install --save-exact @logbrew/sdk@0.1.28
+```
+
+Questo test non usa una chiave reale e non invia richieste. Salvalo come
+`safe-capture.mjs`:
+
+```js
+import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import { LogBrewClient, SdkError } from "@logbrew/sdk";
+
+try {
+  const client = LogBrewClient.create({
+    apiKey: "local-preview-only",
+    sdkName: "privacy-check",
+    sdkVersion: "0.1.28",
+    automaticDelivery: false
+  });
+
+  function recordCheckoutFailure(input) {
+    const status = input?.status;
+    if (!Number.isInteger(status) || status < 400 || status > 599) {
+      return false;
+    }
+    client.log(randomUUID(), new Date().toISOString(), {
+      message: "checkout.failed",
+      level: "error",
+      metadata: { route: "/checkout", status }
+    });
+    return true;
+  }
+
+  const excludedValue = "SYNTHETIC_PRIVATE_VALUE";
+  assert.equal(recordCheckoutFailure({
+    status: 503,
+    authorization: excludedValue,
+    body: excludedValue
+  }), true);
+  assert.equal(recordCheckoutFailure({ status: excludedValue }), false);
+
+  const preview = client.previewJson();
+  const batch = JSON.parse(preview);
+  assert.equal(batch.events.length, 1);
+  assert.equal(preview.includes(excludedValue), false);
+  assert.deepEqual(batch.events[0].attributes.metadata, {
+    route: "/checkout",
+    status: 503
+  });
+  client.purgePendingEvents();
+  console.log(JSON.stringify({
+    ok: true,
+    checked_events: 1,
+    excluded_value_found: false
+  }));
+} catch (error) {
+  console.error(JSON.stringify({
+    ok: false,
+    error: error instanceof SdkError ? error.code : "privacy_check_failed"
+  }));
+  process.exitCode = 1;
+}
+```
+
+
+Esegui il test:
+
+```bash
+node safe-capture.mjs
+```
+
+Output atteso:
+
+```json
+{"ok":true,"checked_events":1,"excluded_value_found":false}
+```
+
+Un'asserzione non riuscita stampa `"ok":false` ed esce con codice 1. Un errore
+di convalida dell'SDK stampa il relativo codice di errore. Non stampare né
+caricare un'anteprima che contiene dati reali.
+
+Usa lo stesso schema nel tuo codice di acquisizione e mantieni le asserzioni
+nei tuoi test. Aggiungi un controllo per ogni campo e valore che la tua app
+non deve inviare. Se usi un oscuramento basato su pattern, esegui di nuovo i
+controlli dopo ogni modifica alle regole. Questo test controlla un solo log in
+coda. Non sostituisce una revisione della privacy.
+
+## Messaggi di errore e stack
+
+| Percorso di acquisizione | Comportamento |
+| --- | --- |
+| `createIssueAttributesFromError` (core) | Mantiene il testo dell'errore nel messaggio del problema e in `metadata.errorMessage`. Aggiunge `metadata.errorStack` solo con `includeErrorStack: true`. Le voci della catena di eccezioni contrassegnano ogni messaggio come `redacted` e non ne riportano il testo. |
+| Conversione della console (core) | Può mantenere il testo dell'errore nel messaggio e nei metadati del log. |
+| `createBrowserErrorEvent` (browser) | Usa un riepilogo fisso dell'errore, rimuove `metadata.errorMessage` e contrassegna come oscurati i messaggi della catena di eccezioni. |
+
+Un `options.message` personalizzato non rimuove `metadata.errorMessage`.
+Controlla l'evento completo, non solo il titolo. Tieni i valori sensibili
+fuori dai messaggi di errore già alla fonte.
+
+## Usa ogni controllo nel suo ambito
+
+### Core JavaScript e Node.js
+
+`LogBrewClient.create` accetta `eventFilter`. Restituisci `false` per omettere
+un evento prima che entri nella coda. Qualsiasi altro valore restituito
+mantiene l'evento. Il filtro riceve una copia dell'evento, quindi le modifiche
+alla copia non oscurano nulla. `createLogBrewNodeClient` e
+`createLogBrewBrowserClient` non applicano `eventFilter` in queste versioni.
+
+`droppedEvents()` conta gli eventi scartati per limiti di dimensione o di
+coda. Non conta gli eventi omessi da `eventFilter`.
+
+Il client Node aggiunge il contesto di runtime, come la versione di Node, il
+sistema operativo e l'architettura. Imposta `captureRuntimeContext: false`
+per ometterlo. Questa impostazione non rimuove il contesto fornito dalla tua
+app e non interrompe l'acquisizione.
+
+### Browser
+
+Per impostazione predefinita, il client browser acquisisce gli errori
+globali, le promise rifiutate non gestite e una visualizzazione di pagina
+iniziale. Imposta `captureGlobalErrors`, `captureUnhandledRejections` o
+`capturePageViews` su `false` per disattivarne uno.
+
+Le visualizzazioni di pagina includono il pathname. Omettono la query string,
+il frammento, il titolo del documento e lo user agent completo, a meno che tu
+non imposti `includeQueryString`, `includeHash`, `includeDocumentTitle` o
+`includeUserAgent`. Se un pathname può contenere valori privati, disattiva le
+visualizzazioni di pagina automatiche e invia tu stesso una visualizzazione di
+pagina con un nome di route sicuro.
+
+`sanitizeMetadata` modifica solo i metadati. Non modifica i nomi delle
+visualizzazioni di pagina o delle azioni. Il nome di una visualizzazione di
+pagina contiene il pathname concreto, come `page_view /orders/1234`. Un
+`routeTemplate` nei metadati imposta la superficie in Analisi, ma non cambia
+il nome. `shouldCaptureError` omette solo i problemi del browser. Non filtra i
+log o altri segnali.
+
+Imposta `captureRuntimeContext: false` per omettere marca del browser,
+piattaforma e famiglia del dispositivo. Questa impostazione non controlla
+`includeUserAgent`.
+
+## Prima dell'acquisizione reale
+
+Prova ogni percorso di acquisizione attivo con dati sintetici, compresi i
+percorsi di errore e le integrazioni di logging.
+
+Le modifiche all'acquisizione valgono solo per i nuovi eventi.
+`purgePendingEvents()` svuota una coda locale inattiva e non riesce mentre è
+in corso una consegna. Non ferma l'acquisizione successiva e non rimuove gli
+eventi che LogBrew ha accettato. `uninstall()` del browser rimuove i listener
+ma mantiene gli eventi in coda. Questi metodi non sono un flusso di consenso o
+di cancellazione.
+
+Poi invia un evento sintetico con la [guida rapida](/it/quickstart). Se manca,
+consulta [Risoluzione degli errori](/it/guides/troubleshooting). Per gli
+errori HTTP, consulta [Errori API](/it/reference/api-errors).

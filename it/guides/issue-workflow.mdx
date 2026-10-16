@@ -1,0 +1,333 @@
+---
+title: "Triage e risoluzione dei problemi in LogBrew"
+sidebarTitle: "Gestisci i problemi"
+description: "Gestisci i problemi in LogBrew. Leggi le prove dell'occorrenza, poi risolvi, archivia, riapri, dai priorità o assegna i problemi, uno alla volta o in blocco."
+---
+
+Un problema raggruppa le occorrenze di errore che condividono un fingerprint.
+Leggi il riepilogo del gruppo e un'occorrenza prima di cambiare stato,
+priorità o assegnatario. Un cambio di stato, priorità o assegnatario registra
+una decisione del team. Non ripara il software e non riscrive gli eventi
+acquisiti.
+
+Prima di iniziare, installa la [CLI di LogBrew](/it/guides/cli) ed esegui
+`logbrew login`.
+
+## Problemi e occorrenze
+
+Un elenco di problemi restituisce un riepilogo del gruppo, non un evento
+completo. Leggi questi campi prima di aprire il dettaglio:
+
+| Campo | Significato |
+| --- | --- |
+| `title` | Titolo dell'errore acquisito. |
+| `severity` | Gravità acquisita. |
+| `triage.effective_severity` | Gravità che LogBrew usa dopo le regole dei problemi. `severity` conserva il valore acquisito. `triage.rule_applied` è `true` quando si applica una regola. |
+| `occurrence_count` | Numero di occorrenze conservate nel gruppo. |
+| `first_seen_at` | Ora della prima occorrenza conservata. |
+| `last_seen_at` | Ora dell'ultima occorrenza conservata. |
+| `project_id` | Progetto che contiene il problema. |
+| `service_name` | Servizio dell'ultima occorrenza. |
+| `release` | Release dell'ultima occorrenza. |
+| `environment` | Ambiente dell'ultima occorrenza. |
+| `status` | Stato del problema nel flusso di lavoro. Consulta [Valori di stato](#status-values). |
+| `priority` | Ordine di triage del problema. Consulta [Priorità](#priority). |
+| `priority_source` | `manual` quando una persona ha impostato la priorità. `derived` quando segue la gravità. |
+| `assignee` | Account responsabile del passo successivo, oppure `null`. Consulta [Assegna i problemi](#assign-issues). |
+
+Il numero di occorrenze non è un numero di utenti coinvolti. Conteggi e orari
+si riferiscono all'ambito restituito, non all'intera cronologia dell'errore.
+Un filtro `--since` o `--until` limita le occorrenze che LogBrew conta. Quando
+riporti un conteggio, riporta anche i filtri che lo hanno prodotto.
+
+## <span id="status-values">Valori di stato</span>
+
+| Stato | Significato |
+| --- | --- |
+| `unresolved` | Il problema richiede una decisione. |
+| `resolved` | Il team ha segnato il problema come corretto. Lo stato non dimostra la correzione. |
+| `archived` | Il team ha tolto il problema dal triage attivo. |
+
+`archived` in precedenza si chiamava `ignored`. I due nomi selezionano gli
+stessi problemi, e LogBrew li accetta entrambi in input. `logbrew read`,
+`logbrew issues` e le versioni 2 e 3 dell'API mostrano `archived`. La
+versione 1 dell'API (quella predefinita), il flusso dell'osservazione in tempo
+reale e la risposta dell'indagine sul problema mostrano `ignored`. La
+dashboard mostra gli stati come Da risolvere, Risolto e Archiviato.
+
+Lo stato vale per l'intero problema, non per una singola occorrenza. La
+gravità indica l'urgenza, lo stato registra la decisione. Tieni separati i
+due concetti. Un problema `critical` può diventare `resolved` dopo una
+correzione verificata. Un problema `archived` mantiene la gravità acquisita.
+
+LogBrew non riapre automaticamente un problema risolto. Quando arriva una
+nuova occorrenza dopo la risoluzione, l'indagine riporta
+`lifecycle.effective_status` come `regressed`. Lo `status` resta `resolved`
+finché una persona non riapre il problema.
+
+## <span id="priority">Priorità</span>
+
+La priorità stabilisce l'ordine in cui il team fa il triage dei problemi:
+
+| Priorità | Significato |
+| --- | --- |
+| `high` | Esamina il problema per primo. |
+| `medium` | Esamina il problema dopo quelli `high`. |
+| `low` | Il problema può aspettare. |
+
+Ogni problema ha una priorità. Se nessuno la imposta, segue la gravità del
+problema: `error` e `critical` sono `high`, `warning` è `medium` e `info` è
+`low`. Quando una regola dei problemi cambia la gravità, la priorità segue
+`triage.effective_severity`. In questo caso `priority_source` è `derived`.
+Quando una persona imposta la priorità, questa resta fissa e `priority_source`
+è `manual`.
+
+Per elencare i problemi da esaminare per primi:
+
+```bash
+logbrew read issues --project "<project_id>" --status unresolved \
+  --priority high --since 24h --json
+```
+
+## <span id="assign-issues">Assegna i problemi</span>
+
+Assegna un problema per indicare chi è responsabile del passo successivo. Un
+problema ha 0 o 1 assegnatario.
+
+<Steps>
+  <Step title="Trova chi può essere assegnatario">
+    ```bash
+    logbrew issues assignees --project "<project_id>" --json
+    ```
+
+    L'elenco contiene ogni account che può leggere il progetto. Ogni voce ha
+    `user_id`, `name` ed `email`. Copia lo `user_id`. Non puoi assegnare un
+    account che non può leggere il progetto.
+  </Step>
+
+  <Step title="Assegna il problema">
+    ```bash
+    logbrew issues assign "<user_id>" "<issue_id>" --json
+    ```
+
+    Usa `me` al posto dell'ID utente per assegnare il problema a te. Usa
+    `logbrew issues unassign "<issue_id>" --json` per rimuovere
+    l'assegnatario. Aggiungi `--project` per modificare fino a 100 problemi di
+    un progetto.
+  </Step>
+
+  <Step title="Leggi i tuoi problemi">
+    ```bash
+    logbrew read issues --project "<project_id>" --assignee me \
+      --status unresolved --json
+    ```
+
+    Usa `--assignee none` per trovare i problemi senza responsabile.
+  </Step>
+</Steps>
+
+Per assegnare problemi ti serve il permesso di gestire i problemi del
+progetto. Lo stesso permesso ti consente di cambiare stato, priorità e regole
+di problemi e log. Qualsiasi account che può leggere il progetto può essere
+assegnatario.
+
+Quando un membro perde l'accesso al progetto, i problemi assegnati a quel
+membro risultano senza assegnatario. Questi problemi compaiono nelle letture
+con `--assignee none`. Se il membro riottiene l'accesso, i problemi mostrano
+di nuovo quel membro, a meno che nel frattempo qualcuno non abbia cambiato o
+rimosso l'assegnatario.
+
+## Flusso di lavoro consigliato
+
+<Steps>
+  <Step title="Elenca i problemi da risolvere in un ambito">
+    ```bash
+    logbrew read issues --project "<project_id>" --environment production \
+      --release api@1.2.3 --status unresolved --since 24h --json
+    ```
+
+    Mantieni gli stessi filtri nelle letture successive dell'elenco. Un
+    risultato vuoto significa che nessun problema corrisponde a questo ambito.
+    Non dimostra che il progetto non abbia errori. Copia l'ID esatto del
+    problema, non il titolo.
+  </Step>
+
+  <Step title="Leggi il dettaglio del problema">
+    ```bash
+    logbrew read issue "<issue_id>" --json
+    ```
+
+    Prima di continuare, verifica che il progetto restituito sia quello
+    giusto. Le letture restituiscono un'istantanea. Rileggi il problema prima
+    di cambiarne lo stato.
+  </Step>
+
+  <Step title="Indaga su un'occorrenza">
+    ```bash
+    logbrew investigate issue "<issue_id>" --occurrence recommended --json
+    ```
+
+    Le letture del dettaglio e dell'indagine non usano i filtri dell'elenco.
+    Confronta `subject.project_id`, `event.occurred_at`, release e ambiente
+    con il tuo ambito. L'occorrenza consigliata può essere meno recente
+    dell'ultima. Per l'esame completo delle prove, segui
+    [Indaga su un problema](/it/guides/investigate-an-issue).
+  </Step>
+
+  <Step title="Segui le prove di traccia solo se disponibili">
+    Leggi la traccia solo quando `correlations.trace.status` è `available`.
+    Usa l'ID traccia della risposta. Non inventarne mai uno.
+
+    ```bash
+    logbrew read trace "<trace_id>" --project "<project_id>" --json
+    logbrew read logs --trace "<trace_id>" --project "<project_id>" \
+      --since 24h --json
+    ```
+
+    La lettura della traccia non ha un filtro temporale. Se lo stato è
+    `not_linked`, continua con le prove del problema.
+  </Step>
+
+  <Step title="Verifica il deploy candidato">
+    Usa l'occorrenza esaminata come riferimento. Ricava l'ID del deploy dalle
+    prove del deploy o dal tuo processo di release.
+
+    ```bash
+    logbrew investigate issue "<issue_id>" verify \
+      --baseline-occurrence "<occurrence_id>" \
+      --candidate-deployment "<deployment_id>" \
+      --json
+    ```
+
+    L'assenza di ricorrenze nell'intervallo di osservazione non dimostra una
+    correzione definitiva. Se `status` è `insufficient_traffic` o
+    `unavailable`, lascia il problema `unresolved`. Segui la prossima azione
+    restituita.
+  </Step>
+
+  <Step title="Cambia stato, priorità o assegnatario">
+    Esegui un solo comando. Questi comandi non chiedono conferma, quindi
+    controlla prima l'ID del problema.
+
+    ```bash
+    logbrew issues resolve "<issue_id>" --json
+    logbrew issues archive "<issue_id>" --json
+    logbrew issues reopen "<issue_id>" --json
+    logbrew issues priority low "<issue_id>" --json
+    logbrew issues assign me "<issue_id>" --json
+    ```
+
+    Senza `--project`, ogni comando accetta 1 ID di problema. Controlla il
+    codice di uscita e i valori restituiti di `status`, `priority` e
+    `assignee`. Se il risultato manca, rileggi il problema prima della
+    modifica successiva.
+
+    Gli script meno recenti possono usare
+    `logbrew set issue "<issue_id>" resolved` e le scorciatoie `resolve`,
+    `ignore` e `reopen`. `ignore` imposta `archived`.
+  </Step>
+</Steps>
+
+## Modifica molti problemi insieme
+
+Aggiungi `--project` per modificare fino a 100 problemi di un progetto con un
+solo comando:
+
+```bash
+logbrew issues archive "<issue_id_1>" "<issue_id_2>" "<issue_id_3>" \
+  --project "<project_id>" --json
+```
+
+Il comando applica la stessa modifica a ogni problema. Ogni ID di problema può
+comparire una sola volta. La CLI rifiuta più di 100 ID o un ID ripetuto prima
+di inviare una richiesta. Il risultato ha 1 voce per ogni problema,
+nell'ordine del comando:
+
+| Esito | Significato |
+| --- | --- |
+| `updated` | LogBrew ha applicato la modifica. |
+| `unchanged` | Il problema aveva già il valore richiesto. |
+| `not_found` | Il progetto non ha un problema con questo ID. LogBrew non ha modificato nulla per questo ID. |
+
+Ogni voce ha `issue_id`, `outcome` e `issue`. `issue` è il problema attuale,
+oppure `null` per `not_found`. Dopo un errore di rete puoi eseguire di nuovo
+lo stesso comando. I problemi già modificati mostrano `unchanged`. Per più di
+100 problemi, esegui più comandi. Per un risultato `not_found`, copia di nuovo
+l'ID da un elenco di problemi di quel progetto. Per la richiesta API, consulta
+[Aggiorna più problemi insieme](/it/reference/telemetry-api#update-issues-in-bulk).
+
+## Scegli lo stato successivo
+
+- **Lascialo `unresolved`** quando l'errore è attivo o la correzione non è
+  verificata. Una traccia mancante non è un motivo per archiviare un problema.
+- **Imposta `resolved`** dopo che il team ha accettato le prove della
+  correzione. Una correzione proposta non è una prova.
+- **Imposta `archived`** per una condizione accettata o per un segnale solo di
+  test. La decisione vale per ogni occorrenza del problema. Il comando non ha
+  un campo per il motivo, quindi annota il motivo nel registro di lavoro del
+  tuo team.
+- **Riapri con `unresolved`** quando arriva una nuova occorrenza dopo la
+  risoluzione. `lifecycle.regression.first_reappeared_occurrence` la
+  identifica. Confrontala con l'occorrenza usata per la risoluzione. Non
+  creare un problema diverso.
+
+## Passa l'indagine a un'altra persona
+
+Dai alla persona successiva dei riferimenti, non un dump grezzo dell'evento:
+
+- ID, stato, priorità, assegnatario e gravità del problema.
+- Progetto, servizio, ambiente e release.
+- Ora della prima occorrenza, ora dell'ultima occorrenza e numero di occorrenze.
+- ID dell'occorrenza selezionata e `occurrence_selection.reason`.
+- `fix.status`, `cause.status` e la loro `provenance`.
+- Stato e ID della traccia, se disponibili.
+- Stato della riproduzione e prove mancanti.
+- Risultato della verifica del deploy candidato.
+- La prossima azione restituita dalla risposta.
+
+Contrassegna come «proposta» ogni causa o correzione proposta.
+
+## Risolvi gli errori della CLI
+
+Controlla il codice di uscita del processo prima di analizzare l'output. In
+caso di successo, il JSON va sullo standard output. Un errore di parsing
+termina con il codice `2`. Un errore di runtime termina con il codice `1`. Gli
+errori JSON vanno sullo standard error e contengono `ok: false`, `error`,
+`message` e `next`. Mostra `next` come indicazione. Non eseguirlo
+automaticamente.
+
+Ad esempio, `logbrew issues archive "<issue_id_1>" "<issue_id_2>" --json`
+non ha `--project`. Termina con il codice `2` prima di inviare una richiesta,
+con l'errore `invalid_issue_command`.
+
+Quando l'API rifiuta una richiesta, `error` è `api_error`. Leggi `status` per
+lo stato HTTP e `api_code` per il codice di errore dell'API.
+
+| Risultato | Recupero |
+| --- | --- |
+| `not_logged_in` | Chiedi a una persona di eseguire `logbrew login`, poi riprova la lettura. |
+| `invalid_issue_command` | Correggi il comando. Usa `--project` per più di 1 problema, al massimo 100 ID e ogni ID una sola volta. |
+| ID del problema non valido | Copia l'ID esatto da un elenco di problemi o da una risposta di dettaglio. |
+| Problema non trovato | Verifica l'account connesso e il progetto. |
+| Una modifica non riesce con `status` `403` | L'account non può gestire i problemi di questo progetto. Chiedi a una persona con accesso. |
+| `invalid_assignee` | Il filtro `--assignee` accetta `me`, `none` o un ID utente. |
+| Un'assegnazione non riesce con `status` `422` e `api_code` `validation_failed` | L'assegnatario non può leggere il progetto. Scegli un account da `logbrew issues assignees`, oppure prima dai a quel membro l'accesso al progetto. |
+| `investigation_response_invalid` | La risposta non ha superato la validazione della CLI. Riprova una volta. Se si ripete, aggiorna la CLI o invia una segnalazione. Non aggirare la validazione. |
+| Stato della traccia `not_linked` | Continua con le prove del problema. Non leggere una traccia. |
+| Stato della traccia `unavailable` | Riprova più tardi la lettura dell'indagine. |
+| Verifica `insufficient_traffic` | Lascia il problema `unresolved`. Attendi traffico sulla release candidata, poi verifica di nuovo. |
+
+Una risposta di errore non dimostra che il cambio di stato, priorità o
+assegnatario non abbia avuto effetto. Rileggi il problema prima di riprovare.
+
+## Cosa rende utile un problema
+
+- Un titolo chiaro e un messaggio leggibile.
+- Un fingerprint stabile.
+- Frame dello stack, quando disponibili.
+- Contesto di release, ambiente e servizio.
+- Contesto di traccia, quando acquisito con l'occorrenza.
+- Attributi brevi e pertinenti, non dump completi del payload.
+
+Per i filtri degli elenchi e i contratti delle risposte, consulta il
+[riferimento dell'API di telemetria](/it/reference/telemetry-api).

@@ -1,0 +1,180 @@
+---
+title: "Rotazione delle chiavi API: ruota una chiave di ingestione LogBrew"
+sidebarTitle: "Ruota una chiave di ingestione"
+description: "Ruota una chiave di ingestione LogBrew. Prova la sostituta prima della revoca pianificata. Risolvi gli errori senza esporre le credenziali."
+---
+
+La rotazione sostituisce una chiave di ingestione del progetto. Non cambia il
+progetto né la telemetria salvata. Gestisci le chiavi con l'autenticazione
+dell'account. Una chiave di ingestione può solo inviare telemetria. Non può
+gestire le chiavi.
+
+Prima di iniziare, [installa la CLI ed esegui l'accesso](/it/guides/cli).
+Imposta `LOGBREW_PROJECT_ID` sull'UUID del progetto. Imposta
+`LOGBREW_API_URL` su `https://api.logbrew.co`. Gli esempi usano Bash, curl
+7.76.0 o successivo e jq.
+
+Per una rotazione pianificata, crea la chiave sostitutiva, esegui il deploy e
+provala prima di revocare quella vecchia. Stabilisci l'intervallo di rotazione
+nella tua policy di sicurezza. Se una chiave ha una data di scadenza,
+sostituiscila prima di quella data.
+
+<Warning>
+  Una chiave esposta è un incidente di sicurezza. Revocala subito, anche prima
+  del deploy della chiave sostitutiva. Le applicazioni che usano ancora una
+  chiave revocata non possono inviare telemetria.
+</Warning>
+
+<Steps>
+  <Step title="Crea la chiave sostitutiva">
+    `POST /api/projects/{project_id}/ingest-keys` accetta un `label` non vuoto
+    di massimo 120 caratteri. `kind` vale `cli`, `sdk`, `browser`, `server` o
+    `artifact`. Una chiave `artifact` non può inviare telemetria. Un
+    `expires_at` facoltativo deve essere un orario RFC3339 futuro.
+
+    Usa lo stesso `kind` della vecchia chiave. La CLI usa `sdk` quando ometti
+    `--kind` e `CLI-created SDK key` quando ometti `--label`. La CLI non ha un
+    flag per la scadenza. Per impostare `expires_at`, usa l'API.
+
+    La CLI salva il token monouso in un nuovo file accessibile solo al
+    proprietario, fuori dal controllo del codice sorgente. Stampa i metadati,
+    non il token:
+
+    ```bash
+    : "${LOGBREW_PROJECT_ID:?set LOGBREW_PROJECT_ID}" &&
+    : "${LOGBREW_REPLACEMENT_KEY_FILE:?choose a new private key file}" &&
+    logbrew projects keys create "$LOGBREW_PROJECT_ID" \
+      --ingest-key-file "$LOGBREW_REPLACEMENT_KEY_FILE" \
+      --label "checkout production rotation" --kind server --json
+    ```
+
+    Continua solo dopo che il comando è riuscito. Imposta `NEW_KEY_ID` sul
+    valore `ingest_key.id` restituito.
+
+    Se il risultato è incerto, esegui di nuovo esattamente lo stesso comando.
+    La CLI riusa la chiave del tentativo in sospeso. Non usare
+    `--abandon-retry` per questo nuovo tentativo.
+
+    Un client che chiama direttamente l'API riceve il token una sola volta,
+    nella risposta. Per riprovare, invia lo stesso header `Idempotency-Key`
+    con lo stesso corpo. Per 24 ore, quel nuovo tentativo restituisce la
+    stessa chiave. Non stampare mai il token, non inserirlo in un commit e non
+    condividerlo.
+  </Step>
+
+  <Step title="Esegui il deploy della nuova chiave mentre la vecchia resta attiva">
+    Inserisci il nuovo token nell'impostazione di deploy protetta. Esegui il
+    deploy dell'app. Mantieni attiva la vecchia chiave. Tieni entrambi i token
+    fuori dal codice sorgente, dall'output della build e dai log.
+  </Step>
+
+  <Step title="Invia un evento sintetico">
+    Carica il nuovo token nella variabile di shell `new_ingest_key`. Non
+    stamparlo. Invia un log sintetico con la nuova chiave, poi rileggilo:
+
+    ```bash
+    occurred_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+
+    curl --fail-with-body -sS "$LOGBREW_API_URL/api/telemetry/ingest" \
+      -H "Authorization: Bearer $new_ingest_key" \
+      -H "Content-Type: application/json" \
+      --data @- <<JSON &&
+    {
+      "project_id": "$LOGBREW_PROJECT_ID",
+      "environment": "production",
+      "release": "ingest-key-rotation@1",
+      "service_name": "checkout-api",
+      "sdk_name": "native-api",
+      "sdk_version": "0.1.0",
+      "items": [
+        {
+          "type": "log",
+          "data": {
+            "level": "info",
+            "message": "ingest key rotation check",
+            "source": "setup",
+            "attributes": {},
+            "occurred_at": "$occurred_at"
+          }
+        }
+      ]
+    }
+    JSON
+
+    logbrew read logs --project "$LOGBREW_PROJECT_ID" \
+      --release ingest-key-rotation@1 \
+      --environment production \
+      --since "$occurred_at" \
+      --json
+    ```
+
+    Continua solo quando la lettura restituisce questo log con lo stesso
+    `occurred_at`. Un log di controllo di una rotazione precedente non
+    dimostra che la nuova chiave funziona. Verifica anche che l'app
+    distribuita invii telemetria. Se un comando non riesce, fermati e leggi la
+    risposta. Mantieni attiva la vecchia chiave, a meno che non sia esposta.
+  </Step>
+
+  <Step title="Elenca i metadati delle chiavi senza segreti">
+    Imposta `LOGBREW_ACCOUNT_BEARER` con il valore della tua autenticazione
+    dell'account.
+    Trova l'ID della vecchia chiave. Verifica che `NEW_KEY_ID` sia `active`:
+
+    ```bash
+    (
+      set -o pipefail
+      curl --fail-with-body -sS "$LOGBREW_API_URL/api/projects/$LOGBREW_PROJECT_ID/ingest-keys" \
+        -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+        | jq -e 'select(type == "array") | map({id, label, kind, token_prefix, status, created_at, expires_at, revoked_at})'
+    )
+    ```
+
+    La risposta è un array di metadati delle chiavi senza token. Lo stato vale
+    `active`, `expired` o `revoked`. Una chiave è `expired` quando il suo
+    orario `expires_at` è passato.
+  </Step>
+
+  <Step title="Revoca solo la vecchia chiave">
+    Imposta `OLD_KEY_ID` con l'ID preso dall'elenco. Il comando revoca la
+    vecchia chiave solo quando i due ID sono diversi:
+
+    ```bash
+    if [ -n "${OLD_KEY_ID:-}" ] && [ -n "${NEW_KEY_ID:-}" ] \
+      && [ "$OLD_KEY_ID" != "$NEW_KEY_ID" ]; then
+      (
+        set -o pipefail
+        curl --fail-with-body -sS -X DELETE \
+          "$LOGBREW_API_URL/api/projects/$LOGBREW_PROJECT_ID/ingest-keys/$OLD_KEY_ID" \
+          -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+          | jq -e --arg id "$OLD_KEY_ID" \
+            'select(.id == $id and .status == "revoked") | {id, label, kind, token_prefix, status, created_at, expires_at, revoked_at}'
+      )
+    else
+      printf '%s\n' 'Set different old and replacement key IDs before revocation.' >&2
+      false
+    fi
+    ```
+
+    `DELETE` è idempotente. Restituisce i metadati della chiave con
+    `status: "revoked"` e `revoked_at` impostato. Puoi ripeterlo in sicurezza
+    dopo una risposta incerta.
+
+    Esegui `unset new_ingest_key`. Gestisci il file della chiave secondo la
+    tua policy sui segreti.
+  </Step>
+</Steps>
+
+## Ripristina in sicurezza
+
+| Risposta | Passaggio successivo |
+| --- | --- |
+| `404`, `code: "not_found"` | Verifica che l'account possieda il progetto e gli ID delle chiavi. Segui `next_action.code: "check_resource"`. Non provare altri ID. |
+| `code: "validation_failed"` | Correggi il campo, il valore o il timestamp indicato. Segui `next` e `next_action`. |
+| `401` o `403` nella gestione delle chiavi | Usa l'autenticazione dell'account, non una chiave di ingestione. |
+| `401`, `code: "ingest_key_invalid"` nella richiesta di ingestione | La chiave è revocata, scaduta o non valida per la telemetria. Usa la nuova chiave attiva per il progetto selezionato. Segui `next_action.code: "configure_ingest_key"`. |
+| `401` o `403` nella richiesta di ingestione | Usa la nuova chiave di ingestione per il progetto selezionato. Non usare una credenziale dell'account. |
+
+Se la rotazione continua a non riuscire,
+[invia una segnalazione](/it/guides/report-a-problem). Condividi solo i
+metadati delle chiavi. Non includere credenziali, header, telemetria grezza,
+dati dei clienti, percorsi locali o codice sorgente.
