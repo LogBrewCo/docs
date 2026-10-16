@@ -46,17 +46,43 @@ native envelope, see [Send SDK telemetry](/guides/sdk-ingestion).
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/api/logs` | List structured logs. |
+| `GET` | `/api/logs/{log_id}` | Read one log. |
+| `GET` | `/api/logs/attributes` | List the log attribute paths and types that a filter can search. |
 | `GET` | `/api/telemetry/issues` | List grouped issues. |
 | `GET` | `/api/telemetry/issues/{issue_id}` | Read one grouped issue. |
+| `GET` | `/api/telemetry/issues/{issue_id}/events` | List the occurrences of one grouped issue. |
 | `PATCH` | `/api/telemetry/issues/{issue_id}` | Update the status, priority, or assignee of one issue. |
 | `POST` | `/api/telemetry/issues/bulk` | Update the status, priority, or assignee of 1 to 100 issues in one project. |
 | `GET` | `/api/telemetry/issues/assignees` | List the accounts that can be assigned issues in one project. |
+| `PUT` | `/api/telemetry/issues/{issue_id}/triage-rule` | Set the severity rule for an issue. |
+| `PUT` | `/api/logs/{log_id}/triage-rule` | Set the severity rule and the ignored state for logs that match a log. |
 | `GET` | `/api/telemetry/traces` | Discover traces in a project scope. |
 | `GET` | `/api/telemetry/traces/{trace_id}` | List spans for one trace. |
 | `GET` | `/api/telemetry/traces/{trace_id}/summary` | Read a bounded summary of one trace. |
 | `GET` | `/api/telemetry/actions` | List product actions. |
 | `GET` | `/api/telemetry/metrics` | List metric samples. |
+| `GET` | `/api/telemetry/metrics/series` | Read one metric as time buckets. |
 | `GET` | `/api/telemetry/releases` | List release summaries. |
+| `GET` | `/api/telemetry/summary/volume` | Read signal counts for one project as time buckets. |
+
+### Deployments
+
+| Method | Path | CLI command |
+| --- | --- | --- |
+| `PUT` | `/api/telemetry/deployments/{deployment_id}` | `logbrew deploy` |
+| `GET` | `/api/telemetry/deployments/{deployment_id}?project_id=<project-uuid>` | None |
+| `GET` | `/api/telemetry/deployments?project_id=<project-uuid>` | None |
+
+Record a deployment from release automation after it succeeds or fails. The
+`PUT` body has `project_id`, `release`, `environment`, `service_name`,
+`status` (`succeeded` or `failed`), `started_at`, `finished_at`, and an
+optional `commit_sha`. Use the same `release`, `environment`, and
+`service_name` values that your SDK sends. The account must own the project.
+
+`deployment_id` is your own ID for the deployment. A retry with the same ID
+and the same body returns the stored deployment. The same ID with a different
+body fails with `409` and `idempotency_conflict`. Use a new ID for a different
+deployment.
 
 ### Investigations
 
@@ -102,12 +128,23 @@ The `POST` analytics routes take a JSON body, not query keys. See
 Usage, quota, subscription, and logout routes are in the
 [Account API](/reference/account-api).
 
+## Success status codes
+
+| Operation | Success status |
+| --- | --- |
+| Ingestion, reads, issue updates, rules, deployments, analytics, and feed tickets | `200 OK` |
+| Live-feed connection | `101 Switching Protocols`, then WebSocket messages |
+
+A `200` response does not prove that the evidence is complete. Read the
+coverage, truncation, and status fields in the response.
+
 ## Query filters and pagination
 
-Each read route accepts its own query keys. Unknown keys fail closed. Friendly
-aliases such as `project`, `trace`, and `user` are not query keys. List routes
-return a bare array by default and a cursor envelope with `pagination=cursor`.
-See [Telemetry API query filters](/reference/telemetry-api-filters).
+Each read route accepts its own query keys. Friendly aliases such as
+`project`, `trace`, and `user` are not query keys. List routes return a bare
+array by default and a cursor envelope with `pagination=cursor`. The
+deployment list always returns a page object. See
+[Telemetry API query filters](/reference/telemetry-api-filters).
 
 ## Responses and errors
 
@@ -133,6 +170,9 @@ Each request sets 1 or more of these fields:
 | `status` | `unresolved`, `resolved`, or `archived`. `ignored` is an older name for `archived`. |
 | `priority` | `high`, `medium`, or `low`. |
 | `assignee` | A user ID, `me` for the signed-in account, or `none` to remove the assignee. |
+
+A request without any of these fields fails with `422` and
+`validation_failed`.
 
 An issue has 0 or 1 assignee. The assignee must be able to read the project.
 If not, the request fails with `422` and `validation_failed`, and LogBrew
@@ -178,8 +218,10 @@ curl -X POST "$LOGBREW_API_URL/api/telemetry/issues/bulk" \
   }'
 ```
 
-The request applies the same change to every issue. The response has 1 result
-for each issue ID, in the request order. Each result has an `outcome`:
+The request applies the same change to every issue. The response has
+`project_id` and `results`, with 1 result for each issue ID, in the request
+order. Each result has `issue_id`, `outcome`, and `issue`. `issue` is the
+current issue in response version 3, or `null` for `not_found`.
 
 | `outcome` | Meaning |
 | --- | --- |
@@ -210,6 +252,23 @@ cannot read the project, the request fails with `404` and `not_found`.
 When a member loses access to the project, the issues assigned to that member
 show no assignee. If the member gets access again, the issues show that
 member again, unless someone changed or removed the assignee in the meantime.
+
+### Set issue and log rules
+
+A rule changes how LogBrew shows matching signals. It does not delete data.
+The captured `severity` stays unchanged, and the response shows the rule in
+`triage`.
+
+| Request | JSON body |
+| --- | --- |
+| `PUT /api/telemetry/issues/{issue_id}/triage-rule` | `{ "severity": "<value>" }` |
+| `PUT /api/logs/{log_id}/triage-rule` | `{ "severity": "<value>", "ignored": true }` |
+
+`severity` is `info`, `warning`, `error`, `critical`, or `source`. `source`
+removes the override and shows the captured severity again. For a log rule,
+`ignored: true` hides matching logs from the default log list. Read them with
+`status=ignored` or `status=all`. The rule applies to retained and future
+matching signals. Another value fails with `422` and `validation_failed`.
 
 <Warning>
   Do not send blank releases. LogBrew rejects them so release tracking stays
