@@ -1,0 +1,173 @@
+---
+title: "تدوير مفتاح API: دوّر مفتاح استيعاب LogBrew"
+sidebarTitle: "تدوير مفتاح الاستيعاب"
+description: "دوّر مفتاح استيعاب LogBrew. اختبر المفتاح البديل قبل الإبطال المخطط له. تعافَ من الأخطاء دون كشف بيانات الاعتماد."
+---
+
+يستبدل التدوير مفتاح الاستيعاب الخاص بالمشروع. ولا يغيّر المشروع أو بيانات
+القياس عن بُعد المخزّنة فيه. أدر المفاتيح باستخدام مصادقة الحساب. يستطيع مفتاح
+الاستيعاب إرسال بيانات القياس عن بُعد فقط، ولا يستطيع إدارة المفاتيح.
+
+قبل أن تبدأ، [ثبّت CLI وسجّل الدخول](/ar/guides/cli). اضبط
+`LOGBREW_PROJECT_ID` على UUID المشروع. واضبط `LOGBREW_API_URL` على
+`https://api.logbrew.co`. تستخدم الأمثلة Bash وcurl بالإصدار 7.76.0 أو أحدث
+وjq.
+
+في التدوير المخطط له، أنشئ المفتاح البديل وانشره واختبره قبل أن تبطل المفتاح
+القديم. حدّد في سياسة الأمان لديك عدد مرات التدوير. إذا كان للمفتاح تاريخ
+انتهاء، فاستبدله قبل ذلك التاريخ.
+
+<Warning>
+  المفتاح المكشوف حادث أمني. أبطله فورًا، حتى قبل نشر المفتاح البديل. التطبيقات
+  التي ما زالت تستخدم مفتاحًا مُبطَلًا لا تستطيع إرسال بيانات القياس عن بُعد.
+</Warning>
+
+<Steps>
+  <Step title="أنشئ المفتاح البديل">
+    يقبل `POST /api/projects/{project_id}/ingest-keys` قيمة `label` غير فارغة
+    بطول 120 حرفًا على الأكثر. قيمة `kind` هي `cli` أو `sdk` أو `browser` أو
+    `server` أو `artifact`. لا يستطيع مفتاح `artifact` إرسال بيانات القياس عن
+    بُعد. ويجب أن تكون قيمة `expires_at` الاختيارية وقتًا مستقبليًا بتنسيق
+    RFC3339.
+
+    استخدم قيمة `kind` نفسها التي يستخدمها المفتاح القديم. يستخدم CLI القيمة
+    `sdk` عندما تحذف `--kind`، والقيمة `CLI-created SDK key` عندما تحذف
+    `--label`. لا يوجد في CLI خيار لتاريخ الانتهاء. لضبط `expires_at`، استخدم
+    API.
+
+    يحفظ CLI الرمز المميز ذا الاستخدام الواحد في ملف جديد لا يصل إليه إلا مالكه،
+    خارج نظام التحكم في المصدر. ويطبع البيانات الوصفية، لا الرمز المميز:
+
+    ```bash
+    : "${LOGBREW_PROJECT_ID:?set LOGBREW_PROJECT_ID}" &&
+    : "${LOGBREW_REPLACEMENT_KEY_FILE:?choose a new private key file}" &&
+    logbrew projects keys create "$LOGBREW_PROJECT_ID" \
+      --ingest-key-file "$LOGBREW_REPLACEMENT_KEY_FILE" \
+      --label "checkout production rotation" --kind server --json
+    ```
+
+    لا تتابع إلا بعد نجاح الأمر. اضبط `NEW_KEY_ID` على قيمة `ingest_key.id`
+    المُعادة.
+
+    إذا كانت النتيجة غير مؤكدة، فشغّل الأمر نفسه تمامًا مرة أخرى. يعيد CLI
+    استخدام مفتاح إعادة المحاولة المعلّق لديه. لا تستخدم `--abandon-retry` في
+    إعادة المحاولة هذه.
+
+    يتلقى عميل API المباشر الرمز المميز مرة واحدة في الاستجابة. لإعادة
+    المحاولة، أرسل الترويسة `Idempotency-Key` نفسها مع النص نفسه. خلال 24 ساعة،
+    تعيد إعادة المحاولة هذه المفتاح نفسه. لا تطبع الرمز المميز أبدًا، ولا تضعه
+    في commit، ولا تشاركه.
+  </Step>
+
+  <Step title="انشر المفتاح الجديد مع بقاء القديم نشطًا">
+    ضع الرمز المميز الجديد في إعداد النشر المحمي. انشر التطبيق. أبقِ المفتاح
+    القديم نشطًا. أبقِ الرمزين المميزين كليهما خارج الشيفرة المصدرية ومخرجات
+    البناء والسجلات.
+  </Step>
+
+  <Step title="أرسل حدثًا اصطناعيًا واحدًا">
+    حمّل الرمز المميز الجديد في متغير الصدفة `new_ingest_key`. لا تطبعه. أرسل
+    سجلًا اصطناعيًا واحدًا بالمفتاح الجديد، ثم اقرأه:
+
+    ```bash
+    occurred_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+
+    curl --fail-with-body -sS "$LOGBREW_API_URL/api/telemetry/ingest" \
+      -H "Authorization: Bearer $new_ingest_key" \
+      -H "Content-Type: application/json" \
+      --data @- <<JSON &&
+    {
+      "project_id": "$LOGBREW_PROJECT_ID",
+      "environment": "production",
+      "release": "ingest-key-rotation@1",
+      "service_name": "checkout-api",
+      "sdk_name": "native-api",
+      "sdk_version": "0.1.0",
+      "items": [
+        {
+          "type": "log",
+          "data": {
+            "level": "info",
+            "message": "ingest key rotation check",
+            "source": "setup",
+            "attributes": {},
+            "occurred_at": "$occurred_at"
+          }
+        }
+      ]
+    }
+    JSON
+
+    logbrew read logs --project "$LOGBREW_PROJECT_ID" \
+      --release ingest-key-rotation@1 \
+      --environment production \
+      --since "$occurred_at" \
+      --json
+    ```
+
+    لا تتابع إلا عندما تعيد القراءة هذا السجل بقيمة `occurred_at` نفسها. سجل
+    فحص تدوير أقدم لا يثبت أن المفتاح الجديد يعمل. تأكد أيضًا من أن التطبيق
+    المنشور يرسل بيانات القياس عن بُعد. إذا فشل أمر، فتوقف واقرأ الاستجابة.
+    أبقِ المفتاح القديم نشطًا ما لم يكن مكشوفًا.
+  </Step>
+
+  <Step title="اعرض البيانات الوصفية للمفاتيح دون أسرار">
+    اضبط `LOGBREW_ACCOUNT_BEARER` من مصادقة حسابك. اعثر على معرّف المفتاح
+    القديم. تأكد من أن حالة `NEW_KEY_ID` هي `active`:
+
+    ```bash
+    (
+      set -o pipefail
+      curl --fail-with-body -sS "$LOGBREW_API_URL/api/projects/$LOGBREW_PROJECT_ID/ingest-keys" \
+        -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+        | jq -e 'select(type == "array") | map({id, label, kind, token_prefix, status, created_at, expires_at, revoked_at})'
+    )
+    ```
+
+    الاستجابة مصفوفة من البيانات الوصفية للمفاتيح دون رموز مميزة. الحالة هي
+    `active` أو `expired` أو `revoked`. يصبح المفتاح `expired` عندما يمر
+    وقت `expires_at` الخاص به.
+  </Step>
+
+  <Step title="أبطل المفتاح القديم فقط">
+    اضبط `OLD_KEY_ID` من القائمة. لا يبطل الأمر المفتاح القديم إلا عندما يختلف
+    المعرّفان:
+
+    ```bash
+    if [ -n "${OLD_KEY_ID:-}" ] && [ -n "${NEW_KEY_ID:-}" ] \
+      && [ "$OLD_KEY_ID" != "$NEW_KEY_ID" ]; then
+      (
+        set -o pipefail
+        curl --fail-with-body -sS -X DELETE \
+          "$LOGBREW_API_URL/api/projects/$LOGBREW_PROJECT_ID/ingest-keys/$OLD_KEY_ID" \
+          -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+          | jq -e --arg id "$OLD_KEY_ID" \
+            'select(.id == $id and .status == "revoked") | {id, label, kind, token_prefix, status, created_at, expires_at, revoked_at}'
+      )
+    else
+      printf '%s\n' 'Set different old and replacement key IDs before revocation.' >&2
+      false
+    fi
+    ```
+
+    الطلب `DELETE` متساوي القوى (idempotent). يعيد البيانات الوصفية للمفتاح مع
+    `status: "revoked"` وضبط `revoked_at`. يمكنك تكراره بأمان بعد استجابة غير
+    مؤكدة.
+
+    شغّل `unset new_ingest_key`. تعامل مع ملف المفتاح وفق سياسة الأسرار لديك.
+  </Step>
+</Steps>
+
+## تعافَ بأمان
+
+| الاستجابة | الخطوة التالية |
+| --- | --- |
+| `404`، `code: "not_found"` | تأكد من أن الحساب يملك معرّفات المشروع والمفتاح. اتّبع `next_action.code: "check_resource"`. لا تجرّب معرّفات أخرى. |
+| `code: "validation_failed"` | صحّح الحقل أو القيمة أو الطابع الزمني المذكور. اتّبع `next` و`next_action`. |
+| `401` أو `403` عند إدارة المفاتيح | استخدم مصادقة الحساب، لا مفتاح استيعاب. |
+| `401`، `code: "ingest_key_invalid"` في طلب الاستيعاب | المفتاح مُبطَل أو منتهي الصلاحية أو غير صالح لبيانات القياس عن بُعد. استخدم المفتاح النشط الجديد للمشروع المحدد. اتّبع `next_action.code: "configure_ingest_key"`. |
+| `401` أو `403` في طلب الاستيعاب | استخدم مفتاح الاستيعاب الجديد للمشروع المحدد. لا تستخدم بيانات اعتماد الحساب. |
+
+إذا استمر فشل التدوير، [فأبلغ عن مشكلة](/ar/guides/report-a-problem). شارك
+البيانات الوصفية للمفاتيح فقط. لا تضمّن بيانات الاعتماد أو الترويسات أو بيانات
+القياس عن بُعد الخام أو بيانات العملاء أو المسارات المحلية أو الشيفرة المصدرية.

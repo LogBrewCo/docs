@@ -1,0 +1,253 @@
+---
+title: "إرسال سجلات React Native إلى LogBrew"
+sidebarTitle: "React Native"
+description: "ثبّت SDK الخاص بـ React Native، وأرسل سجلًا تجريبيًا، واعثر عليه في مشروع LogBrew الصحيح. اضبط Expo بأمان وتعامل مع أخطاء التسليم."
+---
+
+أرسل السجلات من تطبيق React Native إلى LogBrew. ابدأ بسجل تجريبي واحد، ثم
+استخدم CLI للعثور عليه في المشروع الصحيح. تستخدم هذه الإرشادات Expo. أما تطبيق
+React Native المجرد (bare)، فيحمّل المفتاح عبر إعداداته الخاصة.
+
+قبل أن تبدأ، تحتاج إلى:
+
+- تطبيق React Native تستطيع تشغيله محليًا.
+- مشروع LogBrew. راجع [المشاريع](/ar/concepts/projects).
+- CLI مسجَّل الدخول. راجع [إعداد CLI](/ar/guides/cli).
+
+## ثبّت الـ SDK
+
+ثبّت الحزمتين كلتيهما في مجلد التطبيق. أبقِ تبعيات React وReact Native الخاصة
+بالتطبيق كما هي:
+
+```bash
+npm install @logbrew/sdk@0.1.28 @logbrew/react-native@0.1.35
+```
+
+## أنشئ مفتاح SDK للمشروع
+
+أعطِ التطبيق مفتاح SDK خاصًا بالمشروع وللكتابة فقط. يضع Expo كل قيمة
+`EXPO_PUBLIC_*` في حزمة التطبيق. لا تضع أبدًا بيانات اعتماد الحساب أو الخادم
+في هذا المتغير.
+
+ينشئ CLI بالإصدار v0.1.32 أو أحدث مفتاحًا لمشروع موجود. ولا ينشئ مشروعًا
+جديدًا. اعثر على معرّف المشروع:
+
+```bash
+logbrew projects --json
+```
+
+أنشئ المفتاح. استخدم مسار ملف جديدًا في مجلد لا يصل إليه إلا مالكه:
+
+```bash
+install -d -m 700 "$HOME/.logbrew" &&
+logbrew projects keys create "<project_id>" \
+  --ingest-key-file "$HOME/.logbrew/my-mobile-app.ingest" \
+  --label "My mobile app" \
+  --kind sdk \
+  --json
+```
+
+لا تتابع إلا بعد نجاح الأمر. إذا كانت النتيجة غير واضحة، فشغّل الأمر نفسه
+مرة أخرى بالوسائط نفسها. لا تستخدم `--abandon-retry`.
+
+أبقِ ملف المفتاح خارج نظام التحكم في المصدر. لا تستخدم بيانات اعتماد الحساب
+التي أذنت لـ CLI. للتطوير المحلي باستخدام Expo، ضع المفتاح في ملف
+`.env.local` متجاهَل في جذر التطبيق:
+
+```dotenv
+EXPO_PUBLIC_LOGBREW_CLIENT_KEY=<your_project_sdk_key>
+```
+
+أبقِ المرجع المباشر `process.env.EXPO_PUBLIC_LOGBREW_CLIENT_KEY` في وحدة
+الإعداد أدناه. أعد تحميل التطبيق بالكامل بعد أن تغيّر القيمة. راجع
+[متغيرات البيئة في Expo](https://docs.expo.dev/guides/environment-variables/)
+لإعدادات وقت البناء. أما تطبيق React Native المجرد، فيحمّل المفتاح عبر
+إعداداته الخاصة بدلًا من ذلك.
+
+## أنشئ العميل
+
+ضع هذا الإعداد في وحدة واحدة يحمّلها التطبيق عند بدء التشغيل. لا تنشئ عميلًا
+عند كل عملية عرض (render). ضع الخدمة والبيئة والإصدار في `context`:
+
+```js
+import { AppState } from "react-native";
+import {
+  createAppStateListener,
+  createLogBrewReactNativeClient,
+  createReactNativeFetchTransport
+} from "@logbrew/react-native";
+
+const clientKey = process.env.EXPO_PUBLIC_LOGBREW_CLIENT_KEY;
+if (!clientKey) {
+  throw new Error("Set EXPO_PUBLIC_LOGBREW_CLIENT_KEY");
+}
+
+const client = createLogBrewReactNativeClient({
+  clientKey,
+  context: {
+    schemaVersion: 1,
+    resource: {
+      service: { name: "my-mobile-app" },
+      deployment: {
+        environment: __DEV__ ? "development" : "production",
+        release: "mobile@1.0.0"
+      }
+    }
+  },
+  transport: createReactNativeFetchTransport()
+});
+
+const stopAppStateListener = createAppStateListener(client, AppState, {
+  flushOnBackground: true
+});
+
+export async function verifyLogBrewSetup() {
+  client.log(`evt_react_native_setup_${Date.now()}`, new Date().toISOString(), {
+    level: "info",
+    message: "React Native setup check"
+  });
+
+  const receipt = await client.flush();
+  if (receipt.statusCode < 200 || receipt.statusCode >= 300) {
+    throw new Error("LogBrew did not accept the setup event");
+  }
+  return {
+    status_code: receipt.statusCode,
+    attempts: receipt.attempts,
+    batches: receipt.batches
+  };
+}
+```
+
+تفعّل وسيلة النقل fetch التسليم التلقائي مع عدد محدود من إعادات المحاولة
+وطابور. لا تضف مؤقّت تفريغ (flush) ثانيًا. يطلب مستمع AppState تفريغًا أخيرًا
+عندما يصبح التطبيق غير نشط أو ينتقل إلى الخلفية. استدعِ
+`stopAppStateListener()` عند إغلاق التطبيق.
+
+مع الطابور الأصلي (native)، لا يستطيع استخدام المفتاح إلا عميل نشط واحد. العميل
+الثاني للمفتاح نفسه يفشل مع `configuration_error`. وهذا سبب إضافي لإنشاء العميل
+مرة واحدة.
+
+## أرسل السجل التجريبي واعثر عليه
+
+استدعِ `verifyLogBrewSetup()` مرة واحدة من إجراء اختبار مخصص للتطوير فقط.
+انتظر النتيجة، وتعامل مع الـ promise المرفوض. لا تطبع المفتاح أو دفعة الأحداث.
+
+النتيجة `2xx` مع قيمة `batches` أكبر من 0 تثبت أن LogBrew قبل الدفعة. والتفريغ
+الفارغ يعيد `204` مع 0 محاولات و0 دفعات، لأن التسليم التلقائي قد يرسل الحدث
+أولًا. في الحالتين، اقرأ السجل المحفوظ باستخدام CLI:
+
+```bash
+logbrew read logs --project "<project_id>" \
+  --search "React Native setup check" --since 1h --json
+```
+
+افحص وقت الحدث والخدمة في النتيجة. النتيجة الفارغة لا توضح السبب. افحص
+المشروع والمفتاح والنطاق الزمني.
+
+`RecordingTransport.alwaysAccept()` للاختبارات المحلية فقط. يعيد `202`
+اصطناعيًا ولا يرسل أي طلب.
+
+## التسليم دون اتصال وبعد إعادة التشغيل
+
+اقرأ `client.deliveryHealth().storage` في التطبيق أثناء تشغيله:
+
+- `persistent`: يستخدم العميل الطابور الأصلي. تُحمَّل الأحداث المعلّقة مرة أخرى
+  بعد إعادة تشغيل التطبيق.
+- `memory`: تضيع الأحداث المعلّقة عند إعادة تشغيل بيئة JavaScript.
+
+الإعداد الافتراضي `persistentQueue: "auto"` يستخدم الطابور الأصلي عندما يحتوي
+ملف التطبيق الثنائي على وحدة LogBrew الأصلية. يستخدم Expo Go والملفات الثنائية
+الأقدم الذاكرة. لا يستطيع تحديث JavaScript فقط إضافة الوحدة الأصلية.
+
+إذا احتاج تطبيق في بيئة الإنتاج إلى التسليم بعد إعادة التشغيل، فاضبط
+`persistentQueue: "required"`. عندها يفشل إنشاء العميل مع
+`configuration_error` عندما يكون الطابور الأصلي مفقودًا. أعد بناء التطبيق مع
+الوحدة الأصلية. استخدم `persistentQueue: "disabled"` فقط عندما تريد طابورًا في
+الذاكرة.
+
+يتسع الطابور الأصلي لـ 1,000 حدث و4 MiB من بيانات الأحداث على الأكثر. وتنطبق
+أيضًا حدود العميل الأصغر. تحتفظ الأحداث في الطابور الأصلي بمعرّفاتها بعد إعادة
+التشغيل.
+
+التسليم يحدث مرة واحدة على الأقل، لذا قد ترسل إعادة المحاولة الحدث مرتين.
+عندما يطابق معرّف الحدث ومحتواه حدثًا قبله LogBrew من قبل، لا يخزّنه LogBrew
+مرة أخرى. التفريغ في الخلفية محاولة، وليس دليلًا على التسليم. اختبر الالتقاط
+دون اتصال وإعادة تشغيل التطبيق. ثم اعثر على الحدث المحفوظ في المشروع.
+
+### اقرأ حالة التسليم
+
+تعيد `client.deliveryHealth()` حالة الطابور والتسليم دون محتوى الأحداث. اقرأ
+هذه الحقول أولًا:
+
+| الحقل | المعنى |
+| --- | --- |
+| `storage` | `persistent` أو `memory`. |
+| `deliveryState` | الحالة الحالية للتسليم التلقائي. |
+| `lastOutcome` | نتيجة آخر محاولة تسليم. |
+| `lastStatusClass` | فئة حالة آخر استجابة، أو خطأ في الشبكة. |
+| `pausedReason` | `authentication` بعد `401`. و`rate_limit` بعد `429`. |
+| `queueEvents` | عدد الأحداث التي تنتظر التسليم. |
+| `acceptedEvents` | عدد الأحداث التي قبلها LogBrew. |
+| `droppedByReason` | أعداد الأحداث التي أسقطها العميل، حسب السبب. |
+
+## اختر محتوى السجل
+
+اجعل كل رسالة قصيرة ومحددة. صِف نتيجة التطبيق، مثل طلب فاشل أو إعادة محاولة
+مجدولة. لا تضمّن الأسماء أو عناوين البريد الإلكتروني أو رموز الوصول المميزة أو
+قيم النماذج أو نصوص الطلبات.
+
+استخدم مستوى الخطورة الذي يطابق الحدث: `info` أو `warning` أو `error` أو
+`critical`. أبقِ الخدمة والبيئة والإصدار متسقة حتى تستطيع العثور على القيود
+المرتبطة.
+
+يعرض `npx react-native log-ios` و`npx react-native log-android` سجلات الجهاز
+المحلية. ولا يستعلمان من LogBrew. راجع
+[تصحيح الشيفرة الأصلية في React Native](https://reactnative.dev/docs/debugging-native-code).
+
+## تعافَ من فحص فاشل
+
+يُرفض `flush()` الفاشل مع رمز خطأ من الـ SDK. أبقِ المفاتيح ونصوص الأحداث
+خارج تقارير الأخطاء.
+
+| النتيجة | الخطوة التالية |
+| --- | --- |
+| مفتاح العميل مفقود | يتوقف الإعداد قبل الإرسال. حمّل مفتاح SDK الخاص بالمشروع عبر إعدادات التطبيق. |
+| `401`، `unauthenticated` | رفض LogBrew المفتاح. يتوقف التسليم التلقائي مؤقتًا مع `pausedReason: "authentication"`. صحّح مفتاح SDK الخاص بالمشروع أو استبدله قبل أن تنشئ عميلًا جديدًا. لا تستخدم أبدًا بيانات اعتماد الحساب. |
+| `429`، `rate_limited` | يحتفظ الـ SDK بالدفعة ويوقف التسليم التلقائي مؤقتًا مع `pausedReason: "rate_limit"`. لا تضف حلقة إعادة محاولة. |
+| `400`، `transport_error` | رفض LogBrew الطلب. افحص حقول الحدث وإصدارات الحزم. |
+| `network_failure` | ليس لدى الـ SDK نتيجة تسليم. ربما قبل LogBrew الحدث. افحص الاتصال و`deliveryHealth()`. |
+| `5xx`، `transport_error` | أعاد الـ SDK المحاولة بالفعل. اقرأ السجلات المحفوظة قبل أن تعيد المحاولة يدويًا. |
+| نتيجة CLI فارغة | افحص المشروع والمفتاح ووقت الحدث وعوامل التصفية. |
+
+راجع [استكشاف الأخطاء وإصلاحها](/ar/guides/troubleshooting) لمزيد من الفحوص.
+
+## احتفظ بمعرّفات Debug ID من Expo في حزم الإصدار
+
+أنشئ إعدادات Metro الخاصة بـ Expo عبر LogBrew. عندها تحصل حزمة وقت التشغيل على
+Debug ID نفسه الموجود في خريطة المصدر (Source map) الخاصة بها:
+
+```js
+// metro.config.js
+const { getLogBrewExpoConfig } = require("@logbrew/react-native/metro");
+
+module.exports = getLogBrewExpoConfig(__dirname);
+```
+
+إذا كان التطبيق يستخدم وضع الحزم في React Native Worklets، فطبّق ذلك التحويل
+بعد الدالة المساعدة من LogBrew:
+
+```js
+// metro.config.js
+const { getLogBrewExpoConfig } = require("@logbrew/react-native/metro");
+const { getBundleModeMetroConfig } = require("react-native-worklets/bundleMode");
+
+module.exports = getBundleModeMetroConfig(getLogBrewExpoConfig(__dirname));
+```
+
+تحتفظ الدالة المساعدة بإضافات Expo الموجودة التي تعمل قبل التسلسل
+(pre-serialization).
+
+أما تطبيق React Native المجرد، فيغلّف إعدادات Metro النهائية باستخدام
+`withLogBrewMetroConfig()` بدلًا من ذلك. لا تستخدم هذا الغلاف مع Expo. إذا
+استخدمته، فسيتوقف بناء الإنتاج برسالة تشير إلى `getLogBrewExpoConfig()`.

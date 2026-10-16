@@ -1,0 +1,274 @@
+---
+title: "البدء السريع مع LogBrew: سجلات Node.js وقابلية الملاحظة"
+sidebarTitle: "البدء السريع"
+description: "أنشئ مشروعًا، وأعِدّ إرسال السجلات من Node.js، وأرسل حدث SDK آمنًا واحدًا، ثم اقرأ السجل المخزّن دون كشف بيانات الاعتماد."
+---
+
+أنشئ مشروع تطوير. أرسل سجلًا واحدًا من Node.js. ثم اقرأه مرة أخرى من LogBrew.
+ينشئ CLI المشروع ويحفظ مفتاح الاستيعاب الخاص به. لا تحتاج إلى تسجيل الدخول عبر
+المتصفح إلا إذا لم يكن لدى CLI وصول صالح إلى الحساب.
+
+<Note>
+  استخدم `--json` في سير عمل الوكلاء. احفظ بيانات الاعتماد في إعدادات محلية محمية.
+  ولا تمرّر بين الأشخاص والأدوات والوكلاء إلا أسماء المتغيرات.
+</Note>
+
+## <span id="first-project-success-path">قبل أن تبدأ</span>
+
+جهّز ما يلي:
+
+- Node.js 18 أو أحدث.
+- LogBrew CLI بالنسخة v0.1.30 أو أحدث.
+- `jq`.
+- Bash أو Zsh.
+- مجلد حزمة لتطبيق Node.js يعمل على جهة الخادم.
+
+يستخدم المثال المشروع `quickstart-node`، والبيئة `development`، والإصدار
+`quickstart@1`. أبقِ هذا الاختبار منفصلًا عن بيئة الإنتاج. لبيئة تشغيل أخرى، استخدم
+[إرشادات دمج SDK](/ar/guides/sdk-ingestion).
+
+<Warning>
+  أبقِ ملف مفتاح الاستيعاب خارج المستودع، بحيث لا يقرؤه أحد غيرك. لا تضع مفتاح
+  الخادم هذا في شيفرة المتصفح أو في حزمة عامة أو في موجّه (prompt).
+</Warning>
+
+## <span id="send-and-read-your-first-log">إرسال أول سجل وقراءته</span>
+
+<Steps>
+  <Step title="قراءة حالة الحساب" id="confirm-account-access">
+    ثبّت CLI بالأمر الموجود في [إرشادات استخدام CLI](/ar/guides/cli). ثم اقرأ حالة
+    الحساب فيها.
+
+    ```bash
+    logbrew status --json
+    ```
+
+    **نقطة تحقق:** تُبلغ الحالة عن وصول مصادَق عليه إلى الحساب. إذا لم يحدث ذلك،
+    يشغّل شخص `logbrew login` مرة واحدة. ثم شغّل `logbrew status --json` مرة
+    أخرى. يجب ألا يبدأ الوكيل تسجيل دخول جديدًا عندما تعمل المصادقة الحالية.
+  </Step>
+
+  <Step title="إنشاء مشروع واحد من CLI">
+    اختر ملفًا جديدًا في مجلد لا يصل إليه إلا مالكه. يكتب CLI مفتاح استيعاب
+    المشروع في هذا الملف قبل أن يُبلغ عن النجاح. ولا يطبع المفتاح أو مسار ملفه
+    أبدًا.
+
+    ```bash
+    install -d -m 700 "$HOME/.logbrew"
+
+    project_result="$(
+      logbrew projects create quickstart-node \
+        --runtime node \
+        --environment development \
+        --ingest-key-file "$HOME/.logbrew/quickstart-node.ingest" \
+        --json
+    )"
+    export LOGBREW_PROJECT_ID="$(jq -er '.project.id' <<<"$project_result")"
+    jq '{status, setup_status: .setup.status, ingest_key_kind: .ingest_key.kind, next}' \
+      <<<"$project_result"
+    unset project_result
+    ```
+
+    إنشاء المشروع يغيّر حالة الحساب. يجب ألا يكون الملف الوجهة موجودًا. إذا لم
+    تكن النتيجة واضحة، فشغّل الأمر نفسه تمامًا مرة أخرى. يعيد CLI استخدام هوية
+    الطلب المعلّق. استخدم `--abandon-retry` فقط لبدء محاولة مختلفة.
+
+    **نقطة تحقق:** تُبلغ المخرجات عن `status: "created"`، وحالة إعداد
+    `created`، ونوع مفتاح الاستيعاب. المشروع موجود والمفتاح محفوظ. لكن هذا لا
+    يثبت تسليم بيانات القياس عن بُعد. راجع
+    [المشاريع](/ar/concepts/projects).
+  </Step>
+
+  <Step title="تثبيت Node.js SDK">
+    ```bash
+    npm install @logbrew/sdk @logbrew/node
+    ```
+
+    لا تستخدم أبدًا بيانات اعتماد الحساب في إعدادات الـ SDK. أبقِ مفتاح المشروع
+    خارج مخرجات الأوامر والموجّهات والتذاكر والملفات المصدرية وإعدادات الحزم.
+  </Step>
+
+  <Step title="إرسال سجل SDK آمن واحد">
+    أرسل علامتَي الإصدار والبيئة مع سجل `info` واحد لا يحتوي إلا على قيم نائبة.
+    يُضبط المفتاح لعملية Node.js هذه فقط. وتوضع هوية التطبيق في `context`.
+
+    كل تشغيل ينشئ معرّفات أحداث جديدة. إذا أعاد الـ SDK محاولة التسليم في التشغيل
+    نفسه، فإنه يرسل نص الطلب نفسه بالمعرّفات نفسها. ولا يخزّن LogBrew الحدث المقبول
+    مرة ثانية عندما تعيد محاولةٌ إرساله.
+
+    ```bash
+    LOGBREW_SERVER_API_KEY="$(< "$HOME/.logbrew/quickstart-node.ingest")" \
+      node --input-type=module <<'JS'
+    import { randomUUID } from "node:crypto";
+    import { SdkError } from "@logbrew/sdk";
+    import { createLogBrewNodeClient } from "@logbrew/node";
+
+    const client = createLogBrewNodeClient({
+      context: {
+        schemaVersion: 1,
+        resource: { service: { name: "quickstart-node", version: "quickstart@1" } }
+      }
+    });
+    const occurredAt = new Date().toISOString();
+
+    client.release(randomUUID(), occurredAt, {
+      version: "quickstart@1",
+      metadata: { service: "quickstart-node" }
+    });
+    client.environment(randomUUID(), occurredAt, { name: "development" });
+    client.log(randomUUID(), occurredAt, {
+      message: "LogBrew quickstart check",
+      level: "info",
+      logger: "quickstart-node"
+    });
+
+    try {
+      const response = await client.shutdown();
+      console.log(JSON.stringify({
+        ok: true,
+        status_code: response.statusCode,
+        attempts: response.attempts
+      }));
+    } catch (error) {
+      console.error(JSON.stringify({
+        ok: false,
+        error: error instanceof SdkError ? error.code : "delivery_failed"
+      }));
+      process.exitCode = 1;
+    }
+    JS
+    ```
+
+    لا تضع في الحدث بيانات اعتماد أو ترويسات أو نصوص طلبات أو بيانات عملاء أو
+    مسارات محلية.
+
+    **نقطة تحقق:** يطبع البرنامج النصي `"ok":true` مع `status_code` من فئة
+    `2xx`. وتكون قيمة `attempts` أكبر من `1` بعد إعادة المحاولة. الإرسال الناجح
+    ليس آخر فحص.
+
+    إذا فشل التسليم، يخرج البرنامج النصي بالرمز `1` ويطبع خطأ JSON قصيرًا، مثل
+    `{"ok":false,"error":"unauthenticated"}`. ولا يطبع نص الطلب أو المفتاح.
+    مفتاح المشروع المرفوض يسبب `unauthenticated`. وتسجيل الدخول الجديد في CLI لا
+    يحل ذلك.
+  </Step>
+
+  <Step title="قراءة تقرير تشخيص المشروع (doctor)" id="verify-readiness-with-the-project-doctor">
+    يستخدم CLI وصوله المحفوظ إلى الحساب في هذه القراءة. لا تستخدم مفتاح استيعاب
+    المشروع.
+
+    ```bash
+    : "${LOGBREW_PROJECT_ID:?set the project UUID}"
+
+    logbrew doctor --project "$LOGBREW_PROJECT_ID" --json
+    ```
+
+    **نقطة تحقق:** يحتوي التقرير على `status: "ready"`. واقرأ أيضًا كل عنصر في
+    `checks`. رمز الخروج `0` لا يثبت أن كل الفحوص نجحت. لأي حالة أخرى، اتبع
+    `next` و[مرجع تقرير التشخيص](/ar/reference/cli#read-a-project-doctor-report).
+    والمشروع الذي حالته `ready` لا يثبت أن هذا السجل التجريبي وصل.
+  </Step>
+
+  <Step title="قراءة السجل التجريبي">
+    استخدم المشروع والإصدار والبيئة من دفعة الـ SDK.
+
+    ```bash
+    logbrew read logs --project "$LOGBREW_PROJECT_ID" \
+      --release quickstart@1 \
+      --environment development \
+      --since 1h \
+      --json
+    ```
+
+    **نقطة تحقق:** يظهر `LogBrew quickstart check` لهذا المشروع والإصدار
+    والبيئة. وهذا يثبت تسليم السجل التجريبي فقط.
+  </Step>
+</Steps>
+
+## <span id="understand-the-test-result">قراءة نتيجة الاختبار</span>
+
+يرسل المثال ثلاثة أحداث، واحد منها فقط سجل. وتعطي علامتا الإصدار والبيئة السياق
+للسجل.
+
+| الحقل في المثال | البيانات المسجّلة |
+| --- | --- |
+| `message` | العملية التي يسجّلها الاختبار، `LogBrew quickstart check`. |
+| `level: "info"` | حدث اختبار عادي، وليس عطلًا. |
+| `logger` | أداة التسجيل في التطبيق التي أنشأت القيد. |
+| `occurredAt` | وقت إنشاء هذا التشغيل للحدث، في صورة طابع زمني بتوقيت UTC. |
+| `context.resource.service` | خدمة التطبيق ونسختها، وليس هوية الـ SDK. |
+
+أبقِ الاختبار بمستوى `info`. لا تغيّره إلى `error` ليسهل العثور عليه. استخدم
+بدلًا من ذلك عوامل تصفية المشروع والوقت. راجع
+[قيم الخطورة](/ar/concepts/telemetry#severity-values).
+
+يطبع السطر `console.log` نتيجة التسليم في الطرفية. ويرسل الاستدعاء `client.log`
+السجل إلى LogBrew. يطبع التسليم الأول الناجح ما يلي:
+
+```json
+{ "ok": true, "status_code": 200, "attempts": 1 }
+```
+
+يحدد مفتاح الاستيعاب المشروع الذي يستقبل السجل. ولا ينقل عامل التصفية `--project`
+في CLI الأحداث.
+
+ليس لهذا السجل سياق تتبّع، لأن المثال لا ينشئ Span طلب. وهذا لا يعني أن السجل
+فشل. قراءة CLI لقطة لحظية. شغّلها مرة أخرى لقراءة الأحداث اللاحقة، أو استخدم
+`logbrew watch logs --json` لبث مباشر.
+
+## <span id="common-recovery-decisions">قرارات التعافي الشائعة</span>
+
+| النتيجة | الخطوة التالية |
+| --- | --- |
+| حالة CLI غير مصادَق عليها | يشغّل شخص `logbrew login`. ثم شغّل أمر الحالة مرة أخرى. |
+| ملف مفتاح الاستيعاب موجود | اختر مسارًا غير مستخدم. لا تكتب فوق بيانات اعتماد غير معروفة. |
+| نتيجة إنشاء المشروع غير واضحة | شغّل أمر الإنشاء نفسه تمامًا مرة أخرى. |
+| `unauthenticated` | افحص مفتاح استيعاب المشروع، لا بيانات اعتماد حساب CLI. تسجيل الدخول الجديد لا يحل المشكلة. |
+| `rate_limited` | انتظر قبل أن ترسل مرة أخرى. لا تكرر الإرسال في حلقة ولا تنشئ مفتاحًا جديدًا. |
+| `transport_error` أو `network_failure` | افحص الاتصال بالشبكة. الاستجابة الفاشلة لا تثبت أن الطلب السابق لم يكن له أثر. |
+| `delivery_failed` | توقف وافحص العطل. لا تطبع الأسرار أو نص الطلب. |
+| قيمة `status` في تقرير التشخيص ليست `ready` | اقرأ `checks` و`next` في [تقرير التشخيص](/ar/reference/cli#read-a-project-doctor-report). وأبقِ المشروع نفسه. |
+| قراءة السجلات فارغة | قارن المشروع والبيئة والإصدار والنطاق الزمني مع الدفعة المرسلة. |
+
+إذا ظلت بيانات القياس مفقودة، فاستخدم
+[فحوص أول بيانات قياس](/ar/guides/troubleshooting#recover-missing-first-telemetry).
+إذا لم تساعد هذه الفحوص، [فأبلغ عن مشكلة](/ar/guides/report-a-problem).
+لا ترفق بيانات اعتماد أو بيانات قياس خامًا أو بيانات عملاء أو مسارات محلية أو
+شيفرة مصدرية.
+
+## <span id="move-to-your-application">الانتقال إلى تطبيقك</span>
+
+- أنشئ العميل مرة واحدة في شيفرة إعداد تطبيقك.
+- حدّد نسخ الـ SDK بدقة في ملفات الحزم. واختبر الترقيات خارج بيئة الإنتاج.
+- حمّل مفتاح الاستيعاب من إعدادات الأسرار الحالية لديك. دوّر المفتاح بعد أي كشف
+  محتمل. راجع [تدوير مفتاح الاستيعاب](/ar/guides/rotate-ingest-key).
+- استخدم أسماء ثابتة للخدمة والبيئة والإصدار من إعدادات النشر. راجع
+  [الإصدارات](/ar/concepts/releases).
+- اكتب رسائل سجل تذكر العملية ونتيجتها، مثل
+  `Report generation completed`. أبقِ القيم الخاصة خارج الرسالة. ولا تنسخ طلبًا
+  كاملًا أو قيد مستخدم كاملًا في سجل.
+- اجعل لكل سجل في التطبيق مُرسِلًا واحدًا لتجنب القيود المكررة. حدّد عملية الدمج
+  التي ترسل كل قيد حاليًا قبل أن تضيف LogBrew.
+- قبل الطرح في بيئة الإنتاج، أرسل حدثًا آمنًا واحدًا عبر مسار الشيفرة الحقيقي
+  واقرأه مرة أخرى. تحقق من رسالته وخدمته وإصداره وبيئته. المثال المستقل لا يختبر
+  مسار الشيفرة في تطبيقك.
+
+لا يُعِدّ هذا المثال التقاط المتصفح أو خرائط المصدر أو التقاط تطبيقات الهاتف المحمول.
+لهذه الأمور، ابدأ من [إرشادات دمج SDK](/ar/guides/sdk-ingestion).
+
+<CardGroup cols={2}>
+  <Card title="المشاريع" icon="folder-kanban" href="/ar/concepts/projects">
+    اقرأ حالة الإعداد، وأدِر مفاتيح استيعاب المشروع.
+  </Card>
+
+  <Card title="دمج SDK" icon="cloud-upload" href="/ar/guides/sdk-ingestion">
+    اختر حزمة SDK المناسبة لبيئة التشغيل لديك.
+  </Card>
+
+  <Card title="التحقيق في مشكلة" icon="bug" href="/ar/guides/investigate-an-issue">
+    اتبع أدلة التتبّع والسجلات المرتبطة لمشكلة واحدة.
+  </Card>
+
+  <Card title="الإبلاغ عن مشكلة" icon="life-buoy" href="/ar/guides/report-a-problem">
+    أرسل بلاغ دعم آمنًا وخاصًا.
+  </Card>
+</CardGroup>

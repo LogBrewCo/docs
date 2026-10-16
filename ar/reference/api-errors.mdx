@@ -1,0 +1,522 @@
+---
+title: "معالجة أخطاء API ورموز أخطاء API"
+sidebarTitle: "أخطاء API"
+description: "اقرأ رموز أخطاء LogBrew API وحالات HTTP وأمثلة JSON. استخدم تعليمات التعافي المُرجَعة لتصحيح الطلبات وإعادة المحاولة بأمان."
+---
+
+تستخدم أخطاء LogBrew API غلاف JSON واحدًا. استخدم `code` و`next_action` لتحديد
+سلوك البرنامج. واعرض `error` و`next` نصًا عاديًا. لا تعتمد على مطابقة صياغة `error`
+أو `next`.
+
+```json
+{
+  "error": "invalid since value",
+  "code": "validation_failed",
+  "next": "use since=24h, since=7d, or an RFC3339 timestamp",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+| الحقل | المعنى |
+| --- | --- |
+| `error` | وصف قصير للمشكلة يقرؤه الإنسان. |
+| `code` | رمز خطأ ثابت. استخدمه لاختيار المسار المناسب في العميل. |
+| `next` | خطوة تعافٍ يقرؤها الإنسان. يختلف النص حسب المسار. |
+| `next_action.code` | إجراء تعافٍ ثابت لتوجيه البرنامج. |
+| `next_action.target` | الكائن الذي ينطبق عليه إجراء التعافي، مثل `auth` أو `request`. |
+
+تضيف بعض الاستجابات حقولًا، مثل `limit` أو `reset_at` أو
+`retry_after_seconds`. ويذكرها جدول [رموز الأخطاء](#error-codes).
+
+## <span id="handle-an-error-response">معالجة استجابة الخطأ</span>
+
+1. اقرأ حالة HTTP.
+2. تأكد من أن نص الاستجابة بتنسيق JSON قبل أن تقرأ `code`.
+3. استخدم الحالة و`code` معًا لاختيار المسار المناسب في العميل.
+4. اعرض `error` و`next` نصًا عاديًا. لا تعرضهما بتنسيق HTML ولا تشغّلهما كأوامر.
+5. استخدم `next_action` للتعافي التلقائي. إذا لم يتعرف العميل على الإجراء، فتوقف واعرض الخطأ.
+6. احتفظ بقيم `limit` و`reset_at` و`retry_after_seconds` المُرجَعة مع الطلب الفاشل.
+7. قبل أن تعيد المحاولة، طبّق [قواعد إعادة المحاولة](#retry-rules).
+
+إذا لم تحتوِ الاستجابة على غلاف JSON، فاحتفظ بحالة HTTP وسجّل أن الرمز غير متاح.
+لا تختلق `code` من LogBrew. قد ينتج ذلك عن وسيط (proxy) أو عطل في الشبكة.
+
+لا تستبدل `code` الخاص بـ LogBrew باسم حالة HTTP. مثلًا، قد تحتوي استجابة `400`
+على `invalid_json` أو `invalid_path`، وكل رمز منهما يحتاج إلى تصحيح مختلف.
+
+في السجلات، سجّل حالة HTTP و`code`. لا تسجّل نص الاستجابة كاملًا أو بيانات الاعتماد أو
+رموز الاستعادة.
+
+## <span id="error-codes">رموز الأخطاء</span>
+
+قد يظهر `code` نفسه في أكثر من مسار. وقد يتغير نص `next` وقيم `next_action` حسب
+المسار. استخدم القيم المُرجَعة. لا تُرجع نقطة النهاية إلا الرموز التي تنطبق على
+مصادقتها وطريقتها ونص طلبها وحدودها.
+
+| HTTP | `code` | المعنى | إجراء العميل |
+| --- | --- | --- | --- |
+| `400` أو `413` أو `415` أو `422` | `invalid_json` | نص الطلب ليس JSON صالحًا، أو كبير جدًا، أو نوع محتواه خاطئ، أو لا يطابق بنية JSON الخاصة بالمسار. | أرسل JSON صالحًا مع `Content-Type: application/json` والحقول التي يحتاجها المسار. |
+| `400` أو `413` أو `500` | `invalid_multipart` | لا يستطيع الخادم قراءة رفع من نوع `multipart/form-data`. | مع `400` أو `413`، صحّح النموذج أو حجمه. مع `500`، طبّق [قواعد إعادة المحاولة](#retry-rules). |
+| `400` أو `500` | `invalid_path` | لا يستطيع الخادم قراءة قيمة في مسار URL، مثل معرّف مشروع أو مشكلة. | مع `400`، صحّح المعرّف ونوعه. مع `500`، طبّق [قواعد إعادة المحاولة](#retry-rules). |
+| `400` أو `405` أو `426` | `invalid_websocket_upgrade` | اتصال الموجز المباشر ليس ترقية WebSocket صالحة. | اتصل باستخدام `GET` وترويسات ترقية WebSocket. راجع [تنسيق الأحداث المباشرة](/ar/reference/telemetry-response-shapes#live-event-response-format). |
+| `401` | `unauthorized` | مصادقة الحساب مفقودة أو غير صالحة أو منتهية الصلاحية. | سجّل الدخول مرة أخرى. في CLI، شغّل `logbrew login`. |
+| `401` | `ingest_key_invalid` | لا يوجد مفتاح استيعاب صالح خاص بالمشروع لاستيعاب بيانات القياس عن بُعد. | اضبط مفتاح استيعاب حاليًا لهذا المشروع. |
+| `402` | `subscription_required` | يحتاج الإجراء إلى خطة مدفوعة. | اتبع `next`. فهو يذكر خطوة الخطة أو يطلب منك التواصل مع الدعم. |
+| `403` | `forbidden` | لا يستطيع الحساب الوصول إلى المورد أو الإجراء. | استخدم حسابًا لديه صلاحية الوصول. لا تجرّب معرّفات أخرى. |
+| `403` | `role_forbidden` | لا يستطيع الحساب إجراء هذا التغيير في أدوار المؤسسة. | اطلب من مالك المؤسسة أو مشرفها إجراء التغيير. |
+| `404` | `not_found` | المورد أو مسار الـ API غير متاح للحساب. | اقرأ مرة أخرى قائمة بالموارد التي تملكها. ثم افحص المعرّف والمسار وعوامل التصفية. |
+| `405` | `method_not_allowed` | المسار موجود، لكن طريقة HTTP غير مدعومة. | استخدم الطريقة التي يذكرها `next`. |
+| `408` | `request_timeout` | لم يكتمل الطلب في الوقت المحدد. | ضيّق النطاق، أو انتظر وأرسل الطلب مرة أخرى. |
+| `409` | `idempotency_conflict` | استُخدم `Idempotency-Key` أو `deployment_id` مرة أخرى لطلب مختلف. | أعد محاولة الطلب الأصلي دون تغيير، أو استخدم مفتاحًا جديدًا للعمل الجديد. |
+| `409` | `account_link_conflict` | هوية تسجيل الدخول تخص حسابًا آخر. | حلّ مشكلة ربط الحساب من إعدادات الحساب. لا تنشئ حسابًا ثانيًا للهوية نفسها. |
+| `409` | `account_recovery_available` | الحساب في فترة الاستعادة. | اتبع إجراء الاستعادة المُرجَع. وأبقِ رمز الاستعادة خاصًا. |
+| `410` | `account_recovery_expired` | انتهت فترة استعادة الحساب. | سجّل الدخول لإنشاء حساب جديد. |
+| `422` | `validation_failed` | قيمة استعلام أو حقل أو عامل تصفية أو مؤشر أو ترويسة أو نطاق زمني غير صالح. | صحّح القيمة المذكورة. ثم أرسل الطلب مرة أخرى. |
+| `422` | `invite_invalid` | في دعوة المؤسسة عنوان بريد إلكتروني أو دور غير صالح. | صحّح الدعوة. ثم أرسلها مرة أخرى. |
+| `422` | `member_limit_exceeded` | وصلت المؤسسة إلى الحد الأقصى لعدد الأعضاء. | اطلب من مالك المؤسسة إزالة عضو أو تغيير الخطة. |
+| `422` | `organization_limit_exceeded` | وصل الحساب إلى الحد الأقصى لعدد المؤسسات. | أزل مؤسسة، أو غيّر الخطة، أو تواصل مع الدعم. |
+| `423` | `organization_paused` | المؤسسة متوقفة مؤقتًا لأن اشتراكها المدفوع غير نشط. | استأنف اشتراكًا مدفوعًا نشطًا. |
+| `429` | `rate_limited` | أرسل المستدعي طلبات كثيرة جدًا. يضيف `retry_after_seconds`. | انتظر مدة `retry_after_seconds`. ثم أعد المحاولة مع تأخير متزايد (backoff). |
+| `429` | `usage_limit_exceeded` | وصل الاستيعاب إلى الحد المسموح للحساب في فترة الفوترة. يضيف `limit` و`reset_at`. | أوقف الاستيعاب حتى `reset_at`، أو غيّر الخطة. |
+| `429` | `artifact_storage_limit_exceeded` | وصل رفع ملف بناء الإصدار أو ملف التصحيح إلى حد التخزين. يضيف `limit`. | انتظر قبل أن ترفع مرة أخرى. إذا استمر الحد، فتواصل مع الدعم. |
+| `429` | `invitation_limit_exceeded` | وصلت المؤسسة إلى الحد اليومي المسموح للدعوات. يضيف `limit` و`reset_at`. | انتظر حتى `reset_at` أو غيّر الخطة. |
+| `500` | `storage_error` أو `json_error` أو `internal_error` | لم يُكمل الخادم الطلب. | طبّق [قواعد إعادة المحاولة](#retry-rules). إذا استمر العطل، [فأبلغ عن مشكلة](/ar/guides/report-a-problem). |
+| `503` | `service_unavailable` | لا يستطيع الـ API قبول الطلب حاليًا. | انتظر. ثم أرسل الطلب مرة أخرى. |
+| `503` | `artifact_storage_unavailable` | رفع ملفات بناء الإصدارات وملفات التصحيح غير متاح مؤقتًا. | انتظر قبل أن ترفع مرة أخرى. لا تبدأ عمليات رفع متوازية. |
+| `503` | `billing_unavailable` | الدفع أو إدارة الخطة غير متاحة مؤقتًا. | انتظر. ثم جرّب إجراء الفوترة مرة أخرى. |
+
+قد يُرجع المعرّف غير المعروف والمعرّف الذي لا تستطيع الوصول إليه الاستجابة نفسها.
+لا تستخدم نص الخطأ لمعرفة الحساب الذي يملك معرّفًا ما. ومسار الـ API غير المعروف
+يُرجع `404` مع `not_found`.
+
+### <span id="limit-fields">حقول الحدود</span>
+
+| `code` | قيم `limit` | حقول أخرى |
+| --- | --- | --- |
+| `usage_limit_exceeded` | `issue_events` أو `log_bytes` أو `metric_bytes` أو `trace_spans` | `reset_at`: نهاية فترة الفوترة (RFC3339). |
+| `invitation_limit_exceeded` | `invitations_per_day` | `reset_at`: بداية يوم UTC التالي (RFC3339). |
+| `artifact_storage_limit_exceeded` | اسم حد تخزين، مثل `artifact_completed_project_bytes` | لا يوجد. |
+| `rate_limited` | لا يوجد | `retry_after_seconds`: عدد الثواني الكاملة للانتظار، و`1` على الأقل. |
+
+اقرأ الحد المسموح الحالي والاستخدام من
+[Account API](/ar/reference/account-api#account-usage).
+
+## <span id="retry-rules">قواعد إعادة المحاولة</span>
+
+استخدم الرمز والعملية لتقرر إعادة المحاولة. الحالة وحدها لا تكفي.
+
+| الاستجابة | قاعدة إعادة المحاولة |
+| --- | --- |
+| `validation_failed` أو `invalid_json` أو `invalid_path` (`400`) أو `invalid_multipart` (`400` أو `413`) أو `invalid_websocket_upgrade` | صحّح قيمة الطلب المذكورة أولًا. لا ترسل الطلب نفسه مرة أخرى. |
+| `unauthorized` أو `ingest_key_invalid` | استبدل بيانات الاعتماد الصحيحة أو حدّثها أولًا. |
+| `forbidden` أو `role_forbidden` أو `not_found` | لا تُعِد المحاولة بمعرّفات أخرى. اقرأ مرة أخرى قائمة بالموارد التي تملكها، أو احصل على صلاحية الوصول من المالك. |
+| `method_not_allowed` | استخدم الطريقة المذكورة في `next`. لا ترسل الطريقة المرفوضة مرة أخرى. |
+| `idempotency_conflict` | أعد محاولة الطلب الأصلي دون تغيير، أو استخدم مفتاحًا جديدًا للعمل الجديد. |
+| `rate_limited` | انتظر مدة `retry_after_seconds`. ثم استخدم تأخيرًا أُسيًا متزايدًا مع تفاوت عشوائي (jitter). |
+| `usage_limit_exceeded` أو `invitation_limit_exceeded` | انتظر حتى `reset_at`، أو غيّر الخطة. |
+| `artifact_storage_limit_exceeded` | انتظر قبل أن ترفع مرة أخرى. إذا استمر الحد، فتواصل مع الدعم. |
+| `subscription_required` أو `organization_paused` أو `member_limit_exceeded` أو `organization_limit_exceeded` | اتبع `next`. إعادة المحاولة دون تغيير الخطة أو العضوية ستفشل مرة أخرى. |
+| `request_timeout` أو `service_unavailable` أو `artifact_storage_unavailable` أو `billing_unavailable` | انتظر. ثم أرسل طلب القراءة مرة أخرى بالنطاق نفسه. لطلب الكتابة، طبّق [قواعد الكتابة](#writes). |
+| `storage_error` أو `json_error` أو `internal_error` أو أي `5xx` آخر | انتظر. ثم أرسل طلب القراءة مرة أخرى. لطلب الكتابة، طبّق [قواعد الكتابة](#writes). إذا استمر العطل، [فأبلغ عن مشكلة](/ar/guides/report-a-problem). |
+
+- لا تبدأ إعادة محاولات متوازية لطلب فاشل واحد.
+- مع `rate_limited`، تحتوي الاستجابة أيضًا على الترويستين `Retry-After`
+  و`X-RateLimit-After`. وكلتاهما تحتوي على عدد الثواني نفسه الموجود في
+  `retry_after_seconds`.
+- انتهاء المهلة لا يثبت أن النتيجة فارغة.
+
+يتحكم حد المعدّل في تكرار الطلبات. ويتحكم حد الاستخدام في الحد المسموح للحساب
+خلال فترة الفوترة. كلاهما يستخدم `429`. أبقِ حقولهما منفصلة. أثناء أي من الحدين،
+بيّن أن الجمع أو القراءة متأخرة. لا تعرض بيانات قديمة على أنها نتيجة قراءة جديدة.
+
+### <span id="writes">عمليات الكتابة</span>
+
+انتهاء المهلة أو استجابة `5xx` أو عطل الشبكة لا يثبت أن عملية الكتابة فشلت. قبل أن
+ترسل عملية الكتابة مرة أخرى:
+
+1. إذا كان المسار يدعم مفتاح عدم التكرار (Idempotency key)، فأرسل المفتاح نفسه
+   ونص الطلب نفسه مرة أخرى. ولا تستخدم مفتاحًا جديدًا إلا للعمل الجديد.
+2. إذا لم يكن للمسار مفتاح عدم تكرار، فاقرأ المورد أولًا. ولا ترسل عملية الكتابة
+   مرة أخرى إلا إذا لم يكن التغيير موجودًا.
+3. إذا لم تجد النتيجة، فأوقف إعادة المحاولة التلقائية وأخبر المستخدم.
+
+تقبل هذه المسارات مفتاح إعادة المحاولة:
+
+| المسار | مفتاح إعادة المحاولة |
+| --- | --- |
+| `POST /api/projects` | الترويسة `Idempotency-Key` اختيارية. |
+| `POST /api/projects/{project_id}/ingest-keys` | الترويسة `Idempotency-Key` اختيارية. |
+| `POST /api/support/tickets` | الترويسة `Idempotency-Key` اختيارية. |
+| `POST /api/support/tickets/{ticket_id}/context` | الترويسة `Idempotency-Key` مطلوبة. |
+| `PUT /api/telemetry/deployments/{deployment_id}` | `deployment_id` في المسار. |
+
+تتكون قيمة `Idempotency-Key` من 1 إلى 128 حرف ASCII مرئيًا. أي قيم أخرى تُرجع
+`422` مع `validation_failed`.
+
+يعني `idempotency_conflict` أن المفتاح يخص طلبًا مختلفًا. لا تغيّر نص إعادة
+المحاولة التي تستخدم المفتاح الأصلي.
+
+## <span id="request-shape-errors">أخطاء بنية الطلب</span>
+
+يعني `invalid_json` أن الخادم لا يستطيع قبول نص الطلب على أنه بنية JSON الخاصة
+بالمسار. افحص نوع المحتوى، وحجمه، وصياغة JSON، والحقول المطلوبة، وأنواع الحقول.
+وتبيّن حالة HTTP الجزء الذي فشل:
+
+| HTTP | السبب |
+| --- | --- |
+| `400` | نص الطلب ليس JSON صالحًا. |
+| `413` | نص الطلب كبير جدًا. |
+| `415` | الترويسة `Content-Type` ليست `application/json`. |
+| `422` | JSON صالح، لكن أحد الحقول مفقود أو نوعه خاطئ. |
+
+يعني `validation_failed` مع الخطأ `invalid query parameters` أن الخادم لا يستطيع
+قراءة سلسلة الاستعلام. افحص أسماء المعاملات وأنواع قيمها. لا ترسل معاملات استعلام
+غير معروفة. يسرد
+[عوامل تصفية الاستعلام](/ar/reference/telemetry-api-filters) المعاملات الخاصة
+بكل مسار.
+
+يعني `invalid_path` مع الحالة `400` أن قيمة في المسار، مثل معرّف المشروع، تنسيقها
+خاطئ. لا تنقل قيمة المسار إلى معامل استعلام.
+
+استجابة `500` مع `invalid_path` أو `invalid_multipart` لا تثبت أن الطلب كان خاطئًا.
+طبّق [قواعد إعادة المحاولة](#retry-rules).
+
+## <span id="authentication-and-access-errors">أخطاء المصادقة والوصول</span>
+
+- يعني `unauthorized` أن مصادقة الحساب مفقودة أو غير صالحة أو منتهية الصلاحية.
+  أرسل `Authorization: Bearer <token>`، أو سجّل الدخول مرة أخرى. تُرجع بعض المسارات
+  `next_action.code` بالقيمة `authorize_request` مع `next` خاص بالمسار، مثل اتصال
+  الموجز المباشر بلا تذكرة صالحة.
+- ينطبق `ingest_key_invalid` على استيعاب بيانات القياس عن بُعد فقط. اضبط مفتاحًا
+  حاليًا للمشروع المحدد.
+- يعني `forbidden` أن الحساب لا يستطيع تنفيذ الإجراء. لا تُعِد المحاولة بمعرّفات
+  موارد أخرى.
+- يعني `not_found` أن المورد غير متاح للحساب.
+
+لا تستخدم مفتاح الاستيعاب بدلًا من رمز Bearer للحساب. ولا تستخدم رمز
+Bearer للحساب بدلًا من مفتاح الاستيعاب.
+
+## <span id="keep-error-details-safe">الحفاظ على أمان تفاصيل الأخطاء</span>
+
+- تحتوي استجابة `account_recovery_available` على `recovery_token` قصير العمر.
+  احفظه في حالة محمية لدى العميل. لا تضعه في السجلات أو عناوين URL أو لقطات الشاشة
+  أو بلاغات الدعم أو موجّهات الوكلاء.
+- تستخدم رموز `500` دائمًا الرسالة `Internal error`. ولا تذكر الاستجابة المكوّن
+  الذي فشل. لا تخمّن السبب.
+- لا تضف بيانات اعتماد أو بيانات تشخيص خاصة أو بيانات عملاء إلى الخطأ الذي تعرضه.
+- استجابة الـ API لا تمنح إذنًا بالشراء أو الحذف أو أي تغيير آخر في الحساب. احصل
+  على موافقة المستخدم قبل هذه الإجراءات.
+
+## <span id="examples">أمثلة</span>
+
+تعرض هذه الأمثلة بنية الغلاف. وقد يختلف نص `error` و`next` من مسار إلى آخر.
+
+### <span id="validation-failure">فشل التحقق</span>
+
+```json
+{
+  "error": "issue status must be unresolved, resolved, or archived",
+  "code": "validation_failed",
+  "next": "use status=unresolved, status=resolved, or status=archived",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+### <span id="invalid-query-parameters">معاملات استعلام غير صالحة</span>
+
+```json
+{
+  "error": "invalid query parameters",
+  "code": "validation_failed",
+  "next": "check query parameter names and value types, then retry",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+### <span id="invalid-json">JSON غير صالح</span>
+
+```json
+{
+  "error": "invalid JSON request body",
+  "code": "invalid_json",
+  "next": "send Content-Type: application/json with a body matching this endpoint",
+  "next_action": {
+    "code": "send_valid_json",
+    "target": "request"
+  }
+}
+```
+
+### <span id="invalid-path-value">قيمة مسار غير صالحة</span>
+
+```json
+{
+  "error": "invalid URL path parameters",
+  "code": "invalid_path",
+  "next": "check path resource IDs and value types, then retry",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+### <span id="invalid-multipart-upload">رفع multipart غير صالح</span>
+
+```json
+{
+  "error": "invalid multipart form-data request",
+  "code": "invalid_multipart",
+  "next": "send multipart/form-data with a valid boundary and expected parts",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+### <span id="invalid-websocket-upgrade">ترقية WebSocket غير صالحة</span>
+
+```json
+{
+  "error": "invalid WebSocket upgrade request",
+  "code": "invalid_websocket_upgrade",
+  "next": "connect with GET /api/feed/live?ticket=<ticket> using WebSocket upgrade headers",
+  "next_action": {
+    "code": "connect_live_feed",
+    "target": "live_feed"
+  }
+}
+```
+
+### <span id="authentication-failure">فشل المصادقة</span>
+
+```json
+{
+  "error": "Invalid or expired token",
+  "code": "unauthorized",
+  "next": "send Authorization: Bearer <token>, include the logbrew_session cookie, or sign in again",
+  "next_action": {
+    "code": "sign_in",
+    "target": "auth"
+  }
+}
+```
+
+### <span id="invalid-ingest-key">مفتاح استيعاب غير صالح</span>
+
+تنطبق هذه الاستجابة على استيعاب بيانات القياس عن بُعد، لا على قراءات الحساب. يجب أن
+يخص المفتاح المشروع الموجود في الطلب.
+
+```json
+{
+  "error": "Invalid ingest key",
+  "code": "ingest_key_invalid",
+  "next": "create a project-scoped ingest key, then retry ingestion with that key",
+  "next_action": {
+    "code": "configure_ingest_key",
+    "target": "project_ingest_key"
+  }
+}
+```
+
+### <span id="resource-not-found">المورد غير موجود</span>
+
+```json
+{
+  "error": "issue not found",
+  "code": "not_found",
+  "next": "check the resource id or filters and retry",
+  "next_action": {
+    "code": "check_resource",
+    "target": "resource"
+  }
+}
+```
+
+### <span id="access-denied">رفض الوصول</span>
+
+```json
+{
+  "error": "Insufficient permissions",
+  "code": "forbidden",
+  "next": "use an account with access to this resource",
+  "next_action": {
+    "code": "request_access",
+    "target": "auth"
+  }
+}
+```
+
+### <span id="unsupported-method">طريقة غير مدعومة</span>
+
+```json
+{
+  "error": "Method not allowed",
+  "code": "method_not_allowed",
+  "next": "send GET /api/account/usage with Authorization or the logbrew_session cookie",
+  "next_action": {
+    "code": "use_supported_method",
+    "target": "api_method"
+  }
+}
+```
+
+### <span id="request-timeout">انتهاء مهلة الطلب</span>
+
+```json
+{
+  "error": "Request timed out",
+  "code": "request_timeout",
+  "next": "retry read-only requests later or narrow the request scope. Before repeating a write, check whether it succeeded and follow this endpoint's idempotency guidance",
+  "next_action": {
+    "code": "retry_or_narrow_scope",
+    "target": "request"
+  }
+}
+```
+
+### <span id="idempotency-conflict">تعارض مفتاح عدم التكرار</span>
+
+```json
+{
+  "error": "Idempotency key was already used",
+  "code": "idempotency_conflict",
+  "next": "retry the original support request or use a new Idempotency-Key",
+  "next_action": {
+    "code": "use_new_idempotency_key",
+    "target": "request"
+  }
+}
+```
+
+### <span id="rate-limit">حد المعدّل</span>
+
+```json
+{
+  "error": "Rate limit exceeded",
+  "code": "rate_limited",
+  "next": "wait for retry_after_seconds, then retry with exponential backoff and jitter",
+  "next_action": {
+    "code": "retry_with_backoff",
+    "target": "request"
+  },
+  "retry_after_seconds": 1
+}
+```
+
+### <span id="usage-limit">حد الاستخدام</span>
+
+يعتمد نص `next` و`next_action` على توفر تغيير الخطة. إذا لم يكن متاحًا، فقيمة
+`next_action.code` هي `wait_or_contact_support`، والهدف هو `support`.
+
+```json
+{
+  "error": "Usage limit exceeded",
+  "code": "usage_limit_exceeded",
+  "next": "wait until reset_at or upgrade your plan before retrying ingestion",
+  "next_action": {
+    "code": "wait_or_upgrade",
+    "target": "billing"
+  },
+  "limit": "log_bytes",
+  "reset_at": "2026-11-01T00:00:00+00:00"
+}
+```
+
+### <span id="artifact-storage-limit">حد تخزين ملفات البناء</span>
+
+```json
+{
+  "error": "Release artifact storage limit exceeded",
+  "code": "artifact_storage_limit_exceeded",
+  "next": "wait before retrying the upload, or contact LogBrew support if the limit persists",
+  "next_action": {
+    "code": "wait_or_contact_support",
+    "target": "support"
+  },
+  "limit": "artifact_completed_project_bytes"
+}
+```
+
+### <span id="account-recovery-available">استعادة الحساب متاحة</span>
+
+تضيف هذه الاستجابة `deleted_at` و`recovery_token` قصير العمر. احفظ الرمز في حالة
+محمية لدى العميل.
+
+```json
+{
+  "error": "Account recovery available",
+  "code": "account_recovery_available",
+  "next": "restore account with POST /api/auth/restore",
+  "next_action": {
+    "code": "restore_account",
+    "target": "account_recovery"
+  },
+  "deleted_at": "2026-09-04T09:00:00Z",
+  "recovery_token": "<recovery token>"
+}
+```
+
+### <span id="account-recovery-expired">انتهت صلاحية استعادة الحساب</span>
+
+```json
+{
+  "error": "Account recovery window expired",
+  "code": "account_recovery_expired",
+  "next": "create a new account after deletion completes",
+  "next_action": {
+    "code": "create_account",
+    "target": "auth"
+  }
+}
+```
+
+### <span id="organization-paused">المؤسسة متوقفة مؤقتًا</span>
+
+```json
+{
+  "error": "Organization paused",
+  "code": "organization_paused",
+  "next": "resume an active paid subscription before using this organization",
+  "next_action": {
+    "code": "resume_subscription",
+    "target": "billing"
+  }
+}
+```
+
+### <span id="server-error">خطأ في الخادم</span>
+
+تستخدم `storage_error` و`json_error` و`internal_error` رسالة `error` نفسها. لكن
+قيم `code` و`next` و`next_action` مختلفة.
+
+```json
+{
+  "error": "Internal error",
+  "code": "internal_error",
+  "next": "retry read-only requests later. Before repeating a write, check whether it succeeded and follow this endpoint's idempotency guidance. Contact LogBrew support if the problem persists",
+  "next_action": {
+    "code": "retry_or_contact_support",
+    "target": "support"
+  }
+}
+```
+
+| `code` | `next_action.code` | `next_action.target` |
+| --- | --- | --- |
+| `storage_error` | `retry_or_check_storage` | `backend_status` |
+| `json_error` | `send_valid_json` | `request` |
+| `internal_error` | `retry_or_contact_support` | `support` |
+
+لمعرفة نقاط النهاية والمصادقة وعوامل التصفية، اقرأ
+[Telemetry API](/ar/reference/telemetry-api).

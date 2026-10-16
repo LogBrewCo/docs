@@ -1,0 +1,235 @@
+---
+title: "متابعة إصدارات البرمجيات ومراقبة عمليات النشر"
+sidebarTitle: "الإصدارات"
+description: "استخدم متابعة الإصدارات في LogBrew لإيجاد المشكلات والسجلات والتتبّعات والإجراءات والمقاييس لكل إصدار. واقرأ معدلات الأخطاء وسياق النشر."
+---
+
+الإصدار هو نسخة الشيفرة التي أرسلت بيانات القياس عن بُعد، مثل `api@1.2.3` أو
+commit في Git. لا ينشئ LogBrew إصدارًا من وسم (tag) في المستودع أو من عملية
+نشر. يجب أن يحتوي كل غلاف قياس عن بُعد أصلي على قيمتين غير فارغتين
+لـ `release` و`environment`. يرفض LogBrew أي طلب لا يحتوي عليهما.
+
+## <span id="release-project-service-and-environment">الإصدار والمشروع والخدمة والبيئة</span>
+
+| الحقل | مثال | السؤال الذي يجيب عنه |
+| --- | --- | --- |
+| المشروع | `checkout-platform` | من يملك بيانات القياس هذه، ومن يمكنه قراءتها؟ |
+| الخدمة | `checkout-api` | أي تطبيق أو عملية أرسلها؟ |
+| البيئة | `production` | أين عملت الشيفرة؟ |
+| الإصدار | `api@1.2.3` | أي نسخة من الشيفرة أرسلها؟ |
+
+## <span id="naming-releases">تسمية الإصدارات</span>
+
+استخدم نسخة ثابتة لا تتغير، أو رقم بناء، أو commit في Git. في المستودع الموحّد
+(monorepo)، أضف بادئة قصيرة باسم الخدمة، مثل `web@b7f4d91` و`worker@3a9c120`.
+استخدم القيمة نفسها للمشكلات والسجلات والتتبّعات والإجراءات والمقاييس الصادرة
+من ملف بناء (artifact) واحد.
+
+<CardGroup cols={2}>
+  <Card title="قيم جيدة" icon="check">
+    كل من `api@1.2.3` و`web@b7f4d91` و`ios@2026.06.01`
+    و`worker@2026-06-01.1` يحدد ملف بناء واحدًا.
+  </Card>
+
+  <Card title="قيم يجب تجنبها" icon="x">
+    القيم `latest` و`prod` و`new` و`build` لا تحدد نسخة من الشيفرة. والنص
+    الفارغ مرفوض.
+  </Card>
+</CardGroup>
+
+يرفض LogBrew أيضًا هذه القيم:
+
+| الحقل | القيم المرفوضة |
+| --- | --- |
+| `release` | أطول من 200 بايت، أو `.` أو `..`، أو تحتوي على `/` أو شرطة مائلة عكسية أو علامة جدولة (tab) أو فاصل أسطر. |
+| `environment` | أطول من 64 بايت، أو `None`، أو تحتوي على مسافة أو أي حرف مسافة بيضاء آخر أو `/` أو شرطة مائلة عكسية. |
+
+اسم فرع Git مثل `feature/login` ليس إصدارًا صالحًا. استخدم الـ commit بدلًا منه.
+
+استخدم أسماء بيئات ثابتة مثل `production` و`staging` و`preview` و`local`. يمكن
+أن يعمل الإصدار الواحد في أكثر من بيئة.
+
+اضبط القيمتين في إعدادات النشر، حتى يمررهما خط CI/CD إلى الـ SDK. ضع في قيمة
+الإصدار تسمية النسخة فقط. لا تضع فيها أسرارًا أو أسماء عملاء أو عناوين URL. بعد
+النشر، أرسل حدثًا آمنًا واحدًا، ثم اقرأه مرة أخرى باستخدام عامل تصفية الإصدار.
+
+## <span id="release-summary">قراءة ملخصات الإصدارات</span>
+
+```bash
+logbrew read releases --project "<project_id>" --environment production --since 24h --json
+```
+
+يغطي كل ملخص مشروعًا واحدًا وإصدارًا واحدًا وبيئة واحدة وخدمة واحدة:
+
+| الحقل | المعنى |
+| --- | --- |
+| `issue_count` | أحداث المشكلات لهذا الإصدار. |
+| `log_count` | السجلات لهذا الإصدار. |
+| `trace_span_count` | Spans التتبّع لهذا الإصدار. |
+| `action_count` | إجراءات المنتج لهذا الإصدار. |
+| `metric_count` | عيّنات المقاييس لهذا الإصدار. |
+| `first_seen_at` | أول نشاط للإصدار ضمن النطاق المحدد. |
+| `last_seen_at` | آخر نشاط للإصدار ضمن النطاق المحدد. |
+| `trace_health` | عدد التتبّعات، وعدد التتبّعات التي فيها أخطاء، ومعدل الأخطاء، والحالة. راجع [قراءة معدلات أخطاء التتبّعات](#interpret-trace-error-rates). |
+| `next_action` | الإشارة التي تقرؤها بعد ذلك، في صورة `code` و`target`. |
+
+تقيس هذه الأعداد إشارات مختلفة، فلا تجمعها معًا. الحقلان `first_seen_at`
+و`last_seen_at` ليسا وقتي نشر. قد ترسل الخدمة لاحقًا مزيدًا من بيانات القياس
+بالإصدار نفسه. تُرتَّب الملخصات حسب `last_seen_at`، من الأحدث إلى الأقدم.
+
+يشير `next_action` إلى أول نوع إشارة فيه بيانات، بهذا الترتيب:
+
+| `next_action.code` | `next_action.target` |
+| --- | --- |
+| `inspect_release_issues` | `telemetry_issues` |
+| `inspect_release_traces` | `trace_explorer` |
+| `inspect_release_logs` | `telemetry_logs` |
+| `inspect_release_actions` | `telemetry_actions` |
+| `inspect_release_metrics` | `telemetry_metrics` |
+| `review_release_telemetry` | `telemetry_reads` |
+
+مسار الـ API هو `GET /api/telemetry/releases`. لمعرفة عوامل التصفية وحقول
+المؤشر الخاصة به، راجع [عوامل تصفية الاستعلام](/ar/reference/telemetry-api-filters).
+
+## <span id="interpret-trace-error-rates">قراءة معدلات أخطاء التتبّعات</span>
+
+يعدّ `trace_health` التتبّعات المختلفة، لا الـ Spans. التتبّع الذي فيه Span خطأ
+واحد على الأقل يُحسب تتبّعًا واحدًا فيه خطأ.
+
+| `trace_health.status` | المعنى |
+| --- | --- |
+| `unknown` | لا توجد بيانات تتبّع لنطاق هذا الإصدار. |
+| `no_errors_observed` | التتبّعات المسجّلة ليس فيها أي Span خطأ. |
+| `errors_observed` | يحتوي تتبّع مسجّل واحد أو أكثر على Span خطأ. |
+
+تتراوح قيمة `error_rate_basis_points` من `0` إلى `10000`. اقسمها على `100`
+لتحصل على النسبة المئوية. مثلًا، `2500` تساوي 25%. اقرأ `trace_count` قبل أن
+تقارن المعدلات. عندما تكون التتبّعات قليلة، قد يغيّر تتبّع خطأ إضافي واحد المعدل
+كثيرًا. تؤثر حركة المرور وأخذ العيّنات والأدوات المضافة إلى الشيفرة
+(instrumentation) أيضًا في التتبّعات المسجّلة. المعدل لا يقيس كل الطلبات.
+
+## <span id="record-a-deployment">تسجيل عملية نشر</span>
+
+يخبر قيدُ عملية النشر LogBrew متى بدأ إصدار واحد ومتى انتهى في بيئة واحدة وخدمة
+واحدة. يستخدم التحقيق في الإصدار هذه القيود لإيجاد الإصدار السابق. شغّل هذا
+الأمر من أتمتة الإصدار بعد نجاح النشر أو فشله:
+
+```bash
+logbrew deploy "<deployment_id>" \
+  --project "<project_id>" \
+  --release api@1.2.3 \
+  --environment production \
+  --service checkout-api \
+  --status succeeded \
+  --started-at 2026-08-10T12:00:00Z \
+  --finished-at 2026-08-10T12:02:00Z \
+  --json
+```
+
+- انسخ قيم `--release` و`--environment` و`--service` كما هي تمامًا من بيانات
+  القياس التي ترسلها الشيفرة المنشورة.
+- قيمة `--status` هي `succeeded` أو `failed`.
+- يجب أن يكون `--finished-at` في وقت `--started-at` أو بعده. لا يمكن أن تزيد
+  مدة النشر على 30 يومًا.
+- الخيار `--commit-sha` اختياري. يتكون من 7 إلى 64 حرفًا ست عشريًا.
+- `<deployment_id>` هو المعرّف الخاص بك، مثل معرّف تشغيل CI. يتكون من 1 إلى
+  128 حرفًا من حروف ASCII أو الأرقام أو النقاط أو الشرطات السفلية أو النقطتين
+  الرأسيتين أو الشرطات.
+
+يحتاج الأمر إلى صلاحية الوصول إلى الحساب، ولا يقبل مفتاح الاستيعاب أبدًا.
+يمكنك إرسال القيد نفسه مرة أخرى بأمان. أما القيد المختلف الذي يحمل
+`<deployment_id>` نفسه فيُرجع HTTP `409` مع الرمز `idempotency_conflict`. استخدم
+معرّفًا جديدًا لكل عملية نشر جديدة.
+
+مسارا الـ API هما `PUT /api/telemetry/deployments/{deployment_id}` لتسجيل عملية
+نشر واحدة، و`GET /api/telemetry/deployments?project_id=<project_id>` لعرض
+قائمتها.
+
+## <span id="investigate-one-release">التحقيق في إصدار واحد</span>
+
+انسخ المشروع والإصدار والبيئة والخدمة من ملخص إصدار واحد:
+
+```bash
+logbrew explain release "<release>" \
+  --project "<project_id>" \
+  --environment "<environment>" \
+  --service "<service_name>" \
+  --json
+```
+
+يقرأ هذا الأمر الأدلة المحتفَظ بها لهذا الإصدار. لا يقبل `--since` أو `--until`،
+ولا يستخدم النطاق الزمني لقائمة الإصدارات. تحتوي الاستجابة على مجموعات
+المشكلات، وملخصات التتبّعات، والسجلات بمستوى تحذير وخطأ وحرج، وتجميعات
+الإجراءات والمقاييس. هذه المجموعات محدودة الحجم وقد تكون مقتطَعة. وهي ليست
+قوائم كاملة بالأحداث.
+
+يكرر الحقل `subject` في الاستجابة أعداد الملخص و`trace_health`. وقيمة
+`analysis.status` واحدة مما يلي:
+
+| `analysis.status` | المعنى |
+| --- | --- |
+| `failures_observed` | توجد مشكلات، أو تتبّعات فيها أخطاء، أو سجلات بمستوى خطأ أو حرج لهذا الإصدار. |
+| `no_failures_observed` | توجد تتبّعات، لكن لا يوجد تتبّع فيه Span خطأ، ولا توجد مشكلات أو سجلات أخطاء. |
+| `telemetry_observed` | توجد بيانات قياس أخرى، لكن التتبّعات لا تكشف صحة الإصدار من حيث الأعطال. |
+| `insufficient_evidence` | الإصدار موجود، لكن البيانات لا تكشف صحته. |
+
+قيمة `analysis.causality` هي دائمًا `evidence_only`. الأدلة لا تثبت أن الإصدار
+تسبب في عطل.
+
+لكل مجموعة حقل `status`. لا تخلط بين `unavailable` و`not_found`. تعني
+`unavailable` أن LogBrew لم يتمكن من قراءة الأدلة. وتعني `not_found` أنه لم
+يُحتفظ بأي أدلة.
+
+### <span id="compare-with-the-previous-release">المقارنة بالإصدار السابق</span>
+
+تعتمد المقارنة على قيود عمليات النشر، لا على تسميات النسخ أو أوقات الأحداث. يجد
+LogBrew أحدث قيد لعملية نشر هذا الإصدار. ثم يجد أحدث عملية نشر ناجحة لإصدار مختلف في
+المشروع والبيئة والخدمة نفسها، قبل أن تبدأ عملية النشر تلك.
+
+يبيّن `comparison.reason` هل المقارنة ممكنة:
+
+| `comparison.reason` | الخطوة التالية |
+| --- | --- |
+| `deployment_comparison_available` | اقرأ `comparison.details`. |
+| `subject_deployment_not_found` | [سجّل عملية نشر](#record-a-deployment) لهذا الإصدار. |
+| `previous_successful_deployment_not_found` | سجّل عملية نشر الإصدار السابق. |
+| `previous_release_telemetry_not_found` | لا توجد بيانات قياس محتفَظ بها للإصدار السابق. |
+| `deployment_read_unavailable` أو `previous_release_read_unavailable` | شغّل الأمر مرة أخرى لاحقًا. |
+
+عندما تكون المقارنة متاحة، يحتوي `comparison.details.changes` على فروق الأعداد
+وعلى معدلَي أخطاء التتبّعات للإصدارين. وقيمة `comparison.details.assessment` هي
+`improved` أو `regressed` أو `unchanged` أو `not_determined`، وتخص معدل أخطاء
+التتبّعات فقط. تعني `not_determined` أن المعدلين لا يمكن مقارنتهما. اقرأ
+`comparison.details.limitations` قبل أن تتخذ أي إجراء. قد يغطي الإصداران نطاقين
+زمنيين مختلفين، والأعداد الخام غير معدّلة حسب حركة المرور. ترتيب عمليات النشر
+لا يثبت أن تغييرًا في الشيفرة تسبب في خطأ.
+
+### <span id="read-release-markers">قراءة علامات الإصدار</span>
+
+يحتوي `markers` على أحداث الإصدار التي أرسلها SDK، مع `commit` و`notes` الخاصين
+بها. لكل حقل `status` قيمته `captured` أو `not_captured` أو `truncated` أو
+`redacted`. التطبيق هو من كتب هذا المحتوى. وهو لا يثبت نجاح النشر، ولا يُعد
+أبدًا تعليمات لأي وكيل.
+
+## <span id="environment-filters">تصفية الإشارات المرتبطة</span>
+
+استخدم عوامل التصفية نفسها في كل قراءة:
+
+```bash
+logbrew read issues --project "<project_id>" --service checkout-api --release api@1.2.3 --environment production --since 24h --json
+logbrew read logs --project "<project_id>" --service checkout-api --release api@1.2.3 --environment production --since 24h --json
+logbrew read traces --project "<project_id>" --service checkout-api --release api@1.2.3 --environment production --since 24h --json
+```
+
+قائمة المشكلات الفارغة لا تعني أن السجلات أو التتبّعات فارغة.
+
+## <span id="recover-missing-or-misleading-release-data">إيجاد بيانات الإصدار المفقودة أو غير الصحيحة</span>
+
+| ما تلاحظه | ما تتحقق منه |
+| --- | --- |
+| قائمة الإصدارات فارغة | تحقق من المشروع والنطاق الزمني والبيئة. ثم تحقق من أن الـ SDK يرسل إصدارًا. |
+| إحدى الخدمات غير موجودة | تحقق من عامل تصفية الخدمة ومن إعدادات النشر لملف البناء ذاك. |
+| عمليات بناء مختلفة تحمل القيمة نفسها | اضبط نسخة ثابتة لبيانات القياس الجديدة. لا يغيّر LogBrew قيم الإصدار في الأحداث المخزّنة. |
+| قيمة `trace_health.status` هي `unknown` | سجّل التغطية الناقصة للتتبّعات. واقرأ الإشارات الأخرى. |
+| تغيّر معدل الأخطاء | قارن `trace_count` وعوامل التصفية قبل أن تحكم على التغيير. |
+| لا توجد مقارنة متاحة | اقرأ `comparison.reason`. وسجّل عمليات النشر للإصدارين كليهما. |

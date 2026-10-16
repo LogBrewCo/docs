@@ -1,0 +1,189 @@
+---
+title: "حجب البيانات في السجلات: أبعد البيانات الحساسة عنها"
+sidebarTitle: "التحكم في البيانات الملتقطة"
+description: "اختر حقول السجلات المعتمدة. شغّل اختبارًا محليًا للبيانات الحساسة. اقرأ حدود أدوات التحكم في الالتقاط في LogBrew لـ JavaScript وNode.js والمتصفح."
+---
+
+اختر ما يرسله تطبيقك قبل أن تفعّل الالتقاط. أبقِ كلمات المرور ورموز الوصول
+المميزة ومحتويات النماذج وبيانات المستخدمين الخاصة خارج الأحداث.
+
+ابنِ كل حدث من حقول معتمدة. لا تنسخ كائن الطلب أو الاستجابة أو الخطأ كاملًا إلى
+البيانات الوصفية. الحجب يستبدل القيمة الحساسة. وعامل التصفية يحذف الحدث كله.
+قد يحتوي حدث SDK صالح مع ذلك على بيانات يجب ألا يرسلها تطبيقك.
+
+تنطبق هذه الإرشادات على إصدارات الحزم التالية:
+
+- `@logbrew/sdk` 0.1.28
+- `@logbrew/node` 0.1.12
+- `@logbrew/browser` 0.1.11
+
+لبيئات التشغيل الأخرى، اقرأ إرشادات الحزمة من
+[دمج SDK](/ar/guides/sdk-ingestion).
+
+## اختر الحقول التي تلتقطها
+
+عند فشل إتمام الشراء، دوّن رسالة ثابتة وقالب مسار ورمز حالة. لا تدوّن الأسماء أو
+عناوين البريد الإلكتروني أو بيانات الدفع.
+
+| الحقل | قاعدة الالتقاط |
+| --- | --- |
+| الرسالة | استخدم نصًا ثابتًا مثل `checkout.failed`. لا تُدرج نص النموذج أو بيانات الاعتماد. |
+| المسار | استخدم قالبًا مثل `/orders/:id`. قد يحتوي مسار URL أو الاستعلام أو الجزء (fragment) على قيم خاصة. |
+| الحالة | اقبل رمز حالة صالحًا فقط، لا سلسلة نصية من إدخال المستخدم. |
+| البيانات الوصفية | اختر حقولًا مسماة. لا تنسخ كل خصائص الطلب أو الاستجابة أو الخطأ. |
+| الكيان والجلسة | استخدم معرّفات قياس عن بُعد معتمدة، لا رمز تسجيل الدخول المميز أو ملف تعريف ارتباط الجلسة. |
+
+لسياق المستخدم والجلسة، راجع
+[التقاط أحداث المنتج](/ar/guides/product-events#set-users-and-sessions-on-each-event).
+قد يحدد المعرّفُ هويةَ شخص حتى لو لم يحتوِ على اسم.
+
+## اختبر اختيار الحقول محليًا
+
+استخدم Node.js بالإصدار 18 أو أحدث. ثبّت الحزمة في مجلد فارغ:
+
+```bash
+npm install --save-exact @logbrew/sdk@0.1.28
+```
+
+لا يستخدم هذا الاختبار مفتاحًا حقيقيًا ولا يرسل أي طلب. احفظه باسم
+`safe-capture.mjs`:
+
+```js
+import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import { LogBrewClient, SdkError } from "@logbrew/sdk";
+
+try {
+  const client = LogBrewClient.create({
+    apiKey: "local-preview-only",
+    sdkName: "privacy-check",
+    sdkVersion: "0.1.28",
+    automaticDelivery: false
+  });
+
+  function recordCheckoutFailure(input) {
+    const status = input?.status;
+    if (!Number.isInteger(status) || status < 400 || status > 599) {
+      return false;
+    }
+    client.log(randomUUID(), new Date().toISOString(), {
+      message: "checkout.failed",
+      level: "error",
+      metadata: { route: "/checkout", status }
+    });
+    return true;
+  }
+
+  const excludedValue = "SYNTHETIC_PRIVATE_VALUE";
+  assert.equal(recordCheckoutFailure({
+    status: 503,
+    authorization: excludedValue,
+    body: excludedValue
+  }), true);
+  assert.equal(recordCheckoutFailure({ status: excludedValue }), false);
+
+  const preview = client.previewJson();
+  const batch = JSON.parse(preview);
+  assert.equal(batch.events.length, 1);
+  assert.equal(preview.includes(excludedValue), false);
+  assert.deepEqual(batch.events[0].attributes.metadata, {
+    route: "/checkout",
+    status: 503
+  });
+  client.purgePendingEvents();
+  console.log(JSON.stringify({
+    ok: true,
+    checked_events: 1,
+    excluded_value_found: false
+  }));
+} catch (error) {
+  console.error(JSON.stringify({
+    ok: false,
+    error: error instanceof SdkError ? error.code : "privacy_check_failed"
+  }));
+  process.exitCode = 1;
+}
+```
+
+
+شغّل الاختبار:
+
+```bash
+node safe-capture.mjs
+```
+
+المخرجات المتوقعة:
+
+```json
+{"ok":true,"checked_events":1,"excluded_value_found":false}
+```
+
+التأكيد الفاشل يطبع `"ok":false` ويخرج بالرمز 1. وخطأ التحقق في الـ SDK يطبع
+رمز خطأ الـ SDK الخاص به. لا تطبع معاينة تحتوي على بيانات حقيقية، ولا ترفعها.
+
+استخدم النمط نفسه في شيفرة الالتقاط لديك، وأبقِ التأكيدات في اختباراتك. أضف
+فحصًا لكل حقل وقيمة يجب ألا يرسلها تطبيقك. إذا كنت تستخدم الحجب القائم على
+الأنماط، فشغّل الفحوص مرة أخرى بعد كل تغيير في القواعد. يفحص هذا الاختبار سجلًا
+واحدًا في الطابور. ولا يغني عن مراجعة الخصوصية.
+
+## رسائل الأخطاء ومكدّساتها
+
+| طريقة الالتقاط | السلوك |
+| --- | --- |
+| `createIssueAttributesFromError` (النواة) | يُبقي نص الخطأ في رسالة المشكلة وفي `metadata.errorMessage`. ويضيف `metadata.errorStack` فقط مع `includeErrorStack: true`. تضع إدخالات سلسلة الاستثناءات على كل رسالة العلامة `redacted`، ولا تحمل نصها. |
+| تحويل وحدة التحكم في النواة | قد يُبقي نص الخطأ في رسالة السجل وفي البيانات الوصفية. |
+| `createBrowserErrorEvent` (المتصفح) | يستخدم ملخص خطأ ثابتًا، ويحذف `metadata.errorMessage`، ويضع على رسائل سلسلة الاستثناءات علامة الحجب. |
+
+القيمة المخصصة `options.message` لا تحذف `metadata.errorMessage`. افحص الحدث
+كاملًا، لا عنوانه فقط. أبعد القيم الحساسة عن رسائل الأخطاء من مصدرها.
+
+## استخدم كل أداة تحكم ضمن نطاقها
+
+### نواة JavaScript وNode.js
+
+يقبل `LogBrewClient.create` الخيار `eventFilter`. أعِد `false` لحذف الحدث قبل
+أن يدخل الطابور. أي قيمة أخرى تُبقي الحدث. يتلقى عامل التصفية نسخة من الحدث،
+لذا لا تحجب تغييراتك عليها أي شيء. لا يطبّق `createLogBrewNodeClient`
+و`createLogBrewBrowserClient` الخيار `eventFilter` في هذه الإصدارات.
+
+يعدّ `droppedEvents()` الأحداث التي أُسقطت بسبب حدود الحجم أو الطابور. ولا يعدّ
+الأحداث التي حذفها `eventFilter`.
+
+يضيف عميل Node سياق وقت التشغيل، مثل إصدار Node ونظام التشغيل والمعمارية. اضبط
+`captureRuntimeContext: false` لحذفه. لا يحذف هذا الإعداد السياق الذي يوفره
+تطبيقك، ولا يوقف الالتقاط.
+
+### المتصفح
+
+يلتقط عميل المتصفح افتراضيًا الأخطاء العامة والرفض غير المعالَج (unhandled
+rejections) ومشاهدة الصفحة الأولى. اضبط `captureGlobalErrors` أو
+`captureUnhandledRejections` أو `capturePageViews` على `false` لإيقاف أحدها.
+
+تتضمن مشاهدات الصفحات اسم المسار (pathname). وتحذف سلسلة الاستعلام والجزء
+(fragment) وعنوان المستند ووكيل المستخدم الكامل، ما لم تضبط
+`includeQueryString` أو `includeHash` أو `includeDocumentTitle` أو
+`includeUserAgent`. إذا كان اسم المسار قد يحتوي على قيم خاصة، فأوقف مشاهدات
+الصفحات التلقائية، وأرسل مشاهدة صفحة خاصة بك باسم مسار آمن.
+
+يغيّر `sanitizeMetadata` البيانات الوصفية فقط. ولا يغيّر أسماء مشاهدات الصفحات
+أو الإجراءات. يحتوي اسم مشاهدة الصفحة على اسم المسار الفعلي، مثل
+`page_view /orders/1234`. يضبط `routeTemplate` في البيانات الوصفية واجهة
+التحليلات، لكنه لا يغيّر الاسم. يحذف `shouldCaptureError` مشكلات المتصفح فقط.
+ولا يصفّي السجلات أو الإشارات الأخرى.
+
+اضبط `captureRuntimeContext: false` لحذف علامة المتصفح التجارية والمنصة وفئة
+الجهاز. لا يتحكم هذا الإعداد في `includeUserAgent`.
+
+## قبل الالتقاط الحقيقي
+
+اختبر كل طريقة التقاط مفعّلة ببيانات اصطناعية، بما فيها مسارات الأخطاء وتكاملات
+التسجيل.
+
+تنطبق تغييرات الالتقاط على الأحداث الجديدة فقط. يمسح `purgePendingEvents()`
+الطابور المحلي الخامل، ويفشل أثناء نشاط التسليم. ولا يوقف الالتقاط اللاحق أو
+يحذف الأحداث التي قبلها LogBrew. يحذف `uninstall()` في المتصفح المستمعات، لكنه
+يُبقي الأحداث الموجودة في الطابور. هذه الدوال ليست سير عمل للموافقة أو الحذف.
+
+ثم أرسل حدثًا اصطناعيًا واحدًا باستخدام [البدء السريع](/ar/quickstart). إذا لم
+يظهر، فراجع [استكشاف الأخطاء وإصلاحها](/ar/guides/troubleshooting). ولأخطاء
+HTTP، راجع [أخطاء API](/ar/reference/api-errors).
