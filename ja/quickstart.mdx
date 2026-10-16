@@ -1,0 +1,224 @@
+---
+title: "LogBrew Observability クイックスタート：Node.js のログ"
+sidebarTitle: "クイックスタート"
+description: "プロジェクトを作成して Node.js のロギングを設定し、安全な SDK イベントを1件送信します。認証情報を表示せずに、保存されたログを読みます。"
+---
+
+開発用のプロジェクトを作成します。Node.js のログを1件送信します。そのログを LogBrew から読み戻します。プロジェクトの作成と取り込みキーの保存は CLI が行います。ブラウザーでのサインインが必要なのは、CLI に有効なアカウントのアクセス権がない場合だけです。
+
+<Note>
+  エージェントのワークフローでは `--json` を使います。認証情報は、保護されたローカルの設定に保管します。人、ツール、エージェントの間では、変数名だけを受け渡します。
+</Note>
+
+## <span id="first-project-success-path">始める前に</span>
+
+次を用意します。
+
+- Node.js 18 以降。
+- LogBrew CLI v0.1.30 以降。
+- `jq`。
+- Bash または Zsh。
+- サーバーサイドの Node.js アプリのパッケージディレクトリ。
+
+このサンプルでは、プロジェクト `quickstart-node`、環境 `development`、リリース `quickstart@1` を使います。このテストは本番環境と分けておきます。他のランタイムについては、[SDK 連携](/ja/guides/sdk-ingestion)を使います。
+
+<Warning>
+  取り込みキーのファイルはリポジトリの外に置き、自分だけが読めるようにしてください。このサーバー用のキーを、ブラウザーのコード、公開されるバンドル、プロンプトに入れないでください。
+</Warning>
+
+## 最初のログを送信して読む
+
+<Steps>
+  <Step title="アカウントの状態を確認する" id="confirm-account-access">
+    [CLI を使う](/ja/guides/cli)にあるコマンドで CLI をインストールします。次に、アカウントの状態を確認します。
+
+    ```bash
+    logbrew status --json
+    ```
+
+    **確認ポイント**：status が、認証済みのアカウントのアクセス権を報告します。報告しない場合は、人が `logbrew login` を1回実行します。その後、もう一度 `logbrew status --json` を実行します。現在の認証が有効なときは、エージェントは新しいログインを始めてはいけません。
+  </Step>
+
+  <Step title="CLI からプロジェクトを1つ作成する">
+    所有者だけがアクセスできるディレクトリで、新しいファイルを指定します。CLI は、成功を報告する前に、プロジェクトの取り込みキーをそのファイルに書き込みます。キーやそのファイルのパスは表示しません。
+
+    ```bash
+    install -d -m 700 "$HOME/.logbrew"
+
+    project_result="$(
+      logbrew projects create quickstart-node \
+        --runtime node \
+        --environment development \
+        --ingest-key-file "$HOME/.logbrew/quickstart-node.ingest" \
+        --json
+    )"
+    export LOGBREW_PROJECT_ID="$(jq -er '.project.id' <<<"$project_result")"
+    jq '{status, setup_status: .setup.status, ingest_key_kind: .ingest_key.kind, next}' \
+      <<<"$project_result"
+    unset project_result
+    ```
+
+    プロジェクトの作成は、アカウントの状態を変更します。保存先のファイルは、まだ存在していてはいけません。結果がはっきりしない場合は、まったく同じコマンドをもう一度実行します。CLI は保留中のリクエストの識別情報を再利用します。別の試行を始めるときだけ `--abandon-retry` を使います。
+
+    **確認ポイント**：出力に `status: "created"`、セットアップのステータス `created`、取り込みキーの種類が表示されます。プロジェクトが作成され、キーが保存されています。これはテレメトリが届いたことを示すものではありません。[プロジェクトと設定](/ja/concepts/projects)を参照してください。
+  </Step>
+
+  <Step title="Node.js SDK をインストールする">
+    ```bash
+    npm install @logbrew/sdk @logbrew/node
+    ```
+
+    アカウントの認証情報を SDK の設定に使わないでください。プロジェクトのキーは、コマンドの出力、プロンプト、チケット、ソースファイル、パッケージの設定に入れないでください。
+  </Step>
+
+  <Step title="安全な SDK のログを1件送信する">
+    リリースと環境のマーカーを、プレースホルダーだけを含む `info` ログ1件と一緒に送信します。キーは、この Node.js プロセスだけに設定されます。アプリケーションの識別情報は `context` に入れます。
+
+    実行するたびに、新しいイベント ID が作られます。同じ実行の中で SDK が送信を再試行する場合は、同じ本文を同じ ID で送信します。受け付けられたイベントが再試行でもう一度送信されても、LogBrew は2回保存しません。
+
+    ```bash
+    LOGBREW_SERVER_API_KEY="$(< "$HOME/.logbrew/quickstart-node.ingest")" \
+      node --input-type=module <<'JS'
+    import { randomUUID } from "node:crypto";
+    import { SdkError } from "@logbrew/sdk";
+    import { createLogBrewNodeClient } from "@logbrew/node";
+
+    const client = createLogBrewNodeClient({
+      context: {
+        schemaVersion: 1,
+        resource: { service: { name: "quickstart-node", version: "quickstart@1" } }
+      }
+    });
+    const occurredAt = new Date().toISOString();
+
+    client.release(randomUUID(), occurredAt, {
+      version: "quickstart@1",
+      metadata: { service: "quickstart-node" }
+    });
+    client.environment(randomUUID(), occurredAt, { name: "development" });
+    client.log(randomUUID(), occurredAt, {
+      message: "LogBrew quickstart check",
+      level: "info",
+      logger: "quickstart-node"
+    });
+
+    try {
+      const response = await client.shutdown();
+      console.log(JSON.stringify({
+        ok: true,
+        status_code: response.statusCode,
+        attempts: response.attempts
+      }));
+    } catch (error) {
+      console.error(JSON.stringify({
+        ok: false,
+        error: error instanceof SdkError ? error.code : "delivery_failed"
+      }));
+      process.exitCode = 1;
+    }
+    JS
+    ```
+
+    認証情報、ヘッダー、リクエストの本文、顧客データ、ローカルのパスをイベントに入れないでください。
+
+    **確認ポイント**：スクリプトは、`2xx` の `status_code` とともに `"ok":true` を表示します。再試行した場合、`attempts` は `1` より大きくなります。送信の成功が最後の確認ではありません。
+
+    送信に失敗すると、スクリプトはコード `1` で終了し、`{"ok":false,"error":"unauthenticated"}` のような短い JSON エラーを表示します。リクエストの本文やキーは表示しません。プロジェクトのキーが拒否されると `unauthenticated` になります。CLI で新しくログインしても解決しません。
+  </Step>
+
+  <Step title="プロジェクトの doctor レポートを読む" id="verify-readiness-with-the-project-doctor">
+    この読み取りでは、CLI は保存されたアカウントのアクセス権を使います。プロジェクトの取り込みキーは使わないでください。
+
+    ```bash
+    : "${LOGBREW_PROJECT_ID:?set the project UUID}"
+
+    logbrew doctor --project "$LOGBREW_PROJECT_ID" --json
+    ```
+
+    **確認ポイント**：レポートに `status: "ready"` があります。`checks` の各項目も読みます。終了コード `0` は、すべてのチェックに合格したことを示しません。他のステータスの場合は、`next` と [doctor レポートのリファレンス](/ja/reference/cli#read-a-project-doctor-report)に従います。プロジェクトが `ready` でも、このテストログが届いたことは示しません。
+  </Step>
+
+  <Step title="テストログを読む">
+    SDK のバッチと同じプロジェクト、リリース、環境を使います。
+
+    ```bash
+    logbrew read logs --project "$LOGBREW_PROJECT_ID" \
+      --release quickstart@1 \
+      --environment development \
+      --since 1h \
+      --json
+    ```
+
+    **確認ポイント**：そのプロジェクト、リリース、環境に `LogBrew quickstart check` が表示されます。これが示すのは、テストログが届いたことだけです。
+  </Step>
+</Steps>
+
+## <span id="understand-the-test-result">テストの結果を読む</span>
+
+サンプルは3件のイベントを送信します。そのうちログは1件だけです。リリースと環境のマーカーは、ログにコンテキストを与えます。
+
+| サンプルのフィールド | 記録されるデータ |
+| --- | --- |
+| `message` | テストが記録する処理。`LogBrew quickstart check` です。 |
+| `level: "info"` | 障害ではない、通常のテストイベント。 |
+| `logger` | レコードを作成したアプリケーションのロガー。 |
+| `occurredAt` | この実行がイベントを作成した時刻。UTC のタイムスタンプです。 |
+| `context.resource.service` | アプリケーションのサービスとそのバージョン。SDK の識別情報ではありません。 |
+
+テストは `info` のままにします。見つけやすくするために `error` に変えないでください。代わりに、プロジェクトと時間のフィルターを使います。[重大度の値](/ja/concepts/telemetry#severity-values)を参照してください。
+
+`console.log` の行は、送信結果をターミナルに表示します。`client.log` の呼び出しは、ログを LogBrew に送信します。最初の送信に成功すると、次のように表示されます。
+
+```json
+{ "ok": true, "status_code": 200, "attempts": 1 }
+```
+
+ログを受け取るプロジェクトは、取り込みキーで決まります。CLI の `--project` フィルターはイベントを移動しません。
+
+サンプルはリクエストのスパンを作成しないため、このログにはトレースコンテキストがありません。これはログが失敗したことを示すものではありません。CLI の読み取りは、その時点のスナップショットです。後から届いたイベントを読むにはもう一度実行するか、ライブストリームで見るには `logbrew watch logs --json` を使います。
+
+## よくある復旧の判断
+
+| 結果 | 次の手順 |
+| --- | --- |
+| CLI の status が認証済みでない | 人が `logbrew login` を実行します。その後、status コマンドをもう一度実行します。 |
+| 取り込みキーのファイルがすでにある | 使われていないパスを選びます。中身のわからない認証情報を上書きしないでください。 |
+| プロジェクト作成の結果がはっきりしない | まったく同じ作成コマンドをもう一度実行します。 |
+| `unauthenticated` | CLI のアカウントの認証情報ではなく、プロジェクトの取り込みキーを確認します。新しくログインしても解決しません。 |
+| `rate_limited` | 待ってから再送信します。ループで繰り返したり、新しいキーを作成したりしないでください。 |
+| `transport_error` または `network_failure` | 接続を確認します。失敗したレスポンスは、前のリクエストが何も反映しなかったことを示すものではありません。 |
+| `delivery_failed` | 処理を止めて、失敗の内容を確認します。シークレットやリクエストの本文を表示しないでください。 |
+| doctor の `status` が `ready` でない | [doctor レポート](/ja/reference/cli#read-a-project-doctor-report)の `checks` と `next` を読みます。プロジェクトは同じものを使い続けます。 |
+| ログの読み取り結果が空 | プロジェクト、環境、リリース、期間を、送信したバッチと比べます。 |
+
+それでもテレメトリが見つからない場合は、[最初のテレメトリの確認](/ja/guides/troubleshooting#recover-missing-first-telemetry)を行います。それでも解決しない場合は、[問題を報告](/ja/guides/report-a-problem)してください。認証情報、加工していないテレメトリ、顧客データ、ローカルのパス、ソースコードは添付しないでください。
+
+## 自分のアプリケーションに移行する
+
+- クライアントは、アプリのセットアップのコードで1回だけ作成します。
+- パッケージファイルで SDK のバージョンを固定します。アップグレードは本番環境の外でテストします。
+- 取り込みキーは、既存のシークレットの設定から読み込みます。漏えいした可能性がある場合は、キーをローテーションします。[取り込みキーのローテーション](/ja/guides/rotate-ingest-key)を参照してください。
+- サービス、環境、リリースには、デプロイ設定にある変わらない名前を使います。[リリース](/ja/concepts/releases)を参照してください。
+- ログのメッセージには、`Report generation completed` のように、処理とその結果を書きます。非公開の値はメッセージに入れないでください。リクエストやユーザーのレコード全体をログにコピーしないでください。
+- 重複したレコードを防ぐため、アプリケーションのログごとに送信元を1つにします。LogBrew を追加する前に、各レコードをすでに送信している連携を確認します。
+- 本番環境に展開する前に、実際のコードの経路で安全なイベントを1件送信し、読み戻します。メッセージ、サービス、リリース、環境を確認します。単体のサンプルでは、アプリケーションのコードの経路はテストできません。
+
+このサンプルでは、ブラウザーでの取得、ソースマップ、モバイルでの取得は設定しません。これらについては、[SDK 連携](/ja/guides/sdk-ingestion)から始めてください。
+
+<CardGroup cols={2}>
+  <Card title="プロジェクトと設定" icon="folder-kanban" href="/ja/concepts/projects">
+    セットアップの状態を確認し、プロジェクトの取り込みキーを管理します。
+  </Card>
+
+  <Card title="SDK 連携" icon="cloud-upload" href="/ja/guides/sdk-ingestion">
+    ランタイムに合った SDK のパッケージを選びます。
+  </Card>
+
+  <Card title="課題を調査する" icon="bug" href="/ja/guides/investigate-an-issue">
+    1件の課題について、トレースと関連するログの証拠をたどります。
+  </Card>
+
+  <Card title="問題を報告" icon="life-buoy" href="/ja/guides/report-a-problem">
+    安全で非公開のサポートの報告を送信します。
+  </Card>
+</CardGroup>

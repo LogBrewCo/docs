@@ -1,0 +1,162 @@
+---
+title: "Support API：チケットを作成して追跡する"
+sidebarTitle: "問題を報告"
+description: "CLI または Support API で LogBrew のサポートチケットを作成します。安全な診断情報を添え、ステータスを追跡し、追加のコンテキストを送ります。"
+---
+
+フォローアップが必要な問題には、サポートチケットを作成します。作成後は、人や AI エージェントがチケットを追跡し、求められたコンテキストを追加できます。チケットを読めるのは、チケットを作成したアカウントと LogBrew のサポートチームだけです。
+
+<Warning>
+  `$LOGBREW_TOKEN` のようなアカウントアクセスの Bearer トークンを使ってください。プロジェクトの取り込みキーは使わないでください。タイトル、説明、診断情報を書く前に、非公開のデータを取り除いてください。自動の秘匿処理は、この確認の代わりにはなりません。
+</Warning>
+
+## チケットを作成する
+
+CLI から次を実行します。
+
+```bash
+logbrew support create --category docs_confusion \
+  --title "First event is not visible" \
+  --description "Steps: send one info event, then read logs in the same project. Expected: one row. Observed: no rows." \
+  --project "<project_id>" --json
+```
+
+CLI は `source` を `cli` に設定します。`--diagnostics` が追加するのは、バイナリ名、CLI のバージョン、オペレーティングシステム、アーキテクチャだけです。すべてのフラグは `logbrew support --help` で確認できます。
+
+CLI は、チケットを作成するときに再試行キーを送信しません。結果がはっきりしない場合は、コマンドをもう一度実行する前に `logbrew support list --json` を実行してください。そうしないと、2件目のチケットが作成されることがあります。
+
+API からは、`source`、`category`、`title`、`description` を指定して `POST /api/support/tickets` を送信します。再試行を安全にするには、報告ごとに再試行キーを1回だけ作成し、`Idempotency-Key` ヘッダーで送信します。次の例では架空の値を使っています。
+
+```bash
+LOGBREW_SUPPORT_RETRY_KEY="$(uuidgen)"
+
+curl -sS "https://api.logbrew.co/api/support/tickets" \
+  -H "Authorization: Bearer ${LOGBREW_TOKEN:?Set an account access bearer}" \
+  -H "Idempotency-Key: ${LOGBREW_SUPPORT_RETRY_KEY:?Create a retry key for this report}" \
+  -H "Content-Type: application/json" \
+  --data '{
+    "source": "docs",
+    "category": "docs_confusion",
+    "title": "First event is not visible",
+    "description": "Steps: send one info event, then read logs in the same project. Expected: one row. Observed: no rows.",
+    "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    "diagnostics": {
+      "steps": 2,
+      "expected": "one matching row",
+      "observed": "no matching rows"
+    }
+  }'
+```
+
+再試行キーは、スペースを含まない、表示可能な ASCII 文字 1〜128文字です。再試行するときは、同じキーと同じ本文を送信します。レスポンスでは同じチケットが返ります。別の報告には新しいキーを使います。タイムアウトは、作成が失敗したことの証明にはなりません。`Idempotency-Key` ヘッダーは省略できます。省略すると、リクエストを繰り返したときに別のチケットが作成されることがあります。
+
+省略できるフィールドは、`project_id`、`environment`、`runtime`、`framework`、`sdk_package`、`sdk_version`、`release`、`trace_id`、`event_id`、`diagnostics` です。特定のプロジェクトに関する問題でない場合は、`project_id` を省略します。`project_id` は、アカウントのアクティブなプロジェクトを指す必要があります。
+
+| フィールド | 使える値 |
+| --- | --- |
+| `source` | `cli`、`sdk`、`website`、`docs`、`mobile` |
+| `category` | `sdk_install_failure`、`ingest_failure`、`auth_failure`、`project_setup`、`dashboard_issue`、`docs_confusion`、`cli_issue`、`mobile_issue`、`billing_question`、`other` |
+| `title` | 前後のスペースを LogBrew が取り除いた後で 1〜160文字。 |
+| `description` | 前後のスペースを LogBrew が取り除いた後で 1〜4,000文字。 |
+| その他のテキストフィールド | それぞれ 256文字まで。 |
+
+リクエストが成功すると、HTTP `200` が返ります。
+
+```json
+{
+  "ticket_id": "sup_11111111111141118111111111111111",
+  "status": "open",
+  "created_at": "2026-10-01T09:30:00Z",
+  "next": "Support ticket created. LogBrew will review the attached diagnostics.",
+  "next_action": {
+    "code": "review_ticket",
+    "target": "support_ticket"
+  }
+}
+```
+
+チケット ID は `sup_` で始まります。`next` は人への案内として、`next_action` はプログラムの制御に使います。
+
+プロジェクトを削除するには、プロジェクトの設定または `logbrew projects delete` を使います。サポートチケットでプロジェクトの削除を依頼しないでください。
+
+## 役立つ報告を書く
+
+- 1件のチケットには1つの問題だけを報告します。
+- 最も近い `category` を選びます。どれも当てはまらない場合だけ `other` を使います。
+- `title` には、1つの症状と1つの対象を書きます。
+- `description` には、手順を書き、次に期待した結果と実際の結果を書きます。
+- プロジェクト、リリース、トレース、イベントの ID は、同じ障害を指す場合だけ追加します。
+
+`diagnostics` には次のキーを使います。
+
+| キー | 内容 |
+| --- | --- |
+| `steps` | 再現手順の数。 |
+| `expected` | 期待した結果の短い説明。 |
+| `observed` | 実際の結果の短い説明。 |
+| `command_name` | 引数を除いたコマンドとサブコマンドの名前。 |
+| `exit_code` | プロセスの終了コード（数値）。 |
+| `error_code` | 変わらないエラーコード。 |
+| `error_summary` | 秘匿処理済みの短いエラーの要約。 |
+| `retry_count` | 同じ内容で再試行した回数。 |
+| `last_delivery_status` | 最後の送信試行の HTTP ステータス。たとえば `401`。 |
+
+`diagnostics` は、秘匿処理後に 16 KB までの JSON オブジェクトです。キーが認証情報、セッション、メールアドレスを示す場合、LogBrew はその値を `[redacted]` に置き換えます。認証情報、URL、ローカルのパスに見えるテキストも置き換えます。さらに、長い文字列を短くし、入れ子の深さ、キーの数、リストの項目数を制限します。この秘匿処理に頼らないでください。リクエストを送信する前に、非公開のデータを取り除いてください。
+
+## <span id="track-the-ticket">チケットを追跡する</span>
+
+| CLI コマンド | API ルート | 結果 |
+| --- | --- | --- |
+| `logbrew support list` | `GET /api/support/tickets` | アカウントのチケットを一覧表示します。 |
+| `logbrew support show <ticket_id>` | `GET /api/support/tickets/{ticket_id}` | 1件のチケットとその次のアクションを読みます。 |
+| `logbrew support context <ticket_id>` | `GET /api/support/tickets/{ticket_id}/context` | チケットに追加されたコンテキストを読みます。 |
+| `logbrew support reply <ticket_id>` | `POST /api/support/tickets/{ticket_id}/context` | 求められたコンテキストを追加します。 |
+| `logbrew support close <ticket_id>` | `PATCH /api/support/tickets/{ticket_id}` | `closed` に設定します。 |
+| `logbrew support reopen <ticket_id>` | `PATCH /api/support/tickets/{ticket_id}` | `open` に設定します。 |
+
+一覧では `project_id`、`status`、`source`、`category`、`release`、`limit` を指定できます。`limit` のデフォルトは 100 で、最大は 500 です。カーソルベースのページネーションを使うには、`pagination=cursor` を送信します。2ページ目以降では、同じフィルターを繰り返し、`next_cursor` の `cursor_time` と `cursor_id` を送信します。カーソル ID は `sup_` で始まるチケット ID です。`next_cursor` が `null` になったら止めます。CLI では `--project`、`--status`、`--source`、`--category`、`--release`、`--limit`、`--pagination`、`--cursor-time`、`--cursor-id` のフラグを使います。
+
+ステータスの値は `open`、`routed`、`in_progress`、`waiting_on_user`、`resolved`、`closed` です。設定できるのは `open` と `closed` だけです。チケットを閉じるリクエストや再開するリクエストを繰り返しても成功し、何も変わりません。そのため、同じリクエストをそのまま再試行できます。返されたステータスと `next_action` に従います。
+
+| ステータス | `next_action.code` | 次の手順 |
+| --- | --- | --- |
+| `open`、`routed`、`in_progress` | `await_owner_update` | 更新を待ちます。後でもう一度チケットを読みます。 |
+| `waiting_on_user` | `provide_context` | 求められたコンテキストを送信します。 |
+| `resolved`、`closed` | `open_new_ticket_if_needed` | 問題が再び起きた場合は、新しいチケットを作成します。 |
+
+## 求められたコンテキストを追加する
+
+チケットでコンテキストを求められたら返信します。そのチケットのステータスは `waiting_on_user` で、`next_action.code` は `provide_context` です。
+
+```bash
+logbrew support reply sup_11111111111141118111111111111111 \
+  --context "The same project and time filters still return no logs." \
+  --retry-key "<retry_key>" --json
+```
+
+API の本文には `context` と、省略可能な `diagnostics` を入れます。`context` のテキストは 1〜4,000文字にします。`context` には、認証情報、URL、ホスト名、ローカルのパスを入れないでください。API はそのようなテキストを `422` で拒否します。`Idempotency-Key` ヘッダーで再試行キーを送信します。コンテキストのルートでは、このヘッダーが必須です。キーは、スペースを含まない、表示可能な ASCII 文字 1〜128文字です。返信ごとに新しいキーを使います。キーを再利用するのは、同じ返信を再試行するときだけです。
+
+API がコンテキストを受け付けるのは、チケットが `open`、`routed`、`in_progress`、`waiting_on_user` のいずれかの間です。チケットの状態ごとに受け付ける返信は1件です。返信した後は、ステータスが変わるのを待ってから次のコンテキストを送信します。`waiting_on_user` のチケットに返信すると、チケットは `open` になります。この変化を前提にせず、返された `status` を読んでください。
+
+返信に成功すると、`ticket_id`、`context_id`、`status`、`created_at`、`next`、`next_action` が返ります。`context_id` は `ctx_` で始まります。後から別の依頼に答える前に、チケットをもう一度読んでください。
+
+`GET /api/support/tickets/{ticket_id}/context` は、最新のコンテキストを 20件まで、古い順に返します。各エントリーには `context_id`、`context`、`diagnostics`、`created_at` があります。この一覧にはカーソルがありません。
+
+`resolved` または `closed` のチケットに返信すると、`code: "validation_failed"` とともに `422` が返ります。ユーザーがそのサポートリクエストを続けたい場合だけ、チケットを再開します。`next_action` は、エージェントにアカウントの状態を変更する権限を与えるものではありません。
+
+## エラーから復旧する
+
+| HTTP ステータス | `code` | 復旧方法 |
+| --- | --- | --- |
+| `401` | `unauthorized` | 有効なアカウントアクセスの Bearer トークンを送信します。 |
+| `404` | `not_found` | アカウントのチケットを一覧表示し、返された `sup_` の ID を使います。プロジェクトのエラーの場合は、`project_id` を確認するか省略します。 |
+| `405` | `method_not_allowed` | [チケットを追跡する](#track-the-ticket)の表にあるメソッドを使います。 |
+| `409` | `idempotency_conflict` | その再試行キーは別のリクエストで使われました。元のリクエストを再試行するか、チケットを読んでから新しいキーを使います。 |
+| `422` | `validation_failed` | 示されたフィールドを修正します。PATCH では `status: "open"` または `status: "closed"` だけを送信します。 |
+| `429` | `rate_limited` | 待ってから再試行します。 |
+
+エラーレスポンスには `error`、`code`、`next`、`next_action` が含まれます。[API エラー](/ja/reference/api-errors)を参照してください。
+
+## 報告を安全に保つ
+
+シークレット、トークン、Authorization ヘッダー、取り込みキー、加工していないログ、顧客データ、ローカルのパス、ホスト、関係のないソースコードは送信しないでください。秘匿処理した短い要約を送信します。自分で確認できる項目については、[トラブルシューティング](/ja/guides/troubleshooting)を参照してください。

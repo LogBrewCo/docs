@@ -1,0 +1,188 @@
+---
+title: "Vite で JavaScript のソースマップを使う"
+sidebarTitle: "JavaScript ソースマップ"
+description: "Vite のビルドから JavaScript のソースマップをアップロードします。認証情報はアプリに含めず、圧縮されたスタックフレームを元のソースの位置に対応付けます。"
+---
+
+圧縮（minify）された JavaScript ファイルでは、ソースの多くの行が1行にまとめられることがあります。そのファイルのスタックフレームは、生成されたコードの行と列を指します。[ソースマップ](https://ecma-international.org/publications-and-standards/standards/ecma-426/)は、その位置を元のファイル、行、列に対応付けます。
+
+このガイドでは、`@logbrew/sdk` 0.1.28 の Vite プラグインを使います。Vite のアプリ、そのビルド出力へのアクセス、プロジェクトのキーを作成する権限が必要です。Apple のデバッグファイルについては、[Apple のクラッシュとハング](/ja/guides/apple-crashes-and-hangs)を参照してください。
+
+## ビルドとイベントをそろえる
+
+アップロードとアプリの実行時のイベントには、同じプロジェクト、リリース、環境、サービスを使います。バージョン名については、[リリース](/ja/concepts/releases)を参照してください。このガイドでは、`web@1.2.3`、`staging`、`checkout-web` を使います。
+
+ビルドされたコードが変わったら、リリースを変えます。準備したビルドをアップロードしてから、そのビルドをそのままデプロイします。アップロード後に再ビルドしたり、JavaScript を変更したりしないでください。
+
+## Vite プラグインを追加する
+
+アプリのディレクトリに SDK をインストールします。
+
+```bash
+npm install @logbrew/sdk@0.1.28
+```
+
+`vite.config.js` にプラグインを追加します。他のプラグインやビルドの設定はそのまま残します。プロジェクト ID を置き換えます。
+
+```js
+import { createLogBrewViteReleaseArtifactsPlugin } from "@logbrew/sdk/vite-release-artifacts";
+
+export default {
+  plugins: [
+    createLogBrewViteReleaseArtifactsPlugin({
+      projectId: "<project_id>",
+      release: "web@1.2.3",
+      environment: "staging",
+      service: "checkout-web",
+      minifiedPathPrefix: "https://app.example.com"
+    })
+  ]
+};
+```
+
+`minifiedPathPrefix` は、ビルドのディレクトリをデプロイした先の URL です。プラグインは、そのディレクトリ内の各ファイルのパスを付け加えます。たとえば、`dist/assets/app.js` は `https://app.example.com/assets/app.js` になります。ビルドを `/web` で配信している場合は、プレフィックスに `/web` を含めます。プレフィックスに `/assets` は追加しないでください。
+
+`upload` オプションがない場合、プラグインは LogBrew に何も送信しません。また、次のことも行います。
+
+- `build.sourcemap` を設定していない場合は、`"hidden"` に設定します。`false` に設定している場合は、`"hidden"` に変更してください。
+- 圧縮ツールのオプションを設定していない場合は、関数名を保持します。独自に設定している場合は、その設定で名前を保持してください。
+
+hidden のソースマップは、通常のファイルとしてビルド出力に残ります。アクセス制御はされません。インラインのソースマップは使わないでください。プラグインは、JavaScript ファイル内に埋め込まれたマップを受け付けません。
+
+## ビルドしてローカルで確認する
+
+本番用のビルドを実行します。
+
+```bash
+npm run build
+```
+
+プラグインは、各 JavaScript ファイルとそのソースマップに同じ Debug ID を付けます。埋め込まれた `sourcesContent` と、ローカルのアプリのルートパスを削除します。そして `dist/logbrew-release-artifacts.json` を書き出します。
+
+マニフェストを開きます。`validation.status` が `ready` であること、このビルドのファイルとデプロイ先の URL が含まれていることを確認します。hidden のマップでは、`sourceMappingURL comment missing` の警告が出ます。この警告は想定どおりです。
+
+非公開のパスや、共有したくないソースのテキストを含むマップはアップロードしないでください。アップロードにはコンパイル済みの JavaScript も含まれるため、シークレットはアプリのバンドルに入れないでください。
+
+アップロードをローカルで確認します。このコマンドはリクエストを送信せず、キーも不要です。
+
+```bash
+npx --no-install logbrew-release-artifacts upload-js \
+  --build-dir dist \
+  --manifest dist/logbrew-release-artifacts.json \
+  --endpoint https://api.logbrew.co/api/release-artifacts \
+  --allow-hosted \
+  --dry-run
+```
+
+コマンドがコード `0` で終了し、`"status": "dry_run"` を出力した場合にだけ先に進みます。これはローカルのファイルとマニフェストを確認するもので、サーバーはテストしません。ビルドで別の出力ディレクトリを使っている場合は、両方のパスを変更します。
+
+対応付けを確認するには、ビルドしたアプリを実行し、生成されたスタックフレームを1つ、ファイル、行、列と一緒にコピーします。
+
+```bash
+npx --no-install logbrew-release-artifacts symbolicate-js \
+  --build-dir dist \
+  --manifest dist/logbrew-release-artifacts.json \
+  --stack-frame "at checkoutTotal (https://app.example.com/assets/index-a1b2c3.js:2:780)"
+```
+
+結果に `"status": "resolved"` があることを確認します。`original` オブジェクトに、ソースのファイル、行、列が示されます。このコマンドはローカルで実行され、何もアップロードしません。
+
+## <span id="create-an-artifact-key">ビルド成果物キーを作成する</span>
+
+[LogBrew CLI](/ja/guides/cli) でサインインします。プロジェクト ID を確認します。
+
+```bash
+logbrew projects --json
+```
+
+プロジェクトのビルド成果物キーを作成します。所有者だけが使えるディレクトリ内の、新しいファイルパスを使います。
+
+```bash
+install -d -m 700 "$HOME/.logbrew" &&
+logbrew projects keys create "<project_id>" \
+  --ingest-key-file "$HOME/.logbrew/checkout-web.artifact" \
+  --label "Checkout web build" \
+  --kind artifact \
+  --json
+```
+
+コマンドが成功した場合にだけ先に進みます。結果がはっきりしない場合は、同じ引数で同じコマンドをもう一度実行します。`--abandon-retry` は使わないでください。
+
+ビルド成果物キーはプロジェクト単位で、書き込み専用です。ソースマップとデバッグファイルをアップロードします。テレメトリの送信や、ビルド成果物のメタデータの読み取りはできません。代わりにアカウントの認証情報や、実行時の SDK キーを使わないでください。
+
+キーは、ビルド環境のシークレット設定に `LOGBREW_RELEASE_ARTIFACT_TOKEN` として保存します。表示したりコミットしたりしないでください。`VITE_*` や `EXPO_PUBLIC_*` など、クライアントから見える変数に入れないでください。
+
+この変数は、アップロードを実行するプロセスで設定します。ヘルパーは `.env` ファイルを読みません。Vite も、[設定の評価](https://vite.dev/config/#using-environment-variables-in-config)の間はそれらのファイルを `process.env` に読み込みません。
+
+## 準備したビルドをアップロードする
+
+確認済みの同じファイルとマニフェストを使います。このコマンドは、LogBrew にアップロードを送信します。
+
+```bash
+npx --no-install logbrew-release-artifacts upload-js \
+  --build-dir dist \
+  --manifest dist/logbrew-release-artifacts.json \
+  --endpoint https://api.logbrew.co/api/release-artifacts \
+  --allow-hosted
+```
+
+`"status": "uploaded"` は、LogBrew がアップロードを受け付けたことを示します。コマンドがエラーで終了した場合は、作業を止め、下の表を使ってください。
+
+ヘルパーは、ネットワークエラー、`408`、`429`、`5xx` のレスポンスに対して、最大2回再試行します。毎回、同じ準備済みのファイルを送信します。回数を変えるには `--max-retries` を使います。
+
+手動のアップロードが成功したら、代わりに Vite のビルド中にアップロードすることもできます。プラグインの設定に次のオプションを追加します。
+
+```js
+upload: {
+  endpoint: "https://api.logbrew.co/api/release-artifacts",
+  allowHostedUpload: true,
+  tokenEnv: "LOGBREW_RELEASE_ARTIFACT_TOKEN"
+}
+```
+
+アップロードの方法は1つにしてください。準備やアップロードでエラーが起きると、プラグインはビルドを止めます。アップロードせずにテストするには、`dryRun: true` を追加します。
+
+プラグインは、出力ディレクトリからソースマップを削除しません。`.map` ファイルやマニフェストを、公開の Web サイトや CDN にデプロイしないでください。
+
+取得した課題のフレームを対応付けるには、そのフレームを指定して、同じ準備済みのビルドに対して `symbolicate-js` を実行します。
+
+## <span id="verify-a-new-issue">新しい課題を読む</span>
+
+同じ準備済みのビルドをテスト環境にデプロイします。課題を取得する経路で、安全なテスト用のエラーを1つ発生させます。このテストでは、ユーザーの入力、認証情報、生のスタックを送信しないでください。
+
+同じプロジェクトとビルドのコンテキストで、新しい課題を探します。
+
+```bash
+logbrew read issues --project "<project_id>" \
+  --release "web@1.2.3" --environment staging \
+  --service checkout-web --since 1h --json
+```
+
+結果から課題 ID をコピーします。最新の発生事象を読みます。
+
+```bash
+logbrew investigate issue "<issue_id>" --occurrence latest --json
+```
+
+まず、イベントの時刻、プロジェクト、サービス、環境、リリースを読みます。次に `event.stack_frames` を読みます。`source: "symbolicated"` のフレームには、アップロードしたファイルから得た元のファイル、行、列があります。`source: "captured"` のフレームには、アプリが送信した位置があります。
+
+`logbrew read issue "<issue_id>" --json` も `symbolication` オブジェクトを返します。その中の各フレームには `status` があり、値は `resolved`、`artifact_not_found`、`source_not_resolved`、`invalid_metadata`、`unavailable` のいずれかです。元の位置があるのは、`resolved` のフレームだけです。
+
+LogBrew は、課題を読み取るときにフレームを対応付けます。エラーの後にアップロードしても、同じ Debug ID を持つ以前のイベントを対応付けられます。対応付けたフレームは、調べるべきコードを指します。エラーの原因を示すものではありません。他のフィールドについては、[課題を調査する](/ja/guides/investigate-an-issue)を参照してください。
+
+## 確認に失敗したときの対処
+
+| 結果 | 次の手順 |
+| --- | --- |
+| マニフェストのステータスが `ready` ではない | `validation.errors` を読みます。ビルドの設定を修正して、もう一度ビルドします。マニフェストは編集しないでください。 |
+| ソースマップがない、またはインラインのため、ビルドが止まる | `build.sourcemap` を `"hidden"` または `true` に設定します。もう一度ビルドします。 |
+| `auth_missing` | アップロードのプロセスで `LOGBREW_RELEASE_ARTIFACT_TOKEN` を設定します。ドライランではキーはテストされません。 |
+| `auth_failed`（`401` または `403`） | 同じプロジェクトのビルド成果物キーを使います。実行時のキーやアカウントのキーは使わないでください。 |
+| `validation_failed`（`400` または `413`） | 準備したファイルとそのサイズを確認します。同じアップロードをもう一度送信しないでください。 |
+| ローカルのエラーで `validation_failed` | `validation.errors` を読みます。ビルド後にファイルが変わった場合は、もう一度ビルドして確認します。 |
+| `retryable_error` | ネットワークエラー、`408`、`429`、サーバーエラーの後、すべての再試行が失敗しました。後で、同じ準備済みのファイルで再試行します。 |
+| `upload_failed` | サーバーが別のステータスを返しました。`--endpoint` の値を確認します。 |
+| フレームが対応付けられない | Debug ID、デプロイ先の URL のプレフィックス、ビルドを確認します。別のビルドやリリースのマップは使わないでください。 |
+| 新しい課題が表示されない | ソースマップをテストする前に、課題の取得、実行時のキー、時間のフィルターを確認します。 |
+
+サポートへのメッセージに、ソースファイル、キー、非公開のパスを含めないでください。[トラブルシューティング](/ja/guides/troubleshooting)と [API エラー](/ja/reference/api-errors)を参照してください。

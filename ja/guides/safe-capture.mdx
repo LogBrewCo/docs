@@ -1,0 +1,153 @@
+---
+title: "ログの秘匿：機密データをログに含めない"
+sidebarTitle: "取得するデータを管理する"
+description: "承認済みのログフィールドを選びます。機密データをローカルでテストします。LogBrew の JavaScript、Node.js、ブラウザーの取得制御の限界を確認します。"
+---
+
+取得を有効にする前に、アプリが送信するものを選びます。パスワード、アクセストークン、フォームの内容、ユーザーの非公開データはイベントに含めないでください。
+
+各イベントは承認済みのフィールドから組み立てます。リクエスト、レスポンス、エラーのオブジェクト全体をメタデータにコピーしないでください。秘匿は機密の値を置き換えます。フィルターはイベント全体を除外します。SDK にとって有効なイベントでも、アプリが送信してはいけないデータを含むことがあります。
+
+このガイドは、次のパッケージのバージョンを対象とします。
+
+- `@logbrew/sdk` 0.1.28
+- `@logbrew/node` 0.1.12
+- `@logbrew/browser` 0.1.11
+
+その他のランタイムについては、[SDK 連携](/ja/guides/sdk-ingestion)から各パッケージのガイドを読んでください。
+
+## 取得するフィールドを選ぶ
+
+チェックアウトの失敗では、固定のメッセージ、ルートのテンプレート、ステータスコードを記録します。氏名、メールアドレス、支払いデータは記録しないでください。
+
+| フィールド | 取得のルール |
+| --- | --- |
+| メッセージ | `checkout.failed` のような固定のテキストを使います。フォームのテキストや認証情報を差し込まないでください。 |
+| ルート | `/orders/:id` のようなテンプレートを使います。URL のパス、クエリ、フラグメントには非公開の値が含まれることがあります。 |
+| ステータス | 有効なステータスコードだけを受け付けます。ユーザーの入力から得た文字列は使いません。 |
+| メタデータ | 名前を指定してフィールドを選びます。リクエスト、レスポンス、エラーのプロパティをすべてコピーしないでください。 |
+| サブジェクトとセッション | 承認済みのテレメトリ用の識別子を使います。ログイントークンやセッション Cookie は使いません。 |
+
+ユーザーとセッションのコンテキストについては、[プロダクトイベントの取得](/ja/guides/product-events#set-users-and-sessions-on-each-event)を参照してください。ID に名前が含まれていなくても、その ID で個人を特定できることがあります。
+
+## フィールドの選び方をローカルでテストする
+
+Node.js 18 以降を使います。空のディレクトリでパッケージをインストールします。
+
+```bash
+npm install --save-exact @logbrew/sdk@0.1.28
+```
+
+このテストは本物のキーを使わず、リクエストも送信しません。`safe-capture.mjs` として保存します。
+
+```js
+import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import { LogBrewClient, SdkError } from "@logbrew/sdk";
+
+try {
+  const client = LogBrewClient.create({
+    apiKey: "local-preview-only",
+    sdkName: "privacy-check",
+    sdkVersion: "0.1.28",
+    automaticDelivery: false
+  });
+
+  function recordCheckoutFailure(input) {
+    const status = input?.status;
+    if (!Number.isInteger(status) || status < 400 || status > 599) {
+      return false;
+    }
+    client.log(randomUUID(), new Date().toISOString(), {
+      message: "checkout.failed",
+      level: "error",
+      metadata: { route: "/checkout", status }
+    });
+    return true;
+  }
+
+  const excludedValue = "SYNTHETIC_PRIVATE_VALUE";
+  assert.equal(recordCheckoutFailure({
+    status: 503,
+    authorization: excludedValue,
+    body: excludedValue
+  }), true);
+  assert.equal(recordCheckoutFailure({ status: excludedValue }), false);
+
+  const preview = client.previewJson();
+  const batch = JSON.parse(preview);
+  assert.equal(batch.events.length, 1);
+  assert.equal(preview.includes(excludedValue), false);
+  assert.deepEqual(batch.events[0].attributes.metadata, {
+    route: "/checkout",
+    status: 503
+  });
+  client.purgePendingEvents();
+  console.log(JSON.stringify({
+    ok: true,
+    checked_events: 1,
+    excluded_value_found: false
+  }));
+} catch (error) {
+  console.error(JSON.stringify({
+    ok: false,
+    error: error instanceof SdkError ? error.code : "privacy_check_failed"
+  }));
+  process.exitCode = 1;
+}
+```
+
+
+テストを実行します。
+
+```bash
+node safe-capture.mjs
+```
+
+想定される出力：
+
+```json
+{"ok":true,"checked_events":1,"excluded_value_found":false}
+```
+
+アサーションが失敗すると、`"ok":false` を出力して終了コード1で終わります。SDK の検証エラーの場合は、その SDK のエラーコードを出力します。実際のデータを含むプレビューを出力したり、アップロードしたりしないでください。
+
+取得のコードでも同じパターンを使い、アサーションはテストに残します。アプリが送信してはいけないフィールドと値ごとに、確認を追加します。パターンによる秘匿を使う場合は、ルールを変えるたびに確認を再実行します。このテストで確認するのは、キューに入った1件のログです。プライバシーのレビューの代わりにはなりません。
+
+## エラーメッセージとスタック
+
+| 取得方法 | 動作 |
+| --- | --- |
+| `createIssueAttributesFromError`（コア） | エラーのテキストを課題のメッセージと `metadata.errorMessage` に残します。`metadata.errorStack` は `includeErrorStack: true` の場合だけ追加します。例外チェーンの各項目では、メッセージを `redacted` としてマークし、テキストは含めません。 |
+| コアのコンソール変換 | エラーのテキストをログのメッセージとメタデータに残すことがあります。 |
+| `createBrowserErrorEvent`（ブラウザー） | 固定のエラーの概要を使い、`metadata.errorMessage` を削除し、例外チェーンのメッセージを秘匿済みとしてマークします。 |
+
+`options.message` を独自に指定しても、`metadata.errorMessage` は削除されません。タイトルだけでなく、イベント全体を確認してください。機密の値は、発生元の時点でエラーメッセージに含めないようにします。
+
+## 各制御をその範囲で使う
+
+### JavaScript コアと Node.js
+
+`LogBrewClient.create` は `eventFilter` を受け付けます。`false` を返すと、イベントはキューに入る前に除外されます。それ以外の値を返すと、イベントは残ります。フィルターが受け取るのはイベントのコピーなので、それを変更しても何も秘匿されません。これらのバージョンでは、`createLogBrewNodeClient` と `createLogBrewBrowserClient` は `eventFilter` を適用しません。
+
+`droppedEvents()` は、サイズやキューの上限で破棄されたイベントを数えます。`eventFilter` で除外されたイベントは数えません。
+
+Node のクライアントは、Node のバージョン、オペレーティングシステム、アーキテクチャなどの実行時のコンテキストを追加します。これを省くには `captureRuntimeContext: false` を設定します。この設定は、アプリが渡すコンテキストを削除せず、取得も止めません。
+
+### ブラウザー
+
+ブラウザーのクライアントは、デフォルトでグローバルなエラー、処理されなかった Promise の拒否、最初のページビューを取得します。どれかをオフにするには、`captureGlobalErrors`、`captureUnhandledRejections`、`capturePageViews` を `false` に設定します。
+
+ページビューにはパス名が含まれます。`includeQueryString`、`includeHash`、`includeDocumentTitle`、`includeUserAgent` を設定しない限り、クエリ文字列、フラグメント、ドキュメントのタイトル、ユーザーエージェントの全体は含まれません。パス名に非公開の値が含まれうる場合は、自動のページビューをオフにし、安全なルート名で独自のページビューを送信します。
+
+`sanitizeMetadata` が変更するのはメタデータだけです。ページビューやアクションの名前は変わりません。ページビューの名前には、`page_view /orders/1234` のような具体的なパス名が含まれます。メタデータの `routeTemplate` は分析のサーフェスを設定しますが、名前は変えません。`shouldCaptureError` が除外するのはブラウザーの課題だけです。ログやほかのシグナルは絞り込みません。
+
+ブラウザーのブランド、プラットフォーム、デバイスの種類を省くには、`captureRuntimeContext: false` を設定します。この設定は `includeUserAgent` を制御しません。
+
+## 実際に取得する前に
+
+有効にした取得方法を、エラーの経路やログの連携も含めて、すべて合成データでテストします。
+
+取得の変更は新しいイベントにだけ適用されます。`purgePendingEvents()` は待機中のローカルのキューを空にしますが、送信中は失敗します。以降の取得を止めることも、LogBrew が受け付けたイベントを削除することもありません。ブラウザーの `uninstall()` はリスナーを削除しますが、キューに入ったイベントは残します。これらのメソッドは、同意や削除の手続きではありません。
+
+次に、[クイックスタート](/ja/quickstart)で合成のイベントを1件送信します。見つからない場合は、[トラブルシューティング](/ja/guides/troubleshooting)を参照してください。HTTP のエラーについては [API エラー](/ja/reference/api-errors)を参照してください。

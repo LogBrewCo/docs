@@ -1,0 +1,247 @@
+---
+title: "LogBrew で課題をトリアージして解決する"
+sidebarTitle: "課題を管理する"
+description: "LogBrew で課題を管理します。発生事象の証拠を読み、課題を1件ずつまたは一括で解決、アーカイブ、再開し、優先度と担当者を設定します。"
+---
+
+課題は、同じフィンガープリントを持つエラーの発生事象をまとめたものです。ステータス、優先度、担当者を変更する前に、グループの要約と1件の発生事象を読んでください。ステータス、優先度、担当者の変更は、チームの判断を記録するものです。ソフトウェアを修復したり、取得済みのイベントを書き換えたりはしません。
+
+始める前に、[LogBrew CLI](/ja/guides/cli) をインストールし、`logbrew login` を実行します。
+
+## 課題と発生事象
+
+課題の一覧が返すのは、グループの要約で、イベント全体ではありません。詳細を開く前に、次のフィールドを読んでください。
+
+| フィールド | 意味 |
+| --- | --- |
+| `title` | 取得された障害のタイトル。 |
+| `severity` | 取得された重大度。 |
+| `triage.effective_severity` | 課題のルールを適用した後に LogBrew が使う重大度。`severity` は取得された値のままです。ルールが適用されると、`triage.rule_applied` は `true` になります。 |
+| `occurrence_count` | グループ内の保持されている発生事象の件数。 |
+| `first_seen_at` | 保持されている最も古い発生事象の時刻。 |
+| `last_seen_at` | 保持されている最も新しい発生事象の時刻。 |
+| `project_id` | 課題を含むプロジェクト。 |
+| `service_name` | 最新の発生事象のサービス。 |
+| `release` | 最新の発生事象のリリース。 |
+| `environment` | 最新の発生事象の環境。 |
+| `status` | 課題のワークフロー上の状態。[ステータスの値](#status-values)を参照してください。 |
+| `priority` | 課題のトリアージの順序。[優先度](#priority)を参照してください。 |
+| `priority_source` | 人が優先度を設定した場合は `manual`。重大度に従う場合は `derived`。 |
+| `assignee` | 次の手順を担当するアカウント、または `null`。[課題を割り当てる](#assign-issues)を参照してください。 |
+
+発生事象の件数は、影響を受けたユーザーの数ではありません。件数と時刻は、返された範囲についての値で、エラーの全履歴についての値ではありません。`--since` や `--until` のフィルターは、LogBrew が数える発生事象を限定します。件数を報告するときは、その件数を出したフィルターも報告してください。
+
+## <span id="status-values">ステータスの値</span>
+
+| ステータス | 意味 |
+| --- | --- |
+| `unresolved` | 課題について判断が必要です。 |
+| `resolved` | チームが課題を修正済みとしてマークしました。このステータスは修正を証明しません。 |
+| `archived` | チームが課題を進行中のトリアージから外しました。 |
+
+`archived` は、以前は `ignored` という名前でした。2つの名前は同じ課題を選び、入力ではどちらも受け付けます。`logbrew read`、`logbrew issues`、API のバージョン2と3は `archived` を表示します。API のバージョン1（デフォルト）、ライブ監視のストリーム、課題の調査のレスポンスは `ignored` を表示します。ダッシュボードでは、ステータスは「未解決」「解決済み」「アーカイブ済み」と表示されます。
+
+ステータスは、1件の発生事象ではなく、課題全体に適用されます。重大度は緊急度を示し、ステータスは判断を記録します。この2つは分けて扱ってください。`critical` の課題でも、修正が検証されれば `resolved` にできます。`archived` の課題は、取得された重大度をそのまま保ちます。
+
+LogBrew は、解決済みの課題を自動では再開しません。解決後に新しい発生事象が届くと、調査結果は `lifecycle.effective_status` を `regressed` として報告します。人が課題を再開するまで、`status` は `resolved` のままです。
+
+## <span id="priority">優先度</span>
+
+優先度は、チームが課題をトリアージする順序を決めます。
+
+| 優先度 | 意味 |
+| --- | --- |
+| `high` | 最初に調べる課題です。 |
+| `medium` | `high` の課題の後に調べる課題です。 |
+| `low` | 後回しにできる課題です。 |
+
+すべての課題に優先度があります。誰も設定しない場合、優先度は課題の重大度に従います。`error` と `critical` は `high`、`warning` は `medium`、`info` は `low` になります。課題のルールが重大度を変更した場合、優先度は `triage.effective_severity` に従います。このとき `priority_source` は `derived` です。人が優先度を設定すると、その値は固定され、`priority_source` は `manual` になります。
+
+最初に調べる課題を一覧表示するには、次を実行します。
+
+```bash
+logbrew read issues --project "<project_id>" --status unresolved \
+  --priority high --since 24h --json
+```
+
+## <span id="assign-issues">課題を割り当てる</span>
+
+課題を割り当てて、次の手順の担当者を示します。課題の担当者は0人か1人です。
+
+<Steps>
+  <Step title="割り当てられる人を確認する">
+    ```bash
+    logbrew issues assignees --project "<project_id>" --json
+    ```
+
+    一覧には、プロジェクトを読み取れるすべてのアカウントが含まれます。各項目には `user_id`、`name`、`email` があります。`user_id` をコピーします。プロジェクトを読み取れないアカウントには割り当てられません。
+  </Step>
+
+  <Step title="課題を割り当てる">
+    ```bash
+    logbrew issues assign "<user_id>" "<issue_id>" --json
+    ```
+
+    自分に割り当てるには、ユーザー ID の代わりに `me` を使います。担当者を外すには、`logbrew issues unassign "<issue_id>" --json` を使います。1つのプロジェクトの課題を最大100件まとめて変更するには、`--project` を追加します。
+  </Step>
+
+  <Step title="自分の課題を読む">
+    ```bash
+    logbrew read issues --project "<project_id>" --assignee me \
+      --status unresolved --json
+    ```
+
+    誰も担当していない課題を見つけるには、`--assignee none` を使います。
+  </Step>
+</Steps>
+
+課題を割り当てるには、プロジェクトの課題を管理する権限が必要です。同じ権限で、ステータス、優先度、課題とログのルールも変更できます。プロジェクトを読み取れるアカウントであれば、誰でも担当者になれます。
+
+メンバーがプロジェクトへのアクセス権を失うと、そのメンバーに割り当てられていた課題は、担当者なしとして表示されます。これらの課題は `--assignee none` の読み取りに含まれます。そのメンバーがアクセス権を取り戻すと、その間に誰かが担当者を変更または解除していない限り、課題には再びそのメンバーが表示されます。
+
+## 推奨するワークフロー
+
+<Steps>
+  <Step title="1つの範囲で未解決の課題を一覧表示する">
+    ```bash
+    logbrew read issues --project "<project_id>" --environment production \
+      --release api@1.2.3 --status unresolved --since 24h --json
+    ```
+
+    以降の一覧の読み取りでも、同じフィルターを使ってください。結果が空の場合、この範囲に一致する課題はありません。プロジェクトにエラーがないことの証明にはなりません。タイトルではなく、正確な課題 ID をコピーします。
+  </Step>
+
+  <Step title="課題の詳細を読む">
+    ```bash
+    logbrew read issue "<issue_id>" --json
+    ```
+
+    続ける前に、返されたプロジェクトが正しいことを確認します。読み取りが返すのはスナップショットです。ステータスを変更する前に、課題をもう一度読んでください。
+  </Step>
+
+  <Step title="1件の発生事象を調査する">
+    ```bash
+    logbrew investigate issue "<issue_id>" --occurrence recommended --json
+    ```
+
+    詳細と調査の読み取りには、一覧のフィルターは使われません。`subject.project_id`、`event.occurred_at`、リリース、環境を、調査の範囲と比較します。推奨される発生事象は、最新のものより古い場合があります。証拠をすべて確認する手順は、[課題を調査する](/ja/guides/investigate-an-issue)に従ってください。
+  </Step>
+
+  <Step title="トレースの証拠は利用できる場合にだけたどる">
+    トレースを読むのは、`correlations.trace.status` が `available` の場合だけです。レスポンスにあるトレース ID を使います。ID を決して自分で作らないでください。
+
+    ```bash
+    logbrew read trace "<trace_id>" --project "<project_id>" --json
+    logbrew read logs --trace "<trace_id>" --project "<project_id>" \
+      --since 24h --json
+    ```
+
+    トレースの読み取りには時間のフィルターがありません。ステータスが `not_linked` の場合は、課題の証拠で調査を続けます。
+  </Step>
+
+  <Step title="候補のデプロイを検証する">
+    調査した発生事象を基準にします。デプロイ ID は、デプロイの証拠かリリースの手順から取得します。
+
+    ```bash
+    logbrew investigate issue "<issue_id>" verify \
+      --baseline-occurrence "<occurrence_id>" \
+      --candidate-deployment "<deployment_id>" \
+      --json
+    ```
+
+    観測期間内に再発がなくても、恒久的な修正の証明にはなりません。`status` が `insufficient_traffic` または `unavailable` の場合は、課題を `unresolved` のままにします。返された次の操作に従ってください。
+  </Step>
+
+  <Step title="ステータス、優先度、担当者を変更する">
+    コマンドを1つ実行します。これらのコマンドは確認を求めないため、先に課題 ID を確認してください。
+
+    ```bash
+    logbrew issues resolve "<issue_id>" --json
+    logbrew issues archive "<issue_id>" --json
+    logbrew issues reopen "<issue_id>" --json
+    logbrew issues priority low "<issue_id>" --json
+    logbrew issues assign me "<issue_id>" --json
+    ```
+
+    `--project` を付けない場合、各コマンドは課題 ID を1つ受け取ります。終了コードと、返された `status`、`priority`、`assignee` を確認します。結果がない場合は、次の変更の前に課題をもう一度読んでください。
+
+    古いスクリプトでは、`logbrew set issue "<issue_id>" resolved` や、`resolve`、`ignore`、`reopen` の短縮形を使えます。`ignore` は `archived` を設定します。
+  </Step>
+</Steps>
+
+## 複数の課題をまとめて変更する
+
+1つのプロジェクトの課題を、1つのコマンドで最大100件変更するには、`--project` を追加します。
+
+```bash
+logbrew issues archive "<issue_id_1>" "<issue_id_2>" "<issue_id_3>" \
+  --project "<project_id>" --json
+```
+
+このコマンドは、すべての課題に同じ変更を適用します。各課題 ID は1回しか指定できません。CLI は、100件を超える ID や重複した ID を、リクエストを送信する前に拒否します。結果には、課題ごとに1つの項目が、コマンドで指定した順に入ります。
+
+| 結果 | 意味 |
+| --- | --- |
+| `updated` | LogBrew が変更を適用しました。 |
+| `unchanged` | 課題はすでに要求された値でした。 |
+| `not_found` | プロジェクトにこの ID の課題がありません。LogBrew はこの課題に対して何も変更していません。 |
+
+各項目には `issue_id`、`outcome`、`issue` があります。`issue` は現在の課題で、`not_found` の場合は `null` です。ネットワーク障害の後は、同じコマンドをもう一度実行できます。すでに変更された課題は `unchanged` になります。100件を超える課題は、コマンドを分けて実行します。`not_found` の結果が出た場合は、そのプロジェクトの課題一覧から ID をもう一度コピーしてください。API のリクエストについては、[課題を一括で更新する](/ja/reference/telemetry-api#update-issues-in-bulk)を参照してください。
+
+## 次のステータスを選ぶ
+
+- **`unresolved` のままにする**：障害が続いている場合や、修正が検証されていない場合。トレースがないことは、課題をアーカイブする理由になりません。
+- **`resolved` に設定する**：チームが修正の証拠を受け入れた後。修正案は証拠ではありません。
+- **`archived` に設定する**：許容した状態や、テスト専用のシグナルの場合。この判断は、課題のすべての発生事象に適用されます。コマンドには理由を入れるフィールドがないため、理由はチームの作業記録に残してください。
+- **`unresolved` で再開する**：解決後に新しい発生事象が届いた場合。その発生事象は `lifecycle.regression.first_reappeared_occurrence` でわかります。解決に使った発生事象と比較してください。別の課題を作成しないでください。
+
+## 調査を引き継ぐ
+
+次の担当者には、生のイベントをそのまま渡すのではなく、参照情報を渡します。
+
+- 課題 ID、ステータス、優先度、担当者、重大度。
+- プロジェクト、サービス、環境、リリース。
+- 初回確認の時刻、最終確認の時刻、発生事象の件数。
+- 選択した発生事象の ID と `occurrence_selection.reason`。
+- `fix.status`、`cause.status`、それぞれの `provenance`。
+- トレースのステータスとトレース ID（利用できる場合）。
+- 再現のステータスと、欠けている証拠。
+- 候補のデプロイの検証結果。
+- レスポンスが返した次の操作。
+
+推定した原因や修正は、案であることを明記してください。
+
+## CLI のエラーから復旧する
+
+出力を解析する前に、プロセスの終了コードを確認します。成功すると、JSON は標準出力に書き出されます。解析エラーはコード `2` で終了します。実行時エラーはコード `1` で終了します。JSON のエラーは標準エラー出力に書き出され、`ok: false`、`error`、`message`、`next` を含みます。`next` は案内として表示してください。自動で実行しないでください。
+
+たとえば、`logbrew issues archive "<issue_id_1>" "<issue_id_2>" --json` には `--project` がありません。このコマンドは、リクエストを送る前にコード `2` で終了し、エラー `invalid_issue_command` を返します。
+
+API がリクエストを拒否した場合、`error` は `api_error` になります。HTTP ステータスは `status` で、API のエラーコードは `api_code` で読みます。
+
+| 結果 | 復旧方法 |
+| --- | --- |
+| `not_logged_in` | `logbrew login` の実行を人に依頼し、読み取りを再試行します。 |
+| `invalid_issue_command` | コマンドを修正します。2件以上の課題には `--project` を使い、ID は最大100件、各 ID は1回だけにします。 |
+| 無効な課題 ID | 課題の一覧か詳細のレスポンスから、正確な ID をコピーします。 |
+| 課題が見つからない | サインインしているアカウントとプロジェクトを確認します。 |
+| 変更が `status` `403` で失敗する | このアカウントは、このプロジェクトの課題を管理できません。アクセス権を持つ人に依頼してください。 |
+| `invalid_assignee` | `--assignee` フィルターには、`me`、`none`、ユーザー ID のいずれかを指定します。 |
+| 割り当てが `status` `422`、`api_code` `validation_failed` で失敗する | 担当者がプロジェクトを読み取れません。`logbrew issues assignees` からアカウントを選ぶか、先にそのメンバーにプロジェクトへのアクセス権を与えてください。 |
+| `investigation_response_invalid` | レスポンスが CLI の検証に失敗しました。1回だけ再試行します。繰り返す場合は、CLI を更新するか問題を報告してください。検証を回避しないでください。 |
+| トレースのステータスが `not_linked` | 課題の証拠で調査を続けます。トレースは読まないでください。 |
+| トレースのステータスが `unavailable` | 後で調査の読み取りを再試行します。 |
+| 検証の結果が `insufficient_traffic` | 課題を `unresolved` のままにします。候補のリリースにトラフィックが届くのを待ってから、もう一度検証します。 |
+
+レスポンスが失敗しても、ステータス、優先度、担当者の変更が反映されなかったことの証明にはなりません。再試行する前に、課題を読んでください。
+
+## 役に立つ課題の条件
+
+- わかりやすいタイトルと、読みやすいメッセージ。
+- 安定したフィンガープリント。
+- スタックフレーム（利用できる場合）。
+- リリース、環境、サービスのコンテキスト。
+- トレースコンテキスト（発生事象と一緒に取得された場合）。
+- ペイロード全体ではなく、小さく関連性のある属性。
+
+一覧のフィルターとレスポンスの仕様については、[テレメトリ API](/ja/reference/telemetry-api)を参照してください。

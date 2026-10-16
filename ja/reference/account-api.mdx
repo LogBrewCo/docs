@@ -1,0 +1,349 @@
+---
+title: "アカウント API と API の使用量の上限"
+sidebarTitle: "アカウント API"
+description: "LogBrew アカウントの使用量の上限、クォータの履歴、サブスクリプションの準備状況、ログアウトのレスポンスを読みます。"
+---
+
+アカウント API は、使用量、クォータの状態、使用量の履歴、サブスクリプションの準備状況の読み取りと、ログアウトに使います。アカウントの読み取りには、アカウントの Bearer トークンまたはブラウザーのセッションを使います。アカウントのリクエストに、プロジェクトの取り込みキーを使わないでください。アカウントの認証情報を、SDK や取り込みの設定に使わないでください。
+
+| 作業 | エンドポイント |
+| --- | --- |
+| 現在の使用量とクォータの状態を読む | `GET /api/account/usage` |
+| 使用量の推移を読む | `GET /api/account/usage/history` |
+| サブスクリプションと組織の準備状況を読む | `GET /api/account/subscription` |
+| 1つのアプリまたは CLI のログインからログアウトする | `POST /api/auth/logout` |
+| すべての LogBrew のログインを無効化する | `POST /api/auth/logout-all` |
+| ブラウザーのセッションを消去する | `POST /api/auth/web/logout` |
+
+エラーは標準の [API エラーのエンベロープ](/ja/reference/api-errors)を使います。有効なアカウントの認証がない読み取りは、`code: "unauthorized"` 付きで `401` を返します。この失敗を、使用量0、空のグラフ、無料プランとして表示しないでください。対応していないメソッドは `code: "method_not_allowed"` 付きで `405` を返し、`next` に対応しているリクエストが示されます。
+
+アカウント API が報告するのはテレメトリの使用量で、金額ではありません。料金、請求書、支払いの状態は報告しません。
+
+## <span id="account-usage">アカウントの使用量</span>
+
+`GET /api/account/usage` は、使用量とクォータの正式なエンドポイントです。使用量の合計、リセットの時刻、クォータの状態、プロジェクト別とテレメトリストリーム別の内訳にはこれを使います。SDK のファイル、CLI のファイル、クライアントのカウンターから使用量を計算しないでください。CLI のコマンド `logbrew usage` はこのエンドポイントを読みます。[CLI リファレンス](/ja/reference/cli)を参照してください。
+
+```bash
+curl "https://api.logbrew.co/api/account/usage" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER"
+```
+
+合成の値を使ったレスポンスの例です。この無料アカウントにはプロジェクトが1つあり、現在の期間にはログだけを送信しています。
+
+```json
+{
+  "period_start": "2026-06-01T00:00:00Z",
+  "period_end": "2026-07-01T00:00:00Z",
+  "reset_at": "2026-07-01T00:00:00Z",
+  "plan": { "tier": "free", "status": "free" },
+  "limits": { "events": null, "bytes": null, "projects": null, "retention_days": 30 },
+  "usage": { "events": 27000, "bytes": 10485760, "projects": 1 },
+  "state": "ok",
+  "warning_threshold": 0.8,
+  "percent_used": 0.2,
+  "warning": false,
+  "blocked": false,
+  "limit": null,
+  "next": "continue sending telemetry",
+  "next_action": {
+    "code": "continue_sending_telemetry",
+    "target": "telemetry_ingest",
+    "state": "ok",
+    "limit": null,
+    "reset_at": "2026-07-01T00:00:00Z"
+  },
+  "by_project": [
+    { "project_id": "00000000-0000-4000-8000-000000000001", "events": 27000, "bytes": 10485760 }
+  ],
+  "by_stream": [
+    { "kind": "logs", "events": 27000, "bytes": 10485760 }
+  ]
+}
+```
+
+| フィールド | 意味 |
+| --- | --- |
+| `period_start`、`period_end` | 現在の使用量の期間。終了の時刻自体は含みません。 |
+| `reset_at` | 使用量の上限がリセットされる時刻。`period_end` と同じです。 |
+| `plan.tier` | プランの識別子：`free`、`pro`、`scale`。 |
+| `plan.status` | `free`、`trial`、`active`、`past_due`、`disabled`。 |
+| `limits.events`、`limits.bytes`、`limits.projects` | 互換性のためのフィールドで、値は `null` です。`null` は無制限という意味ではありません。クォータの状態には `state`、`limit`、`percent_used` を使います。 |
+| `limits.retention_days` | プランのデータ保持期間（日数）、または `null`。 |
+| `usage.events`、`usage.bytes` | 期間内の、すべてのテレメトリストリームの合計。 |
+| `usage.projects` | アカウントが所有するプロジェクトの数。 |
+| `state` | `ok`、`warning`、`blocked` のいずれか。 |
+| `warning_threshold` | `warning` の状態になる、上限に対する使用の割合（小数）。 |
+| `percent_used` | 各上限に対する使用の割合のうち最も高いもの（パーセント）。たとえば `80` は80%です。 |
+| `warning`、`blocked` | `state` の互換性のための形式。 |
+| `limit` | その状態の原因となった上限：`events`、`bytes`、または `null`。 |
+| `next`、`next_action` | 現在の状態の回復用のテキストと、型付きのアクション。 |
+| `by_project` | プロジェクトごとの使用量。所有するプロジェクトごとに1行あり、使用量が0でも行があります。行は配列の位置ではなく、`project_id` で照合してください。 |
+| `by_stream` | `logs`、`issues`、`actions`、`traces` などの、テレメトリストリームの `kind` ごとの使用量。 |
+
+### クォータの状態
+
+主な分岐には `state` を使います。`limit` が `null` になるのは、`state` が `ok` の場合だけです。
+
+| `state` | `warning` | `blocked` | `limit` | `next_action.code` | `next_action.target` |
+| --- | --- | --- | --- | --- | --- |
+| `ok` | `false` | `false` | `null` | `continue_sending_telemetry` | `telemetry_ingest` |
+| `warning` | `true` | `false` | `events` または `bytes` | `reduce_usage_or_upgrade` | `pricing` |
+| `blocked` | `false` | `true` | `events` または `bytes` | `wait_until_reset_or_upgrade` | `pricing` |
+
+`next_action.state`、`next_action.limit`、`next_action.reset_at` は、トップレベルの値を繰り返します。`next_action.code` の値には、ターゲットが `account_usage` の `check_usage_limits` もあります。クライアントがこの組み合わせを受け取ったら、使用量をもう一度読み、`next` を表示します。
+
+LogBrew は、テレメトリの種類ごとにそれぞれの上限と比べて測定します。`limit` はそれらを次のようにまとめます。
+
+- `events` は課題のイベントとトレースのスパンを対象とします。
+- `bytes` はログのバイト数とメトリクスのバイト数を対象とします。
+
+ある上限が blocked で、別の上限が warning の場合、`limit` は blocked の上限を示します。使用量が上限の `warning_threshold` に達すると `warning` の状態になります。使用量が上限に達すると `blocked` の状態になります。
+
+`next` のテキストは、プランが販売されていないときなどに変わることがあります。`next_action` の値は変わりません。ローカライズは `next_action` から行ってください。`next` を解析しないでください。
+
+アカウントの使用量の上限は、API のレート制限とは別のものです。取り込みが上限を超えると、取り込みリクエストは `usage_limit_exceeded` 付きで `429` を返し、ボディに `limit` と `reset_at` が追加されます。このエラーでは、`limit` が正確な上限を示します：`issue_events`、`log_bytes`、`metric_bytes`、`trace_spans`。LogBrew はリクエスト全体を拒否します。`reset_at` を過ぎるか、プランが変わるまで、そのテレメトリの種類を再び送信しないでください。クライアントがリクエストを送りすぎた場合、API は `rate_limited` を返します。[API エラー](/ja/reference/api-errors#retry-rules)を参照してください。
+
+レスポンスはスナップショットです。アカウントを変更したら、もう一度読みます。
+
+<Note>
+  `GET /api/logs/usage` は、モバイルの互換性のための従来のレスポンスで、`bytes_used`、`limit_bytes`、`month` を含みます。新しい連携には `GET /api/account/usage` を使ってください。
+</Note>
+
+## 使用量の履歴
+
+`GET /api/account/usage/history` は、グラフやレポート用に、件数に上限があり、空の期間を0で埋めた使用量のバケットを返します。`interval` には対応している値を1つ設定します。`interval` を省略すると、API は `monthly` を使います。このルートは、ほかのクエリキーを受け付けません。
+
+```bash
+curl --get "https://api.logbrew.co/api/account/usage/history" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "interval=daily"
+```
+
+| `interval` | バケット数 | バケットの開始 |
+| --- | ---: | --- |
+| `daily` | 30 | 00:00 UTC |
+| `weekly` | 12 | 月曜日 00:00 UTC |
+| `monthly` | 12 | 月の初日 00:00 UTC |
+| `yearly` | 5 | 1月1日 00:00 UTC |
+
+| フィールド | 意味 |
+| --- | --- |
+| `interval` | リクエストした間隔。 |
+| `period_start`、`period_end` | 履歴の期間の開始と終了。終了の時刻自体は含みません。 |
+| `current` | 現在の期間の、`GET /api/account/usage` のレスポンス全体。 |
+| `buckets` | 古い順に並んだバケット。各バケットには `period_start`、`period_end`、`usage`、`by_project`、`by_stream` があります。 |
+
+この `yearly` のレスポンスは、2026年6月のリクエストに対する合成データです。使用量はすべて6月に発生しました。
+
+```json
+{
+  "interval": "yearly",
+  "period_start": "2022-01-01T00:00:00Z",
+  "period_end": "2027-01-01T00:00:00Z",
+  "current": {
+    "period_start": "2026-06-01T00:00:00Z",
+    "period_end": "2026-07-01T00:00:00Z",
+    "reset_at": "2026-07-01T00:00:00Z",
+    "plan": { "tier": "free", "status": "free" },
+    "limits": { "events": null, "bytes": null, "projects": null, "retention_days": 30 },
+    "usage": { "events": 27000, "bytes": 10485760, "projects": 1 },
+    "state": "ok",
+    "warning_threshold": 0.8,
+    "percent_used": 0.2,
+    "warning": false,
+    "blocked": false,
+    "limit": null,
+    "next": "continue sending telemetry",
+    "next_action": {
+      "code": "continue_sending_telemetry",
+      "target": "telemetry_ingest",
+      "state": "ok",
+      "limit": null,
+      "reset_at": "2026-07-01T00:00:00Z"
+    },
+    "by_project": [
+      { "project_id": "00000000-0000-4000-8000-000000000001", "events": 27000, "bytes": 10485760 }
+    ],
+    "by_stream": [{ "kind": "logs", "events": 27000, "bytes": 10485760 }]
+  },
+  "buckets": [
+    { "period_start": "2022-01-01T00:00:00Z", "period_end": "2023-01-01T00:00:00Z", "usage": { "events": 0, "bytes": 0, "projects": 0 }, "by_project": [], "by_stream": [] },
+    { "period_start": "2023-01-01T00:00:00Z", "period_end": "2024-01-01T00:00:00Z", "usage": { "events": 0, "bytes": 0, "projects": 0 }, "by_project": [], "by_stream": [] },
+    { "period_start": "2024-01-01T00:00:00Z", "period_end": "2025-01-01T00:00:00Z", "usage": { "events": 0, "bytes": 0, "projects": 0 }, "by_project": [], "by_stream": [] },
+    { "period_start": "2025-01-01T00:00:00Z", "period_end": "2026-01-01T00:00:00Z", "usage": { "events": 0, "bytes": 0, "projects": 0 }, "by_project": [], "by_stream": [] },
+    {
+      "period_start": "2026-01-01T00:00:00Z",
+      "period_end": "2027-01-01T00:00:00Z",
+      "usage": { "events": 27000, "bytes": 10485760, "projects": 1 },
+      "by_project": [
+        { "project_id": "00000000-0000-4000-8000-000000000001", "events": 27000, "bytes": 10485760 }
+      ],
+      "by_stream": [{ "kind": "logs", "events": 27000, "bytes": 10485760 }]
+    }
+  ]
+}
+```
+
+上限のリセットには `current.reset_at` を使います。履歴の期間の終わりは使わないでください。`current` はバケットの合計ではなく、その日付は履歴の期間の日付と異なることがあります。
+
+最後のバケットには、終わっていない現在の暦上の期間が含まれます。終了の時刻が未来でも、LogBrew が未来の使用量を測定したという意味ではありません。値が0のバケットは、LogBrew がそのバケットで使用量を数えなかったという意味です。
+
+バケットの `usage.projects` は、そのバケットで使用量があるプロジェクトの数です。これらを足してプロジェクトの数を求めないでください。所有するプロジェクトの数には `current.usage.projects` を使います。
+
+イベントとバイトは単位が違うため、別の系列としてグラフにします。バケットに含まれるのは使用量で、費用ではありません。グラフに支出、請求書、API リクエストといったラベルを付けないでください。
+
+対応していない間隔は `422` を返します。
+
+```json
+{
+  "error": "Unsupported usage history interval",
+  "code": "validation_failed",
+  "next": "use interval=daily, weekly, monthly, or yearly",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+不明なクエリキーも、`validation_failed` 付きで `422` を返します。
+
+## サブスクリプションの準備状況
+
+`GET /api/account/subscription` は読み取り専用です。有料プランや組織の操作を有効にするかどうかの判断に使います。クォータの状態には、使用量のエンドポイントを使います。
+
+```bash
+curl "https://api.logbrew.co/api/account/subscription" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER"
+```
+
+無料アカウントでは次のレスポンスが返ります。`account_id` は合成の値です。
+
+```json
+{
+  "account_id": "00000000-0000-4000-8000-0000000000aa",
+  "tier": "free",
+  "billing_interval": "none",
+  "state": "free",
+  "access_state": "active",
+  "current_period_start": null,
+  "current_period_end": null,
+  "renews_at": null,
+  "cancels_at": null,
+  "organization_creation_allowed": false,
+  "organization_creation_blocker": "subscription_required",
+  "limits": {
+    "organizations": 0,
+    "members_per_organization": 0,
+    "projects_per_organization": 0,
+    "invitations_per_day": 0
+  },
+  "next": "<display text>",
+  "next_action": {
+    "code": "choose_plan",
+    "target": "pricing"
+  }
+}
+```
+
+`next` は表示用のテキストです。有料プランを販売しているかどうかで変わります。返されたテキストを表示するか、`next_action` からローカライズします。`next` からプラン名を取り出してハードコードしないでください。
+
+列挙値：
+
+| フィールド | 値 |
+| --- | --- |
+| `tier` | `free`、`pro`、`scale` |
+| `billing_interval` | `none`、`monthly`、`yearly` |
+| `state` | `free`、`trialing`、`active`、`past_due`、`paused`、`canceled` |
+| `access_state` | `free`、`trialing`、`active` では `active`。`past_due`、`paused`、`canceled` では `paused`。 |
+| `organization_creation_blocker` | `subscription_required`、`subscription_inactive`、`organization_limit_exceeded`、または `null` |
+
+それぞれのブロック要因には、`next_action` の組み合わせが1つあります。
+
+| `organization_creation_blocker` | `next_action.code` | `next_action.target` |
+| --- | --- | --- |
+| `null` | `create_or_manage_organization` | `organization` |
+| `subscription_required` | `choose_plan` | `pricing` |
+| `subscription_inactive` | `resume_subscription` | `billing` |
+| `organization_limit_exceeded` | `manage_organization_limit` | `organization` |
+
+ティアの値は識別子で、表示名ではありません。ローカライズしたクライアントでも変更しないでください。有料アカウントでもブロックされることがあります。組織の作成を有効にする前に `organization_creation_allowed` を確認してください。
+
+このエンドポイントは、組織の作成、招待の送信、ロールの変更、請求の変更を行いません。
+
+## ログアウト
+
+作業に合った最も狭い範囲を選びます。これらのエンドポイントは、アカウントやそのプロジェクトの削除、取り込みキーのローテーション、サードパーティのログインプロバイダーの許可の取り消しを行いません。
+
+| 範囲 | エンドポイント | 認証情報 |
+| --- | --- | --- |
+| 1つのアプリまたは CLI のログイン | `POST /api/auth/logout` | JSON ボディに、そのクライアントのリフレッシュトークン。Bearer トークンは不要です。 |
+| すべての LogBrew のログイン | `POST /api/auth/logout-all` | アカウントの Bearer トークンまたはブラウザーのセッション。ボディは不要です。 |
+| 現在のブラウザーのセッション | `POST /api/auth/web/logout` | 不要です。レスポンスがブラウザーの Cookie を消去します。 |
+
+### 1つのアプリまたは CLI のログイン
+
+リフレッシュトークンを持っているクライアントからリクエストを送信します。`Content-Type: application/json` を設定します。
+
+```json
+{
+  "refresh_token": "<current refresh token>"
+}
+```
+
+人やエージェントに、リフレッシュトークンを出力させたり貼り付けさせたりしないでください。成功したレスポンスは `200` です。
+
+```json
+{
+  "revoked": true,
+  "next_action": {
+    "code": "clear_local_session",
+    "target": "local_credentials"
+  }
+}
+```
+
+これは、リフレッシュトークンのファミリーを1つ無効化します。LogBrew は、そのログインでの以降のリフレッシュを拒否します。アカウントのほかのログインは変わりません。クライアントがすでに持っているアクセストークンは、期限が切れるまで有効です。アカウントの認証情報が漏えいした可能性がある場合は、[すべての LogBrew のログイン](#every-logbrew-login)を使います。
+
+レスポンスを受け取ったら、クライアントはローカルの認証情報を削除します。同じ有効なリフレッシュトークンをもう一度送信しても、レスポンスは同じ `200` です。トークンが無効、期限切れ、またはアクセストークンの場合、レスポンスは `code: "unauthorized"` と `next_action.code: "authorize_request"` 付きの `401` です。この場合も、ローカルの認証情報を削除します。`logbrew logout` はこのエンドポイントを使います。
+
+### <span id="every-logbrew-login">すべての LogBrew のログイン</span>
+
+<Warning>
+  このリクエストは、アカウントのすべてのクライアントをログアウトさせます。エージェントが送信する前に、アカウントの所有者の承認を得てください。
+</Warning>
+
+成功したレスポンスは `200` です。
+
+```json
+{
+  "revoked": true,
+  "revoked_before": "2026-09-07T12:00:00.123Z",
+  "next_action": {
+    "code": "clear_local_session",
+    "target": "local_credentials"
+  }
+}
+```
+
+`revoked_before` はその時刻自体を含み、ミリ秒の精度です。LogBrew は、その時刻以前のサインインによるアクセストークン、ブラウザーのセッション、リフレッシュトークンを拒否します。そのようなサインインから後でリフレッシュしたトークンも拒否されます。現在のライブフィードのセッションは終了し、レスポンスはブラウザーのセッション Cookie を消去します。その時刻より後のサインインは有効なままです。各クライアントは、ローカルの LogBrew の認証情報を削除し、もう一度サインインする必要があります。
+
+もう一度サインインして、このリクエストを自動で繰り返さないでください。新しいリクエストは、新しいサインインも無効化します。
+
+レスポンスが失われた場合は、すべてのログインが無効化されたと報告しないでください。後で古い認証情報が `401` を返しても、成功のレスポンスの代わりにはなりません。その他の回復の手順は、[不正利用されたアカウントを保護する](/ja/guides/troubleshooting#secure-a-compromised-account)を読んでください。
+
+### ブラウザーのセッション
+
+`POST /api/auth/web/logout` は、ブラウザーの `logbrew_session` Cookie を消去し、ボディなしで `204 No Content` を返します。ブラウザーから呼び出してください。セッションの Cookie をコマンドにコピーしないでください。このリクエストは、ほかのクライアントをログアウトさせず、Cookie の値のコピーも無効化しません。すべてのセッションを無効化するには、[すべての LogBrew のログイン](#every-logbrew-login)を使います。
+
+### ログアウトのエラーから回復する
+
+| 結果 | 回復方法 |
+| --- | --- |
+| `POST /api/auth/logout` で `401` | クライアントのローカルの認証情報を削除します。別の種類の認証情報を送信しないでください。 |
+| `POST /api/auth/logout-all` で `401` | ユーザーがまだアクセスを必要としている場合は、信頼できるクライアントからサインインします。リクエストを繰り返す前に、もう一度承認を得てください。 |
+| `405` | `next` が示すメソッドを、ユーザーが承認した範囲でだけ使います。 |
+| `POST /api/auth/logout` で `invalid_json` | 文字列の `refresh_token` を含む JSON オブジェクトを、`Content-Type: application/json` 付きで送信します。トークンは出力しないでください。 |
+| タイムアウトまたは `5xx` のステータス | 成功したと報告しないでください。サインインとログアウトを自動で繰り返すループを始めないでください。[書き込みの再試行のルール](/ja/reference/api-errors#writes)に従います。 |
+
+テレメトリのルート、フィルター、ページネーションについては、[テレメトリ API](/ja/reference/telemetry-api)を読んでください。

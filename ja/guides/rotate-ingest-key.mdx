@@ -1,0 +1,137 @@
+---
+title: "API キーのローテーション：LogBrew の取り込みキーを交換する"
+sidebarTitle: "取り込みキーのローテーション"
+description: "LogBrew の取り込みキーをローテーションします。計画的な無効化の前に新しいキーをテストし、認証情報を漏らさずにエラーから回復します。"
+---
+
+ローテーションは、プロジェクトの取り込みキーを置き換えます。プロジェクトや保存済みのテレメトリは変わりません。キーの管理にはアカウントの認証を使います。取り込みキーはテレメトリの送信にしか使えません。キーの管理はできません。
+
+始める前に、[CLI をインストールしてサインイン](/ja/guides/cli)します。`LOGBREW_PROJECT_ID` にプロジェクトの UUID を設定します。`LOGBREW_API_URL` に `https://api.logbrew.co` を設定します。例では Bash、curl 7.76.0 以降、jq を使います。
+
+計画的なローテーションでは、古いキーを無効化する前に、新しいキーを作成、デプロイ、テストします。ローテーションの間隔はセキュリティポリシーで決めます。キーに有効期限がある場合は、その日より前に置き換えます。
+
+<Warning>
+  漏えいしたキーはセキュリティインシデントです。新しいキーをデプロイする前でも、すぐに無効化してください。無効化したキーを使い続けるアプリケーションは、テレメトリを送信できません。
+</Warning>
+
+<Steps>
+  <Step title="新しいキーを作成する">
+    `POST /api/projects/{project_id}/ingest-keys` は、空でない120文字以内の `label` を受け付けます。`kind` は `cli`、`sdk`、`browser`、`server`、`artifact` のいずれかです。`artifact` キーはテレメトリを送信できません。省略可能な `expires_at` には、未来の RFC3339 時刻を指定する必要があります。
+
+    古いキーと同じ `kind` を使います。CLI は、`--kind` を省略すると `sdk` を、`--label` を省略すると `CLI-created SDK key` を使います。CLI には有効期限のフラグがありません。`expires_at` を設定するには API を使います。
+
+    CLI は、1回だけ表示されるトークンを、ソース管理の外にある所有者専用の新しいファイルに保存します。出力するのはメタデータで、トークンは出力しません。
+
+    ```bash
+    : "${LOGBREW_PROJECT_ID:?set LOGBREW_PROJECT_ID}" &&
+    : "${LOGBREW_REPLACEMENT_KEY_FILE:?choose a new private key file}" &&
+    logbrew projects keys create "$LOGBREW_PROJECT_ID" \
+      --ingest-key-file "$LOGBREW_REPLACEMENT_KEY_FILE" \
+      --label "checkout production rotation" --kind server --json
+    ```
+
+    コマンドが成功してから先に進みます。返された `ingest_key.id` を `NEW_KEY_ID` に設定します。
+
+    結果がはっきりしない場合は、まったく同じコマンドをもう一度実行します。CLI は保留中の再試行用キーを再利用します。この再試行では `--abandon-retry` を使わないでください。
+
+    API を直接呼び出すクライアントは、レスポンスでトークンを1回だけ受け取ります。再試行するには、同じ `Idempotency-Key` ヘッダーと同じボディを送信します。24時間以内であれば、その再試行は同じキーを返します。トークンを出力、コミット、共有しないでください。
+  </Step>
+
+  <Step title="古いキーを有効にしたまま新しいキーをデプロイする">
+    新しいトークンを、保護されたデプロイ設定に入れます。アプリをデプロイします。古いキーは有効なままにします。どちらのトークンも、ソース、ビルド出力、ログに含めないでください。
+  </Step>
+
+  <Step title="合成イベントを1件送信する">
+    新しいトークンをシェル変数 `new_ingest_key` に読み込みます。出力はしないでください。新しいキーで合成のログを1件送信し、読み戻します。
+
+    ```bash
+    occurred_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+
+    curl --fail-with-body -sS "$LOGBREW_API_URL/api/telemetry/ingest" \
+      -H "Authorization: Bearer $new_ingest_key" \
+      -H "Content-Type: application/json" \
+      --data @- <<JSON &&
+    {
+      "project_id": "$LOGBREW_PROJECT_ID",
+      "environment": "production",
+      "release": "ingest-key-rotation@1",
+      "service_name": "checkout-api",
+      "sdk_name": "native-api",
+      "sdk_version": "0.1.0",
+      "items": [
+        {
+          "type": "log",
+          "data": {
+            "level": "info",
+            "message": "ingest key rotation check",
+            "source": "setup",
+            "attributes": {},
+            "occurred_at": "$occurred_at"
+          }
+        }
+      ]
+    }
+    JSON
+
+    logbrew read logs --project "$LOGBREW_PROJECT_ID" \
+      --release ingest-key-rotation@1 \
+      --environment production \
+      --since "$occurred_at" \
+      --json
+    ```
+
+    読み取りで、同じ `occurred_at` のこのログが返ってから先に進みます。以前のローテーション確認用のログでは、新しいキーが動くことの証明になりません。デプロイしたアプリがテレメトリを送信していることも確認します。コマンドが失敗したら、止めてレスポンスを読みます。漏えいしていない限り、古いキーは有効なままにします。
+  </Step>
+
+  <Step title="秘密情報を含まないキーのメタデータを一覧表示する">
+    アカウントの認証から `LOGBREW_ACCOUNT_BEARER` を設定します。古いキーの ID を確認します。`NEW_KEY_ID` が `active` であることを確認します。
+
+    ```bash
+    (
+      set -o pipefail
+      curl --fail-with-body -sS "$LOGBREW_API_URL/api/projects/$LOGBREW_PROJECT_ID/ingest-keys" \
+        -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+        | jq -e 'select(type == "array") | map({id, label, kind, token_prefix, status, created_at, expires_at, revoked_at})'
+    )
+    ```
+
+    レスポンスは、トークンを含まないキーのメタデータの配列です。ステータスは `active`、`expired`、`revoked` のいずれかです。`expires_at` の時刻を過ぎたキーは `expired` になります。
+  </Step>
+
+  <Step title="古いキーだけを無効化する">
+    一覧から `OLD_KEY_ID` を設定します。このコマンドは、2つの ID が異なる場合だけ古いキーを無効化します。
+
+    ```bash
+    if [ -n "${OLD_KEY_ID:-}" ] && [ -n "${NEW_KEY_ID:-}" ] \
+      && [ "$OLD_KEY_ID" != "$NEW_KEY_ID" ]; then
+      (
+        set -o pipefail
+        curl --fail-with-body -sS -X DELETE \
+          "$LOGBREW_API_URL/api/projects/$LOGBREW_PROJECT_ID/ingest-keys/$OLD_KEY_ID" \
+          -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+          | jq -e --arg id "$OLD_KEY_ID" \
+            'select(.id == $id and .status == "revoked") | {id, label, kind, token_prefix, status, created_at, expires_at, revoked_at}'
+      )
+    else
+      printf '%s\n' 'Set different old and replacement key IDs before revocation.' >&2
+      false
+    fi
+    ```
+
+    `DELETE` はべき等です。`status: "revoked"` と `revoked_at` が設定されたキーのメタデータを返します。レスポンスがはっきりしない場合も、安全に繰り返せます。
+
+    `unset new_ingest_key` を実行します。キーのファイルは、秘密情報のポリシーに沿って扱います。
+  </Step>
+</Steps>
+
+## 安全に回復する
+
+| レスポンス | 次のステップ |
+| --- | --- |
+| `404`、`code: "not_found"` | アカウントがそのプロジェクトとキーの ID を所有していることを確認します。`next_action.code: "check_resource"` に従います。ほかの ID を試さないでください。 |
+| `code: "validation_failed"` | 示されたフィールド、値、タイムスタンプを直します。`next` と `next_action` に従います。 |
+| キーの管理で `401` または `403` | 取り込みキーではなく、アカウントの認証を使います。 |
+| 取り込みリクエストで `401`、`code: "ingest_key_invalid"` | キーが無効化済み、期限切れ、またはテレメトリに使えないキーです。選んだプロジェクトの、有効な新しいキーを使います。`next_action.code: "configure_ingest_key"` に従います。 |
+| 取り込みリクエストで `401` または `403` | 選んだプロジェクトの新しい取り込みキーを使います。アカウントの認証情報は使わないでください。 |
+
+それでもローテーションが失敗する場合は、[問題を報告](/ja/guides/report-a-problem)してください。共有するのはキーのメタデータだけにします。認証情報、ヘッダー、生のテレメトリ、顧客のデータ、ローカルのパス、ソースコードは含めないでください。

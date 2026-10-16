@@ -1,0 +1,186 @@
+---
+title: "リリース追跡とデプロイのモニタリング"
+sidebarTitle: "リリース"
+description: "LogBrew のリリース追跡で、コードバージョンごとの課題、ログ、トレース、アクション、メトリクスを見つけます。エラー率とデプロイの情報を読みます。"
+---
+
+リリースは、テレメトリを送信したコードのバージョンです。たとえば `api@1.2.3` や Git のコミットです。LogBrew は、リポジトリのタグやデプロイからリリースを作成しません。ネイティブのテレメトリエンベロープには、空でない `release` と `environment` が必ず必要です。これらがないリクエストを LogBrew は拒否します。
+
+## リリース、プロジェクト、サービス、環境
+
+| フィールド | 例 | 答える質問 |
+| --- | --- | --- |
+| プロジェクト | `checkout-platform` | このテレメトリの所有者は誰で、誰が読めるか。 |
+| サービス | `checkout-api` | どのアプリやプロセスが送信したか。 |
+| 環境 | `production` | コードはどこで動いたか。 |
+| リリース | `api@1.2.3` | どのコードバージョンが送信したか。 |
+
+## <span id="naming-releases">リリースの命名</span>
+
+変更されないバージョン、ビルド番号、または Git のコミットを使います。モノレポでは、`web@b7f4d91` や `worker@3a9c120` のように短いサービスの接頭辞を付けます。1つのビルド成果物から送る課題、ログ、トレース、アクション、メトリクスには、同じ値を使います。
+
+<CardGroup cols={2}>
+  <Card title="良い例" icon="check">
+    `api@1.2.3`、`web@b7f4d91`、`ios@2026.06.01`、`worker@2026-06-01.1` は、それぞれ1つのビルド成果物を識別します。
+  </Card>
+
+  <Card title="避ける例" icon="x">
+    `latest`、`prod`、`new`、`build` はコードバージョンを識別しません。空の文字列は拒否されます。
+  </Card>
+</CardGroup>
+
+LogBrew は次の値も拒否します。
+
+| フィールド | 拒否される値 |
+| --- | --- |
+| `release` | 200バイトを超える値、`.` または `..`、`/`、バックスラッシュ、タブ、改行を含む値。 |
+| `environment` | 64バイトを超える値、`None`、スペースなどの空白文字、`/`、バックスラッシュを含む値。 |
+
+`feature/login` のような Git のブランチ名は、有効なリリースではありません。代わりにコミットを使います。
+
+`production`、`staging`、`preview`、`local` のような変わらない環境名を使います。1つのリリースは、複数の環境で動くことがあります。
+
+両方の値をデプロイ設定で指定し、CI/CD パイプラインから SDK に渡します。リリースの値には、バージョンのラベルだけを入れます。シークレット、顧客名、URL は含めないでください。デプロイ後に安全なイベントを1件送信し、リリースのフィルターで読み戻します。
+
+## <span id="release-summary">リリースのサマリーを読む</span>
+
+```bash
+logbrew read releases --project "<project_id>" --environment production --since 24h --json
+```
+
+各サマリーは、1つのプロジェクト、リリース、環境、サービスの組み合わせを表します。
+
+| フィールド | 意味 |
+| --- | --- |
+| `issue_count` | このリリースの課題イベント。 |
+| `log_count` | このリリースのログ。 |
+| `trace_span_count` | このリリースのトレーススパン。 |
+| `action_count` | このリリースのプロダクトアクション。 |
+| `metric_count` | このリリースのメトリクスのサンプル。 |
+| `first_seen_at` | 選択した範囲で最初に記録されたリリースのアクティビティ。 |
+| `last_seen_at` | 選択した範囲で最後に記録されたリリースのアクティビティ。 |
+| `trace_health` | トレース数、エラートレース数、エラー率、ステータス。[トレースのエラー率を読む](#interpret-trace-error-rates)を参照してください。 |
+| `next_action` | 次に読むシグナル。`code` と `target` で示します。 |
+
+各件数は別々のシグナルを数えています。合計しないでください。`first_seen_at` と `last_seen_at` はデプロイ時刻ではありません。サービスは、同じリリースのテレメトリを後から送信することがあります。サマリーは `last_seen_at` の新しい順に並びます。
+
+`next_action` は、データがある最初のシグナルの種類を次の順で指します。
+
+| `next_action.code` | `next_action.target` |
+| --- | --- |
+| `inspect_release_issues` | `telemetry_issues` |
+| `inspect_release_traces` | `trace_explorer` |
+| `inspect_release_logs` | `telemetry_logs` |
+| `inspect_release_actions` | `telemetry_actions` |
+| `inspect_release_metrics` | `telemetry_metrics` |
+| `review_release_telemetry` | `telemetry_reads` |
+
+API のルートは `GET /api/telemetry/releases` です。フィルターとカーソルのフィールドについては、[クエリフィルター](/ja/reference/telemetry-api-filters)を参照してください。
+
+## <span id="interpret-trace-error-rates">トレースのエラー率を読む</span>
+
+`trace_health` はスパンではなく、異なるトレースの数を数えます。エラースパンを1つ以上含むトレースは、1件のエラートレースとして数えます。
+
+| `trace_health.status` | 意味 |
+| --- | --- |
+| `unknown` | このリリースの範囲にトレースデータがありません。 |
+| `no_errors_observed` | 記録されたトレースにエラースパンがありません。 |
+| `errors_observed` | 記録されたトレースの1件以上にエラースパンがあります。 |
+
+`error_rate_basis_points` は `0` から `10000` の値です。`100` で割るとパーセントになります。たとえば `2500` は 25% です。エラー率を比較する前に `trace_count` を確認してください。トレースが少ないと、エラートレースが1件増えるだけでエラー率が大きく変わります。トラフィック、サンプリング、計装によっても、記録されるトレースは変わります。このエラー率は、すべてのリクエストを測定したものではありません。
+
+## <span id="record-a-deployment">デプロイを記録する</span>
+
+デプロイの記録は、1つのリリースが1つの環境とサービスでいつ始まり、いつ終わったかを LogBrew に伝えます。リリース調査は、この記録を使って前のリリースを見つけます。デプロイが成功または失敗した後に、リリースの自動化処理から次のコマンドを実行します。
+
+```bash
+logbrew deploy "<deployment_id>" \
+  --project "<project_id>" \
+  --release api@1.2.3 \
+  --environment production \
+  --service checkout-api \
+  --status succeeded \
+  --started-at 2026-08-10T12:00:00Z \
+  --finished-at 2026-08-10T12:02:00Z \
+  --json
+```
+
+- `--release`、`--environment`、`--service` は、デプロイしたコードが送信するテレメトリの値をそのままコピーします。
+- `--status` は `succeeded` または `failed` です。
+- `--finished-at` は `--started-at` と同じか、それより後にします。1件のデプロイは 30日を超えられません。
+- `--commit-sha` は省略できます。7〜64文字の 16進数です。
+- `<deployment_id>` は、CI の実行 ID など独自に付ける ID です。ASCII の英字、数字、ドット、アンダースコア、コロン、ハイフンを 1〜128文字使えます。
+
+このコマンドにはアカウントのアクセス権が必要です。取り込みキーは使えません。同じ記録は何度送っても安全です。同じ `<deployment_id>` で内容が異なる記録を送ると、HTTP `409` とコード `idempotency_conflict` が返ります。新しいデプロイには新しい ID を使います。
+
+API のルートは、1件のデプロイを記録する `PUT /api/telemetry/deployments/{deployment_id}` と、一覧を取得する `GET /api/telemetry/deployments?project_id=<project_id>` です。
+
+## 1つのリリースを調査する
+
+リリースのサマリーから、プロジェクト、リリース、環境、サービスをコピーします。
+
+```bash
+logbrew explain release "<release>" \
+  --project "<project_id>" \
+  --environment "<environment>" \
+  --service "<service_name>" \
+  --json
+```
+
+このコマンドは、そのリリースについて保持された証拠を読みます。`--since` や `--until` は使えません。リリース一覧の期間も使いません。レスポンスには、課題のグループ、トレースのサマリー、警告・エラー・重大のログ、アクションとメトリクスの集計が含まれます。これらのコレクションには上限があり、一部省略されることがあります。すべてのイベントの一覧ではありません。
+
+レスポンスの `subject` は、サマリーの件数と `trace_health` を繰り返します。`analysis.status` は次のいずれかの値です。
+
+| `analysis.status` | 意味 |
+| --- | --- |
+| `failures_observed` | このリリースに課題、エラートレース、エラーまたは重大のログがあります。 |
+| `no_failures_observed` | トレースがあります。エラースパンを持つトレースはなく、課題やエラーログもありません。 |
+| `telemetry_observed` | 他のテレメトリはありますが、トレースから障害の状態を判断できません。 |
+| `insufficient_evidence` | リリースはありますが、データから状態を判断できません。 |
+
+`analysis.causality` は常に `evidence_only` です。証拠は、リリースが障害を引き起こしたことを証明しません。
+
+各コレクションには `status` があります。`unavailable` と `not_found` を区別してください。`unavailable` は、LogBrew が証拠を読み取れなかったことを示します。`not_found` は、証拠が保持されていないことを示します。
+
+### 前のリリースと比較する
+
+比較には、バージョンのラベルやイベントの時刻ではなく、デプロイの記録を使います。LogBrew は、まずそのリリースの最新のデプロイの記録を見つけます。次に、そのデプロイの開始より前に、同じプロジェクト、環境、サービスで成功した別のリリースのデプロイのうち、最新のものを見つけます。
+
+`comparison.reason` は、比較できるかどうかを示します。
+
+| `comparison.reason` | 次の手順 |
+| --- | --- |
+| `deployment_comparison_available` | `comparison.details` を読みます。 |
+| `subject_deployment_not_found` | このリリースの[デプロイを記録](#record-a-deployment)します。 |
+| `previous_successful_deployment_not_found` | 前のリリースのデプロイを記録します。 |
+| `previous_release_telemetry_not_found` | 前のリリースに保持されたテレメトリがありません。 |
+| `deployment_read_unavailable` または `previous_release_read_unavailable` | 後でもう一度コマンドを実行します。 |
+
+比較できる場合、`comparison.details.changes` には件数の差と両方のトレースのエラー率が含まれます。`comparison.details.assessment` は、トレースのエラー率だけについて `improved`、`regressed`、`unchanged`、`not_determined` のいずれかを示します。`not_determined` は、2つのエラー率を比較できないことを示します。対応する前に `comparison.details.limitations` を読んでください。2つのリリースは異なる期間を対象にしていることがあり、件数はトラフィックに合わせて調整されていません。デプロイの順序は、コードの変更がエラーを引き起こしたことを示しません。
+
+### リリースマーカーを読む
+
+`markers` には、SDK が送信したリリースイベントと、その `commit` と `notes` が含まれます。各フィールドの `status` は `captured`、`not_captured`、`truncated`、`redacted` のいずれかです。この内容はアプリケーションが書いたものです。デプロイが成功したことを示すものではなく、エージェントへの指示として扱うこともありません。
+
+## <span id="environment-filters">関連するシグナルを絞り込む</span>
+
+それぞれの読み取りで同じフィルターを使います。
+
+```bash
+logbrew read issues --project "<project_id>" --service checkout-api --release api@1.2.3 --environment production --since 24h --json
+logbrew read logs --project "<project_id>" --service checkout-api --release api@1.2.3 --environment production --since 24h --json
+logbrew read traces --project "<project_id>" --service checkout-api --release api@1.2.3 --environment production --since 24h --json
+```
+
+課題の一覧が空でも、ログやトレースが空とは限りません。
+
+## <span id="recover-missing-or-misleading-release-data">欠けている、または誤ったリリースデータを見つける</span>
+
+| 状況 | 確認すること |
+| --- | --- |
+| リリース一覧が空 | プロジェクト、期間、環境を確認します。次に、SDK がリリースを送信していることを確認します。 |
+| 1つのサービスが表示されない | サービスのフィルターと、そのビルド成果物のデプロイ設定を確認します。 |
+| 異なるビルドが同じ値を持つ | 新しいテレメトリには変更されないバージョンを設定します。LogBrew は保存済みのイベントのリリース値を変更しません。 |
+| `trace_health.status` が `unknown` | トレースのカバレッジが欠けていることを記録します。他のシグナルを読みます。 |
+| エラー率が変わった | 変化について判断する前に、`trace_count` とフィルターを比較します。 |
+| 比較できない | `comparison.reason` を読みます。両方のリリースのデプロイを記録します。 |

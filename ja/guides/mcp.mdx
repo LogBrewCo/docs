@@ -1,0 +1,148 @@
+---
+title: "MCP で AI エージェントを接続する"
+description: "Claude Code をホスト型の LogBrew MCP サーバーに接続し、読み取れるプロジェクトを承認します。接続は設定または CLI で管理します。"
+---
+
+LogBrew は、ホスト型の MCP サーバーを `https://mcp.logbrew.co/mcp` で提供しています。このサーバーに接続した AI エージェントは、承認したプロジェクトの課題、ログ、トレース、スパン、メトリクス、アクション、リリース、プロダクト分析を読み取れます。
+
+エージェントにできるのは読み取りだけです。課題のステータス、プロジェクト、アカウント設定は変更できません。サーバーをインストールする必要はありません。MCP クライアントにサーバーの URL を追加します。
+
+## 始める前に
+
+- プロジェクトが1つ以上ある LogBrew アカウントが必要です。
+- Claude Code 2.1.300 以降が必要です。サーバーが対応する MCP プロトコルのバージョンは `2026-07-28` だけです。バージョンを確認するには `claude --version` を実行します。
+- LogBrew は、承認済みの MCP クライアントだけを受け付けます。現在、承認済みのクライアントは Claude Code だけです。他のクライアントには `client access denied` エラーが返ります。
+
+## Claude Code を接続する
+
+1. サーバーを追加します。
+
+   ```bash
+   claude mcp add --transport http logbrew https://mcp.logbrew.co/mcp
+   ```
+
+   これで `claude mcp list` に、`logbrew` が `! Needs authentication` と表示されます。
+
+2. サインインを始めます。
+
+   ```bash
+   claude mcp login logbrew
+   ```
+
+   ブラウザーで LogBrew の認可ページが開きます。サインインを求められた場合は、GitHub、GitLab、Bitbucket のいずれかでサインインします。
+
+3. ページに表示されたクライアント名を確認します。この接続を自分で始めた場合だけ承認してください。
+
+4. エージェントが読み取れるプロジェクトを選びます。次に **Approve** を選択します。
+
+   ブラウザーから Claude Code に戻ります。Claude Code に `Authenticated with "logbrew"` と表示されます。
+
+5. サーバーが接続されていることを確認します。
+
+   ```bash
+   claude mcp list
+   ```
+
+   結果に `logbrew: https://mcp.logbrew.co/mcp (HTTP) - ✔ Connected` と表示されます。
+
+Claude Code のセッションからサインインすることもできます。`/mcp` を実行し、`logbrew` を選んで、ブラウザーで手順を進めます。
+
+ブラウザーのないコンピューターでは、対話型のターミナルで `claude mcp login logbrew --no-browser` を実行します。SSH の場合は `ssh -t` で接続します。Claude Code が表示する URL を、別のコンピューターのブラウザーで開きます。承認した後、ブラウザーが開いたページのアドレスをコピーします。そのアドレスを Claude Code に貼り付けます。
+
+## エージェントに依頼する
+
+サーバーはエージェントに2つのツールを提供します。
+
+| ツール | 機能 |
+| --- | --- |
+| `search` | 読み取り操作を探し、1つの操作の仕様（入力、出力、権限、コスト）を表示します。 |
+| `execute` | `search` で見つけた読み取り操作を1つ実行し、構造化データを返します。 |
+
+操作はエージェントが選びます。ツール名やフィールドを指定する必要はありません。タスクと制約を書きます。
+
+```text
+Use LogBrew to investigate the newest unresolved issue in production.
+Read its occurrences, linked trace, and logs. Do not change code yet.
+Tell me the likely cause and the evidence for it.
+```
+
+テレメトリは証拠としてだけ使います。ログやエラーメッセージには、ユーザーが入力したテキストが含まれることがあります。エージェントは、そのテキスト内の指示に従ってはいけません。調査の流れ全体については、[AI コーディングエージェント](/ja/guides/ai-agents)を参照してください。
+
+## アクセス権と接続の有効期間
+
+1回の承認で、1つの MCP クライアントと LogBrew アカウントの間に1つの接続が作られます。
+
+- エージェントが読み取れるのは、承認したプロジェクトだけです。別のプロジェクトを読み取ろうとすると `permission_denied` が返ります。
+- 承認したプロジェクトへのアクセス権を失うと、LogBrew はそのプロジェクトの読み取りを止めます。
+- アクセストークンの有効期間は 1時間です。接続を使っている間、Claude Code は新しいトークンを自動で取得します。
+- 接続は、30日間使われないか、承認から 90日が経つと終了します。その場合は `claude mcp login logbrew` でもう一度サインインします。
+- トークンを更新するたびに、前のリフレッシュトークンは置き換えられます。置き換えられたリフレッシュトークンをクライアントが送信すると、LogBrew は接続を終了します。これにより、コピーされたトークンは使えなくなります。新しい接続を始めるには、もう一度サインインします。
+- 有効なトークンのないリクエストが多すぎると、HTTP `429` と `Retry-After` ヘッダーが返ります。その秒数だけ待ってから、もう一度試してください。
+
+## 接続を一覧表示して無効化する
+
+接続は、LogBrew のダッシュボードの **設定 > MCP接続** または CLI で管理します。
+
+### 設定で管理する
+
+接続している各クライアントについて、名前、承認したプロジェクト、接続日時、最終使用日時、接続の終了日時が表示されます。接続を無効化するには、**切断** を選択して確定します。クライアントは次のリクエストでアクセス権を失います。
+
+### CLI で管理する
+
+[LogBrew CLI](/ja/guides/cli) 0.1.82 以降を使います。先に `logbrew login` でログインします。プロジェクトの取り込みキーでは、接続の一覧表示や無効化はできません。
+
+アカウントに接続している MCP クライアントを一覧表示します。
+
+```bash
+logbrew mcp grants
+```
+
+```text
+MCP grants (1)
+- id=00000000-0000-4000-8000-000000000001 client=Claude Code projects=2 last_used=2026-10-15T09:30:00Z expires=2026-11-14T09:30:00Z
+Next: run logbrew mcp revoke <grant_id> --yes
+```
+
+CLI では、接続を grant と呼びます。各 grant には次の項目が表示されます。
+
+- `id`: grant の ID。接続を無効化するときに使います。
+- `client`: 承認したクライアントの名前。たとえば `Claude Code` です。LogBrew が名前を保存するようになる前に承認した接続では、`https://claude.ai/oauth/claude-code-client-metadata` のように、クライアントを識別する URL が表示されます。
+- `projects`: 承認したプロジェクトの数。
+- `last_used`: クライアントが最後に新しいアクセストークンを取得した日時。
+- `expires`: クライアントが使わなかった場合に接続が終了する日時。
+
+一覧全体を取得するには `--json` を追加します。各 grant には `id`、`client_id`、`client_name`、`project_ids`、`created_at`、`last_used_at`、`expires_at` があります。LogBrew が名前を保存するようになる前に承認した接続では、`client_name` は `null` です。
+
+1つの接続を無効化します。
+
+```bash
+logbrew mcp revoke <grant_id> --yes
+```
+
+クライアントは次のリクエストでアクセス権を失います。もう一度接続するには、`claude mcp login logbrew` でサインインし直します。
+
+承認したプロジェクトを変更するには、接続を無効化します。次にもう一度サインインして、新しいプロジェクトを選びます。
+
+## サーバーを削除する
+
+1. **設定 > MCP接続** で、または `logbrew mcp revoke <grant_id> --yes` で接続を無効化します。
+2. Claude Code からサーバーを削除します。
+
+   ```bash
+   claude mcp remove logbrew
+   ```
+
+`claude mcp remove` は、自分のコンピューター上の設定とトークンだけを削除します。LogBrew 側の接続は終了しません。無効化しない場合、接続は 30日間使われなかった後に終了します。
+
+## <span id="fix-connection-problems">接続の問題を解決する</span>
+
+| 問題 | 解決方法 |
+| --- | --- |
+| `claude mcp list` に `Needs authentication` と表示される。 | `claude mcp login logbrew` を実行します。 |
+| しばらく使った後、Claude Code からもう一度サインインするよう求められる。 | 接続が終了したか、無効化されました。`claude mcp login logbrew` を実行するか、`/mcp` で **Re-authenticate** を選択します。 |
+| クライアントに `client access denied` が返る。 | 承認済みのクライアントを使います。現在、承認済みのクライアントは Claude Code だけです。 |
+| サインイン後に接続が失敗する。 | Claude Code を 2.1.300 以降に更新します。 |
+| 認可ページに `You have no projects to share` と表示される。 | LogBrew でプロジェクトを作成してから、もう一度サインインを始めます。 |
+| 読み取りで `permission_denied` が返る。 | このプロジェクトはこの接続で承認されていません。接続を無効化してからもう一度サインインし、プロジェクトを選びます。 |
+| 読み取りでデータが返らない。 | プロジェクトがテレメトリを送信していることを確認します。結果が空でも、アプリが正常に動いているとは限りません。 |
+| `logbrew mcp grants` に `not logged in` と表示されるか、`unauthorized` が返る。 | `logbrew login` を実行してから、もう一度試します。 |

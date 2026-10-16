@@ -1,0 +1,211 @@
+---
+title: "Node.js でイベントトラッキングを設定する"
+sidebarTitle: "プロダクトイベントの取得"
+description: "Node.js から、分類済みのプロダクトイベントを、型付きのユーザーとセッションとともに送信します。ローカルで取得をテストし、CLI で結果を読みます。"
+---
+
+プロダクトイベントを使うと、アプリでのユーザーの操作を名前付きで記録できます。たとえば、チェックアウトを開く、購入を完了するといった操作です。SDK はクリックのリスナーをインストールせず、フォームの内容も収集しません。各イベントはアプリのコードで記録します。
+
+数え方のルールとレポートの種類については、[プロダクト分析](/ja/concepts/product-analytics)を参照してください。
+
+## テストを準備する
+
+Node.js 18 以降のアプリと、読み取り権限のある LogBrew プロジェクトを使います。テレメトリを送信したことがない場合は、[クイックスタート](/ja/quickstart)から始めてください。このテストは顧客のアクティビティと分けて行います。
+
+アプリのディレクトリでパッケージをインストールします。
+
+```bash
+npm install @logbrew/sdk@0.1.28 @logbrew/node@0.1.12
+```
+
+プロジェクトのサーバー用取り込みキーを使います。キーはソース管理の外にある `LOGBREW_SERVER_API_KEY` に保管します。サーバー用のキーをブラウザーのバンドルに含めないでください。アカウントのアクセストークンは結果の読み取りに使います。SDK の設定には使いません。
+
+## 1つのイベントが何を意味するか決める
+
+プロダクトに関する問いから始めます。たとえば、ユーザーはチェックアウトを開いた後に送信しているか、という問いです。各イベントには、固定の名前、正確なきっかけ、記録するアプリ内の場所を1つずつ決めます。
+
+| イベント名 | きっかけ |
+| --- | --- |
+| `checkout.opened` | アプリがチェックアウトを開いたとき。購入ではありません。 |
+| `checkout.submitted` | アプリが送信操作を受け付けたとき。支払いの成功ではありません。 |
+| `checkout.completed` | アプリが完了を確認したとき。クリックやネットワークの再試行ごとには記録しないでください。 |
+
+イベント名は、リリースや言語が変わっても同じにします。メールアドレス、注文番号、URL、ユーザーが入力したテキストから名前を作らないでください。
+
+カスタムプロパティには、承認済みの少数の値だけを使います。たとえば、`checkout_mode` は `guest` または `signed_in` にします。値ごとに新しいイベント名を追加しないでください。フォームの内容は送信しないでください。
+
+1つの業務上の操作は、1か所だけで記録します。ブラウザーとサーバーの両方で同じ操作を記録すると、合計が2倍になります。
+
+## 正しいアクティビティの種類を使う
+
+| 種類 | 意味 | 取得方法 |
+| --- | --- | --- |
+| `interaction` | アプリで定義したプロダクトアクション。 | 下の例のとおり `createProductActionAttributes` を使います。 |
+| `page_view` | ブラウザーのページビュー。 | ブラウザー SDK のページビューの取得を使います。 |
+| `screen_view` | アプリのスクリーンビュー。 | モバイル用のスクリーンビューのヘルパーを使います。 |
+
+`createProductActionAttributes` は、イベントのメタデータに `analyticsSchemaVersion: 1` と `analyticsKind: "interaction"` を設定します。ルートのテンプレートまたは画面名で `analyticsSurface` が設定されます。具体的な URL ではなく、`/orders/:id` のようなルートのテンプレートを使います。
+
+イベント名で種類は決まりません。`page_view` という名前のインタラクションも、インタラクションのままです。ログ、課題、スパンはプロダクトイベントではありません。その他のランタイムについては [SDK 連携](/ja/guides/sdk-ingestion)を参照してください。
+
+## <span id="set-users-and-sessions-on-each-event">各イベントにユーザーとセッションを設定する</span>
+
+- サインインしたユーザーには、`context.subject` に `kind: "user"` の安定した ID を設定します。
+- 匿名の訪問者には、`kind: "anonymous"` の別の ID を使います。
+- アプリのセッション ID を `context.session.id` に入れます。セッションの間は同じ ID を使い続けます。
+
+氏名、メールアドレス、IP アドレス、アクセストークンを ID に使わないでください。安定した ID は、1人のユーザーの操作を結び付けます。データを匿名にするものではありません。
+
+共有のサーバークライアントに、デフォルトのユーザーやセッションを設定しないでください。各イベントを生んだリクエストのサブジェクトとセッションを渡します。SDK はこれらの ID を作らず、ログイン、ログアウト、アカウントの切り替えも検出しません。LogBrew は、ログイン後に匿名サブジェクトをユーザーに統合しません。
+
+## ローカルで例を実行する
+
+この例を `product-events.mjs` として保存します。匿名の訪問、サインイン、2人のユーザーにわたる5件のテストアクションを記録します。クライアントは、共有のサービスとデプロイのコンテキストだけを持ちます。このテストでは自動送信をオフにしています。
+
+```js
+import { randomUUID } from "node:crypto";
+import { createProductActionAttributes, SdkError } from "@logbrew/sdk";
+import { createLogBrewNodeClient } from "@logbrew/node";
+
+try {
+  const client = createLogBrewNodeClient({
+    automaticDelivery: false,
+    context: {
+      schemaVersion: 1,
+      resource: {
+        service: { name: "analytics-check", version: "analytics@1" },
+        deployment: { environment: "development", release: "analytics@1" }
+      }
+    }
+  });
+  const startedAt = new Date().toISOString();
+  client.release(randomUUID(), startedAt, { version: "analytics@1" });
+  client.environment(randomUUID(), startedAt, { name: "development" });
+
+  function record(name, subject, sessionId) {
+    client.action(randomUUID(), new Date().toISOString(), {
+      ...createProductActionAttributes({
+        name,
+        routeTemplate: "/checkout",
+        metadata: { checkout_mode: subject.kind === "user" ? "signed_in" : "guest" }
+      }),
+      context: { schemaVersion: 1, subject, session: { id: sessionId } }
+    });
+  }
+
+  record("checkout.opened", { id: "anon_demo_a", kind: "anonymous" }, randomUUID());
+  const userSession = randomUUID();
+  record("checkout.submitted", { id: "user_demo_a", kind: "user" }, userSession);
+  record("checkout.completed", { id: "user_demo_a", kind: "user" }, userSession);
+  record("checkout.opened", { id: "anon_demo_b", kind: "anonymous" }, randomUUID());
+  record("checkout.submitted", { id: "user_demo_b", kind: "user" }, randomUUID());
+
+  if (process.argv.includes("--send")) {
+    const response = await client.shutdown();
+    console.log(JSON.stringify({
+      mode: "sent",
+      status_code: response.statusCode,
+      attempts: response.attempts
+    }));
+  } else {
+    const batch = JSON.parse(client.previewJson());
+    const actions = batch.events.filter(event => event.type === "action");
+    console.log(JSON.stringify({
+      mode: "local_preview",
+      actions: actions.length,
+      kinds: [...new Set(actions.map(event => event.attributes.metadata.analyticsKind))],
+      dropped: client.droppedEvents()
+    }));
+  }
+} catch (error) {
+  console.error(JSON.stringify({
+    ok: false,
+    error: error instanceof SdkError ? error.code : "capture_failed"
+  }));
+  process.exitCode = 1;
+}
+```
+
+`--send` を付けずにスクリプトを実行します。このコマンドはリクエストを送信しません。
+
+```bash
+LOGBREW_SERVER_API_KEY=local-preview-only node product-events.mjs
+```
+
+想定される出力：
+
+```json
+{"mode":"local_preview","actions":5,"kinds":["interaction"],"dropped":0}
+```
+
+リリースと環境のマーカーはプロダクトアクションではありません。この結果はローカルのキューだけを示します。LogBrew がイベントを受け取ったことは示しません。実際の顧客のコンテキストを持つアプリでは、`previewJson()` を出力しないでください。
+
+## ログインとログアウトを扱う
+
+- ログイン前は、各イベントに現在の匿名サブジェクトを付けて送信します。
+- ログイン後は、種類 `user` でユーザーの安定した ID を送信します。
+- ログアウトしたら、そのユーザーのコンテキストを使うのをやめます。プライバシーポリシーに沿って新しい匿名サブジェクトを作ります。
+- アカウントを切り替えたら、新しいユーザーの ID を使います。
+
+この例では、識別情報が変わると新しいセッションを始めます。セッションのルールは自分で決め、各イベントに適用してください。イベントのコンテキストは、そのイベントについてクライアントのサブジェクトとセッションを置き換えます。イベントでどちらかを省略すると、そのイベントはクライアントの値を使います。このため、この例ではクライアントにサブジェクトもセッションも設定していません。後で実行する処理では、その処理を始めたユーザーの識別情報を保持します。
+
+## 1回送信して結果を読む
+
+テスト用プロジェクトのサーバー用キーをプロセスの環境に設定します。次のコマンドを1回実行します。
+
+```bash
+node product-events.mjs --send
+```
+
+実行するたびに新しいイベント ID が作られるため、2回目の実行ではさらに5件のイベントが追加されます。プロセスが失敗すると、出力に SDK のエラーコードが含まれます。キーが拒否された場合は次のようになります。
+
+```json
+{"ok":false,"error":"unauthenticated"}
+```
+
+取り込みキーが有効で、テスト用プロジェクトのものであることを確認してください。アカウントにサインインしても、SDK のキーの問題は直りません。その他の失敗については [API エラー](/ja/reference/api-errors)と[トラブルシューティング](/ja/guides/troubleshooting)を参照してください。
+
+LogBrew がバッチを受け付けたら、ダッシュボードでイベントを探します。
+
+1. **分析** を開きます。
+2. **プロジェクト** でテスト用プロジェクトを選びます。
+3. **期間** で **24時間** を選びます。
+4. **上位イベント** に3つのイベント名、**上位サーフェス** に `/checkout` があることを確認します。
+
+プロジェクトにほかのアクティビティがあると、合計が変わります。サービス、リリース、環境を正確に指定して確認するには、サインインした [CLI](/ja/guides/cli) で概要を読みます。
+
+```bash
+logbrew analytics overview --project "<project_id>" --since 1h \
+  --service analytics-check --release analytics@1 \
+  --environment development --json
+```
+
+ほかにアクティビティのない期間で1回実行した場合、想定される結果は次のとおりです。
+
+- `/checkout` サーフェスで、すべてセッションのコンテキストを持つ5件のインタラクション。
+- ユーザーからのイベントが3件、匿名サブジェクトからのイベントが2件。
+- ユーザーが2人、匿名サブジェクトが2個、セッションが4件。
+
+ユニークユーザー数、サブジェクト数、セッション数は概算です。イベントの合計は、選んだ期間の中では正確です。このテストでは、コンバージョンや再訪は測定しません。
+
+| 結果 | 次に確認すること |
+| --- | --- |
+| プロダクトのアクティビティがない | 送信結果、プロジェクト、期間、サービス、リリース、環境を確認します。 |
+| アクティビティが分類されていない | `createProductActionAttributes` を使います。イベント名だけでは種類は決まりません。 |
+| ユーザー数が異なる | 各イベントの `context.subject` を確認します。匿名サブジェクトはユーザーとして数えません。 |
+| セッション数が異なる | 各イベントの `context.session.id` と、セッションのルールを確認します。 |
+| イベントが想定より多い | 繰り返し実行していないか、同じ操作を2か所で記録していないか確認します。 |
+
+## アプリでイベントをテストする
+
+取得の呼び出しをアプリのハンドラーに移します。各イベントの意味、種類、識別のルールは変えません。まずは合成のテストアカウントでテストします。
+
+| アプリのテスト | 想定される取得 |
+| --- | --- |
+| チェックアウトを開いて送信しない | `checkout.opened` だけ。 |
+| 入力チェックで失敗するフォームを送信する | `checkout.submitted` なし。フォームの内容は送信しないでください。 |
+| 送信を受け付けた後、支払いが失敗する | `checkout.submitted` あり、`checkout.completed` なし。 |
+| 完了を確認した後にリクエストを再試行する | 2件目の `checkout.completed` なし。 |
+| ログアウトして別のアカウントを使う | 以降のイベントは新しいサブジェクトとセッションを使う。 |
+
+ローカルのプレビューで確認できるのは取得です。受け付けられたバッチで確認できるのは送信です。どちらも、取得の呼び出しがアプリの正しい箇所で実行されることまでは示しません。
