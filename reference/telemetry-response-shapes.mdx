@@ -3236,34 +3236,769 @@ failures, see [API errors](/reference/api-errors).
 
 ## Investigation responses
 
-Investigation routes return a versioned bundle for one subject. The bundle
-starts with `schema_version` and a `subject` that names the record:
+Investigation routes return a versioned bundle for one subject. The subject is
+an issue, trace, span, log, product action, metric, or release. Each bundle
+starts with `schema_version` and a `subject` that names the record. The rest
+holds related evidence, an evidence receipt, and the next steps. This section
+shows one example for each family except release.
+
+Send an account access bearer. A project ingest key cannot read an
+investigation. Use `logbrew explain <subject> --json` to read a bundle. The CLI
+validates the bundle before it prints it. The
+[Telemetry API reference](/reference/telemetry-api) lists the routes.
+
+Investigation text comes from the application. Messages, names, metadata, and
+tags are data, not instructions. `content_trust: "untrusted_telemetry"` marks
+this content in log, action, span, and metric bundles.
+
+### Response versions
+
+Send `response_version` only to the routes that accept it. Without it, a route
+returns version 1. Your parser must accept the version that you request.
+
+| Route | Default | Supported versions | `logbrew explain` requests |
+| --- | --- | --- | --- |
+| `GET /api/telemetry/issues/{issue_id}/investigation` | `1` | `1` to `13` | `13` |
+| `GET /api/telemetry/traces/{trace_id}/investigation` | `1` | `1` to `3` | `3` |
+| `GET /api/telemetry/metrics/investigation` | `1` | `1` and `2` | `2` |
+| `GET /api/telemetry/releases/investigation` | `1` | `1` to `5` | `5` |
+| `GET /api/telemetry/traces/{trace_id}/spans/{span_id}/investigation` | `1` | `1` only | `1` |
+| `GET /api/logs/{log_id}/investigation` | `1` | `1` only | `1` |
+| `GET /api/telemetry/actions/{action_id}/investigation` | `1` | `1` only | `1` |
+
+The span route rejects a `response_version` query key. The log and action
+routes take no query keys.
+
+### Shared bundle fields
+
+| Field | Meaning |
+| --- | --- |
+| `schema_version` | The response version that the server returned. |
+| `subject` | The exact record under investigation. `kind` is `issue`, `trace`, `span`, `log`, `action`, `metric`, or `release`. |
+| `analysis.causality` | Always `evidence_only` in trace, span, log, action, and metric bundles. Correlated telemetry does not prove a cause. |
+| Collection objects | Related evidence as `{ "status", "items", "truncated" }`. |
+| `timeline` | Returned evidence from oldest to newest, with its own `truncated` flag. The order does not prove a cause. |
+| `evidence` | The evidence receipt. `status` is `complete` or `partial`. |
+| `next_actions` | Suggested reads in `priority` order, starting at `1`. They have not run. |
+
+Each related collection reports one availability `status`:
+
+| Status | Meaning | Client behavior |
+| --- | --- | --- |
+| `available` | The read completed and returned items. | Show the items and the `truncated` flag. |
+| `not_linked` | The subject has no identifier for this link, such as a trace ID. | Explain the missing link. Do not build one from timestamps. |
+| `not_found` | The read completed and found no retained evidence. | Show an empty result. |
+| `unavailable` | The optional read failed. The subject is still valid. | Keep the subject visible. Retry later. Do not show zero items as a result. |
+
+The evidence receipt has four sorted lists of stable field names:
+`captured_fields`, `missing_fields`, `redacted_fields`, and
+`truncated_fields`. `status` is `complete` only when the last three lists are
+empty. Redacted data is not missing data. Truncated data is not complete data.
+Do not fill in a redacted or truncated value.
+
+### Investigation limits
+
+These limits bound one response. A `truncated` flag or a `truncated_fields`
+entry shows that a limit omitted data.
+
+| Evidence | Limit |
+| --- | --- |
+| Related items in one collection | 20 |
+| Retained spans read for one trace | 1,000 |
+| Timeline items | 50 for log, action, and span bundles. 100 for trace and metric bundles. |
+| Structured attributes, properties, and metadata | 64 scalar values, 4 levels of objects or arrays, 16 items in each array, 512 characters in each string |
+| Correlation time window | 5 minutes before and after a log, action, or selected issue occurrence. For a trace or span, 5 minutes before the start and after the end, at most 24 hours. |
+
+Each family section lists its own limits.
+
+### Issue investigation response
+
+Use `GET /api/telemetry/issues/{issue_id}/investigation` to read the evidence
+for one occurrence of a grouped issue. The
+[issue investigation guide](/guides/investigate-an-issue) shows how to read
+the evidence in order. Request version 13:
+
+```bash
+curl --fail-with-body -sS -G \
+  "https://api.logbrew.co/api/telemetry/issues/$LOGBREW_ISSUE_ID/investigation" \
+  -H "Authorization: Bearer $LOGBREW_TOKEN" \
+  --data-urlencode "response_version=13" \
+  --data-urlencode "selection=recommended"
+```
+
+The query keys are `response_version`, `selection`, and `occurrence_id`.
+`selection` is `recommended`, `first`, or `latest`. The values are
+case-sensitive. In versions 2 to 13, an omitted selector uses `recommended`.
+Version 1 returns the latest retained occurrence and accepts no selector.
+Issue-list filters do not apply to this read.
+
+<Accordion title="Version 13 issue investigation example">
+
+This synthetic `200 OK` response has one handled `TypeError` occurrence with a
+linked trace. It has no request, breadcrumbs, related logs, or deployment
+evidence, so `evidence.status` is `partial`.
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 13,
   "subject": {
-    "kind": "action",
-    "id": "14141414-1414-4141-8141-141414141414",
+    "kind": "issue", "id": "11111111-1111-4111-8111-111111111111",
     "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-    "name": "checkout.submit",
-    "status": "failure",
-    "content_trust": "untrusted_telemetry",
+    "fingerprint": "checkout-cart-total", "status": "unresolved", "severity": "error",
+    "title": "TypeError",
+    "message": "Cannot read properties of undefined (reading 'total')",
+    "occurrence_count": 1, "first_seen_at": "2026-08-03T11:05:00Z",
+    "last_seen_at": "2026-08-03T11:05:00Z"
+  },
+  "event": {
+    "id": "22222222-2222-4222-8222-222222222222",
     "occurred_at": "2026-08-03T11:05:00Z",
-    "service_name": "checkout-api",
-    "environment": "production",
-    "release": "checkout@1.2.3"
+    "sdk": {"name": "@logbrew/node", "version": "0.1.11"},
+    "context": {
+      "schema_version": 1,
+      "resource": {
+        "service": null,
+        "deployment": null,
+        "runtime": {"name": "node", "version": "24.4.0"},
+        "framework": null,
+        "operating_system": {"name": "Linux", "version": "6.8", "build": null},
+        "device": {"family": null, "model": null, "architecture": "arm64"},
+        "application": null
+      },
+      "trace": {
+        "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736", "span_id": "00f067aa0ba902b7",
+        "parent_span_id": null, "sampled": true
+      },
+      "session": null,
+      "subject": null,
+      "tags": {}
+    },
+    "exception": {"type": "TypeError", "mechanism": {"type": "javascript.error", "handled": true}},
+    "exception_chain": {
+      "status": "captured",
+      "entries": [
+        {
+          "id": 0,
+          "parent_id": null,
+          "relationship": "reported",
+          "type": "TypeError",
+          "message": null,
+          "message_state": "redacted",
+          "module": null,
+          "mechanism": {"type": "javascript.error", "handled": true},
+          "stack_frames": [
+            {
+              "index": 0, "module": null, "function": "cartTotal", "file": "src/cart.ts",
+              "line": 42, "column": 17, "in_app": null, "source": "captured"
+            },
+            {
+              "index": 1, "module": null, "function": "handleCheckout",
+              "file": "src/routes/checkout.ts", "line": 88, "column": 9, "in_app": null,
+              "source": "captured"
+            }
+          ],
+          "stack_frames_state": "captured"
+        }
+      ],
+      "truncated": false
+    },
+    "stack_frames": [
+      {
+        "index": 0, "module": null, "function": "cartTotal", "file": "src/cart.ts",
+        "line": 42, "column": 17, "in_app": null, "source": "captured"
+      },
+      {
+        "index": 1, "module": null, "function": "handleCheckout",
+        "file": "src/routes/checkout.ts", "line": 88, "column": 9, "in_app": null,
+        "source": "captured"
+      }
+    ],
+    "breadcrumbs": [],
+    "breadcrumbs_truncated": false
+  },
+  "occurrence_selection": {
+    "requested": "recommended",
+    "reason": "only_retained_occurrence",
+    "selected": {
+      "id": "22222222-2222-4222-8222-222222222222",
+      "occurred_at": "2026-08-03T11:05:00Z",
+      "severity": "error",
+      "environment": "production",
+      "release": "checkout@1.2.3",
+      "service_name": "checkout-api",
+      "sdk": {"name": "@logbrew/node", "version": "0.1.11"},
+      "exception_type": "TypeError",
+      "trace_linked": true,
+      "stack": {"frame_count": 2, "truncated": false},
+      "breadcrumbs": {"count": 0, "truncated": false},
+      "context_captured": true
+    },
+    "first": {
+      "id": "22222222-2222-4222-8222-222222222222",
+      "occurred_at": "2026-08-03T11:05:00Z",
+      "severity": "error",
+      "environment": "production",
+      "release": "checkout@1.2.3",
+      "service_name": "checkout-api",
+      "sdk": {"name": "@logbrew/node", "version": "0.1.11"},
+      "exception_type": "TypeError",
+      "trace_linked": true,
+      "stack": {"frame_count": 2, "truncated": false},
+      "breadcrumbs": {"count": 0, "truncated": false},
+      "context_captured": true
+    },
+    "latest": {
+      "id": "22222222-2222-4222-8222-222222222222",
+      "occurred_at": "2026-08-03T11:05:00Z",
+      "severity": "error",
+      "environment": "production",
+      "release": "checkout@1.2.3",
+      "service_name": "checkout-api",
+      "sdk": {"name": "@logbrew/node", "version": "0.1.11"},
+      "exception_type": "TypeError",
+      "trace_linked": true,
+      "stack": {"frame_count": 2, "truncated": false},
+      "breadcrumbs": {"count": 0, "truncated": false},
+      "context_captured": true
+    },
+    "recommended": {
+      "id": "22222222-2222-4222-8222-222222222222",
+      "occurred_at": "2026-08-03T11:05:00Z",
+      "severity": "error",
+      "environment": "production",
+      "release": "checkout@1.2.3",
+      "service_name": "checkout-api",
+      "sdk": {"name": "@logbrew/node", "version": "0.1.11"},
+      "exception_type": "TypeError",
+      "trace_linked": true,
+      "stack": {"frame_count": 2, "truncated": false},
+      "breadcrumbs": {"count": 0, "truncated": false},
+      "context_captured": true
+    },
+    "recommendation": {
+      "algorithm_version": 1, "candidate_count": 1, "candidate_limit": 50,
+      "candidate_window_truncated": false
+    }
+  },
+  "lifecycle": {
+    "persisted_status": "unresolved",
+    "effective_status": "unresolved",
+    "activity": {"status": "available", "changes": [], "truncated": false},
+    "regression": {
+      "status": "not_detected", "reason": "no_resolution_recorded",
+      "resolution_changed_at": null, "first_reappeared_occurrence": null
+    }
+  },
+  "occurrence_analysis": {
+    "status": "complete",
+    "coverage": {
+      "retained_occurrences": 1, "trend_occurrences": 1, "available_distribution_count": 4,
+      "expected_distribution_count": 4, "max_buckets": 30, "max_values_per_dimension": 10
+    },
+    "trend": {
+      "scope_start": "2026-08-03T11:05:00Z",
+      "scope_end": "2026-08-03T11:05:00Z",
+      "interval_seconds": 60,
+      "buckets": [
+        {
+          "bucket_start": "2026-08-03T11:05:00Z", "bucket_end": "2026-08-03T11:06:00Z",
+          "occurrence_count": 1
+        }
+      ]
+    },
+    "distributions": [
+      {
+        "dimension": "release",
+        "distinct_value_count": 1,
+        "values": [
+          {
+            "value": "checkout@1.2.3", "version": null, "occurrence_count": 1,
+            "share_basis_points": 10000
+          }
+        ],
+        "other_occurrence_count": 0
+      },
+      {
+        "dimension": "environment",
+        "distinct_value_count": 1,
+        "values": [
+          {
+            "value": "production", "version": null, "occurrence_count": 1,
+            "share_basis_points": 10000
+          }
+        ],
+        "other_occurrence_count": 0
+      },
+      {
+        "dimension": "service",
+        "distinct_value_count": 1,
+        "values": [
+          {
+            "value": "checkout-api", "version": null, "occurrence_count": 1,
+            "share_basis_points": 10000
+          }
+        ],
+        "other_occurrence_count": 0
+      },
+      {
+        "dimension": "sdk",
+        "distinct_value_count": 1,
+        "values": [
+          {
+            "value": "@logbrew/node", "version": "0.1.11", "occurrence_count": 1,
+            "share_basis_points": 10000
+          }
+        ],
+        "other_occurrence_count": 0
+      }
+    ],
+    "limitations": []
+  },
+  "grouping": {"strategy": "sdk_fingerprint", "components": ["sdk_fingerprint"], "stack": null},
+  "cause": {
+    "status": "evidence_only",
+    "summary": null,
+    "provenance": null,
+    "signals": ["handled_exception", "error_trace_span"]
+  },
+  "fix": {
+    "status": "observed_frame",
+    "location": {
+      "component": null, "module": null, "function": "cartTotal", "file": "src/cart.ts",
+      "line": 42, "column": 17, "in_app": null
+    },
+    "provenance": "backend_observed"
+  },
+  "source_locator": {
+    "status": "not_found",
+    "repository_provider": null,
+    "repository_full_name": null,
+    "component_path": null,
+    "revision": null,
+    "revision_source": null,
+    "repository_relative_file": null,
+    "evidence": {
+      "status": "partial",
+      "captured_fields": ["source.service"],
+      "missing_fields": ["source.component"],
+      "redacted_fields": [],
+      "truncated_fields": []
+    }
+  },
+  "reproduction": {
+    "status": "insufficient_evidence",
+    "baseline_occurrence_id": "22222222-2222-4222-8222-222222222222",
+    "evidence": {
+      "status": "partial",
+      "captured_fields": [
+        "reproduction.baseline_occurrence", "reproduction.code_location",
+        "reproduction.expected_failure"
+      ],
+      "missing_fields": ["reproduction.trigger"],
+      "redacted_fields": [],
+      "truncated_fields": []
+    }
+  },
+  "impact": {
+    "occurrence_count": 1,
+    "first_seen_at": "2026-08-03T11:05:00Z",
+    "last_seen_at": "2026-08-03T11:05:00Z",
+    "affected_users": null,
+    "user_impact": {
+      "status": "not_captured",
+      "known_affected_users": null,
+      "count_method": "unavailable",
+      "coverage": {
+        "retained_occurrences": 1, "indexed_occurrences": 1,
+        "historical_unindexed_occurrences": 0, "identified_user_occurrences": 0,
+        "anonymous_subject_occurrences": 0, "missing_subject_occurrences": 1,
+        "privacy_filtered_subject_occurrences": 0, "index_coverage_basis_points": 10000,
+        "identified_user_coverage_basis_points": 0
+      },
+      "limitations": ["missing_subject_context"]
+    },
+    "reported": null
+  },
+  "correlations": {
+    "trace": {
+      "status": "available",
+      "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+      "summary": {
+        "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+        "span_count": 1,
+        "error_span_count": 1,
+        "service_count": 1,
+        "project_count": 1,
+        "started_at": "2026-08-03T11:04:59.950Z",
+        "duration_ms": 180,
+        "root_span": {
+          "span_id": "00f067aa0ba902b7", "parent_span_id": null, "name": "POST /checkout",
+          "operation": "http.server", "status": "error",
+          "started_at": "2026-08-03T11:04:59.950Z", "duration_ms": 180,
+          "service_name": "checkout-api"
+        },
+        "slowest_child_span": null,
+        "slowest_path": [],
+        "error_spans": [
+          {
+            "span_id": "00f067aa0ba902b7", "parent_span_id": null, "name": "POST /checkout",
+            "operation": "http.server", "status": "error",
+            "started_at": "2026-08-03T11:04:59.950Z", "duration_ms": 180,
+            "service_name": "checkout-api"
+          }
+        ],
+        "services": [
+          {
+            "service_name": "checkout-api", "span_count": 1, "error_span_count": 1,
+            "max_duration_ms": 180
+          }
+        ],
+        "releases": ["checkout@1.2.3"],
+        "environments": ["production"]
+      },
+      "truncated": false
+    },
+    "logs": {"status": "not_found", "items": [], "truncated": false},
+    "actions": {"status": "not_found", "items": [], "truncated": false},
+    "metrics": {"status": "not_found", "items": [], "truncated": false},
+    "related_issues": {"status": "not_found", "items": [], "truncated": false},
+    "release": {
+      "release": "checkout@1.2.3", "environment": "production",
+      "service_name": "checkout-api", "deployment_status": "not_found"
+    }
+  },
+  "evidence": {
+    "status": "partial",
+    "captured_fields": [
+      "context", "deployment.lookup", "exception", "exception.mechanism", "exception_chain",
+      "exception_chain.stack_frames", "grouping", "grouping.components",
+      "grouping.strategy", "grouping.strategy_details", "lifecycle.regression",
+      "lifecycle.status_history", "likely_fix_area", "occurrence.boundaries",
+      "occurrence.distribution.environment", "occurrence.distribution.release",
+      "occurrence.distribution.sdk", "occurrence.distribution.service",
+      "occurrence.recommendation", "occurrence.selection", "occurrence.trend", "release",
+      "sdk", "source_locator", "stack_frames", "trace"
+    ],
+    "missing_fields": [
+      "affected_users", "breadcrumbs", "deployment", "impact", "likely_root_cause",
+      "related_actions", "related_issues", "related_logs", "related_metrics", "request",
+      "source_locator.complete"
+    ],
+    "redacted_fields": ["exception_chain.messages"],
+    "truncated_fields": []
+  },
+  "next_actions": [
+    {
+      "priority": 1, "code": "inspect_code_location", "target": "source_code",
+      "reason": "likely_fix_location_available"
+    },
+    {
+      "priority": 2, "code": "inspect_trace", "target": "trace_summary",
+      "reason": "linked_trace_available"
+    },
+    {
+      "priority": 3, "code": "compare_release", "target": "release_summary",
+      "reason": "release_identity_available"
+    },
+    {
+      "priority": 4, "code": "improve_capture", "target": "sdk_configuration",
+      "reason": "evidence_incomplete"
+    }
+  ]
+}
+```
+
+</Accordion>
+
+| Field | Version | Meaning |
+| --- | --- | --- |
+| `subject` | 1 | The grouped issue. `first_seen_at`, `last_seen_at`, and `occurrence_count` describe the group. |
+| `event` | 1 | The selected occurrence: SDK, `context`, `exception`, `stack_frames`, and `breadcrumbs`. In version 1, `null` when no latest occurrence can be read. |
+| `cause` | 1 | `status` is `reported_hypothesis`, `evidence_only`, or `unknown`. `signals` lists the observed signals. |
+| `fix` | 1 | A code location. `status` is `reported_location`, `observed_application_frame`, `observed_frame`, `observed_underlying_exception_frame`, or `unknown`. |
+| `impact` | 1 | Occurrence counts and `user_impact`. `reported` holds application-reported impact or `null`. |
+| `correlations` | 1 | `trace`, `logs`, `actions`, `metrics`, and `release`. |
+| `occurrence_selection` | 2 | The requested selector, the reason, and summaries of the selected, first, latest, and recommended occurrences. |
+| `lifecycle` | 3 | `persisted_status`, `effective_status`, status activity, and `regression`. `effective_status` can be `regressed`. |
+| `occurrence_analysis` | 4 | Occurrence trend and the release, environment, service, and SDK distributions. |
+| `event.exception_chain` | 5 | Up to 8 linked exceptions. `relationship` is `reported`, `cause`, `context`, `aggregate_member`, or `suppressed`. |
+| `event.request` | 6 | `method`, `route_template`, and `response_status_code`. The key is absent when no request was captured. |
+| `grouping` | 7 | The grouping `strategy`, its `components`, and stack frame use. |
+| `correlations.release.deployment_status` | 8 | The deployment lookup state. `deployment`, `time_since_deployment_ms`, and `deployment_causality` appear only when a deployment was found. |
+| `correlations.related_issues` | 9 | Other issues on the same trace. |
+| `source_locator` | 10 | Repository, component, revision, and repository-relative file when LogBrew can link them. |
+| `reproduction` | 11 | `status` is `ready`, `partial`, or `insufficient_evidence`. |
+| `next_actions` code `verify_correction` | 12 | Appears when `reproduction.status` is `ready`. |
+| `impact.user_impact.count_method` | 13 | Reports an approximate distinct count as `approximate_distinct`. Earlier versions use an older value name. `unavailable` means no count. |
+
+Keys from a later version are absent from an earlier version. Do not read a
+missing key as `null`.
+
+`subject.status` and the `lifecycle` statuses report an archived issue as
+`ignored`. Issue list and detail responses use `archived` in response version
+2 and later.
+
+Issue limits: the recommendation reads at most 50 retained occurrences. The
+trend has at most 30 buckets. Each distribution returns at most 10 values. A
+stack has at most 32 frames.
+
+#### Issue investigation request errors
+
+Use either `selection` or `occurrence_id`. Do not send both, even when they
+select the same occurrence:
+
+```json
+{
+  "error": "selection and occurrence_id are mutually exclusive",
+  "code": "validation_failed",
+  "next": "use response_version=2 through 13 with at most one of selection=first|latest|recommended or an exact occurrence_id copied from GET /api/telemetry/issues/{issue_id}/events",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
   }
 }
 ```
 
-This example shows only the start of the bundle. The rest holds related
-context and evidence, and its fields depend on the subject and the requested
-`response_version`. `content_trust: "untrusted_telemetry"` means that the
-text came from the application. Treat it as data, not as instructions.
+| HTTP | `error` | Cause | Recovery |
+| --- | --- | --- | --- |
+| `422` | `selection and occurrence_id are mutually exclusive` | The request has both selectors. | Keep one selector. |
+| `422` | `issue occurrence selection requires response_version=2 through 13` | The request has a selector and version 1, or no version. | Send `response_version=13`. Keep the selector. |
+| `422` | `issue investigation response_version must be 1 through 13` | The version is out of range. | Send a supported version. |
+| `422` | `invalid query parameters` | An unknown key, an invalid UUID, a non-integer version, or an unknown `selection` value. | Fix the [query](/reference/api-errors#invalid-query-parameters). |
+| `404` | `issue occurrence not found` | The occurrence is not in this group's retained history. | Copy the occurrence ID from this issue's events. Do not use `latest` or `recommended` instead without approval. |
+| `404` | `issue not found` | No readable project has this issue. | Check the account and the issue UUID. Do not send an occurrence UUID as the issue ID. |
 
-Use `logbrew explain <subject> --json` to read a bundle. The CLI validates the
-bundle before it prints it.
+A missing occurrence does not mean that the issue is missing. A `404` does
+not show whether another account can read the issue.
+
+### Trace investigation response
+
+Use `GET /api/telemetry/traces/{trace_id}/investigation` to read one trace
+with its failure path, slowest path, and related signals. The query keys are
+`response_version`, `project_id`, `release`, and `environment`. All are
+optional. Request version 3:
+
+```bash
+curl --fail-with-body -sS -G \
+  "https://api.logbrew.co/api/telemetry/traces/$TRACE_ID/investigation" \
+  -H "Authorization: Bearer $LOGBREW_TOKEN" \
+  --data-urlencode "response_version=3"
+```
+
+Version 2 adds `cause` and `fix` to each related issue. Version 3 adds
+`span_id` to related issues, actions, and metrics when it was captured.
+
+<Accordion title="Version 3 trace investigation example">
+
+This synthetic response has a root server span and a failed client span. The
+failed span is also the slowest child span. The spans have no structured
+context, so `spans.context` is missing.
+
+```json
+{
+  "schema_version": 3,
+  "subject": {
+    "kind": "trace",
+    "trace_id": "0af7651916cd43dd8448eb211c80319c",
+    "analyzed_span_count": 2,
+    "error_span_count": 1,
+    "service_count": 1,
+    "project_count": 1,
+    "started_at": "2026-08-03T11:05:00Z",
+    "duration_ms": 1200,
+    "releases": ["checkout@1.2.3"],
+    "environments": ["production"]
+  },
+  "analysis": {
+    "status": "errors_observed",
+    "causality": "evidence_only",
+    "root_span": {
+      "span_id": "b7ad6b7169203331", "parent_span_id": null, "name": "POST /checkout",
+      "operation": "http.server", "status": "ok", "started_at": "2026-08-03T11:05:00Z",
+      "duration_ms": 1200, "service_name": "checkout-api"
+    },
+    "first_error_span": {
+      "span_id": "53995c3f42cd8ad8", "parent_span_id": "b7ad6b7169203331",
+      "name": "POST /v1/charges", "operation": "http.client", "status": "error",
+      "started_at": "2026-08-03T11:05:00.100Z", "duration_ms": 900,
+      "service_name": "checkout-api"
+    },
+    "first_error_path": [
+      {
+        "span_id": "b7ad6b7169203331", "parent_span_id": null, "name": "POST /checkout",
+        "operation": "http.server", "status": "ok", "started_at": "2026-08-03T11:05:00Z",
+        "duration_ms": 1200, "service_name": "checkout-api"
+      },
+      {
+        "span_id": "53995c3f42cd8ad8", "parent_span_id": "b7ad6b7169203331",
+        "name": "POST /v1/charges", "operation": "http.client", "status": "error",
+        "started_at": "2026-08-03T11:05:00.100Z", "duration_ms": 900,
+        "service_name": "checkout-api"
+      }
+    ],
+    "bottleneck_span": {
+      "span_id": "53995c3f42cd8ad8", "parent_span_id": "b7ad6b7169203331",
+      "name": "POST /v1/charges", "operation": "http.client", "status": "error",
+      "started_at": "2026-08-03T11:05:00.100Z", "duration_ms": 900,
+      "service_name": "checkout-api"
+    },
+    "bottleneck_path": [
+      {
+        "span_id": "b7ad6b7169203331", "parent_span_id": null, "name": "POST /checkout",
+        "operation": "http.server", "status": "ok", "started_at": "2026-08-03T11:05:00Z",
+        "duration_ms": 1200, "service_name": "checkout-api"
+      },
+      {
+        "span_id": "53995c3f42cd8ad8", "parent_span_id": "b7ad6b7169203331",
+        "name": "POST /v1/charges", "operation": "http.client", "status": "error",
+        "started_at": "2026-08-03T11:05:00.100Z", "duration_ms": 900,
+        "service_name": "checkout-api"
+      }
+    ]
+  },
+  "spans": {
+    "items": [
+      {
+        "id": "33333333-3333-4333-8333-333333333333",
+        "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "span_id": "b7ad6b7169203331",
+        "parent_span_id": null,
+        "name": "POST /checkout",
+        "operation": "http.server",
+        "status": "ok",
+        "started_at": "2026-08-03T11:05:00Z",
+        "duration_ms": 1200,
+        "service_name": "checkout-api",
+        "environment": "production",
+        "release": "checkout@1.2.3",
+        "sdk": {"name": "@logbrew/node", "version": "0.1.11"},
+        "context": null,
+        "roles": ["root", "error_path", "bottleneck_path", "slow"]
+      },
+      {
+        "id": "44444444-4444-4444-8444-444444444444",
+        "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "span_id": "53995c3f42cd8ad8",
+        "parent_span_id": "b7ad6b7169203331",
+        "name": "POST /v1/charges",
+        "operation": "http.client",
+        "status": "error",
+        "started_at": "2026-08-03T11:05:00.100Z",
+        "duration_ms": 900,
+        "service_name": "checkout-api",
+        "environment": "production",
+        "release": "checkout@1.2.3",
+        "sdk": {"name": "@logbrew/node", "version": "0.1.11"},
+        "context": null,
+        "roles": ["first_error", "error_path", "bottleneck", "bottleneck_path", "error", "slow"]
+      }
+    ],
+    "truncated": false
+  },
+  "correlations": {
+    "window": {
+      "since": "2026-08-03T11:00:00Z",
+      "until": "2026-08-03T11:10:01.200Z",
+      "scopes": [
+        {
+          "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "environment": "production",
+          "release": "checkout@1.2.3"
+        }
+      ],
+      "truncated": false
+    },
+    "issues": {"status": "not_found", "items": [], "truncated": false},
+    "logs": {
+      "status": "available",
+      "items": [
+        {
+          "id": "55555555-5555-4555-8555-555555555555",
+          "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "severity": "error",
+          "source": "payments", "message": "Charge request failed",
+          "occurred_at": "2026-08-03T11:05:01Z", "service_name": "checkout-api",
+          "span_id": "53995c3f42cd8ad8", "environment": "production",
+          "release": "checkout@1.2.3"
+        }
+      ],
+      "truncated": false
+    },
+    "actions": {"status": "not_found", "items": [], "truncated": false},
+    "metrics": {"status": "not_found", "items": [], "truncated": false}
+  },
+  "timeline": {
+    "items": [
+      {
+        "id": "b7ad6b7169203331", "kind": "span", "occurred_at": "2026-08-03T11:05:00Z",
+        "name": "POST /checkout", "service_name": "checkout-api",
+        "span_id": "b7ad6b7169203331", "severity": null, "status": "ok",
+        "duration_ms": 1200
+      },
+      {
+        "id": "53995c3f42cd8ad8", "kind": "span", "occurred_at": "2026-08-03T11:05:00.100Z",
+        "name": "POST /v1/charges", "service_name": "checkout-api",
+        "span_id": "53995c3f42cd8ad8", "severity": null, "status": "error",
+        "duration_ms": 900
+      },
+      {
+        "id": "55555555-5555-4555-8555-555555555555", "kind": "log",
+        "occurred_at": "2026-08-03T11:05:01Z", "name": "Charge request failed",
+        "service_name": "checkout-api", "span_id": "53995c3f42cd8ad8", "severity": "error",
+        "status": null, "duration_ms": null
+      }
+    ],
+    "truncated": false
+  },
+  "evidence": {
+    "status": "partial",
+    "captured_fields": [
+      "correlations.window", "related_actions", "related_issues", "related_logs",
+      "related_metrics", "spans.sdk", "timeline", "trace.parentage", "trace.root",
+      "trace.spans"
+    ],
+    "missing_fields": ["spans.context"],
+    "redacted_fields": [],
+    "truncated_fields": []
+  },
+  "next_actions": [
+    {
+      "priority": 1, "code": "inspect_first_error_span", "target": "trace_span",
+      "reason": "error_span_observed", "span_id": "53995c3f42cd8ad8", "issue_id": null
+    },
+    {
+      "priority": 2, "code": "review_related_logs", "target": "telemetry_logs",
+      "reason": "related_logs_available", "span_id": "53995c3f42cd8ad8", "issue_id": null
+    },
+    {
+      "priority": 3, "code": "compare_release", "target": "release_summary",
+      "reason": "release_identity_available", "span_id": null, "issue_id": null
+    },
+    {
+      "priority": 4, "code": "improve_capture", "target": "sdk_configuration",
+      "reason": "evidence_incomplete", "span_id": null, "issue_id": null
+    }
+  ]
+}
+```
+
+</Accordion>
+
+| Field | Meaning |
+| --- | --- |
+| `subject` | Trace totals from the analyzed spans. |
+| `analysis.status` | `errors_observed`, `latency_focus`, or `no_error_observed`. |
+| `analysis.first_error_path` | The known parent chain from the root to the earliest error span. |
+| `analysis.bottleneck_path` | The known parent chain to the slowest child span. |
+| `spans.items[].roles` | Why the span is in the preview: `root`, `first_error`, `error_path`, `bottleneck`, `bottleneck_path`, `error`, or `slow`. |
+| `correlations.window` | The time range and deployment scopes used for related reads. |
+| `correlations.issues`, `logs`, `actions`, `metrics` | Signals with the same trace ID in the window. |
+
+`trace.parentage` is missing when a span names a parent that LogBrew did not
+retain. The span preview has at most 64 spans. Each analysis path has at most
+64 spans. Related reads use at most 8 deployment scopes.
+
+A next action with target `trace_span` names a `span_id` from this bundle. To
+read that span, send the span route with the span's `project_id`,
+`environment`, and `release`.
 
 ## Severity values
 
