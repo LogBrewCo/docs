@@ -1,0 +1,434 @@
+---
+title: "Hesap API'si ve API kullanım sınırları"
+sidebarTitle: "Hesap API'si"
+description: "LogBrew hesap kullanım sınırlarını, kota geçmişini, abonelik hazırlığını ve çıkış yanıtlarını okuyun."
+---
+
+Kullanımı, kota durumunu, kullanım geçmişini ve abonelik hazırlığını okumak ve
+çıkış yapmak için hesap API'sini kullanın. Hesap okumaları bir hesap bearer
+tokenı veya tarayıcı oturumu kullanır. Hesap isteğinde asla proje alım
+anahtarı (ingest key) kullanmayın. Hesap kimlik bilgisini asla SDK veya alım
+yapılandırması olarak kullanmayın.
+
+| Görev | Uç nokta |
+| --- | --- |
+| Güncel kullanımı ve kota durumunu okuyun | `GET /api/account/usage` |
+| Zaman içindeki kullanımı okuyun | `GET /api/account/usage/history` |
+| Abonelik ve organizasyon hazırlığını okuyun | `GET /api/account/subscription` |
+| Tek bir uygulama veya CLI girişinden çıkış yapın | `POST /api/auth/logout` |
+| Tüm LogBrew girişlerini iptal edin | `POST /api/auth/logout-all` |
+| Tarayıcı oturumunu temizleyin | `POST /api/auth/web/logout` |
+
+Hatalar standart [API hata zarfını](/tr/reference/api-errors) kullanır.
+Geçerli hesap kimlik doğrulaması olmayan bir okuma `code: "unauthorized"` ile
+`401` döndürür. Bu hatayı sıfır kullanım, boş bir grafik veya ücretsiz plan
+olarak göstermeyin. Desteklenmeyen bir yöntem `code: "method_not_allowed"` ile
+`405` döndürür. `next` desteklenen isteği belirtir.
+
+Hesap API'si para değil, telemetri kullanımını bildirir. Ücretleri, faturaları
+veya ödeme durumunu bildirmez.
+
+## <span id="account-usage">Hesap kullanımı</span>
+
+`GET /api/account/usage`, kullanım ve kota için esas uç noktadır. Kullanım
+toplamları, sıfırlanma zamanı, kota durumu ve proje ile telemetri akışına göre
+dağılımlar için bunu kullanın. Kullanımı SDK dosyalarından, CLI dosyalarından
+veya istemci sayaçlarından hesaplamayın. `logbrew usage` CLI komutu bu uç
+noktayı okur. [CLI referansı](/tr/reference/cli) sayfasına bakın.
+
+```bash
+curl "https://api.logbrew.co/api/account/usage" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER"
+```
+
+Sentetik değerlerle örnek yanıt. Bu ücretsiz hesabın 1 projesi var ve güncel
+dönemde yalnızca log gönderdi:
+
+```json
+{
+  "period_start": "2026-06-01T00:00:00Z",
+  "period_end": "2026-07-01T00:00:00Z",
+  "reset_at": "2026-07-01T00:00:00Z",
+  "plan": { "tier": "free", "status": "free" },
+  "limits": { "events": null, "bytes": null, "projects": null, "retention_days": 30 },
+  "usage": { "events": 27000, "bytes": 10485760, "projects": 1 },
+  "state": "ok",
+  "warning_threshold": 0.8,
+  "percent_used": 0.2,
+  "warning": false,
+  "blocked": false,
+  "limit": null,
+  "next": "continue sending telemetry",
+  "next_action": {
+    "code": "continue_sending_telemetry",
+    "target": "telemetry_ingest",
+    "state": "ok",
+    "limit": null,
+    "reset_at": "2026-07-01T00:00:00Z"
+  },
+  "by_project": [
+    { "project_id": "00000000-0000-4000-8000-000000000001", "events": 27000, "bytes": 10485760 }
+  ],
+  "by_stream": [
+    { "kind": "logs", "events": 27000, "bytes": 10485760 }
+  ]
+}
+```
+
+| Alan | Anlamı |
+| --- | --- |
+| `period_start`, `period_end` | Güncel kullanım dönemi. Bitiş zamanı aralığa dâhil değildir. |
+| `reset_at` | Kullanım hakkının sıfırlandığı zaman. `period_end` ile aynıdır. |
+| `plan.tier` | Plan tanımlayıcısı: `free`, `pro` veya `scale`. |
+| `plan.status` | `free`, `trial`, `active`, `past_due` veya `disabled`. |
+| `limits.events`, `limits.bytes`, `limits.projects` | Uyumluluk alanları. Değerleri `null` olur. `null` sınırsız anlamına gelmez. Kota durumu için `state`, `limit` ve `percent_used` kullanın. |
+| `limits.retention_days` | Planın gün cinsinden veri saklama süresi veya `null`. |
+| `usage.events`, `usage.bytes` | Dönemdeki tüm telemetri akışlarının toplamları. |
+| `usage.projects` | Hesaba ait proje sayısı. |
+| `state` | `ok`, `warning` veya `blocked`. |
+| `warning_threshold` | Bir kullanım hakkının `warning` durumunu başlatan payı, kesir olarak. |
+| `percent_used` | Herhangi bir kullanım hakkının en yüksek payı, yüzde olarak. Örneğin `80`, %80 anlamına gelir. |
+| `warning`, `blocked` | `state` değerinin uyumluluk biçimleri. |
+| `limit` | Duruma neden olan kullanım hakkı: `events`, `bytes` veya `null`. |
+| `next`, `next_action` | Güncel durum için kurtarma metni ve türü belli aksiyon. |
+| `by_project` | Proje başına kullanım. Kullanımı sıfır olsa bile hesaba ait her proje için 1 satır bulunur. Satırları dizideki konuma göre değil, `project_id` ile eşleştirin. |
+| `by_stream` | `logs`, `issues`, `actions` veya `traces` gibi telemetri akışı `kind` değerine göre kullanım. |
+
+### Kota durumları
+
+Ana dal için `state` kullanın. `limit` yalnızca `state` değeri `ok` olduğunda
+`null` olur.
+
+| `state` | `warning` | `blocked` | `limit` | `next_action.code` | `next_action.target` |
+| --- | --- | --- | --- | --- | --- |
+| `ok` | `false` | `false` | `null` | `continue_sending_telemetry` | `telemetry_ingest` |
+| `warning` | `true` | `false` | `events` veya `bytes` | `reduce_usage_or_upgrade` | `pricing` |
+| `blocked` | `false` | `true` | `events` veya `bytes` | `wait_until_reset_or_upgrade` | `pricing` |
+
+`next_action.state`, `next_action.limit` ve `next_action.reset_at` üst
+düzeydeki değerleri tekrarlar. `next_action.code` değerleri arasında
+`account_usage` hedefiyle `check_usage_limits` da bulunur. Bir istemci bu
+çifti alırsa kullanımı yeniden okumalı ve `next` değerini göstermelidir.
+
+LogBrew her telemetri türünü kendi kullanım hakkına göre ölçer. `limit`
+bunları gruplar:
+
+- `events`, sorun olaylarını ve iz span'lerini kapsar.
+- `bytes`, log baytlarını ve metrik baytlarını kapsar.
+
+Bir kullanım hakkı engellenmiş, diğeri uyarı durumundaysa `limit` engellenmiş
+kullanım hakkını belirtir. `warning` durumu, kullanım bir kullanım hakkının
+`warning_threshold` payına ulaştığında başlar. `blocked` durumu, kullanım
+kullanım hakkına ulaştığında başlar.
+
+`next` metni değişebilir, örneğin planlar satışta olmadığında. `next_action`
+değerleri değişmez. Yerelleştirmeyi `next_action` üzerinden yapın. `next`
+metnini ayrıştırmayın.
+
+Hesap kullanım sınırı bir API hız sınırı değildir. Veri alımı bir kullanım
+hakkını aştığında alım isteği `usage_limit_exceeded` ile `429` döndürür ve
+gövdeye `limit` ile `reset_at` eklenir. Bu hatada `limit` tam kullanım hakkını
+belirtir: `issue_events`, `log_bytes`, `metric_bytes` veya `trace_spans`.
+LogBrew isteğin tamamını reddeder. `reset_at` zamanına veya plan değişene
+kadar o telemetri türünü yeniden göndermeyin. Bir istemci çok fazla istek
+gönderdiğinde API `rate_limited` döndürür.
+[API hataları](/tr/reference/api-errors#retry-rules) sayfasına bakın.
+
+Yanıt bir anlık görüntüdür. Hesapta bir değişiklikten sonra yanıtı yeniden
+okuyun.
+
+<Note>
+  `GET /api/logs/usage`, `bytes_used`, `limit_bytes` ve `month` içeren eski
+  bir mobil uyumluluk yanıtıdır. Yeni entegrasyonlar için
+  `GET /api/account/usage` kullanın.
+</Note>
+
+## Kullanım geçmişi
+
+`GET /api/account/usage/history`, grafikler ve raporlar için sınırlı, boşları
+sıfırla doldurulmuş kullanım dilimleri döndürür. `interval` değerini
+desteklenen değerlerden birine ayarlayın. `interval` göndermezseniz API
+`monthly` kullanır. Rota başka sorgu anahtarı kabul etmez.
+
+```bash
+curl --get "https://api.logbrew.co/api/account/usage/history" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "interval=daily"
+```
+
+| `interval` | Dilim sayısı | Dilim başlangıcı |
+| --- | ---: | --- |
+| `daily` | 30 | 00:00 UTC |
+| `weekly` | 12 | Pazartesi, 00:00 UTC |
+| `monthly` | 12 | Ayın ilk günü, 00:00 UTC |
+| `yearly` | 5 | 1 Ocak, 00:00 UTC |
+
+| Alan | Anlamı |
+| --- | --- |
+| `interval` | İstenen dönem. |
+| `period_start`, `period_end` | Geçmiş aralığının başlangıcı ve aralığa dâhil olmayan bitişi. |
+| `current` | Güncel dönem için `GET /api/account/usage` yanıtının tamamı. |
+| `buckets` | En eskiden başlayarak zaman sırasına göre dilimler. Her dilim `period_start`, `period_end`, `usage`, `by_project` ve `by_stream` içerir. |
+
+Bu `yearly` yanıtı, Haziran 2026'daki bir istek için sentetik veriler
+kullanır. Tüm kullanım Haziran'da gerçekleşti:
+
+```json
+{
+  "interval": "yearly",
+  "period_start": "2022-01-01T00:00:00Z",
+  "period_end": "2027-01-01T00:00:00Z",
+  "current": {
+    "period_start": "2026-06-01T00:00:00Z",
+    "period_end": "2026-07-01T00:00:00Z",
+    "reset_at": "2026-07-01T00:00:00Z",
+    "plan": { "tier": "free", "status": "free" },
+    "limits": { "events": null, "bytes": null, "projects": null, "retention_days": 30 },
+    "usage": { "events": 27000, "bytes": 10485760, "projects": 1 },
+    "state": "ok",
+    "warning_threshold": 0.8,
+    "percent_used": 0.2,
+    "warning": false,
+    "blocked": false,
+    "limit": null,
+    "next": "continue sending telemetry",
+    "next_action": {
+      "code": "continue_sending_telemetry",
+      "target": "telemetry_ingest",
+      "state": "ok",
+      "limit": null,
+      "reset_at": "2026-07-01T00:00:00Z"
+    },
+    "by_project": [
+      { "project_id": "00000000-0000-4000-8000-000000000001", "events": 27000, "bytes": 10485760 }
+    ],
+    "by_stream": [{ "kind": "logs", "events": 27000, "bytes": 10485760 }]
+  },
+  "buckets": [
+    { "period_start": "2022-01-01T00:00:00Z", "period_end": "2023-01-01T00:00:00Z", "usage": { "events": 0, "bytes": 0, "projects": 0 }, "by_project": [], "by_stream": [] },
+    { "period_start": "2023-01-01T00:00:00Z", "period_end": "2024-01-01T00:00:00Z", "usage": { "events": 0, "bytes": 0, "projects": 0 }, "by_project": [], "by_stream": [] },
+    { "period_start": "2024-01-01T00:00:00Z", "period_end": "2025-01-01T00:00:00Z", "usage": { "events": 0, "bytes": 0, "projects": 0 }, "by_project": [], "by_stream": [] },
+    { "period_start": "2025-01-01T00:00:00Z", "period_end": "2026-01-01T00:00:00Z", "usage": { "events": 0, "bytes": 0, "projects": 0 }, "by_project": [], "by_stream": [] },
+    {
+      "period_start": "2026-01-01T00:00:00Z",
+      "period_end": "2027-01-01T00:00:00Z",
+      "usage": { "events": 27000, "bytes": 10485760, "projects": 1 },
+      "by_project": [
+        { "project_id": "00000000-0000-4000-8000-000000000001", "events": 27000, "bytes": 10485760 }
+      ],
+      "by_stream": [{ "kind": "logs", "events": 27000, "bytes": 10485760 }]
+    }
+  ]
+}
+```
+
+Kullanım hakkının sıfırlanması için `current.reset_at` kullanın. Geçmiş
+aralığının sonunu kullanmayın. `current` dilimlerin toplamı değildir ve
+tarihleri aralığın tarihlerinden farklı olabilir.
+
+Son dilim, tamamlanmamış güncel takvim dönemini içerir. Bitiş zamanının
+gelecekte olması, LogBrew'ün gelecekteki kullanımı ölçtüğü anlamına gelmez.
+Sıfırlarla dolu bir dilim, LogBrew'ün o dilimde hiç kullanım saymadığı
+anlamına gelir.
+
+Bir dilimdeki `usage.projects`, o dilimde kullanımı olan projeleri sayar.
+Proje sayısını bulmak için bu sayıları toplamayın. Hesaba ait proje sayısı
+için `current.usage.projects` kullanın.
+
+Olayları ve baytları farklı birimler kullandıkları için ayrı seriler olarak
+çizin. Dilimler maliyeti değil, kullanımı içerir. Grafiği harcama, fatura veya
+API isteği olarak etiketlemeyin.
+
+Desteklenmeyen bir dönem `422` döndürür:
+
+```json
+{
+  "error": "Unsupported usage history interval",
+  "code": "validation_failed",
+  "next": "use interval=daily, weekly, monthly, or yearly",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+Bilinmeyen bir sorgu anahtarı da `validation_failed` ile `422` döndürür.
+
+## Abonelik hazırlığı
+
+`GET /api/account/subscription` salt okunurdur. Ücretli plan veya
+organizasyon denetimlerini etkinleştirip etkinleştirmeyeceğinize karar vermek
+için bunu kullanın. Kota durumu için kullanım uç noktasını kullanın.
+
+```bash
+curl "https://api.logbrew.co/api/account/subscription" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER"
+```
+
+Ücretsiz bir hesap bu yanıtı döndürür. `account_id` sentetiktir:
+
+```json
+{
+  "account_id": "00000000-0000-4000-8000-0000000000aa",
+  "tier": "free",
+  "billing_interval": "none",
+  "state": "free",
+  "access_state": "active",
+  "current_period_start": null,
+  "current_period_end": null,
+  "renews_at": null,
+  "cancels_at": null,
+  "organization_creation_allowed": false,
+  "organization_creation_blocker": "subscription_required",
+  "limits": {
+    "organizations": 0,
+    "members_per_organization": 0,
+    "projects_per_organization": 0,
+    "invitations_per_day": 0
+  },
+  "next": "<display text>",
+  "next_action": {
+    "code": "choose_plan",
+    "target": "pricing"
+  }
+}
+```
+
+`next` görüntüleme metnidir. Ücretli planların satışta olup olmamasına göre
+değişir. Dönen metni gösterin veya yerelleştirmeyi `next_action` üzerinden
+yapın. `next` içindeki bir plan adını koda sabit yazmayın.
+
+Enum değerleri:
+
+| Alan | Değerler |
+| --- | --- |
+| `tier` | `free`, `pro`, `scale` |
+| `billing_interval` | `none`, `monthly`, `yearly` |
+| `state` | `free`, `trialing`, `active`, `past_due`, `paused`, `canceled` |
+| `access_state` | `free`, `trialing` ve `active` için `active`. `past_due`, `paused` ve `canceled` için `paused`. |
+| `organization_creation_blocker` | `subscription_required`, `subscription_inactive`, `organization_limit_exceeded` veya `null` |
+
+Her engelin bir `next_action` çifti vardır:
+
+| `organization_creation_blocker` | `next_action.code` | `next_action.target` |
+| --- | --- | --- |
+| `null` | `create_or_manage_organization` | `organization` |
+| `subscription_required` | `choose_plan` | `pricing` |
+| `subscription_inactive` | `resume_subscription` | `billing` |
+| `organization_limit_exceeded` | `manage_organization_limit` | `organization` |
+
+Plan düzeyi değerleri görünen adlar değil, tanımlayıcılardır. Yerelleştirilmiş bir
+istemcide bunları değiştirmeyin. Ücretli bir hesap da engellenmiş olabilir.
+Organizasyon oluşturmayı etkinleştirmeden önce
+`organization_creation_allowed` değerini kontrol edin.
+
+Bu uç nokta organizasyon oluşturmaz, davet göndermez, rolleri veya
+faturalandırmayı değiştirmez.
+
+## Çıkış yapın
+
+Göreve uyan en küçük kapsamı seçin. Bu uç noktalar hesabı veya projelerini
+silmez, alım anahtarlarını yenilemez ve üçüncü taraf bir giriş sağlayıcısının
+verdiği izni iptal etmez.
+
+| Kapsam | Uç nokta | Kimlik bilgisi |
+| --- | --- | --- |
+| Tek bir uygulama veya CLI girişi | `POST /api/auth/logout` | JSON gövdesinde o istemcinin yenileme tokenı. Bearer yok. |
+| Tüm LogBrew girişleri | `POST /api/auth/logout-all` | Hesap bearer tokenı veya tarayıcı oturumu. Gövde yok. |
+| Güncel tarayıcı oturumu | `POST /api/auth/web/logout` | Yok. Yanıt tarayıcı çerezini temizler. |
+
+### Tek bir uygulama veya CLI girişi
+
+İsteği yenileme tokenını tutan istemciden gönderin.
+`Content-Type: application/json` ayarlayın:
+
+```json
+{
+  "refresh_token": "<current refresh token>"
+}
+```
+
+Bir kişiden veya agent'tan asla yenileme tokenını yazdırmasını veya
+yapıştırmasını istemeyin. Başarılı yanıt `200` olur:
+
+```json
+{
+  "revoked": true,
+  "next_action": {
+    "code": "clear_local_session",
+    "target": "local_credentials"
+  }
+}
+```
+
+Bu istek tek bir yenileme tokenı ailesini iptal eder. LogBrew o giriş için
+sonraki yenilemeleri reddeder. Hesaptaki diğer girişler değişmez. İstemcide
+zaten bulunan bir erişim tokenı süresi dolana kadar geçerli kalır. Hesap
+kimlik bilgileri açığa çıkmış olabilirse
+[Tüm LogBrew girişleri](#every-logbrew-login) bölümünü kullanın.
+
+Yanıttan sonra istemci yerel kimlik bilgilerini kaldırır. Aynı geçerli
+yenileme tokenını yeniden gönderirseniz yanıt yine aynı `200` olur. Token
+geçersizse, süresi dolmuşsa veya bir erişim tokenıysa yanıt
+`code: "unauthorized"` ve `next_action.code: "authorize_request"` ile `401`
+olur. Bu durumda da yerel kimlik bilgilerini kaldırın. `logbrew logout` bu uç
+noktayı kullanır.
+
+### <span id="every-logbrew-login">Tüm LogBrew girişleri</span>
+
+<Warning>
+  Bu istek hesaptaki tüm istemcilerden çıkış yapar. Bir agent bu isteği
+  göndermeden önce hesap sahibinin onayını alın.
+</Warning>
+
+Başarılı yanıt `200` olur:
+
+```json
+{
+  "revoked": true,
+  "revoked_before": "2026-09-07T12:00:00.123Z",
+  "next_action": {
+    "code": "clear_local_session",
+    "target": "local_credentials"
+  }
+}
+```
+
+`revoked_before` değeri aralığa dâhildir ve milisaniye hassasiyetindedir.
+LogBrew bu zamanda veya daha önce yapılmış bir girişten gelen erişim
+tokenlarını, tarayıcı oturumlarını ve yenileme tokenlarını reddeder. Böyle bir
+girişten daha sonra yenilenen bir token da reddedilir. Mevcut canlı akış
+oturumları sona erer ve yanıt tarayıcı oturum çerezini temizler. Bu zamandan
+sonra yapılan bir giriş geçerli kalır. Her istemci yerel LogBrew kimlik
+bilgilerini kaldırmalı ve yeniden giriş yapmalıdır.
+
+Yeniden giriş yapıp bu isteği otomatik olarak tekrarlamayın. Yeni bir istek
+yeni girişi de iptal eder.
+
+Yanıt kaybolursa tüm girişlerin iptal edildiğini bildirmeyin. Eski bir kimlik
+bilgisinden daha sonra gelen `401` başarı yanıtının yerini tutmaz. Diğer
+kurtarma adımları için
+[Ele geçirilmiş bir hesabı güvenceye alın](/tr/guides/troubleshooting#secure-a-compromised-account)
+bölümünü okuyun.
+
+### Tarayıcı oturumu
+
+`POST /api/auth/web/logout`, tarayıcıdaki `logbrew_session` çerezini temizler
+ve gövdesiz `204 No Content` döndürür. Bu isteği tarayıcıdan çağırın. Oturum
+çerezini bir komuta kopyalamayın. Bu istek diğer istemcilerden çıkış yapmaz ve
+çerez değerinin bir kopyasını iptal etmez. Tüm oturumları iptal etmek için
+[Tüm LogBrew girişleri](#every-logbrew-login) bölümünü kullanın.
+
+### Çıkış hatasından kurtulun
+
+| Sonuç | Kurtarma |
+| --- | --- |
+| `POST /api/auth/logout` isteğinden `401` | İstemcinin yerel kimlik bilgilerini kaldırın. Başka türde bir kimlik bilgisi göndermeyin. |
+| `POST /api/auth/logout-all` isteğinden `401` | Kullanıcı hâlâ erişim istiyorsa güvenilir bir istemciden giriş yapın. İsteği tekrarlamadan önce yeniden onay alın. |
+| `405` | `next` değerinin belirttiği yöntemi yalnızca kullanıcının onayladığı kapsam için kullanın. |
+| `POST /api/auth/logout` isteğinden `invalid_json` | Dize türünde bir `refresh_token` içeren bir JSON nesnesini `Content-Type: application/json` ile gönderin. Tokenı yazdırmayın. |
+| Zaman aşımı veya `5xx` durumu | Başarı bildirmeyin. Otomatik bir giriş ve çıkış döngüsü başlatmayın. [Yazma işlemlerinde yeniden deneme kurallarını](/tr/reference/api-errors#writes) izleyin. |
+
+Telemetri rotaları, filtreler ve sayfalama için
+[Telemetri API'si](/tr/reference/telemetry-api) sayfasını okuyun.

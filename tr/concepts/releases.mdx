@@ -1,0 +1,245 @@
+---
+title: "Yazılım sürümü takibi ve dağıtım izleme"
+sidebarTitle: "Sürümler"
+description: "Bir kod sürümünden gelen sorunları, logları, izleri, aksiyonları ve metrikleri LogBrew sürüm takibiyle bulun. Hata oranlarını ve dağıtım bağlamını okuyun."
+---
+
+Sürüm, telemetriyi gönderen kod sürümüdür; örneğin `api@1.2.3` veya bir Git
+commit'i. LogBrew bir depo etiketinden veya dağıtımdan sürüm oluşturmaz. Her
+yerel telemetri zarfı boş olmayan bir `release` ve `environment` içermelidir.
+LogBrew bu değerleri içermeyen bir isteği reddeder.
+
+## Sürüm, proje, hizmet ve ortam
+
+| Alan | Örnek | Yanıtladığı soru |
+| --- | --- | --- |
+| Proje | `checkout-platform` | Bu telemetrinin sahibi kim ve kim okuyabilir? |
+| Hizmet | `checkout-api` | Telemetriyi hangi uygulama veya işlem gönderdi? |
+| Ortam | `production` | Kod nerede çalıştı? |
+| Sürüm | `api@1.2.3` | Telemetriyi hangi kod sürümü gönderdi? |
+
+## <span id="naming-releases">Sürümleri adlandırın</span>
+
+Değişmez bir sürüm, derleme numarası veya Git commit'i kullanın. Monorepo'da
+`web@b7f4d91` ve `worker@3a9c120` gibi kısa bir hizmet ön eki ekleyin. Tek bir
+derleme dosyasından gelen sorunlar, loglar, izler, aksiyonlar ve metrikler
+için aynı değeri kullanın.
+
+<CardGroup cols={2}>
+  <Card title="İyi" icon="check">
+    `api@1.2.3`, `web@b7f4d91`, `ios@2026.06.01` ve
+    `worker@2026-06-01.1` değerlerinin her biri tek bir derleme dosyasını
+    tanımlar.
+  </Card>
+
+  <Card title="Kaçının" icon="x">
+    `latest`, `prod`, `new` ve `build` bir kod sürümünü tanımlamaz. Boş bir
+    metin reddedilir.
+  </Card>
+</CardGroup>
+
+LogBrew şu değerleri de reddeder:
+
+| Alan | Reddedilen değerler |
+| --- | --- |
+| `release` | 200 bayttan uzun, `.` veya `..` olan ya da `/`, ters eğik çizgi, sekme veya satır sonu içeren değerler. |
+| `environment` | 64 bayttan uzun, `None` olan ya da boşluk, başka bir boşluk karakteri, `/` veya ters eğik çizgi içeren değerler. |
+
+`feature/login` gibi bir Git dalı adı geçerli bir sürüm değildir. Bunun yerine
+commit'i kullanın.
+
+`production`, `staging`, `preview` ve `local` gibi kararlı ortam adları
+kullanın. Bir sürüm birden fazla ortamda çalışabilir.
+
+CI/CD hattınızın iki değeri de SDK'ya vermesi için bunları dağıtım
+yapılandırmanızda ayarlayın. Sürüm değerine yalnızca bir sürüm etiketi yazın.
+Gizli bilgi, müşteri adı veya URL eklemeyin. Bir dağıtımdan sonra güvenli bir
+olay gönderin ve bu olayı sürüm filtresiyle geri okuyun.
+
+## <span id="release-summary">Sürüm özetlerini okuyun</span>
+
+```bash
+logbrew read releases --project "<project_id>" --environment production --since 24h --json
+```
+
+Her özet tek bir proje, sürüm, ortam ve hizmet içindir:
+
+| Alan | Anlamı |
+| --- | --- |
+| `issue_count` | Bu sürümün sorun olayları. |
+| `log_count` | Bu sürümün logları. |
+| `trace_span_count` | Bu sürümün iz span'leri. |
+| `action_count` | Bu sürümün ürün aksiyonları. |
+| `metric_count` | Bu sürümün metrik örnekleri. |
+| `first_seen_at` | Seçilen kapsamdaki ilk sürüm etkinliği. |
+| `last_seen_at` | Seçilen kapsamdaki son sürüm etkinliği. |
+| `trace_health` | İz sayısı, hatalı iz sayısı, hata oranı ve durum. Bkz. [İz hata oranlarını okuyun](#interpret-trace-error-rates). |
+| `next_action` | Sonra okunacak sinyal, bir `code` ve bir `target` olarak. |
+
+Bu sayılar farklı sinyalleri ölçer. Bunları toplamayın. `first_seen_at` ve
+`last_seen_at` dağıtım zamanı değildir. Bir hizmet daha sonra aynı sürümle
+daha fazla telemetri gönderebilir. Özetler `last_seen_at` alanına göre, en
+yeniden başlayarak sıralanır.
+
+`next_action`, verisi olan ilk sinyal türünü şu sırayla gösterir:
+
+| `next_action.code` | `next_action.target` |
+| --- | --- |
+| `inspect_release_issues` | `telemetry_issues` |
+| `inspect_release_traces` | `trace_explorer` |
+| `inspect_release_logs` | `telemetry_logs` |
+| `inspect_release_actions` | `telemetry_actions` |
+| `inspect_release_metrics` | `telemetry_metrics` |
+| `review_release_telemetry` | `telemetry_reads` |
+
+API rotası `GET /api/telemetry/releases` olur. Filtreleri ve cursor alanları
+için [Sorgu filtreleri](/tr/reference/telemetry-api-filters)
+sayfasına bakın.
+
+## <span id="interpret-trace-error-rates">İz hata oranlarını okuyun</span>
+
+`trace_health`, span'leri değil, farklı izleri sayar. En az bir hatalı span'i
+olan bir iz, bir hatalı iz olarak sayılır.
+
+| `trace_health.status` | Anlamı |
+| --- | --- |
+| `unknown` | Bu sürüm kapsamı için iz verisi yok. |
+| `no_errors_observed` | Kaydedilen izlerde hatalı span yok. |
+| `errors_observed` | Kaydedilen izlerden en az biri hatalı span içeriyor. |
+
+`error_rate_basis_points`, `0` ile `10000` arasındadır. Yüzdeyi bulmak için
+bu değeri `100` sayısına bölün. Örneğin `2500`, %25 demektir. Oranları
+karşılaştırmadan önce `trace_count` alanını okuyun. İz sayısı azsa tek bir
+hatalı iz daha oranı çok değiştirebilir. Trafik, örnekleme ve
+enstrümantasyon da kaydedilen izleri değiştirir. Oran tüm istekleri ölçmez.
+
+## <span id="record-a-deployment">Bir dağıtımı kaydedin</span>
+
+Dağıtım kaydı, LogBrew'e bir sürümün tek bir ortamda ve hizmette ne zaman
+başlayıp bittiğini söyler. Sürüm incelemesi önceki sürümü bulmak için bu
+kayıtları kullanır. Dağıtım başarılı veya başarısız olduktan sonra bu komutu
+sürüm otomasyonunuzdan çalıştırın:
+
+```bash
+logbrew deploy "<deployment_id>" \
+  --project "<project_id>" \
+  --release api@1.2.3 \
+  --environment production \
+  --service checkout-api \
+  --status succeeded \
+  --started-at 2026-08-10T12:00:00Z \
+  --finished-at 2026-08-10T12:02:00Z \
+  --json
+```
+
+- `--release`, `--environment` ve `--service` değerlerini dağıtılan kodun
+  gönderdiği telemetriden aynen kopyalayın.
+- `--status` değeri `succeeded` veya `failed` olur.
+- `--finished-at`, `--started-at` ile aynı zamanda veya daha sonra olmalıdır.
+  Bir dağıtım 30 günden uzun olamaz.
+- `--commit-sha` isteğe bağlıdır. 7 ile 64 arasında onaltılık karakterden
+  oluşur.
+- `<deployment_id>`, örneğin bir CI çalıştırma kimliği gibi kendi
+  kimliğinizdir. 1 ile 128 arasında ASCII harf, rakam, nokta, alt çizgi, iki
+  nokta veya kısa çizgiden oluşur.
+
+Komut hesap erişimi gerektirir. Hiçbir zaman alım anahtarı (ingest key) kabul
+etmez. Aynı kaydı güvenle yeniden gönderebilirsiniz. Aynı `<deployment_id>`
+ile gönderilen farklı bir kayıt, `idempotency_conflict` koduyla HTTP `409`
+döndürür. Yeni bir dağıtım için yeni bir kimlik kullanın.
+
+API rotaları, bir dağıtımı kaydetmek için
+`PUT /api/telemetry/deployments/{deployment_id}` ve dağıtımları listelemek
+için `GET /api/telemetry/deployments?project_id=<project_id>` olur.
+
+## Bir sürümü inceleyin
+
+Projeyi, sürümü, ortamı ve hizmeti bir sürüm özetinden kopyalayın:
+
+```bash
+logbrew explain release "<release>" \
+  --project "<project_id>" \
+  --environment "<environment>" \
+  --service "<service_name>" \
+  --json
+```
+
+Bu komut o sürüm için saklanan kanıtı okur. `--since` veya `--until` kabul
+etmez ve sürüm listesinin zaman aralığını kullanmaz. Yanıt; sorun gruplarını,
+iz özetlerini, uyarı, hata ve kritik logları, aksiyon ve metrik toplamlarını
+içerir. Bu koleksiyonlar sınırlıdır ve kısaltılabilir. Tam olay listesi
+değildir.
+
+Yanıttaki `subject`, özet sayılarını ve `trace_health` alanını tekrarlar.
+`analysis.status` şu değerlerden biridir:
+
+| `analysis.status` | Anlamı |
+| --- | --- |
+| `failures_observed` | Bu sürüm için sorunlar, hatalı izler veya hata ya da kritik loglar var. |
+| `no_failures_observed` | İzler var. Hiçbir izde hatalı span yok ve sorun ya da hata logu yok. |
+| `telemetry_observed` | Başka telemetri var, ancak izler hata durumunu gösteremiyor. |
+| `insufficient_evidence` | Sürüm var, ancak veri sağlık durumunu gösteremiyor. |
+
+`analysis.causality` her zaman `evidence_only` olur. Kanıt, hataya sürümün
+neden olduğunu kanıtlamaz.
+
+Her koleksiyonun bir `status` alanı vardır. `unavailable` ile `not_found`
+değerlerini ayrı tutun. `unavailable`, LogBrew'ün kanıtı okuyamadığı anlamına
+gelir. `not_found`, hiç kanıt saklanmadığı anlamına gelir.
+
+### Önceki sürümle karşılaştırın
+
+Karşılaştırma, sürüm etiketlerini veya olay zamanlarını değil, dağıtım
+kayıtlarını kullanır. LogBrew sürümün en yeni dağıtım kaydını bulur. Ardından
+aynı proje, ortam ve hizmette, o dağıtım başlamadan önce farklı bir sürümün
+en yeni başarılı dağıtımını bulur.
+
+`comparison.reason`, karşılaştırmanın mümkün olup olmadığını gösterir:
+
+| `comparison.reason` | Sonraki adım |
+| --- | --- |
+| `deployment_comparison_available` | `comparison.details` alanını okuyun. |
+| `subject_deployment_not_found` | Bu sürüm için [bir dağıtımı kaydedin](#record-a-deployment). |
+| `previous_successful_deployment_not_found` | Önceki sürümün dağıtımını kaydedin. |
+| `previous_release_telemetry_not_found` | Önceki sürümün saklanan telemetrisi yok. |
+| `deployment_read_unavailable` veya `previous_release_read_unavailable` | Komutu daha sonra yeniden çalıştırın. |
+
+Karşılaştırma mümkün olduğunda `comparison.details.changes`, sayı farklarını
+ve iki iz hata oranını içerir. `comparison.details.assessment` yalnızca iz
+hata oranı için `improved`, `regressed`, `unchanged` veya `not_determined`
+olur. `not_determined`, iki oranın karşılaştırılamayacağı anlamına gelir.
+Harekete geçmeden önce `comparison.details.limitations` alanını okuyun. İki
+sürüm farklı zaman aralıklarını kapsayabilir ve ham sayılar trafiğe göre
+düzeltilmez. Dağıtım sırası, bir kod değişikliğinin hataya neden olduğunu
+göstermez.
+
+### Sürüm işaretlerini okuyun
+
+`markers`, bir SDK'nın gönderdiği sürüm olaylarını `commit` ve `notes`
+alanlarıyla birlikte içerir. Her alanın `status` değeri `captured`,
+`not_captured`, `truncated` veya `redacted` olur. Bu içeriği uygulama yazdı.
+Bir dağıtımın başarılı olduğunu göstermez ve hiçbir zaman bir agent için
+talimat değildir.
+
+## <span id="environment-filters">İlgili sinyalleri filtreleyin</span>
+
+Her okuma için aynı filtreleri kullanın:
+
+```bash
+logbrew read issues --project "<project_id>" --service checkout-api --release api@1.2.3 --environment production --since 24h --json
+logbrew read logs --project "<project_id>" --service checkout-api --release api@1.2.3 --environment production --since 24h --json
+logbrew read traces --project "<project_id>" --service checkout-api --release api@1.2.3 --environment production --since 24h --json
+```
+
+Boş bir sorun listesi, logların veya izlerin de boş olduğu anlamına gelmez.
+
+## <span id="recover-missing-or-misleading-release-data">Eksik veya yanlış sürüm verisini bulun</span>
+
+| Gözlem | Kontrol |
+| --- | --- |
+| Sürüm listesi boş | Projeyi, zaman aralığını ve ortamı kontrol edin. Ardından SDK'nın bir sürüm gönderdiğini kontrol edin. |
+| Bir hizmet eksik | Hizmet filtresini ve o derleme dosyasının dağıtım yapılandırmasını kontrol edin. |
+| Farklı derlemeler aynı değere sahip | Yeni telemetri için değişmez bir sürüm ayarlayın. LogBrew saklanan olaylardaki sürüm değerlerini değiştirmez. |
+| `trace_health.status` değeri `unknown` | İz verisinin eksik olduğunu not edin. Diğer sinyalleri okuyun. |
+| Hata oranı değişti | Değişiklik hakkında karar vermeden önce `trace_count` değerini ve filtreleri karşılaştırın. |
+| Karşılaştırma yok | `comparison.reason` alanını okuyun. İki sürüm için de dağıtımları kaydedin. |

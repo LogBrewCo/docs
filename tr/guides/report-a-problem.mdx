@@ -1,0 +1,228 @@
+---
+title: "Destek API'si: destek talebi oluşturun ve takip edin"
+sidebarTitle: "Sorun bildirin"
+description: "CLI'dan veya Destek API'sinden bir LogBrew destek talebi oluşturun. Güvenli tanılama bilgisi ekleyin, durumunu takip edin ve ek bağlam gönderin."
+---
+
+Bir sorunun takip edilmesi gerektiğinde destek talebi oluşturun. Ardından bir
+kişi veya bir AI agent talebi takip edebilir ve istenen bağlamı ekleyebilir.
+Talebi yalnızca onu oluşturan hesap ve LogBrew destek ekibi okuyabilir.
+
+<Warning>
+  `$LOGBREW_TOKEN` gibi bir hesap erişim bearer tokenı kullanın. Bir projenin
+  alım anahtarını (ingest key) asla kullanmayın. Başlığı, açıklamayı veya
+  tanılama bilgisini yazmadan önce özel verileri çıkarın. Otomatik gizleme bu
+  kontrolün yerini tutmaz.
+</Warning>
+
+## Talep oluşturun
+
+CLI'dan şunu çalıştırın:
+
+```bash
+logbrew support create --category docs_confusion \
+  --title "First event is not visible" \
+  --description "Steps: send one info event, then read logs in the same project. Expected: one row. Observed: no rows." \
+  --project "<project_id>" --json
+```
+
+CLI, `source` değerini `cli` yapar. `--diagnostics` yalnızca ikili dosya
+adını, CLI sürümünü, işletim sistemini ve mimariyi ekler. Tüm seçenekler için
+`logbrew support --help` komutunu çalıştırın.
+
+CLI, talep oluştururken yeniden deneme anahtarı göndermez. Sonuç belirsizse
+komutu yeniden çalıştırmadan önce `logbrew support list --json` komutunu
+çalıştırın. Aksi hâlde ikinci bir talep oluşturabilirsiniz.
+
+API'den `source`, `category`, `title` ve `description` alanlarıyla
+`POST /api/support/tickets` isteği gönderin. Yeniden denemeyi güvenli hâle
+getirmek için rapor başına bir kez yeniden deneme anahtarı oluşturun ve bunu
+`Idempotency-Key` başlığında gönderin. Bu örnek yapay değerler kullanır:
+
+```bash
+LOGBREW_SUPPORT_RETRY_KEY="$(uuidgen)"
+
+curl -sS "https://api.logbrew.co/api/support/tickets" \
+  -H "Authorization: Bearer ${LOGBREW_TOKEN:?Set an account access bearer}" \
+  -H "Idempotency-Key: ${LOGBREW_SUPPORT_RETRY_KEY:?Create a retry key for this report}" \
+  -H "Content-Type: application/json" \
+  --data '{
+    "source": "docs",
+    "category": "docs_confusion",
+    "title": "First event is not visible",
+    "description": "Steps: send one info event, then read logs in the same project. Expected: one row. Observed: no rows.",
+    "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    "diagnostics": {
+      "steps": 2,
+      "expected": "one matching row",
+      "observed": "no matching rows"
+    }
+  }'
+```
+
+Yeniden deneme anahtarı, boşluk içermeyen 1 ile 128 arasında görünür ASCII
+karakterden oluşur. Yeniden denemek için aynı anahtarı aynı gövdeyle gönderin.
+Yanıt aynı talebi verir. Farklı bir rapor için yeni bir anahtar kullanın. Zaman
+aşımı, oluşturmanın başarısız olduğunu kanıtlamaz. `Idempotency-Key` başlığı
+isteğe bağlıdır. Bu başlık olmadan tekrarlanan bir istek başka bir talep
+oluşturabilir.
+
+İsteğe bağlı alanlar `project_id`, `environment`, `runtime`, `framework`,
+`sdk_package`, `sdk_version`, `release`, `trace_id`, `event_id` ve
+`diagnostics` alanlarıdır. Sorun belirli bir projeye ait değilse `project_id`
+alanını göndermeyin. `project_id`, hesabınızdaki etkin bir projeyi
+tanımlamalıdır.
+
+| Alan | Kabul edilen değerler |
+| --- | --- |
+| `source` | `cli`, `sdk`, `website`, `docs`, `mobile` |
+| `category` | `sdk_install_failure`, `ingest_failure`, `auth_failure`, `project_setup`, `dashboard_issue`, `docs_confusion`, `cli_issue`, `mobile_issue`, `billing_question`, `other` |
+| `title` | LogBrew baştaki ve sondaki boşlukları sildikten sonra 1 ile 160 arasında karakter. |
+| `description` | LogBrew baştaki ve sondaki boşlukları sildikten sonra 1 ile 4.000 arasında karakter. |
+| Diğer metin alanları | Her biri en fazla 256 karakter. |
+
+Başarılı bir istek HTTP `200` döndürür:
+
+```json
+{
+  "ticket_id": "sup_11111111111141118111111111111111",
+  "status": "open",
+  "created_at": "2026-10-01T09:30:00Z",
+  "next": "Support ticket created. LogBrew will review the attached diagnostics.",
+  "next_action": {
+    "code": "review_ticket",
+    "target": "support_ticket"
+  }
+}
+```
+
+Talep kimlikleri `sup_` ile başlar. `next` alanını bir kişiye yönlendirme
+olarak, `next_action` alanını program akışı için kullanın.
+
+Bir projeyi silmek için proje ayarlarını veya `logbrew projects delete`
+komutunu kullanın. Proje silme işlemini destek talebiyle istemeyin.
+
+## Yararlı bir rapor yazın
+
+- Her talepte tek bir sorun bildirin.
+- En yakın `category` değerini seçin. `other` değerini yalnızca hiçbir
+  kategori uymadığında kullanın.
+- `title` alanında tek bir belirti ve tek bir yüzey belirtin.
+- `description` alanına önce adımları, ardından beklenen ve gözlemlenen sonucu
+  yazın.
+- Proje, sürüm, iz veya olay kimliklerini yalnızca aynı hatayı tanımlıyorlarsa
+  ekleyin.
+
+Şu `diagnostics` anahtarlarını kullanın:
+
+| Anahtar | İçerik |
+| --- | --- |
+| `steps` | Yeniden üretme adımlarının sayısı. |
+| `expected` | Kısa beklenen sonuç. |
+| `observed` | Kısa gözlemlenen sonuç. |
+| `command_name` | Argümanlar olmadan komut ve alt komut adı. |
+| `exit_code` | Sayısal işlem çıkış kodu. |
+| `error_code` | Kararlı hata kodu. |
+| `error_summary` | Kısa, gizlenmiş hata özeti. |
+| `retry_count` | Aynı yeniden deneme girişimlerinin sayısı. |
+| `last_delivery_status` | Son gönderim girişiminin HTTP durumu, örneğin `401`. |
+
+`diagnostics`, gizlemeden sonra en fazla 16 KB olan bir JSON nesnesidir.
+Anahtarı bir kimlik bilgisini, oturumu veya e-posta adresini adlandıran bir
+değeri LogBrew `[redacted]` ile değiştirir. Kimlik bilgisine, URL'ye veya yerel
+yola benzeyen metni de değiştirir. LogBrew ayrıca uzun metinleri kısaltır ve
+iç içe yapıları, anahtarları ve liste öğelerini sınırlar. Bu gizlemeye
+güvenmeyin. İsteği göndermeden önce özel verileri çıkarın.
+
+## <span id="track-the-ticket">Talebi takip edin</span>
+
+| CLI komutu | API rotası | Sonuç |
+| --- | --- | --- |
+| `logbrew support list` | `GET /api/support/tickets` | Hesabın taleplerini listeler. |
+| `logbrew support show <ticket_id>` | `GET /api/support/tickets/{ticket_id}` | Bir talebi ve sonraki aksiyonunu okur. |
+| `logbrew support context <ticket_id>` | `GET /api/support/tickets/{ticket_id}/context` | Talebe eklenen bağlamı okur. |
+| `logbrew support reply <ticket_id>` | `POST /api/support/tickets/{ticket_id}/context` | İstenen bağlamı ekler. |
+| `logbrew support close <ticket_id>` | `PATCH /api/support/tickets/{ticket_id}` | `closed` değerini ayarlar. |
+| `logbrew support reopen <ticket_id>` | `PATCH /api/support/tickets/{ticket_id}` | `open` değerini ayarlar. |
+
+Liste `project_id`, `status`, `source`, `category`, `release` ve `limit`
+parametrelerini kabul eder. Varsayılan `limit` 100, en büyük değer 500 olur.
+Cursor ile sayfalama için `pagination=cursor` gönderin. Sonraki sayfalarda
+aynı filtreleri tekrarlayın ve `next_cursor` içindeki `cursor_time` ve
+`cursor_id` değerlerini gönderin. Cursor kimliği bir `sup_` talep kimliğidir.
+`next_cursor` değeri `null` olduğunda durun. CLI `--project`, `--status`,
+`--source`, `--category`, `--release`, `--limit`, `--pagination`,
+`--cursor-time` ve `--cursor-id` seçeneklerini kullanır.
+
+Durum değerleri `open`, `routed`, `in_progress`, `waiting_on_user`,
+`resolved` ve `closed` olur. Yalnızca `open` veya `closed` ayarlayabilirsiniz.
+Tekrarlanan bir kapatma veya yeniden açma isteği, hiçbir şeyi değiştirmeyen
+başarılı bir istektir. Bu yüzden aynı isteği yeniden deneyebilirsiniz.
+Döndürülen durumu ve `next_action` alanını izleyin:
+
+| Durum | `next_action.code` | Sonraki adım |
+| --- | --- | --- |
+| `open`, `routed`, `in_progress` | `await_owner_update` | Bir güncelleme bekleyin. Talebi daha sonra yeniden okuyun. |
+| `waiting_on_user` | `provide_context` | İstenen bağlamı gönderin. |
+| `resolved`, `closed` | `open_new_ticket_if_needed` | Sorun yeniden ortaya çıkarsa yeni bir talep oluşturun. |
+
+## İstenen bağlamı ekleyin
+
+Talep bağlam istediğinde yanıt verin. Böyle bir talebin durumu
+`waiting_on_user`, `next_action.code` değeri `provide_context` olur.
+
+```bash
+logbrew support reply sup_11111111111141118111111111111111 \
+  --context "The same project and time filters still return no logs." \
+  --retry-key "<retry_key>" --json
+```
+
+API gövdesi `context` ve isteğe bağlı `diagnostics` alanlarını içerir.
+`context` metni 1 ile 4.000 arasında karakter içermelidir. `context` içine
+kimlik bilgisi, URL, ana bilgisayar adı veya yerel yol yazmayın. API bu metni
+`422` ile reddeder. `Idempotency-Key` başlığında bir yeniden deneme anahtarı
+gönderin. Bağlam rotası bu başlığı zorunlu tutar. Anahtar, boşluk içermeyen 1
+ile 128 arasında görünür ASCII karakterden oluşur. Her yanıt için yeni bir
+anahtar kullanın. Bir anahtarı yalnızca aynı yanıtı yeniden denemek için
+tekrar kullanın.
+
+API, talep `open`, `routed`, `in_progress` veya `waiting_on_user` durumundayken
+bağlam kabul eder. Talebin her durumu için 1 yanıt kabul eder. Bir yanıttan
+sonra daha fazla bağlam göndermeden önce durumun değişmesini bekleyin.
+`waiting_on_user` durumundaki bir talebe verilen yanıt, talebi `open` yapar. Bu
+değişikliği varsaymak yerine döndürülen `status` değerini okuyun.
+
+Başarılı bir yanıt `ticket_id`, `context_id`, `status`, `created_at`, `next`
+ve `next_action` döndürür. `context_id`, `ctx_` ile başlar. Sonraki bir isteği
+yanıtlamadan önce talebi yeniden okuyun.
+
+`GET /api/support/tickets/{ticket_id}/context`, en son 20 bağlam kaydını en
+eskiden başlayarak döndürür. Her kayıtta `context_id`, `context`,
+`diagnostics` ve `created_at` bulunur. Bu listede cursor yoktur.
+
+`resolved` veya `closed` durumundaki bir talebe verilen yanıt,
+`code: "validation_failed"` ile `422` döndürür. Talebi yalnızca kullanıcı o
+destek isteğine devam etmek istiyorsa yeniden açın. Bir `next_action`, agent'a
+hesap durumunu değiştirme izni vermez.
+
+## Hatalardan kurtarın
+
+| HTTP durumu | `code` | Kurtarma |
+| --- | --- | --- |
+| `401` | `unauthorized` | Geçerli bir hesap erişim bearer tokenı gönderin. |
+| `404` | `not_found` | Hesabın taleplerini listeleyin ve döndürülen bir `sup_` kimliğini kullanın. Proje hatası için `project_id` değerini kontrol edin veya alanı göndermeyin. |
+| `405` | `method_not_allowed` | [Talebi takip edin](#track-the-ticket) tablosundaki bir yöntemi kullanın. |
+| `409` | `idempotency_conflict` | Yeniden deneme anahtarı farklı bir istekle kullanıldı. Asıl isteği yeniden deneyin veya talebi okuyup yeni bir anahtar kullanın. |
+| `422` | `validation_failed` | Adı geçen alanı düzeltin. PATCH için yalnızca `status: "open"` veya `status: "closed"` gönderin. |
+| `429` | `rate_limited` | Bekleyin, ardından yeniden deneyin. |
+
+Hata yanıtları `error`, `code`, `next` ve `next_action` alanlarını içerir.
+Bkz. [API hataları](/tr/reference/api-errors).
+
+## Raporu güvenli tutun
+
+Gizli bilgileri, tokenları, yetkilendirme başlıklarını, alım anahtarlarını, ham
+logları, müşteri verilerini, yerel yolları, ana bilgisayarları veya ilgisiz
+kaynak kodunu asla göndermeyin. Kısa ve gizlenmiş bir özet gönderin. Kendi
+başınıza yapabileceğiniz kontroller için [Sorun giderme](/tr/guides/troubleshooting)
+sayfasına bakın.

@@ -1,0 +1,228 @@
+---
+title: "Görünmeyen uygulama logları için sorun giderme"
+sidebarTitle: "Sorun giderme"
+description: "Güvenli LogBrew kontrolleriyle görünmeyen uygulama loglarını, proje kurulumunu, filtreleri, sorun kanıtını ve iz bağlantılarını inceleyin."
+---
+
+Telemetri görünmüyorsa, eksikse veya gereğinden genişse bu sayfayı kullanın.
+Önce erişimi kontrol edin. Ardından nedeni ararken proje, hizmet, sürüm, ortam
+ve zaman aralığını sabit tutun.
+
+<Note>
+  Agent iş akışlarında `--json` ekleyin. Başarısız bir kontrol kararlı bir
+  `next` alanı döndürür.
+</Note>
+
+## Hızlı kontrollerle başlayın
+
+| Belirti | İlk kontrol | Sonraki adım |
+| --- | --- | --- |
+| CLI'da giriş yapılmamış | `logbrew status --json` | Bir kişi `logbrew login` komutunu çalıştırır. |
+| Bir proje eksik | `logbrew projects --json` | Proje listesindeki bir kimliği kullanın. |
+| Kurulum durumu belirsiz | `logbrew doctor --project "<project_id>" --json` | Dönen `next` değerini izleyin. |
+| Loglar boş | Tam proje ve zaman aralığı için logları okuyun | Diğer sinyal türlerini ayrı ayrı kontrol edin. |
+| Sonuçlar çok geniş | Proje, hizmet, sürüm ve ortam filtreleri ekleyin | Her okumada aynı kapsamı koruyun. |
+| Bir iz eksik | Sorun ayrıntısını okuyun | Bir izi yalnızca yanıtta iz kimliği varsa okuyun. |
+| JavaScript çerçeveleri derlenmiş kodu gösteriyor | Derleme ve source map eşini kontrol edin | [JavaScript source map'leri](/tr/guides/source-maps) rehberini izleyin. |
+| Bir MCP agent'ı bir projeyi okuyamıyor | Onaylı projeleri kontrol edin | [MCP bağlantı sorunları](/tr/guides/mcp#fix-connection-problems) bölümünü izleyin. |
+
+## <span id="recover-missing-first-telemetry">Görünmeyen ilk telemetriyi kurtarın</span>
+
+SDK yapılandırmasını değiştirmeden önce şu salt okunur komutları çalıştırın:
+
+```bash
+logbrew version --json
+logbrew status --json
+logbrew projects --json
+logbrew doctor --project "<project_id>" --json
+```
+
+`logbrew doctor`; API erişimini, kimlik doğrulamayı, projeyi, alım anahtarını
+(ingest key), kurulumu, telemetriyi ve log görünürlüğünü kontrol eder. Projeyi
+değiştirmez. Genel `status` değerini ve
+[doctor raporundaki](/tr/reference/cli#read-a-project-doctor-report) her
+kontrolü okuyun. `0` çıkış kodu her kontrolün geçtiği anlamına gelmez.
+
+| Doctor durumu | Sonraki adım |
+| --- | --- |
+| `needs_ingest_key` | Proje kapsamlı bir alım anahtarı oluşturun. [Alım anahtarını yenileyin](/tr/guides/rotate-ingest-key) sayfasına bakın. |
+| `needs_setup` | SDK kurulumunu tamamlayın. [SDK entegrasyonu](/tr/guides/sdk-ingestion) sayfasına bakın. |
+| `needs_telemetry` | Uygulamadan güvenli bir test olayı gönderin, ardından doctor komutunu yeniden çalıştırın. |
+| `ready` | Son logları, sorunları, sürümleri veya izleri okuyun. |
+
+Raporun durumu `auth_invalid`, `project_missing`, `api_unreachable` veya
+`check_failed` da olabilir.
+[Doctor raporu](/tr/reference/cli#read-a-project-doctor-report) her biri için
+sonraki adımı verir.
+
+`ready` durumundaki bir projede yine de log olmayabilir, çünkü her sinyal türü
+ayrıdır. `logs` kontrolü `empty` veya `unavailable` olabilir. Başarısız bir
+log okuması boş bir sonuç değildir.
+
+### Güvenli bir test olayı gönderin
+
+Kurulu SDK ile benzersiz mesajlı tek bir test logu gönderin. Token, kullanıcı
+verisi veya istek gövdesi eklemeyin. Proje kimliğini, hizmeti, ortamı, sürümü,
+UTC başlangıç zamanını ve SDK sürümünü kaydedin. Gönderimin bitmesini bekleyin,
+ardından aynı projede kısa bir zaman aralığını okuyun. Gönderim sürerken başka
+test olayı göndermeyin.
+
+## Görünmeyen logları bulun
+
+Önce küçük ve tam bir kapsamı okuyun:
+
+```bash
+logbrew read releases --project "<project_id>" --environment production --json
+logbrew read logs --project "<project_id>" --environment production \
+  --release checkout@1 --since 1h --limit 20 --json
+```
+
+Şunları sırayla kontrol edin:
+
+1. Proje kimliği olayı gönderen uygulamaya aittir.
+2. Hizmet, sürüm ve ortam harf büyüklüğü ve boşluklar dâhil tam olarak
+   eşleşir.
+3. Zaman aralığı olay zamanını içerir. LogBrew olay zamanlarını UTC olarak
+   döndürür. `--until` üst sınırı aralığa dâhil değildir.
+4. Hiçbir arama veya önem düzeyi filtresi olayı gizlemez.
+5. Uygulama okuduğunuz sinyal türünü göndermiştir. Bir log sorun veya iz
+   oluşturmaz.
+
+Olay hâlâ görünmüyorsa filtreleri tek tek kaldırın:
+
+1. Projeyi koruyun ve zaman aralığını genişletin.
+2. Sürüm filtresini kaldırın.
+3. Ortam filtresini kaldırın.
+4. Hizmet filtresini kaldırın.
+5. Arama ve önem düzeyi filtrelerini kaldırın.
+
+Olay göründüğünde durun. Son kaldırdığınız filtre uygulama yapılandırmasıyla
+eşleşmiyordur. Yapılandırılmış proje yerine tüm projeleri okumayın.
+
+| Sonuç | Gösterdiği | Sonraki kontrol |
+| --- | --- | --- |
+| Bir projede satır yok | O kapsamda eşleşme yok | Zamanı ve filtreleri kontrol edin. |
+| Log var ama sorun yok | Filtrelerle eşleşen gruplanmış bir hata yok | Uygulamanın bir hata gönderdiğini kontrol edin. |
+| İzi olmayan sorun | Oluşumun kullanılabilir bir iz bağlantısı yok | Sorun incelemesindeki iz durumunu okuyun. |
+| Sürüm var ama log yok | Sürümün başka sinyalleri var ama o kapsamda logu yok | `logbrew read releases` çıktısındaki sayıları karşılaştırın. Her sinyal türünü aynı projede okuyun. |
+| Bir filtreyi kaldırınca olay görünüyor | O filtre olayı dışarıda bıraktı | Filtreyi veya uygulamadaki değeri düzeltin. |
+
+Bir sonuç sayfası toplam değildir. `--pagination cursor` ile dönen
+`next_cursor` değeriyle devam edin ve aynı filtreleri koruyun.
+[Cursor ile sayfalama](/tr/reference/telemetry-api-filters#cursor-pagination)
+bölümüne bakın.
+
+### Panel görünümünü kontrol edin
+
+Panel her listenin anlık görüntüsünü gösterir. Loglar görünümünde yeni logları
+geldikçe eklemek için **Canlı loglar** seçeneğini açın. Diğer görünümler canlı
+güncellenmez. Yeni bir anlık görüntü almak için sayfayı yeniden yükleyin. Eski
+bir anlık görüntü boş bir sonuçtan farklıdır.
+
+LogBrew yalnızca uygulamanın gönderdiği telemetriyi saklar. Göndermeden önce
+kimlik bilgilerini, istek gövdelerini, sorgu değerlerini ve kişisel verileri
+kaldırın. Alan seçiminizi kontrol etmek için
+[Yakalanan verileri denetleyin](/tr/guides/safe-capture) rehberini kullanın.
+
+## Sorunları ve izleri kontrol edin
+
+LogBrew'ün döndürdüğü bir sorun kimliğini veya iz kimliğini kullanın. Asla
+kimlik uydurmayın.
+
+```bash
+logbrew read issues --project "<project_id>" --environment production \
+  --status unresolved --since 24h --json
+logbrew read issue "<issue_id>" --json
+logbrew read trace "<trace_id>" --project "<project_id>" --json
+logbrew read logs --trace "<trace_id>" --project "<project_id>" --json
+```
+
+`--status`; `unresolved`, `resolved` ve `archived` değerlerini kabul eder.
+`ignored`, `archived` ile aynı sorunları seçer.
+
+Sorun durumu ve iz durumu farklıdır. `not_linked`, `not_found` ve
+`unavailable` iz durumu değerlerinin anlamları farklıdır. Her değer için
+[Bir sorunu inceleyin](/tr/guides/investigate-an-issue) rehberine bakın. Bir sorunu
+çözmeden, arşivlemeden veya yeniden açmadan önce sorunu ve loglarını okuyun.
+
+## CLI ve API hatalarını ele alın
+
+JSON kipinde bir CLI hatası `ok`, `error`, `message` ve `next` alanlarını
+içerir:
+
+```json
+{
+  "ok": false,
+  "error": "not_logged_in",
+  "message": "not logged in: run logbrew login",
+  "next": "run logbrew login"
+}
+```
+
+API hata döndürdüğünde `error` değeri `api_error` olur. Hata ayrıca `status`
+(HTTP durumu), `api_code` (API `code` değeri), `api_error` ve `api_next`
+alanlarını içerir. `rate_limited` hatasında `retry_after_seconds` alanı da
+bulunur. CLI otomatik olarak yeniden denemez.
+
+| Durum veya hata | Kurtarma |
+| --- | --- |
+| `not_logged_in` veya HTTP `401` | Bir kişi `logbrew login` komutunu çalıştırır. Ardından okumayı yeniden deneyin. |
+| HTTP `403` | Proje için doğru kimlik bilgisini kullanın. Sorun değişikliği için projede sorunları yönetme izni de gerekir. Kimlik bilgisinin değerini göstermeyin. |
+| HTTP `404` | Bir yanıttan alınan güncel bir proje, sorun veya iz kimliğini kullanın. |
+| HTTP `422` | Adı verilen alanı düzeltin. |
+| `rate_limited` ile HTTP `429` | `retry_after_seconds` kadar bekleyin, ardından bir kez yeniden deneyin. |
+| Başka bir kodla HTTP `429` | Otomatik yeniden denemeleri durdurun. `api_next` değerini izleyin. |
+| HTTP `5xx` | Bekleyin, bir okumayı yeniden deneyin ve sorun sürerse bildirin. |
+
+Her hata kodu için [API hataları](/tr/reference/api-errors) sayfasına bakın.
+
+## <span id="secure-a-compromised-account">Ele geçirilmiş bir hesabı güvenceye alın</span>
+
+Başka birinde hesap erişim tokenı, yenileme tokenı veya oturum çerezi olabilirse
+tüm LogBrew istemcilerinden çıkış yapın.
+[Hesap genelinde çıkış](/tr/reference/account-api#every-logbrew-login)
+adımlarını izleyin. Bu işlemi bir kişinin onaylaması gerekir. `logbrew logout`
+ve tarayıcıdan çıkış yalnızca tek bir istemciyi kapatır. Bu yüzden yeterli
+değildir.
+
+Hesap genelinde çıkış, ondan önce onaylanmış tüm MCP bağlantılarını da
+durdurur. İşlem başarılı olduktan sonra her istemcideki yerel LogBrew kimlik
+bilgilerini temizleyin ve güvenilir bir istemciden yeniden giriş yapın. MCP
+istemcilerini ancak onlara güvendikten sonra yeniden onaylayın. Yanıt
+kaybolursa tüm istemcilerden çıkış yapıldığını bildirmeyin ve isteği otomatik
+olarak tekrarlamayın.
+
+Hesap genelinde çıkış proje alım anahtarlarını yenilemez. Bir alım anahtarı
+açığa çıktıysa [alım anahtarını yenileyin](/tr/guides/rotate-ingest-key).
+
+## Sorun gidermeyi güvenli tutun
+
+CLI okumalarında hesap erişim kimlik bilgisini kullanın. Proje kapsamlı alım
+kimlik bilgisini yalnızca SDK yazmalarında kullanın. Tokenları, yetkilendirme
+başlıklarını, ham logları, müşteri verilerini, istek gövdelerini, yerel yolları
+veya kaynak kodu bir komuta, sohbete ya da destek talebine koymayın.
+
+Sorunu bildirmeden önce hâlâ başarısız olan en küçük kapsamla bir okumayı
+tekrarlayın. Kimlik bilgisi değerlerini çıkararak komutu, hata kodunu, proje
+kimliğini ve filtre değerlerini kaydedin. Kontroller sorunu çözmezse
+[sorun bildirin](/tr/guides/report-a-problem).
+
+## İlgili sayfalar
+
+<CardGroup cols={2}>
+  <Card title="Hızlı başlangıç" icon="rocket" href="/tr/quickstart">
+    İlk güvenli olayı gönderin ve okuyun.
+  </Card>
+
+  <Card title="CLI rehberi" icon="square-terminal" href="/tr/guides/cli">
+    Tam filtreler ve JSON çıktısı kullanın.
+  </Card>
+
+  <Card title="Bir sorunu inceleyin" icon="search" href="/tr/guides/investigate-an-issue">
+    Durumu değiştirmeden önce sorun kanıtını okuyun.
+  </Card>
+
+  <Card title="API hataları" icon="triangle-alert" href="/tr/reference/api-errors">
+    Her hata kodundan kurtulun.
+  </Card>
+</CardGroup>

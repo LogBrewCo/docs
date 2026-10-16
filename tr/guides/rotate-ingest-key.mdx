@@ -1,0 +1,179 @@
+---
+title: "API anahtarı yenileme: LogBrew alım anahtarını yenileyin"
+sidebarTitle: "Alım anahtarını yenileyin"
+description: "Bir LogBrew alım anahtarını yenileyin. Planlı iptalden önce yeni anahtarı test edin. Kimlik bilgilerini açığa çıkarmadan hatalardan kurtulun."
+---
+
+Anahtar yenileme, bir projenin alım anahtarını (ingest key) değiştirir. Projeyi
+veya projede saklanan telemetriyi değiştirmez. Anahtarları hesap kimlik
+doğrulamasıyla yönetin. Alım anahtarı yalnızca telemetri gönderebilir.
+Anahtarları yönetemez.
+
+Başlamadan önce [CLI'ı kurun ve giriş yapın](/tr/guides/cli).
+`LOGBREW_PROJECT_ID` değişkenine proje UUID'sini yazın. `LOGBREW_API_URL`
+değişkenine `https://api.logbrew.co` adresini yazın. Örnekler Bash, curl 7.76.0
+veya daha yeni bir sürüm ve jq kullanır.
+
+Planlı bir yenilemede eski anahtarı iptal etmeden önce yeni anahtarı oluşturun,
+dağıtın ve test edin. Yenileme sıklığını güvenlik politikanızda belirleyin.
+Anahtarın bir son kullanma tarihi varsa onu bu tarihten önce değiştirin.
+
+<Warning>
+  Açığa çıkmış bir anahtar bir güvenlik olayıdır. Yeni anahtar dağıtılmamış
+  olsa bile onu hemen iptal edin. İptal edilmiş bir anahtarı kullanmaya devam
+  eden uygulamalar telemetri gönderemez.
+</Warning>
+
+<Steps>
+  <Step title="Yeni anahtarı oluşturun">
+    `POST /api/projects/{project_id}/ingest-keys`, en fazla 120 karakterlik
+    boş olmayan bir `label` kabul eder. `kind` değeri `cli`, `sdk`, `browser`,
+    `server` veya `artifact` olur. `artifact` anahtarı telemetri gönderemez.
+    İsteğe bağlı `expires_at` değeri gelecekteki bir RFC3339 zamanı olmalıdır.
+
+    Eski anahtarla aynı `kind` değerini kullanın. `--kind` seçeneğini
+    vermezseniz CLI `sdk` kullanır. `--label` seçeneğini vermezseniz
+    `CLI-created SDK key` kullanır. CLI'da son kullanma tarihi için bir seçenek
+    yoktur. `expires_at` değerini ayarlamak için API'yi kullanın.
+
+    CLI, tek seferlik tokenı kaynak kontrolü dışındaki yeni bir dosyaya kaydeder.
+    Bu dosyayı yalnızca sahibi okuyabilir. CLI tokenı değil, meta verileri
+    yazdırır:
+
+    ```bash
+    : "${LOGBREW_PROJECT_ID:?set LOGBREW_PROJECT_ID}" &&
+    : "${LOGBREW_REPLACEMENT_KEY_FILE:?choose a new private key file}" &&
+    logbrew projects keys create "$LOGBREW_PROJECT_ID" \
+      --ingest-key-file "$LOGBREW_REPLACEMENT_KEY_FILE" \
+      --label "checkout production rotation" --kind server --json
+    ```
+
+    Yalnızca komut başarılı olduktan sonra devam edin. `NEW_KEY_ID`
+    değişkenine dönen `ingest_key.id` değerini yazın.
+
+    Sonuç belirsizse aynı komutu yeniden çalıştırın. CLI bekleyen yeniden
+    deneme anahtarını tekrar kullanır. Bu yeniden denemede `--abandon-retry`
+    kullanmayın.
+
+    Doğrudan API istemcisi tokenı yanıtta yalnızca bir kez alır. Yeniden denemek
+    için aynı gövdeyle aynı `Idempotency-Key` başlığını gönderin. 24 saat
+    boyunca bu yeniden deneme aynı anahtarı döndürür. Tokenı asla
+    yazdırmayın, commit etmeyin veya paylaşmayın.
+  </Step>
+
+  <Step title="Eski anahtar etkinken yeni anahtarı dağıtın">
+    Yeni tokenı korumalı dağıtım ayarına koyun. Uygulamayı dağıtın. Eski
+    anahtarı etkin tutun. İki tokenı da kaynak koddan, derleme çıktısından ve
+    loglardan uzak tutun.
+  </Step>
+
+  <Step title="Tek bir test olayı gönderin">
+    Yeni tokenı `new_ingest_key` kabuk değişkenine aktarın. Tokenı
+    yazdırmayın. Yeni anahtarla tek bir test logu gönderin, ardından geri
+    okuyun:
+
+    ```bash
+    occurred_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+
+    curl --fail-with-body -sS "$LOGBREW_API_URL/api/telemetry/ingest" \
+      -H "Authorization: Bearer $new_ingest_key" \
+      -H "Content-Type: application/json" \
+      --data @- <<JSON &&
+    {
+      "project_id": "$LOGBREW_PROJECT_ID",
+      "environment": "production",
+      "release": "ingest-key-rotation@1",
+      "service_name": "checkout-api",
+      "sdk_name": "native-api",
+      "sdk_version": "0.1.0",
+      "items": [
+        {
+          "type": "log",
+          "data": {
+            "level": "info",
+            "message": "ingest key rotation check",
+            "source": "setup",
+            "attributes": {},
+            "occurred_at": "$occurred_at"
+          }
+        }
+      ]
+    }
+    JSON
+
+    logbrew read logs --project "$LOGBREW_PROJECT_ID" \
+      --release ingest-key-rotation@1 \
+      --environment production \
+      --since "$occurred_at" \
+      --json
+    ```
+
+    Yalnızca okuma bu logu aynı `occurred_at` değeriyle döndürdüğünde devam
+    edin. Daha eski bir yenileme kontrol logu, yeni anahtarın çalıştığını
+    kanıtlamaz. Dağıtılan uygulamanın telemetri gönderdiğini de doğrulayın.
+    Bir komut başarısız olursa durun ve yanıtı okuyun. Açığa çıkmadıysa eski
+    anahtarı etkin tutun.
+  </Step>
+
+  <Step title="Gizli bilgi içermeyen anahtar meta verilerini listeleyin">
+    `LOGBREW_ACCOUNT_BEARER` değişkenini hesap kimlik doğrulamanızdan
+    ayarlayın. Eski anahtarın kimliğini bulun. `NEW_KEY_ID` anahtarının
+    `active` olduğunu doğrulayın:
+
+    ```bash
+    (
+      set -o pipefail
+      curl --fail-with-body -sS "$LOGBREW_API_URL/api/projects/$LOGBREW_PROJECT_ID/ingest-keys" \
+        -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+        | jq -e 'select(type == "array") | map({id, label, kind, token_prefix, status, created_at, expires_at, revoked_at})'
+    )
+    ```
+
+    Yanıt, token içermeyen anahtar meta verilerinden oluşan bir dizidir. Durum
+    `active`, `expired` veya `revoked` olur. `expires_at` zamanı geçen anahtar
+    `expired` olur.
+  </Step>
+
+  <Step title="Yalnızca eski anahtarı iptal edin">
+    `OLD_KEY_ID` değişkenini listeden ayarlayın. Komut eski anahtarı yalnızca
+    iki kimlik farklıysa iptal eder:
+
+    ```bash
+    if [ -n "${OLD_KEY_ID:-}" ] && [ -n "${NEW_KEY_ID:-}" ] \
+      && [ "$OLD_KEY_ID" != "$NEW_KEY_ID" ]; then
+      (
+        set -o pipefail
+        curl --fail-with-body -sS -X DELETE \
+          "$LOGBREW_API_URL/api/projects/$LOGBREW_PROJECT_ID/ingest-keys/$OLD_KEY_ID" \
+          -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+          | jq -e --arg id "$OLD_KEY_ID" \
+            'select(.id == $id and .status == "revoked") | {id, label, kind, token_prefix, status, created_at, expires_at, revoked_at}'
+      )
+    else
+      printf '%s\n' 'Set different old and replacement key IDs before revocation.' >&2
+      false
+    fi
+    ```
+
+    `DELETE` idempotent bir işlemdir. Anahtar meta verilerini
+    `status: "revoked"` ve dolu bir `revoked_at` ile döndürür. Belirsiz bir
+    yanıttan sonra komutu güvenle tekrarlayabilirsiniz.
+
+    `unset new_ingest_key` komutunu çalıştırın. Anahtar dosyasını gizli bilgi
+    politikanıza göre yönetin.
+  </Step>
+</Steps>
+
+## Güvenle kurtarın
+
+| Yanıt | Sonraki adım |
+| --- | --- |
+| `404`, `code: "not_found"` | Proje ve anahtar kimliklerinin bu hesaba ait olduğunu doğrulayın. `next_action.code: "check_resource"` adımını izleyin. Başka kimlikleri denemeyin. |
+| `code: "validation_failed"` | Adı verilen alanı, değeri veya zaman damgasını düzeltin. `next` ve `next_action` adımlarını izleyin. |
+| Anahtar yönetiminde `401` veya `403` | Alım anahtarı yerine hesap kimlik doğrulamasını kullanın. |
+| Alım isteğinde `401`, `code: "ingest_key_invalid"` | Anahtar iptal edilmiş, süresi dolmuş veya telemetri için geçersiz. Seçili proje için yeni etkin anahtarı kullanın. `next_action.code: "configure_ingest_key"` adımını izleyin. |
+| Alım isteğinde `401` veya `403` | Seçili proje için yeni alım anahtarını kullanın. Hesap kimlik bilgisi kullanmayın. |
+
+Yenileme yine başarısız olursa [sorun bildirin](/tr/guides/report-a-problem).
+Yalnızca anahtar meta verilerini paylaşın. Kimlik bilgilerini, başlıkları, ham
+telemetriyi, müşteri verilerini, yerel yolları veya kaynak kodu eklemeyin.

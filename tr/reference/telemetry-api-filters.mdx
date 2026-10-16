@@ -1,0 +1,486 @@
+---
+title: "API sorgu parametreleri ve cursor ile sayfalama"
+sidebarTitle: "Sorgu filtreleri"
+description: "LogBrew telemetrisini proje, hizmet, sürüm, ortam, önem düzeyi, iz, sorun durumu, öncelik, sorumlu ve zamana göre filtreleyin. Sonuçlara cursor ile devam edin."
+---
+
+Her okuma rotası kendi sorgu anahtarlarını kabul eder.
+[Filtre tablosundaki](#filter-matrix) bir rota, tablo aksini söylemedikçe
+bilinmeyen bir anahtarı veya yanlış türdeki bir değeri `422` ve
+`validation_failed` ile reddeder. `project`, `trace` ve `user` gibi kolay
+eş adlar sorgu anahtarı değildir. Bir filtreyi bir rotadan başka bir rotaya
+taşımayın.
+
+## Filtrelenmiş bir istek oluşturun
+
+Sorgu dizesini yolun arkasına koyun. Ayrılmış karakterlerin güvenli kalması
+için `--data-urlencode` kullanın. Bu istek, bir projenin son 24 saatteki
+kritik loglarını okur:
+
+```bash
+curl --get "https://api.logbrew.co/api/logs" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "severity=critical" \
+  --data-urlencode "since=24h"
+```
+
+Filtreleri şu sırayla ekleyin:
+
+1. Projeyi `project_id` veya `project_ids` ile seçin.
+2. `since` ve isteğe bağlı olarak `until` ile bir zaman aralığı ekleyin.
+3. Hizmet, sürüm, ortam, durum veya sinyale özgü filtreleri ekleyin.
+4. Daha küçük bir sayfa için `limit` ayarlayın.
+5. Cursor alanlarını yalnızca bir cursor yanıtı onları döndürdükten sonra
+   ekleyin.
+
+Dönen her satır, istekteki tüm filtrelerle eşleşir. Gönderilmeyen bir filtre
+rotanın varsayılanını kullanır. Örneğin `GET /api/logs`, `status`
+gönderilmediğinde `status=active` kullanır.
+
+## <span id="filter-matrix">Filtre tablosu</span>
+
+"Zorunlu" sütunundaki anahtarlar istekte bulunmalıdır. Diğer tüm anahtarlar
+isteğe bağlıdır.
+
+| Rota | Zorunlu | İsteğe bağlı sorgu anahtarları |
+| --- | --- | --- |
+| `GET /api/logs` | Yok | `project_id` veya `project_ids`, `severity`, `level` (uyumluluk için eş ad), `status`, `search`, `trace_id`, `service_name`, `release`, `environment`, `since`, `until`, `attribute_filters`, `pagination`, `cursor_time`, `cursor_id`, `limit` |
+| `GET /api/logs/attributes` | `since` | `project_id` veya `project_ids`, `type`, `search`, `severity`, `level`, `service_name`, `release`, `environment`, `until`, `cursor_count`, `cursor_path`, `cursor_type`, `limit` |
+| `GET /api/telemetry/issues` | Yok | `project_id` veya `project_ids`, `status`, `severity`, `priority`, `assignee`, `service_name`, `release`, `environment`, `since`, `until`, `pagination`, `cursor_time`, `cursor_id`, `limit`, `response_version` |
+| `GET /api/telemetry/issues/{issue_id}` | Yok | `response_version`. Bu rota diğer anahtarları yok sayar. |
+| `GET /api/telemetry/issues/{issue_id}/events` | Yok | `pagination`, `cursor_time`, `cursor_id`, `limit` |
+| `GET /api/telemetry/issues/assignees` | `project_id` | Yok |
+| `GET /api/telemetry/actions` | Yok | `project_id` veya `project_ids`, `name`, `distinct_id`, `service_name`, `release`, `environment`, `since`, `until`, `pagination`, `cursor_time`, `cursor_id`, `limit` |
+| `GET /api/telemetry/metrics` | Yok | `project_id` veya `project_ids`, `name`, `service_name`, `release`, `environment`, `since`, `until`, `pagination`, `cursor_time`, `cursor_id`, `limit` |
+| `GET /api/telemetry/metrics/series` | `project_id`, `name`, `since` | `until`, `interval`, `group_by`, `service_name`, `release`, `environment`, `series_limit` |
+| `GET /api/telemetry/releases` | Yok | `project_id` veya `project_ids`, `service_name`, `release`, `environment`, `since`, `until`, `pagination`, `cursor_time`, `cursor_project_id`, `cursor_release`, `cursor_environment`, `cursor_service_name`, `limit` |
+| `GET /api/telemetry/traces` | Yok | `project_id` veya `project_ids`, `service_name`, `release`, `environment`, `status`, `since`, `until`, `min_duration_ms`, `pagination`, `cursor_time`, `cursor_trace_id`, `limit` |
+| `GET /api/telemetry/traces/{trace_id}` ve `.../summary` | Yok | `project_id`, `release`, `environment` |
+| `GET /api/telemetry/summary/volume` | `project_id`, `since` | `until`, `interval`, `service_name`, `release`, `environment`, `response_version` |
+| `GET /api/telemetry/deployments` | `project_id` | `release`, `environment`, `service_name`, `status`, `since`, `until`, `pagination`, `cursor_time`, `cursor_id`, `limit` |
+| `GET /api/telemetry/deployments/{deployment_id}` | `project_id` | Yok |
+| `GET /api/telemetry/traces/{trace_id}/investigation` | Yok | `project_id`, `release`, `environment`, `response_version` |
+| `GET /api/telemetry/traces/{trace_id}/spans/{span_id}/investigation` | `project_id`, `release`, `environment` | Yok |
+| `GET /api/telemetry/issues/{issue_id}/investigation` | Yok | `response_version` ve `selection` ya da `occurrence_id` |
+| `GET /api/telemetry/issues/{issue_id}/correction-verification` | `baseline_occurrence_id`, `candidate_deployment_id` | Yok |
+| `GET /api/telemetry/releases/investigation` | `project_id`, `release`, `environment`, `service_name` | `response_version` |
+| `GET /api/telemetry/metrics/investigation` | `project_id`, `name`, `since` | `until`, `interval`, `group_by`, `service_name`, `release`, `environment`, `series_limit`, `response_version` |
+| `GET /api/telemetry/analytics/overview` | `project_id`, `since` | `until`, `interval`, `top_limit`, `service_name`, `release`, `environment`, `response_version` |
+| `GET /api/telemetry/analytics/properties` | `project_id`, `since` | `until`, `limit`, `service_name`, `release`, `environment`, `response_version` |
+
+Sorun incelemesinde `selection` değeri `first`, `latest` veya `recommended`
+olur. `selection` veya `occurrence_id` gönderin, ikisini birden göndermeyin.
+İkisi de 2 ile 13 arasında bir `response_version` gerektirir. Sürüm 2 veya
+sonrasında seçici gönderilmezse LogBrew `recommended` kullanır.
+`occurrence_id` değerini `GET /api/telemetry/issues/{issue_id}/events`
+rotasından alın.
+
+`POST` analiz rotaları bir JSON gövdesi alır. Bkz.
+[Ürün analizleri](/tr/concepts/product-analytics).
+
+## Ortak ve sinyale özgü filtreler
+
+`service_name`, `release` ve `environment` her telemetri listesini daraltır.
+SDK'nızın gönderdiği değerlerin aynısını kullanın.
+
+Bazı filtreler tek bir sinyale aittir:
+
+- Loglar `search`, `trace_id`, `severity` ve `attribute_filters` kabul eder.
+- Loglar `status` kabul eder: `active` (varsayılan), `ignored` veya `all`.
+  `ignored`, bir log kuralının etkin görünümden gizlediği logları seçer.
+- Sorunlar sorun `status` değerini kabul eder: `unresolved`, `resolved` veya
+  `archived`. `ignored`, `archived` için eski bir addır ve aynı sorunları
+  seçer.
+- Sorunlar `severity` kabul eder: `info`, `warning`, `error` veya
+  `critical`.
+- Sorunlar `priority` kabul eder: `high`, `medium` veya `low`.
+- Sorunlar `assignee` kabul eder: giriş yapmış hesaba atanmış sorunlar için
+  `me`, sorumlusu olmayan sorunlar için `none` veya bir kullanıcı kimliği.
+- Aksiyonlar ve metrikler `name` kabul eder.
+- Aksiyonlar `distinct_id` kabul eder.
+- İzler iz `status` değerini ve `min_duration_ms` kabul eder.
+- Dağıtımlar `status` kabul eder: `succeeded` veya `failed`.
+
+Log ve sorun `severity` filtreleri geçerli önem düzeyini karşılaştırır. Bir
+kural önem düzeyini değiştirdiyse filtre kuralın değerini kullanır. Bkz.
+[Önem düzeyi değerleri](/tr/reference/telemetry-response-shapes#severity-values).
+
+## Zaman aralığı
+
+`since`, `24h` veya `7d` gibi pozitif bir tam saat veya gün sayısı ya da bir
+RFC3339 zaman damgası kabul eder. Kısa süre biçimi, her isteğin zamanına
+göre hesaplanır.
+
+`until` yalnızca RFC3339 zaman damgası kabul eder. Bitiş zamanı aralığa dâhil
+değildir: tam olarak `until` anındaki bir satır sonuçta yer almaz. `since`
+dâhildir. Örneğin `since=2026-10-01T00:00:00Z` ve
+`until=2026-10-02T00:00:00Z` tam 1 günü seçer. LogBrew zamanları milisaniye
+hassasiyetinde karşılaştırır.
+
+`until`, `since` değerinden sonra olmalıdır. Değilse veya `until` bir RFC3339
+zaman damgası değilse istek `422` ve `validation_failed` ile başarısız olur.
+
+Birden fazla sayfalık bir okumada tek bir RFC3339 başlangıç zamanı seçin ve
+her sayfada onu kullanın. Her sayfada aynı `until` değerini de koruyun.
+
+Bu istek 1 günün hata loglarını okur:
+
+```bash
+curl --get "https://api.logbrew.co/api/logs" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "severity=error" \
+  --data-urlencode "since=2026-10-01T00:00:00Z" \
+  --data-urlencode "until=2026-10-02T00:00:00Z"
+```
+
+<Note>
+  Dağıtım listesi farklı zaman kuralları kullanır. `since` ve `until`
+  yalnızca RFC3339 zaman damgası kabul eder ve ikisi de dâhildir. Dağıtımın
+  bittiği zamanı karşılaştırırlar.
+</Note>
+
+## Sorun yanıt sürümü
+
+Sorun listesi ve sorun ayrıntısı `response_version=1`,
+`response_version=2` veya `response_version=3` kabul eder. Varsayılan sürüm
+1'dir. Başka bir değer `422` ve `validation_failed` ile başarısız olur.
+
+- Sürüm 1 arşivlenmiş durumu `ignored` olarak gösterir. Önceliği göstermez.
+- Sürüm 2 arşivlenmiş durumu `archived` olarak gösterir. `priority` ve
+  `priority_source` alanlarını ekler.
+- Sürüm 3, sürüm 2'nin tüm alanlarını içerir. `assignee` alanını ekler.
+
+Her sürüm `status=archived`, `priority` ve `assignee` kabul eder. Bkz.
+[Sorun yanıtı](/tr/reference/telemetry-response-shapes#issue-response).
+
+## Önem düzeyi filtresi
+
+`GET /api/logs` üzerinde `severity=info|warning|error|critical` kullanın.
+Eski `level` anahtarı uyumluluk için bir eş addır. İki anahtar da standart
+değerleri ve `trace`, `debug`, `warn` ve `fatal` eş adlarını kabul eder.
+LogBrew karşılaştırmadan önce bir eş adı standart değerine çevirir.
+
+Bir istek hem `severity` hem `level` gönderirse LogBrew önce ikisini de
+standart hâle getirir. Çelişen değerler şu yanıtla reddedilir:
+
+```text
+log severity and level filters conflict; use one value
+```
+
+## <span id="trace-filters">İz filtreleri</span>
+
+İz keşfinde `status` değeri `error` veya `ok` olur. İkisini de dâhil etmek
+için göndermeyin. `min_duration_ms` sıfır veya daha büyük olmalıdır.
+Yalnızca iz keşfine uygulanır.
+
+Bu istek en az 500 milisaniye süren hatalı izleri bulur:
+
+```bash
+curl --get "https://api.logbrew.co/api/telemetry/traces" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "status=error" \
+  --data-urlencode "min_duration_ms=500" \
+  --data-urlencode "since=7d"
+```
+
+İz ayrıntısı ve özeti için `trace_id` değerini yol parçası olarak yüzde
+kodlamasıyla gönderin. Sorgu anahtarı olarak göndermeyin.
+
+## <span id="project-scope">Proje kapsamı</span>
+
+Tek bir projeyi okumak için `project_id=<project-uuid>` kullanın. Tabloda
+`project_ids` listeleyen rotalarda, 2 ile 50 arasındaki kesin bir proje
+kümesi için `project_ids=<uuid>,<uuid>` kullanın. Bu rotalarda hesabın
+okuyabildiği her projeyi okumak için iki anahtarı da göndermeyin.
+`project_id` gerektiren bir rota yalnızca 1 proje kabul eder.
+
+```text
+project_id=00000000-0000-4000-8000-000000000001
+project_ids=00000000-0000-4000-8000-000000000001,00000000-0000-4000-8000-000000000002
+```
+
+LogBrew şu seçimleri `422` ve `validation_failed` ile reddeder:
+
+- Hem `project_id` hem `project_ids` içeren bir istek.
+- 2'den az veya 50'den fazla kimlik içeren bir `project_ids` değeri.
+- Yinelenen bir kimlik veya UUID olmayan bir kimlik.
+
+`project_ids` içindeki bir kimlik hesabın okuyamadığı bir projeyse istek
+`404` ve `not_found` ile başarısız olur. O kimliği çıkarıp devam etmeyin.
+Kullanıcıdan yeni bir küme seçmesini isteyin.
+
+Her cursor sayfasında aynı proje kapsamını koruyun. Boş bir sonuçtan sonra
+proje filtresini kaldırmayın. Bu, farklı bir soru sormak olur.
+
+## Zaman dilimli seriler
+
+`GET /api/telemetry/metrics/series`, bir metriği zaman dilimleri olarak
+döndürür. `GET /api/telemetry/summary/volume`, sinyal sayılarını zaman
+dilimleri olarak döndürür. İki rota da şu kuralları kullanır:
+
+- `since` zorunludur. `until` isteğe bağlıdır ve varsayılanı istek
+  zamanıdır.
+- `since` ile `until` arasındaki aralık en fazla 31 gündür.
+- `interval` değeri `auto`, `1m`, `5m`, `15m`, `1h`, `6h` veya `1d` olur.
+  Varsayılan `auto` değeridir. 500'den fazla zaman dilimi oluşturan bir
+  aralık başarısız olur.
+- `service_name`, `release` ve `environment` kesin eşleşme filtreleridir.
+
+Metrik serilerinde `name`, `GET /api/telemetry/metrics` rotasından alınan
+kesin metrik adıdır. `group_by` değeri `none`, `service_name`, `release` veya
+`environment` olur. `series_limit` 1 ile 20 arasındadır.
+
+Sinyal hacminde `until` gelecekte olamaz ve `response_version` yalnızca `1`
+olabilir.
+
+## Log özniteliklerini filtreleyin
+
+Arayabileceğiniz öznitelik yollarını ve türlerini bulmak için
+`GET /api/logs/attributes` kullanın. Ardından `GET /api/logs` rotasına
+`attribute_filters` gönderin. İki istek de `since` gerektirir.
+
+### Öznitelik kataloğunu okuyun
+
+Bu istek, bir projede `status` içeren sayısal yolları bulur:
+
+```bash
+curl --get "https://api.logbrew.co/api/logs/attributes" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "since=2026-06-01T00:00:00Z" \
+  --data-urlencode "type=number" \
+  --data-urlencode "search=status" \
+  --data-urlencode "limit=2"
+```
+
+Yanıt düz bir dizi değil, bir nesnedir. Bu yapay örnekte 2 öznitelik ve bir
+sonraki sayfa vardır:
+
+```json
+{
+  "attributes": [
+    { "path": "/http/status_code", "type": "number", "observed_count": 50, "last_seen_at": "2026-06-01T12:00:03.789Z" },
+    { "path": "/response/status", "type": "number", "observed_count": 42, "last_seen_at": "2026-06-01T12:00:02.456Z" }
+  ],
+  "coverage": {
+    "total_logs": 60,
+    "fully_indexed_logs": 50,
+    "partially_indexed_logs": 2,
+    "unindexed_logs": 8
+  },
+  "next_cursor": { "observed_count": 42, "path": "/response/status", "type": "number" }
+}
+```
+
+`type` değeri `string`, `number` veya `boolean` olur. `observed_count`,
+aralıkta bu yola ve türe sahip log sayısıdır. `last_seen_at`, bunların en
+sonuncusunun zamanıdır. Bir log birçok yola sahip olabilir. Log sayısını
+bulmak için bu sayıları toplamayın.
+
+`coverage`, bir öznitelik filtresinin hangi logları arayabileceğini bildirir:
+
+| Alan | Anlamı |
+| --- | --- |
+| `total_logs` | Kataloğun proje, zaman, önem düzeyi, hizmet, sürüm ve ortam filtreleriyle eşleşen loglar. |
+| `fully_indexed_logs` | Desteklenen tüm öznitelik değerleri aranabilen loglar. |
+| `partially_indexed_logs` | Bazı değerleri dizinin dışında kalan loglar. Bir filtre, dizin dışında kalan bir değeri kaçırabilir. |
+| `unindexed_logs` | Türü belirtilmiş öznitelik filtrelerinin arayamadığı loglar. |
+
+Bu 3 grubun toplamı `total_logs` değerine eşittir. Kataloğun `type`,
+`search` ve cursor değerleri kapsama oranını değiştirmez. Boş bir
+`attributes` listesi, `total_logs` değerinin sıfır olduğu anlamına gelmez.
+
+Kataloğun `status` anahtarı yoktur. Önem düzeyi filtresi geçerli önem
+düzeyini değil, yakalanan önem düzeyini karşılaştırır.
+
+`search`, kontrol karakteri içermeyen, 1 ile 128 bayt arasında bir yol alt
+dizesidir. `limit`, bir sayfadaki öznitelik sayısını belirler.
+
+### Kataloğa devam edin
+
+Katalog `pagination=cursor` kullanmaz. Her filtreyi tekrarlayın ve
+`next_cursor` içindeki 3 alanın tamamını kopyalayın:
+
+| Dönen alan | Sonraki istek anahtarı |
+| --- | --- |
+| `next_cursor.observed_count` | `cursor_count` |
+| `next_cursor.path` | `cursor_path` |
+| `next_cursor.type` | `cursor_type` |
+
+`next_cursor` değeri `null` olduğunda durun.
+
+### Türü belirtilmiş bir filtre uygulayın
+
+Yolu ve türü katalogdan kopyalayın. Yollar noktalı anahtarlar değil, JSON
+Pointer söz dizimini kullanır. Yoldaki `~0` veya `~1` kaçış dizilerini
+değiştirmeyin.
+
+Bu istek, sayısal yanıt durumu 500 veya daha büyük olan logları okur:
+
+```bash
+curl --get "https://api.logbrew.co/api/logs" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "since=2026-06-01T00:00:00Z" \
+  --data-urlencode 'attribute_filters=[{"path":"/response/status","type":"number","operator":"gte","value":500}]'
+```
+
+`attribute_filters`, 1 ile 4 arasında filtre içeren bir JSON dizisidir. Bir
+log her filtreyle eşleşmelidir. Her filtrede `path`, `type`, `operator` ve
+`value` bulunur. `value` değerinin JSON türü `type` ile eşleşmelidir: `500`
+sayısı `"500"` dizesiyle aynı değildir.
+
+| `type` | `operator` değerleri |
+| --- | --- |
+| `string` | `eq`, `ne`, `contains`, `starts_with` |
+| `number` | `eq`, `ne`, `gt`, `gte`, `lt`, `lte` |
+| `boolean` | `eq`, `ne` |
+
+`ne` yalnızca bu yola sahip loglarla eşleşir. Yolu olmayan bir log `ne` ile
+eşleşmez. `string` için `case_sensitive` isteğe bağlıdır ve varsayılanı
+`false` değeridir. LogBrew, `number` ve `boolean` için
+`"case_sensitive": true` değerini reddeder.
+
+Şu sınırlar geçerlidir:
+
+- JSON dizisi en fazla 4.096 bayttır.
+- Bir dize değeri en fazla 1.024 bayttır.
+- `contains` ve `starts_with` boş olmayan bir dize gerektirir.
+- Bir sayı sonlu olmalı ve -9.007.199.254.740.992 ile
+  9.007.199.254.740.992 arasında olmalıdır.
+
+Dizinin arayamadığı bir log hiçbir filtreyle eşleşmez. Bu log,
+`attribute_filters` içermeyen bir istekte yine görünebilir. Log yanıtı için
+[Log yanıtı](/tr/reference/telemetry-response-shapes#log-response) bölümüne
+bakın.
+
+### Öznitelik hatalarını düzeltin
+
+Aşağıdaki her hata `422` ve `validation_failed` döndürür:
+
+| `error` | Düzeltme |
+| --- | --- |
+| `log attribute queries require since` | Katalog isteğine veya `attribute_filters` içeren log isteğine `since` ekleyin. |
+| `invalid log attribute filters` | Katalogdan alınan yol, tür, operatör ve değerle 1 ile 4 arasında filtre içeren bir JSON dizisi gönderin. |
+| `invalid log attribute cursor` | `next_cursor` içindeki `cursor_count`, `cursor_path` ve `cursor_type` değerlerini birlikte gönderin. |
+| `invalid log attribute search` | 128 bayt veya daha kısa, boş olmayan bir yol alt dizesi gönderin. |
+
+Yeniden denemeden önce isteği düzeltin. Bir filtreyi kaldırmayın. Bu, sonucu
+değiştirir.
+
+## <span id="cursor-pagination">Cursor ile sayfalama</span>
+
+Cursor modu isteğe bağlıdır. Bu mod olmadan liste rotaları düz bir dizi
+döndürür. İlk sayfa için cursor alanları olmadan `pagination=cursor`
+gönderin. Sonraki her sayfa için her filtreyi tekrarlayın ve cursor
+alanlarının tamamını gönderin:
+
+| Rota | Devam için cursor alanları |
+| --- | --- |
+| Loglar, sorunlar, sorun oluşumları, aksiyonlar, metrikler ve dağıtımlar | `cursor_time` ve `cursor_id` |
+| Sürümler | `cursor_time`, `cursor_project_id`, `cursor_release`, `cursor_environment` ve `cursor_service_name` |
+| İz keşfi | `cursor_time` ve `cursor_trace_id` |
+
+Dönen `next_cursor` alanlarını sonraki isteğe şöyle aktarın:
+
+- `next_cursor.time` değeri `cursor_time` olur.
+- `next_cursor.id` değeri `cursor_id` olur.
+- İzlerde `next_cursor.trace_id` değeri `cursor_trace_id` olur.
+- Sürümlerde dönen her alan adının başına `cursor_` ekleyin; örneğin
+  `next_cursor.release` değeri `cursor_release` olur.
+
+`next_cursor` değeri `null` olduğunda durun. Cursor'ı son satırdan
+hesaplamayın. Sürüm cursor'ı seçilen projeleri değiştirmez. Özgün
+`project_id` veya `project_ids` değerini koruyun.
+
+```bash
+curl --get "https://api.logbrew.co/api/logs" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "severity=error" \
+  --data-urlencode "since=2026-06-01T00:00:00Z" \
+  --data-urlencode "pagination=cursor" \
+  --data-urlencode "limit=50"
+```
+
+`limit` sayfa boyutunu belirler. Bir sayfa daha az satır içerebilir. Bu
+rotalar `page` veya `page_number` kabul etmez.
+
+| Rota | Varsayılan `limit` | En fazla `limit` |
+| --- | ---: | ---: |
+| Loglar, log öznitelikleri, sorunlar, aksiyonlar, metrikler, sürümler ve iz keşfi | 100 | 500 |
+| Sorun oluşumları | 25 | 100 |
+| Dağıtımlar | 50 | 100 |
+
+Çoğu rotada LogBrew, en fazla değerin üzerindeki bir `limit` değerini en
+fazla değere düşürür. Dağıtım listesi 1 ile 100 dışındaki bir `limit`
+değerini `422` ile reddeder. Dağıtım listesi `pagination=cursor` olmadan da
+her zaman `next_cursor` içeren bir sayfa nesnesi döndürür.
+
+LogBrew şu istekleri `422` ve `validation_failed` ile reddeder:
+
+- `cursor` dışında bir `pagination` değeri.
+- `pagination=cursor` olmadan gönderilen cursor alanları.
+- Eksik bir cursor alanı kümesi.
+- RFC3339 zaman damgası olmayan bir `cursor_time`.
+
+Cursor bir konumu işaretler; veriyi dondurmaz. Güncel bir görünüme
+ihtiyacınız olduğunda yeni bir ilk sayfayla başlayın.
+
+CLI aynı alanları kullanır:
+
+```bash
+logbrew read logs --severity error --pagination cursor --limit 50 --json
+logbrew read logs --severity error --pagination cursor --limit 50 \
+  --cursor-time <time> --cursor-id <id> --json
+```
+
+## Boş bir sonucu teşhis edin
+
+Boş bir liste, hiçbir satırın tüm filtrelerle eşleşmediği anlamına gelir.
+Diğer sinyaller hakkında hiçbir şey söylemez. İsteği şu sırayla kontrol edin:
+
+1. Proje kimliğini doğrulayın.
+2. İsteğe bağlı filtreleri birer birer kaldırın.
+3. Beklenen olay daha eskiyse `since` değerini genişletin. Beklenen olay
+   daha yeniyse `until` değerini kaldırın veya daha ileri bir zamana alın.
+4. `service_name`, `release` ve `environment` değerlerini SDK'nızın
+   gönderdiği değerlerle karşılaştırın.
+5. Loglarda, bir log kuralı beklenen logu gizleyebiliyorsa `status=all`
+   ekleyin.
+6. Rotanın her filtreyi kabul ettiğini doğrulayın.
+
+## Reddedilen bir sorgudan sonra kurtarma
+
+Reddedilen bir sorgu standart hata zarfını döndürür. Bilinmeyen bir anahtar
+veya yanlış türdeki bir değer `422` döndürür:
+
+```json
+{
+  "error": "invalid query parameters",
+  "code": "validation_failed",
+  "next": "check query parameter names and value types, then retry",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+Yaygın düzeltmeler:
+
+- Kolay bir eş adı [filtre tablosundaki](#filter-matrix) anahtarla
+  değiştirin.
+- Rotanın gerektirdiği tüm devam cursor alanlarını gönderin.
+- İlk sayfa isteğinden cursor alanlarını kaldırın.
+- Yalnızca bir proje seçici kullanın.
+- Desteklenmeyen bir önem düzeyini veya iz durumunu standart bir değerle
+  değiştirin.
+
+Hata kodları ve kurtarma için [API hataları](/tr/reference/api-errors)
+sayfasına bakın. Yanıt gövdeleri için
+[Yanıt biçimleri](/tr/reference/telemetry-response-shapes) sayfasına
+bakın.

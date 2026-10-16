@@ -1,0 +1,288 @@
+---
+title: "LogBrew gözlemlenebilirlik hızlı başlangıcıyla Node.js loglama"
+sidebarTitle: "Hızlı başlangıç"
+description: "Bir proje oluşturun, Node.js loglamayı kurun, güvenli bir SDK olayı gönderin ve saklanan logu kimlik bilgilerini göstermeden okuyun."
+---
+
+Bir geliştirme projesi oluşturun. Bir Node.js logu gönderin. Logu LogBrew'den
+geri okuyun. CLI projeyi oluşturur ve alım anahtarını (ingest key) kaydeder.
+Tarayıcıdan giriş yalnızca CLI'ın geçerli hesap erişimi yoksa gerekir.
+
+<Note>
+  Agent iş akışları için `--json` kullanın. Kimlik bilgilerini korumalı yerel
+  yapılandırmada tutun. Kişiler, araçlar ve agentlar arasında yalnızca
+  değişken adlarını paylaşın.
+</Note>
+
+## <span id="first-project-success-path">Başlamadan önce</span>
+
+Şunları hazırlayın:
+
+- Node.js 18 veya üstü.
+- LogBrew CLI v0.1.30 veya üstü.
+- `jq`.
+- Bash veya Zsh.
+- Sunucu tarafında çalışan bir Node.js uygulaması için paket dizini.
+
+Örnek; `quickstart-node` projesini, `development` ortamını ve `quickstart@1`
+sürümünü kullanır. Bu testi production'dan ayrı tutun. Başka bir çalışma
+zamanı için [SDK entegrasyonu](/tr/guides/sdk-ingestion) rehberini kullanın.
+
+<Warning>
+  Alım anahtarı dosyasını deponun dışında ve yalnızca sizin okuyabileceğiniz
+  şekilde tutun. Bu sunucu anahtarını tarayıcı koduna, herkese açık bir
+  pakete veya bir prompta yazmayın.
+</Warning>
+
+## İlk logunuzu gönderin ve okuyun
+
+<Steps>
+  <Step title="Hesap durumunu okuyun" id="confirm-account-access">
+    CLI'ı [CLI rehberindeki](/tr/guides/cli) komutla kurun. Ardından hesap
+    durumunu okuyun.
+
+    ```bash
+    logbrew status --json
+    ```
+
+    **Kontrol noktası:** durum, kimliği doğrulanmış hesap erişimini bildirir.
+    Bildirmiyorsa bir kişi `logbrew login` komutunu bir kez çalıştırır.
+    Ardından `logbrew status --json` komutunu yeniden çalıştırın. Mevcut kimlik
+    doğrulama çalışıyorsa agent yeni bir giriş başlatmamalıdır.
+  </Step>
+
+  <Step title="CLI'dan bir proje oluşturun">
+    Yalnızca sahibinin erişebildiği bir dizinde yeni bir dosya seçin. CLI,
+    başarılı olduğunu bildirmeden önce projenin alım anahtarını bu dosyaya
+    yazar. Anahtarı ve dosya yolunu asla ekrana yazdırmaz.
+
+    ```bash
+    install -d -m 700 "$HOME/.logbrew"
+
+    project_result="$(
+      logbrew projects create quickstart-node \
+        --runtime node \
+        --environment development \
+        --ingest-key-file "$HOME/.logbrew/quickstart-node.ingest" \
+        --json
+    )"
+    export LOGBREW_PROJECT_ID="$(jq -er '.project.id' <<<"$project_result")"
+    jq '{status, setup_status: .setup.status, ingest_key_kind: .ingest_key.kind, next}' \
+      <<<"$project_result"
+    unset project_result
+    ```
+
+    Proje oluşturmak hesap durumunu değiştirir. Hedef dosya önceden var
+    olmamalıdır. Sonuç net değilse aynı komutu yeniden çalıştırın. CLI bekleyen
+    isteğinin kimliğini yeniden kullanır. `--abandon-retry` seçeneğini yalnızca
+    farklı bir deneme başlatmak için kullanın.
+
+    **Kontrol noktası:** çıktı `status: "created"` değerini, `created` kurulum
+    durumunu ve bir alım anahtarı türünü bildirir. Proje vardır ve anahtar
+    saklanmıştır. Bu, telemetrinin ulaştığını göstermez. Bkz.
+    [Projeler](/tr/concepts/projects).
+  </Step>
+
+  <Step title="Node.js SDK'sını kurun">
+    ```bash
+    npm install @logbrew/sdk @logbrew/node
+    ```
+
+    Hesap kimlik bilgisini asla SDK yapılandırması olarak kullanmayın. Proje
+    anahtarını komut çıktısının, promptların, destek taleplerinin, kaynak
+    dosyaların ve paket yapılandırmasının dışında tutun.
+  </Step>
+
+  <Step title="Güvenli bir SDK logu gönderin">
+    Yalnızca yer tutucu içeren bir `info` loguyla birlikte sürüm ve ortam
+    işaretlerini gönderin. Anahtar yalnızca bu Node.js işlemi için ayarlanır.
+    Uygulama kimliği `context` içine yazılır.
+
+    Her çalıştırma yeni olay kimlikleri oluşturur. SDK aynı çalıştırmada
+    gönderimi yeniden denerse aynı gövdeyi aynı kimliklerle gönderir. Kabul
+    edilmiş bir olay yeniden denemeyle tekrar gelirse LogBrew onu ikinci kez
+    saklamaz.
+
+    ```bash
+    LOGBREW_SERVER_API_KEY="$(< "$HOME/.logbrew/quickstart-node.ingest")" \
+      node --input-type=module <<'JS'
+    import { randomUUID } from "node:crypto";
+    import { SdkError } from "@logbrew/sdk";
+    import { createLogBrewNodeClient } from "@logbrew/node";
+
+    const client = createLogBrewNodeClient({
+      context: {
+        schemaVersion: 1,
+        resource: { service: { name: "quickstart-node", version: "quickstart@1" } }
+      }
+    });
+    const occurredAt = new Date().toISOString();
+
+    client.release(randomUUID(), occurredAt, {
+      version: "quickstart@1",
+      metadata: { service: "quickstart-node" }
+    });
+    client.environment(randomUUID(), occurredAt, { name: "development" });
+    client.log(randomUUID(), occurredAt, {
+      message: "LogBrew quickstart check",
+      level: "info",
+      logger: "quickstart-node"
+    });
+
+    try {
+      const response = await client.shutdown();
+      console.log(JSON.stringify({
+        ok: true,
+        status_code: response.statusCode,
+        attempts: response.attempts
+      }));
+    } catch (error) {
+      console.error(JSON.stringify({
+        ok: false,
+        error: error instanceof SdkError ? error.code : "delivery_failed"
+      }));
+      process.exitCode = 1;
+    }
+    JS
+    ```
+
+    Olaya kimlik bilgisi, başlık, istek gövdesi, müşteri verisi veya yerel yol
+    yazmayın.
+
+    **Kontrol noktası:** betik, `2xx` bir `status_code` ile `"ok":true`
+    yazdırır. Yeniden denemeden sonra `attempts`, `1` değerinden büyük olur.
+    Başarılı bir gönderim son kontrol değildir.
+
+    Gönderim başarısız olursa betik `1` koduyla çıkar ve
+    `{"ok":false,"error":"unauthenticated"}` gibi kısa bir JSON hatası yazdırır.
+    İstek gövdesini veya anahtarı yazdırmaz. Reddedilen bir proje anahtarı
+    `unauthenticated` hatasına neden olur. Yeni bir CLI girişi bunu düzeltmez.
+  </Step>
+
+  <Step title="Proje doctor raporunu okuyun" id="verify-readiness-with-the-project-doctor">
+    CLI bu okuma için kayıtlı hesap erişimini kullanır. Projenin alım
+    anahtarını kullanmayın.
+
+    ```bash
+    : "${LOGBREW_PROJECT_ID:?set the project UUID}"
+
+    logbrew doctor --project "$LOGBREW_PROJECT_ID" --json
+    ```
+
+    **Kontrol noktası:** raporda `status: "ready"` bulunur. `checks` içindeki
+    her öğeyi de okuyun. `0` çıkış kodu tüm kontrollerin geçtiğini göstermez.
+    Başka bir durum için `next` alanını ve
+    [doctor raporu referansını](/tr/reference/cli#read-a-project-doctor-report)
+    izleyin. `ready` durumundaki bir proje, bu test logunun ulaştığını
+    göstermez.
+  </Step>
+
+  <Step title="Test logunu okuyun">
+    SDK'nın toplu gönderimindeki projeyi, sürümü ve ortamı kullanın.
+
+    ```bash
+    logbrew read logs --project "$LOGBREW_PROJECT_ID" \
+      --release quickstart@1 \
+      --environment development \
+      --since 1h \
+      --json
+    ```
+
+    **Kontrol noktası:** `LogBrew quickstart check` o proje, sürüm ve ortam
+    için görünür. Bu yalnızca test logunun ulaştığını gösterir.
+  </Step>
+</Steps>
+
+## <span id="understand-the-test-result">Test sonucunu okuyun</span>
+
+Örnek üç olay gönderir. Bunlardan yalnızca biri logdur. Sürüm ve ortam
+işaretleri loga bağlam verir.
+
+| Örnekteki alan | Kaydedilen veri |
+| --- | --- |
+| `message` | Testin kaydettiği işlem: `LogBrew quickstart check`. |
+| `level: "info"` | Hata değil, normal bir test olayı. |
+| `logger` | Kaydı oluşturan uygulama loglayıcısı. |
+| `occurredAt` | Bu çalıştırmanın olayı oluşturduğu zaman, UTC zaman damgası olarak. |
+| `context.resource.service` | SDK kimliği değil, uygulama hizmeti ve sürümü. |
+
+Testi `info` düzeyinde tutun. Daha kolay bulmak için `error` düzeyine
+çevirmeyin. Bunun yerine proje ve zaman filtrelerini kullanın. Bkz.
+[Önem düzeyi değerleri](/tr/concepts/telemetry#severity-values).
+
+`console.log` satırı gönderim sonucunu terminalinize yazdırır. `client.log`
+çağrısı logu LogBrew'e gönderir. Başarılı ilk gönderim şunu yazdırır:
+
+```json
+{ "ok": true, "status_code": 200, "attempts": 1 }
+```
+
+Logu alan projeyi alım anahtarı seçer. CLI'daki `--project` filtresi olayları
+taşımaz.
+
+Örnek bir istek span'i oluşturmadığı için bu logda iz bağlamı yoktur. Bu, logun
+başarısız olduğunu göstermez. CLI okuması anlık bir görüntüdür. Sonraki
+olayları okumak için komutu yeniden çalıştırın veya canlı akış için
+`logbrew watch logs --json` kullanın.
+
+## Sık karşılaşılan kurtarma kararları
+
+| Sonuç | Sonraki adım |
+| --- | --- |
+| CLI durumu kimliği doğrulanmamış gösteriyor | Bir kişi `logbrew login` komutunu çalıştırır. Ardından durum komutunu yeniden çalıştırın. |
+| Alım anahtarı dosyası zaten var | Kullanılmayan bir yol seçin. Bilinmeyen bir kimlik bilgisinin üzerine yazmayın. |
+| Proje oluşturma sonucu net değil | Aynı oluşturma komutunu yeniden çalıştırın. |
+| `unauthenticated` | CLI hesap kimlik bilgisini değil, projenin alım anahtarını inceleyin. Yeni bir giriş bunu düzeltmez. |
+| `rate_limited` | Yeniden göndermeden önce bekleyin. Döngüye girmeyin ve yeni anahtar oluşturmayın. |
+| `transport_error` veya `network_failure` | Bağlantıyı inceleyin. Başarısız bir yanıt, önceki isteğin etkisiz kaldığını göstermez. |
+| `delivery_failed` | Durun ve hatayı inceleyin. Gizli bilgileri veya istek gövdesini yazdırmayın. |
+| Doctor `status` değeri `ready` değil | [Doctor raporundaki](/tr/reference/cli#read-a-project-doctor-report) `checks` ve `next` alanlarını okuyun. Aynı projeyi kullanmaya devam edin. |
+| Log okuması boş | Projeyi, ortamı, sürümü ve zaman aralığını SDK'nın toplu gönderimiyle karşılaştırın. |
+
+Telemetri hâlâ eksikse
+[ilk telemetri kontrollerini](/tr/guides/troubleshooting#recover-missing-first-telemetry)
+kullanın. Bu kontroller yardımcı olmazsa [sorun bildirin](/tr/guides/report-a-problem).
+Kimlik bilgisi, ham telemetri, müşteri verisi, yerel yol veya kaynak kodu
+eklemeyin.
+
+## Uygulamanıza geçin
+
+- İstemciyi uygulamanızın kurulum kodunda bir kez oluşturun.
+- Paket dosyalarınızda SDK sürümlerini sabitleyin. Yükseltmeleri production
+  dışında test edin.
+- Alım anahtarını mevcut gizli bilgi yapılandırmanızdan okuyun. Anahtar
+  açığa çıkmış olabilirse yenileyin. Bkz.
+  [Alım anahtarını yenileyin](/tr/guides/rotate-ingest-key).
+- Dağıtım yapılandırmanızdaki kararlı hizmet, ortam ve sürüm adlarını
+  kullanın. Bkz. [Sürümler](/tr/concepts/releases).
+- İşlemi ve sonucunu adlandıran log mesajları yazın, örneğin
+  `Report generation completed`. Özel değerleri mesajın dışında tutun. Bir
+  isteğin veya kullanıcı kaydının tamamını loga kopyalamayın.
+- Yinelenen kayıtları önlemek için her uygulama logunu tek bir gönderici
+  göndersin. LogBrew'ü eklemeden önce her kaydı hâlihazırda gönderen
+  entegrasyonu bulun.
+- Production'a geçmeden önce gerçek kod yolundan güvenli bir olay gönderin ve
+  geri okuyun. Mesajını, hizmetini, sürümünü ve ortamını kontrol edin. Bağımsız
+  bir örnek, uygulamanızın kod yolunu test etmez.
+
+Bu örnek tarayıcıdan yakalamayı, source map'leri veya mobil yakalamayı
+kurmaz. Bunlar için [SDK entegrasyonu](/tr/guides/sdk-ingestion) rehberinden
+başlayın.
+
+<CardGroup cols={2}>
+  <Card title="Projeler" icon="folder-kanban" href="/tr/concepts/projects">
+    Kurulum durumunu okuyun ve projenin alım anahtarlarını yönetin.
+  </Card>
+
+  <Card title="SDK entegrasyonu" icon="cloud-upload" href="/tr/guides/sdk-ingestion">
+    Çalışma zamanınız için SDK paketini seçin.
+  </Card>
+
+  <Card title="Bir sorunu inceleyin" icon="bug" href="/tr/guides/investigate-an-issue">
+    Bir sorunun iz ve ilişkili log kanıtını izleyin.
+  </Card>
+
+  <Card title="Sorun bildirin" icon="life-buoy" href="/tr/guides/report-a-problem">
+    Güvenli ve gizli bir destek raporu gönderin.
+  </Card>
+</CardGroup>

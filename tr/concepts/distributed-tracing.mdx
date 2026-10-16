@@ -1,0 +1,228 @@
+---
+title: "Dağıtık izleme: izler, span'ler ve bağlam"
+sidebarTitle: "Dağıtık izleme"
+description: "Dağıtık izlerin ve span'lerin LogBrew'de istekleri, logları, sorunları, aksiyonları ve metrikleri nasıl bağladığını öğrenin."
+---
+
+Dağıtık izleme (distributed tracing), bir isteği veya işlemi enstrümante
+edilmiş hizmetler boyunca takip eder. Bir iz, bu işin span'lerini bir araya
+getirir. Her span, süresi ölçülen tek bir işlemdir: HTTP isteği, veritabanı
+çağrısı, kuyruk işlemi veya arka plan işi gibi. Eksik bir span, yolun bir
+kısmını bilinmez bırakır.
+
+Bir log hatayı bildiriyor ama işlemin yolunu göstermiyorsa bir iz kullanın.
+Bir iz şunları gösterebilir:
+
+- İsteği hangi işlemin başlattığı.
+- İsteğin zamanını nerede harcadığı.
+- Hangi alt işlemin hata döndürdüğü.
+- Hangi logların, sorunların, aksiyonların ve metriklerin aynı iz kimliğine sahip olduğu.
+- Her span'i hangi hizmetin, ortamın ve sürümün gönderdiği.
+
+## İz ve span alanları
+
+| Alan | Anlamı |
+| --- | --- |
+| `trace_id` | Span'in ait olduğu izi tanımlar. |
+| `span_id` | İzdeki tek bir işlemi tanımlar. |
+| `parent_span_id` | Bir alt işlemi, onu başlatan işleme bağlar. Kök span'de bu alan yoktur. |
+| `name` | İşlemi adlandırır, örneğin bir rota şablonuyla. |
+| `operation` | İşin türü, örneğin `http.server` veya `db.query`. |
+| `status` | Bildirilen sonuç, örneğin `ok`, `error` veya `cancelled`. |
+| `started_at` | İşlemin başladığı zaman. |
+| `duration_ms` | İşlemin milisaniye cinsinden süresi. |
+| `service_name`, `environment`, `release` | Span'i gönderen hizmetin kapsamı. |
+
+Kök span bir izi başlatır ve üst span'i yoktur. Alt span'ler aynı iz
+kimliğini, kendi span kimliklerini ve bir üst kimliği taşır. İşlemleri
+yalnızca bu kimlikler birbirine bağlar. Zaman damgaları tek başına bağlamaz.
+LogBrew bir span'i yalnızca `status` değeri `error` olduğunda hata span'i
+olarak sayar.
+
+## Hizmetler arasında bir istek
+
+1. Web hizmeti, ödeme rotası için bir sunucu span'i başlatır.
+2. Ödeme istemcisi, giden HTTP isteği için bir alt span oluşturur.
+3. Ödeme hizmeti, kendi sunucu span'iyle izi sürdürür.
+4. Bir veritabanı yardımcısı, yazma işlemi için bir alt span kaydeder.
+5. Uygulama, etkin ödeme span'inin içinde güvenli bir hata logu gönderir.
+
+Bu beş kaydın iz kimliği aynıdır. Bir hizmet iz bağlamını almazsa zamanlar
+örtüşse bile onun işi ize katılmaz.
+
+## Bağlamı aktarın
+
+LogBrew SDK'ları W3C iz bağlamını kullanır. Örneğin Node.js SDK'sı, gelen
+geçerli bir `traceparent` başlığını yeni bir istek span'iyle sürdürür. Başlık
+yoksa veya geçersizse yeni bir kök başlatır. Bu istek kapsamında yakalanan
+loglar, sorunlar, aksiyonlar ve metrikler isteğin izini taşır.
+
+Giden enstrümantasyon, `traceparent` başlığını yalnızca
+`tracePropagationTargets` gibi ayarlarla belirlediğiniz hedeflere yazar. İz
+bağlamını yalnızca güvenilir ve enstrümante edilmiş hizmetlere gönderin. İz
+kimliği işlemleri ilişkilendirir. Kimlik doğrulama değildir.
+
+Bir kuyruk mesajı da iz bağlamı taşıyabilir. Node.js'te mesaja `traceparent`
+başlığı eklemek için üretici işlemde `createLogBrewQueueTraceHeaders()`
+fonksiyonunu çağırın. Tüketicide bu başlığı `queueOperationWithLogBrewSpan()`
+fonksiyonuna `traceparent` olarak verin. Bkz.
+[JavaScript kuyruk izleri](/tr/guides/sdk-ingestion#javascript-queue-tracing).
+
+Node.js ve Python'un istek ve giden çağrı entegrasyonları; istek veya yanıt
+gövdelerini, sorgu dizelerini, rastgele başlıkları ve ham `traceparent`
+değerini span'lere kaydetmez. Span'leri somut URL'lere göre değil, rota
+şablonlarına göre adlandırın. Çalışma ortamınızın entegrasyonları için
+[SDK entegrasyonu](/tr/guides/sdk-ingestion) rehberini okuyun.
+
+## <span id="capture-spans">Yakalama span'leri</span>
+
+LogBrew her yeni logu, sorunu, aksiyonu ve metriği bir iz kimliğiyle saklar.
+Bir sinyal aynı gönderimdeki bir span'e başvurmuyorsa LogBrew onun için bir
+yakalama span'i ekler:
+
+| Alan | Değer |
+| --- | --- |
+| `name` | `log capture`, `issue capture`, `action capture` veya `metric capture` |
+| `operation` | `logbrew.log`, `logbrew.issue`, `logbrew.action` veya `logbrew.metric` |
+| `duration_ms` | `0` |
+| `parent_span_id` | Uygulama sinyali yakaladığında etkin olan span. Etkin span yoksa boştur. |
+| `status` | Sorun, `error` veya `critical` log ya da başarısız aksiyon için `error`. Diğer durumlarda boştur. |
+| `attributes.logbrew.evidence` | `signal_capture` |
+
+Bu durumda sinyalin `span_id` değeri yakalama span'ini tanımlar. Sinyalin iz
+bağlamı yoksa LogBrew onun için yeni bir iz kimliği oluşturur. Bu iz,
+LogBrew'ün sinyali sakladığını gösterir. Bir istek yolunu göstermez. Bir
+izdeki yakalama span'lerini tek bir istek gibi okumayın.
+
+Yakalama span'leri `span_count` ve `error_span_count` sayılarına dâhildir. Bu
+yüzden bir hata logu, hiçbir uygulama işleminin başarısız olmadığı bir izi
+`--status error` ile seçtirebilir. Sonuca varmadan önce her hata span'inin
+`operation` değerini okuyun.
+
+## Bir izi okuyun
+
+Bir logdan, sorundan veya iz listesinden alınan kesin bir iz kimliği kullanın:
+
+```bash
+logbrew read traces --project "<project_id>" --status error --since 24h --json
+logbrew read trace "<trace_id>" --project "<project_id>" --json
+```
+
+`--status error` en az bir hata span'i olan izleri seçer. `--status ok` hata
+span'i olmayan izleri seçer. `--min-duration-ms 500` 500 milisaniye veya daha
+uzun süren izleri seçer.
+
+Önce kök span'in süresini okuyun. Ardından en uzun alt span'leri ve hata
+durumlarını inceleyin. Proje, hizmet, ortam ve sürümü göz önünde tutun. Böylece
+bir staging izi, production hakkında kanıta dönüşmez.
+
+Bir iz tek bir yürütmeyi gösterir, bir performans temel çizgisini değil. Bir
+performans değişikliği önermeden önce birkaç izi ilgili metrik eğilimiyle
+karşılaştırın.
+
+### İz özeti
+
+`GET /api/telemetry/traces/{trace_id}/summary`, span öznitelikleri olmadan
+bir özet döndürür:
+
+| Alan | Anlamı |
+| --- | --- |
+| `root_span` | Üst span'i izde olmayan en erken span. Her span'in üst span'i izdeyse en erken span. |
+| `slowest_child_span` | Üst span'i olan en uzun span. |
+| `slowest_path` | Bir kökten en yavaş alt span'e uzanan bilinen üst span zinciri. |
+| `error_spans` | Durumu `error` olan en uzun span'lerden en fazla 5 tanesi. |
+| `services` | Her hizmetin span sayısı, hata span'i sayısı ve en uzun span süresi. |
+| `duration_ms` | En erken span başlangıcından en geç span bitişine kadar geçen süre. |
+
+`root_span.parent_span_id` bir değer içeriyorsa gerçek kök span izde
+değildir. Bu durumda `root_span` değerini isteğin başlangıcı olarak okumayın.
+
+### Bir izi açıklayın
+
+`logbrew explain trace` bir iz incelemesi döndürür:
+
+```bash
+logbrew explain trace "<trace_id>" --json
+```
+
+| Alan | Anlamı |
+| --- | --- |
+| `analysis.status` | `errors_observed`, `latency_focus` veya `no_error_observed`. |
+| `analysis.first_error_span`, `analysis.first_error_path` | En erken hata span'i ve onun bilinen üst span zinciri. |
+| `analysis.bottleneck_span`, `analysis.bottleneck_path` | Üst span'i olan en uzun span ve onun bilinen üst span zinciri. |
+| `correlations` | Aynı iz kimliğine sahip sorunlar, loglar, aksiyonlar ve metrikler. Her listede bir `status` ve `truncated` bulunur. |
+| `evidence` | Yakalanan, eksik, gizlenen ve kısaltılan alanlar. |
+| `next_actions` | Öncelik sırasına göre sonraki okumalar. |
+
+`analysis.causality` değeri `evidence_only` olur. Analiz bir kök nedeni
+kanıtlamaz. CLI, yanıt sürümü 3'ü ister. Bu sürümde ilişkili her sorun,
+aksiyon ve metrik kendi kesin `span_id` değerini de taşır.
+
+Bir span'i üst span'i, alt span'leri ve hizmet sınırlarıyla birlikte
+incelemek için şunu çalıştırın:
+
+```bash
+logbrew explain span "<trace_id>" "<span_id>" --project "<project_id>" \
+  --environment production --release "<release>" --json
+```
+
+`topology.parent_chain_status`, üst span zincirinin tam olup olmadığını
+bildirir:
+
+| Değer | Anlamı |
+| --- | --- |
+| `root` | Span'in üst kimliği yok. |
+| `complete` | Kök span'e kadar her üst span izde var. |
+| `missing` | Bir üst kimlik, izde olmayan bir span'e başvuruyor. |
+| `cycle` | Üst kimlikler bir döngü oluşturuyor. |
+| `truncated` | Bir yanıt sınırı zincirin tamamını engelliyor. |
+| `unavailable` | İz okuması tamamlanamadı. |
+
+## Eksik iz bağlamı
+
+Her olayın, isteğine ait bir izi yoktur. İz durumunu okuyun:
+
+| Durum | Anlamı |
+| --- | --- |
+| `available` | Kesin iz kanıtı okunabilir. |
+| `not_linked` | Olayın iz kimliği yok. Bazı eski olayların iz kimliği yoktur. |
+| `not_found` | Olayın iz kimliği var, ancak seçilen kapsamda hiçbir iz eşleşmedi. |
+| `unavailable` | İz kanıtı o sırada okunamadı. |
+
+`not_linked` bir hata değildir. `available` bir iz de olayın istek bağlamı
+olmadığını gösterebilir. Olayın yakalama span'inde `parent_span_id` yoksa
+uygulama olayı yakaladığında hiçbir span etkin değildi. İstek kapsamı
+dışındaki arka plan işleri genellikle bu sonucu verir. Eksik bir ilişkiyi
+bulmak için:
+
+1. Olayın projesini, hizmetini, ortamını, sürümünü ve zamanını okuyun.
+2. İşin enstrümante edilmiş bir istek veya işlem içinde çalıştığını kontrol
+   edin.
+3. İstemci ve sunucu entegrasyonlarının bağlamı bu sınırın ötesine
+   aktardığını kontrol edin.
+4. Enstrümantasyonu düzelttikten sonra yeni bir olay yakalayın ve okuyun.
+
+Yeni bir SDK sürümü, daha önce gönderilmiş olaylara iz bağlamı eklemez. Bir
+olayı zaman damgasına, rotaya, mesaja veya sürüme bakarak bir ize bağlamayın.
+
+## Bir proje için dağıtık izlemeyi planlayın
+
+Ödeme gibi önemli bir istekle veya işle başlayın. Her seferinde bir sınırı
+enstrümante edin:
+
+1. Gelen istek veya arka plan işlemi için bir span oluşturun.
+2. Önemli giden çağrılar için alt span'ler ekleyin.
+3. W3C iz bağlamını güvenilir hizmet sınırları boyunca sürdürün.
+4. Etkin span'in içinde güvenli bir log gönderin.
+5. Bu logu okuyun, iz kimliğini açın ve kökü, alt span'leri, hizmeti,
+   ortamı, sürümü, durumu ve süreyi kontrol edin.
+
+Sonraki sınırı ancak bu kontrol başarılı olduktan sonra ekleyin. Ortak bir iz
+ilişkiyi gösterir. Bir span'in bir soruna neden olduğunu kanıtlamaz.
+
+Span adlarını kontrol etmek için
+`logbrew traces --project "<project_id>" --pagination cursor --json`
+komutunu çalıştırın. `naming_quality` nesnesi, o sayfadaki izlerden kök adı
+genel olanları (`generic_name_traces`) ve rotası eşleşmeyenleri
+(`unmatched_route_traces`) sayar. Adlandırmanın düzeltilmesi gerekiyorsa
+`naming_quality.next_action.code` değeri `improve_trace_naming` olur.

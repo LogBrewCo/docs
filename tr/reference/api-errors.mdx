@@ -1,0 +1,534 @@
+---
+title: "API hatalarını ele alma ve API hata kodları"
+sidebarTitle: "API hataları"
+description: "LogBrew API hata kodlarını, HTTP durumlarını ve JSON örneklerini okuyun. İstekleri düzeltmek ve güvenle yeniden denemek için dönen kurtarma talimatlarını kullanın."
+---
+
+LogBrew API hataları tek bir JSON zarfı kullanır. Program davranışı için
+`code` ve `next_action` alanlarını kullanın. `error` ve `next` alanlarını düz
+metin olarak gösterin. `error` veya `next` metninin ifadesiyle eşleştirme
+yapmayın.
+
+```json
+{
+  "error": "invalid since value",
+  "code": "validation_failed",
+  "next": "use since=24h, since=7d, or an RFC3339 timestamp",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+| Alan | Anlamı |
+| --- | --- |
+| `error` | İnsanların okuyabileceği kısa sorun açıklaması. |
+| `code` | Kararlı hata kodu. İstemcide hangi dalın çalışacağını seçmek için kullanın. |
+| `next` | İnsanların okuyabileceği kurtarma adımı. Metin rotaya göre değişir. |
+| `next_action.code` | Program yönlendirmesi için kararlı kurtarma aksiyonu. |
+| `next_action.target` | Kurtarma aksiyonunun uygulandığı nesne, örneğin `auth` veya `request`. |
+
+Bazı yanıtlar `limit`, `reset_at` veya `retry_after_seconds` gibi alanlar
+ekler. [Hata kodları](#error-codes) tablosu bu alanları adlandırır.
+
+## Hata yanıtını ele alın
+
+1. HTTP durumunu okuyun.
+2. `code` alanını okumadan önce gövdenin JSON olduğundan emin olun.
+3. İstemci dalını seçmek için durumu ve `code` değerini birlikte kullanın.
+4. `error` ve `next` alanlarını düz metin olarak gösterin. Bunları HTML olarak işlemeyin veya komut olarak çalıştırmayın.
+5. Otomatik kurtarma için `next_action` kullanın. İstemci aksiyonu tanımıyorsa durun ve hatayı gösterin.
+6. Dönen `limit`, `reset_at` ve `retry_after_seconds` değerlerini başarısız istekle birlikte saklayın.
+7. Yeniden denemeden önce [yeniden deneme kurallarını](#retry-rules) uygulayın.
+
+Yanıtta JSON zarfı yoksa HTTP durumunu saklayın ve kodu kullanılamıyor olarak
+kaydedin. LogBrew `code` değeri uydurmayın. Bir proxy veya ağ hatası bu sonucu
+üretebilir.
+
+LogBrew `code` değerini HTTP durum adıyla değiştirmeyin. Örneğin bir `400`
+yanıtı `invalid_json` veya `invalid_path` içerebilir. Her kod farklı bir
+düzeltme gerektirir.
+
+Loglar için HTTP durumunu ve `code` değerini kaydedin. Gövdenin tamamını, kimlik
+bilgilerini veya kurtarma tokenlarını loglamayın.
+
+## <span id="error-codes">Hata kodları</span>
+
+Aynı `code` birden fazla rotada görülebilir. `next` metni ve `next_action`
+değerleri rotaya göre değişebilir. Dönen değerleri kullanın. Bir uç nokta
+yalnızca kendi kimlik doğrulamasına, yöntemine, gövdesine ve sınırlarına
+uyan kodları döndürür.
+
+| HTTP | `code` | Anlamı | İstemci aksiyonu |
+| --- | --- | --- | --- |
+| `400`, `413`, `415` veya `422` | `invalid_json` | Gövde geçerli bir JSON değil, çok büyük, içerik türü yanlış veya rotanın JSON yapısıyla eşleşmiyor. | Geçerli JSON'u `Content-Type: application/json` ile ve rotanın gerektirdiği alanlarla gönderin. |
+| `400`, `413` veya `500` | `invalid_multipart` | Sunucu bir `multipart/form-data` yüklemesini okuyamıyor. | `400` veya `413` için formu veya boyutunu düzeltin. `500` için [yeniden deneme kurallarını](#retry-rules) uygulayın. |
+| `400` veya `500` | `invalid_path` | Sunucu URL yolundaki proje veya sorun kimliği gibi bir değeri okuyamıyor. | `400` için kimliği ve türünü düzeltin. `500` için [yeniden deneme kurallarını](#retry-rules) uygulayın. |
+| `400`, `405` veya `426` | `invalid_websocket_upgrade` | Canlı akış bağlantısı geçerli bir WebSocket yükseltmesi değil. | `GET` ve WebSocket yükseltme başlıklarıyla bağlanın. Bkz. [canlı olay biçimi](/tr/reference/telemetry-response-shapes#live-event-response-format). |
+| `401` | `unauthorized` | Hesap kimlik doğrulaması yok, geçersiz veya süresi dolmuş. | Yeniden giriş yapın. CLI için `logbrew login` komutunu çalıştırın. |
+| `401` | `ingest_key_invalid` | Telemetri veri alımında projeye özel geçerli bir alım anahtarı (ingest key) yok. | O proje için güncel bir alım anahtarı yapılandırın. |
+| `402` | `subscription_required` | Aksiyon ücretli bir plan gerektiriyor. | `next` alanını izleyin. Bu alan plan adımını adlandırır veya destekle iletişime geçmenizi söyler. |
+| `403` | `forbidden` | Hesap kaynağa veya aksiyona erişemiyor. | Erişimi olan bir hesap kullanın. Başka kimlikleri denemeyin. |
+| `403` | `role_forbidden` | Hesap bu organizasyon rolü değişikliğini yapamıyor. | Değişikliği bir organizasyon sahibinden veya yöneticisinden isteyin. |
+| `404` | `not_found` | Kaynak veya API rotası hesap için kullanılamıyor. | Sahip olduğunuz bir listeyi yeniden okuyun. Ardından kimliği, yolu ve filtreleri inceleyin. |
+| `405` | `method_not_allowed` | Rota var, ancak HTTP yöntemi desteklenmiyor. | `next` alanının adlandırdığı yöntemi kullanın. |
+| `408` | `request_timeout` | İstek zamanında tamamlanmadı. | Kapsamı daraltın veya bekleyip isteği yeniden gönderin. |
+| `409` | `idempotency_conflict` | Bir `Idempotency-Key` veya `deployment_id` farklı bir istek için yeniden kullanıldı. | Asıl isteği değiştirmeden yeniden deneyin veya yeni iş için yeni bir anahtar kullanın. |
+| `409` | `account_link_conflict` | Giriş kimliği başka bir hesaba ait. | Hesap bağlantısını hesap ayarlarından çözün. Aynı kimlik için ikinci bir hesap oluşturmayın. |
+| `409` | `account_recovery_available` | Hesap kurtarma süresi içinde. | Dönen kurtarma aksiyonunu izleyin. Kurtarma tokenını gizli tutun. |
+| `410` | `account_recovery_expired` | Hesap kurtarma süresi sona erdi. | Yeni bir hesap oluşturmak için giriş yapın. |
+| `422` | `validation_failed` | Bir sorgu değeri, alan, filtre, cursor, başlık veya zaman aralığı geçerli değil. | Adı geçen değeri düzeltin. Ardından isteği yeniden gönderin. |
+| `422` | `invite_invalid` | Bir organizasyon davetinde geçersiz bir e-posta adresi veya rol var. | Daveti düzeltin. Ardından yeniden gönderin. |
+| `422` | `member_limit_exceeded` | Organizasyon en fazla üye sayısına ulaştı. | Organizasyon sahibinden bir üyeyi çıkarmasını veya planı değiştirmesini isteyin. |
+| `422` | `organization_limit_exceeded` | Hesap en fazla organizasyon sayısına ulaştı. | Bir organizasyonu kaldırın, planı değiştirin veya destekle iletişime geçin. |
+| `423` | `organization_paused` | Ücretli aboneliği etkin olmadığı için organizasyon duraklatıldı. | Ücretli aboneliği yeniden etkinleştirin. |
+| `429` | `rate_limited` | Çağıran çok fazla istek gönderdi. `retry_after_seconds` ekler. | `retry_after_seconds` kadar bekleyin. Ardından artan bekleme süreleriyle (backoff) yeniden deneyin. |
+| `429` | `usage_limit_exceeded` | Veri alımı, faturalandırma dönemi için hesabın kotasına ulaştı. `limit` ve `reset_at` ekler. | `reset_at` zamanına kadar veri alımını durdurun veya planı değiştirin. |
+| `429` | `artifact_storage_limit_exceeded` | Bir sürüm derleme dosyası veya hata ayıklama dosyası yüklemesi depolama sınırına ulaştı. `limit` ekler. | Yeniden yüklemeden önce bekleyin. Sınır devam ederse destekle iletişime geçin. |
+| `429` | `invitation_limit_exceeded` | Organizasyon günlük davet kotasına ulaştı. `limit` ve `reset_at` ekler. | `reset_at` zamanını bekleyin veya planı değiştirin. |
+| `500` | `storage_error`, `json_error` veya `internal_error` | Sunucu isteği tamamlamadı. | [Yeniden deneme kurallarını](#retry-rules) uygulayın. Hata devam ederse [sorun bildirin](/tr/guides/report-a-problem). |
+| `503` | `service_unavailable` | API şu anda isteği kabul edemiyor. | Bekleyin. Ardından isteği yeniden gönderin. |
+| `503` | `artifact_storage_unavailable` | Sürüm derleme dosyası ve hata ayıklama dosyası yüklemeleri geçici olarak kullanılamıyor. | Yeniden yüklemeden önce bekleyin. Paralel yüklemeler başlatmayın. |
+| `503` | `billing_unavailable` | Ödeme veya plan yönetimi geçici olarak kullanılamıyor. | Bekleyin. Ardından faturalandırma aksiyonunu yeniden deneyin. |
+
+Bilinmeyen bir kimlik ile erişemediğiniz bir kimlik aynı yanıtı döndürebilir.
+Bir kimliğin hangi hesaba ait olduğunu bulmak için hata metnini kullanmayın.
+Bilinmeyen bir API yolu `not_found` ile `404` döndürür.
+
+### Sınır alanları
+
+| `code` | `limit` değerleri | Diğer alanlar |
+| --- | --- | --- |
+| `usage_limit_exceeded` | `issue_events`, `log_bytes`, `metric_bytes` veya `trace_spans` | `reset_at`: faturalandırma döneminin sonu (RFC3339). |
+| `invitation_limit_exceeded` | `invitations_per_day` | `reset_at`: sonraki UTC gününün başlangıcı (RFC3339). |
+| `artifact_storage_limit_exceeded` | `artifact_completed_project_bytes` gibi bir depolama sınırı adı | Yok. |
+| `rate_limited` | Yok | `retry_after_seconds`: beklenecek tam saniye sayısı, en az `1`. |
+
+Güncel kotayı ve kullanımı [hesap API'sinden](/tr/reference/account-api#account-usage)
+okuyun.
+
+## <span id="retry-rules">Yeniden deneme kuralları</span>
+
+Yeniden deneme kararı için kodu ve işlemi kullanın. Durum tek başına yeterli
+değildir.
+
+| Yanıt | Yeniden deneme kuralı |
+| --- | --- |
+| `validation_failed`, `invalid_json`, `invalid_path` (`400`), `invalid_multipart` (`400` veya `413`) ya da `invalid_websocket_upgrade` | Önce adı geçen istek değerini düzeltin. Aynı isteği yeniden göndermeyin. |
+| `unauthorized` veya `ingest_key_invalid` | Önce doğru kimlik bilgisini değiştirin veya yenileyin. |
+| `forbidden`, `role_forbidden` veya `not_found` | Başka kimliklerle yeniden denemeyin. Sahip olduğunuz bir listeyi yeniden okuyun veya sahibinden erişim alın. |
+| `method_not_allowed` | `next` içindeki yöntemi kullanın. Reddedilen yöntemi yeniden göndermeyin. |
+| `idempotency_conflict` | Asıl isteği değiştirmeden yeniden deneyin veya yeni iş için yeni bir anahtar kullanın. |
+| `rate_limited` | `retry_after_seconds` kadar bekleyin. Ardından rastgele sapmalı (jitter) üstel bekleme (exponential backoff) kullanın. |
+| `usage_limit_exceeded` veya `invitation_limit_exceeded` | `reset_at` zamanını bekleyin veya planı değiştirin. |
+| `artifact_storage_limit_exceeded` | Yeniden yüklemeden önce bekleyin. Sınır devam ederse destekle iletişime geçin. |
+| `subscription_required`, `organization_paused`, `member_limit_exceeded` veya `organization_limit_exceeded` | `next` alanını izleyin. Plan veya üyelik değişmeden yapılan yeniden deneme yine başarısız olur. |
+| `request_timeout`, `service_unavailable`, `artifact_storage_unavailable` veya `billing_unavailable` | Bekleyin. Ardından okumayı aynı kapsamla yeniden gönderin. Yazma işlemi için [yazma kurallarını](#writes) uygulayın. |
+| `storage_error`, `json_error`, `internal_error` veya başka bir `5xx` | Bekleyin. Ardından okumayı yeniden gönderin. Yazma işlemi için [yazma kurallarını](#writes) uygulayın. Hata devam ederse [sorun bildirin](/tr/guides/report-a-problem). |
+
+- Başarısız tek bir istek için paralel yeniden denemeler başlatmayın.
+- `rate_limited` için yanıtta `Retry-After` ve `X-RateLimit-After`
+  başlıkları da bulunur. İkisi de `retry_after_seconds` ile aynı saniye
+  sayısını içerir.
+- Zaman aşımı, sonucun boş olduğunu kanıtlamaz.
+
+Hız sınırı istek sıklığını denetler. Kullanım sınırı ise faturalandırma dönemi
+için hesap kotasını denetler. İkisi de `429` kullanır. Alanlarını ayrı tutun.
+Sınırlardan biri sürerken veri toplamanın veya okumanın geciktiğini gösterin.
+Eski verileri yeni bir okumanın sonucu gibi göstermeyin.
+
+### <span id="writes">Yazma işlemleri</span>
+
+Zaman aşımı, `5xx` yanıtı veya ağ hatası, bir yazma işleminin başarısız
+olduğunu kanıtlamaz. Bir yazma işlemini yeniden göndermeden önce:
+
+1. Rota idempotency anahtarını destekliyorsa aynı anahtarı ve aynı gövdeyi
+   yeniden gönderin. Yeni anahtarı yalnızca yeni iş için kullanın.
+2. Rotanın idempotency anahtarı yoksa önce kaynağı okuyun. Yazma işlemini
+   yalnızca değişiklik yoksa yeniden gönderin.
+3. Sonucu bulamıyorsanız otomatik yeniden denemeleri durdurun ve kullanıcıya
+   bildirin.
+
+Şu rotalar yeniden deneme anahtarı kabul eder:
+
+| Rota | Yeniden deneme anahtarı |
+| --- | --- |
+| `POST /api/projects` | İsteğe bağlı `Idempotency-Key` başlığı. |
+| `POST /api/projects/{project_id}/ingest-keys` | İsteğe bağlı `Idempotency-Key` başlığı. |
+| `POST /api/support/tickets` | İsteğe bağlı `Idempotency-Key` başlığı. |
+| `POST /api/support/tickets/{ticket_id}/context` | Zorunlu `Idempotency-Key` başlığı. |
+| `PUT /api/telemetry/deployments/{deployment_id}` | Yoldaki `deployment_id`. |
+
+Bir `Idempotency-Key` değeri 1 ile 128 arasında görünür ASCII karakterden
+oluşur. Diğer değerler `validation_failed` ile `422` döndürür.
+
+`idempotency_conflict`, anahtarın farklı bir isteğe ait olduğu anlamına gelir.
+Asıl anahtarı kullanan bir yeniden denemenin gövdesini değiştirmeyin.
+
+## İstek yapısı hataları
+
+`invalid_json`, sunucunun gövdeyi rotanın JSON yapısı olarak kabul edemediği
+anlamına gelir. İçerik türünü, gövde boyutunu, JSON söz dizimini, zorunlu
+alanları ve alan türlerini inceleyin. HTTP durumu hangi kısmın başarısız
+olduğunu gösterir:
+
+| HTTP | Neden |
+| --- | --- |
+| `400` | Gövde geçerli bir JSON değil. |
+| `413` | Gövde çok büyük. |
+| `415` | `Content-Type` başlığı `application/json` değil. |
+| `422` | JSON geçerli, ancak bir alan eksik veya türü yanlış. |
+
+`invalid query parameters` hatasıyla birlikte `validation_failed`, sunucunun
+sorgu dizesini okuyamadığı anlamına gelir. Parametre adlarını ve değer
+türlerini inceleyin. Bilinmeyen sorgu parametreleri göndermeyin.
+[Sorgu filtreleri](/tr/reference/telemetry-api-filters) sayfası her rotanın
+parametrelerini listeler.
+
+`400` durumuyla `invalid_path`, proje kimliği gibi bir yol değerinin biçiminin
+yanlış olduğu anlamına gelir. Bir yol değerini sorgu parametresine taşımayın.
+
+`invalid_path` veya `invalid_multipart` içeren bir `500` yanıtı, isteğin yanlış
+olduğunu kanıtlamaz. [Yeniden deneme kurallarını](#retry-rules) uygulayın.
+
+## Kimlik doğrulama ve erişim hataları
+
+- `unauthorized`, hesap kimlik doğrulamasının olmadığı, geçersiz olduğu veya
+  süresinin dolduğu anlamına gelir. `Authorization: Bearer <token>` gönderin
+  veya yeniden giriş yapın. Bazı rotalar, rotaya özel bir `next` ile birlikte
+  `next_action.code` için `authorize_request` döndürür; örneğin geçerli bir
+  bileti olmayan canlı akış bağlantısı.
+- `ingest_key_invalid` yalnızca telemetri veri alımı için geçerlidir. Tam o
+  proje için güncel bir anahtar yapılandırın.
+- `forbidden`, hesabın aksiyonu yapamadığı anlamına gelir. Başka kaynak
+  kimlikleriyle yeniden denemeyin.
+- `not_found`, kaynağın hesap için kullanılamadığı anlamına gelir.
+
+Hesap bearer tokenı yerine alım anahtarı kullanmayın. Alım anahtarı yerine
+hesap bearer tokenı kullanmayın.
+
+## Hata ayrıntılarını güvende tutun
+
+- `account_recovery_available` yanıtı kısa ömürlü bir `recovery_token`
+  içerir. Bunu korumalı istemci durumunda tutun. Loglara, URL'lere, ekran
+  görüntülerine, destek raporlarına veya agent promptlarına yazmayın.
+- `500` kodları her zaman `Internal error` mesajını kullanır. Yanıt, başarısız
+  olan bileşeni adlandırmaz. Nedeni tahmin etmeyin.
+- Gösterdiğiniz bir hataya kimlik bilgisi, özel tanılama bilgisi veya müşteri
+  verisi eklemeyin.
+- Bir API yanıtı satın alma, silme veya başka bir hesap değişikliği için izin
+  vermez. Bu aksiyonlardan önce kullanıcının onayını alın.
+
+## Örnekler
+
+Bu örnekler zarfın yapısını gösterir. `error` ve `next` metni her rotada farklı
+olabilir.
+
+### Doğrulama hatası
+
+```json
+{
+  "error": "issue status must be unresolved, resolved, or archived",
+  "code": "validation_failed",
+  "next": "use status=unresolved, status=resolved, or status=archived",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+### <span id="invalid-query-parameters">Geçersiz sorgu parametreleri</span>
+
+```json
+{
+  "error": "invalid query parameters",
+  "code": "validation_failed",
+  "next": "check query parameter names and value types, then retry",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+### <span id="invalid-json">Geçersiz JSON</span>
+
+```json
+{
+  "error": "invalid JSON request body",
+  "code": "invalid_json",
+  "next": "send Content-Type: application/json with a body matching this endpoint",
+  "next_action": {
+    "code": "send_valid_json",
+    "target": "request"
+  }
+}
+```
+
+### <span id="invalid-path-value">Geçersiz yol değeri</span>
+
+```json
+{
+  "error": "invalid URL path parameters",
+  "code": "invalid_path",
+  "next": "check path resource IDs and value types, then retry",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+### Geçersiz multipart yüklemesi
+
+```json
+{
+  "error": "invalid multipart form-data request",
+  "code": "invalid_multipart",
+  "next": "send multipart/form-data with a valid boundary and expected parts",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+### Geçersiz WebSocket yükseltmesi
+
+```json
+{
+  "error": "invalid WebSocket upgrade request",
+  "code": "invalid_websocket_upgrade",
+  "next": "connect with GET /api/feed/live?ticket=<ticket> using WebSocket upgrade headers",
+  "next_action": {
+    "code": "connect_live_feed",
+    "target": "live_feed"
+  }
+}
+```
+
+### <span id="authentication-failure">Kimlik doğrulama hatası</span>
+
+```json
+{
+  "error": "Invalid or expired token",
+  "code": "unauthorized",
+  "next": "send Authorization: Bearer <token>, include the logbrew_session cookie, or sign in again",
+  "next_action": {
+    "code": "sign_in",
+    "target": "auth"
+  }
+}
+```
+
+### Geçersiz alım anahtarı
+
+Bu yanıt hesap okumaları için değil, telemetri veri alımı için geçerlidir.
+Anahtar, istekteki projeye ait olmalıdır.
+
+```json
+{
+  "error": "Invalid ingest key",
+  "code": "ingest_key_invalid",
+  "next": "create a project-scoped ingest key, then retry ingestion with that key",
+  "next_action": {
+    "code": "configure_ingest_key",
+    "target": "project_ingest_key"
+  }
+}
+```
+
+### <span id="resource-not-found">Kaynak bulunamadı</span>
+
+```json
+{
+  "error": "issue not found",
+  "code": "not_found",
+  "next": "check the resource id or filters and retry",
+  "next_action": {
+    "code": "check_resource",
+    "target": "resource"
+  }
+}
+```
+
+### Erişim reddedildi
+
+```json
+{
+  "error": "Insufficient permissions",
+  "code": "forbidden",
+  "next": "use an account with access to this resource",
+  "next_action": {
+    "code": "request_access",
+    "target": "auth"
+  }
+}
+```
+
+### <span id="unsupported-method">Desteklenmeyen yöntem</span>
+
+```json
+{
+  "error": "Method not allowed",
+  "code": "method_not_allowed",
+  "next": "send GET /api/account/usage with Authorization or the logbrew_session cookie",
+  "next_action": {
+    "code": "use_supported_method",
+    "target": "api_method"
+  }
+}
+```
+
+### İstek zaman aşımı
+
+```json
+{
+  "error": "Request timed out",
+  "code": "request_timeout",
+  "next": "retry read-only requests later or narrow the request scope. Before repeating a write, check whether it succeeded and follow this endpoint's idempotency guidance",
+  "next_action": {
+    "code": "retry_or_narrow_scope",
+    "target": "request"
+  }
+}
+```
+
+### Idempotency çakışması
+
+```json
+{
+  "error": "Idempotency key was already used",
+  "code": "idempotency_conflict",
+  "next": "retry the original support request or use a new Idempotency-Key",
+  "next_action": {
+    "code": "use_new_idempotency_key",
+    "target": "request"
+  }
+}
+```
+
+### Hız sınırı
+
+```json
+{
+  "error": "Rate limit exceeded",
+  "code": "rate_limited",
+  "next": "wait for retry_after_seconds, then retry with exponential backoff and jitter",
+  "next_action": {
+    "code": "retry_with_backoff",
+    "target": "request"
+  },
+  "retry_after_seconds": 1
+}
+```
+
+### Kullanım sınırı
+
+`next` metni ve `next_action`, plan değişikliğinin mümkün olup olmadığına
+bağlıdır. Mümkün değilse `next_action.code` değeri
+`wait_or_contact_support`, hedef ise `support` olur.
+
+```json
+{
+  "error": "Usage limit exceeded",
+  "code": "usage_limit_exceeded",
+  "next": "wait until reset_at or upgrade your plan before retrying ingestion",
+  "next_action": {
+    "code": "wait_or_upgrade",
+    "target": "billing"
+  },
+  "limit": "log_bytes",
+  "reset_at": "2026-11-01T00:00:00+00:00"
+}
+```
+
+### Derleme dosyası depolama sınırı
+
+```json
+{
+  "error": "Release artifact storage limit exceeded",
+  "code": "artifact_storage_limit_exceeded",
+  "next": "wait before retrying the upload, or contact LogBrew support if the limit persists",
+  "next_action": {
+    "code": "wait_or_contact_support",
+    "target": "support"
+  },
+  "limit": "artifact_completed_project_bytes"
+}
+```
+
+### Hesap kurtarılabilir
+
+Bu yanıt `deleted_at` ve kısa ömürlü bir `recovery_token` ekler. Tokenı
+korumalı istemci durumunda tutun.
+
+```json
+{
+  "error": "Account recovery available",
+  "code": "account_recovery_available",
+  "next": "restore account with POST /api/auth/restore",
+  "next_action": {
+    "code": "restore_account",
+    "target": "account_recovery"
+  },
+  "deleted_at": "2026-09-04T09:00:00Z",
+  "recovery_token": "<recovery token>"
+}
+```
+
+### Hesap kurtarma süresi doldu
+
+```json
+{
+  "error": "Account recovery window expired",
+  "code": "account_recovery_expired",
+  "next": "create a new account after deletion completes",
+  "next_action": {
+    "code": "create_account",
+    "target": "auth"
+  }
+}
+```
+
+### Organizasyon duraklatıldı
+
+```json
+{
+  "error": "Organization paused",
+  "code": "organization_paused",
+  "next": "resume an active paid subscription before using this organization",
+  "next_action": {
+    "code": "resume_subscription",
+    "target": "billing"
+  }
+}
+```
+
+### Sunucu hatası
+
+`storage_error`, `json_error` ve `internal_error` aynı `error` mesajını
+kullanır. `code`, `next` ve `next_action` değerleri farklıdır.
+
+```json
+{
+  "error": "Internal error",
+  "code": "internal_error",
+  "next": "retry read-only requests later. Before repeating a write, check whether it succeeded and follow this endpoint's idempotency guidance. Contact LogBrew support if the problem persists",
+  "next_action": {
+    "code": "retry_or_contact_support",
+    "target": "support"
+  }
+}
+```
+
+| `code` | `next_action.code` | `next_action.target` |
+| --- | --- | --- |
+| `storage_error` | `retry_or_check_storage` | `backend_status` |
+| `json_error` | `send_valid_json` | `request` |
+| `internal_error` | `retry_or_contact_support` | `support` |
+
+Uç noktalar, kimlik doğrulama ve filtreler için
+[Telemetri API'si](/tr/reference/telemetry-api) sayfasını okuyun.
