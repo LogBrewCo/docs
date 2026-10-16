@@ -1,0 +1,230 @@
+---
+title: "Śledzenie rozproszone: ślady, spany i kontekst"
+sidebarTitle: "Śledzenie rozproszone"
+description: "Dowiedz się, jak ślady rozproszone i spany łączą żądania, logi, problemy, akcje i metryki w LogBrew."
+---
+
+Śledzenie rozproszone pokazuje drogę jednego żądania lub jednej operacji przez
+usługi objęte instrumentacją. Ślad grupuje spany tej pracy. Każdy span to jedna
+mierzona operacja, na przykład żądanie HTTP, wywołanie bazy danych, operacja na
+kolejce lub zadanie w tle. Gdy brakuje spanu, część ścieżki pozostaje nieznana.
+
+Użyj śladu, gdy log zgłasza błąd, ale nie pokazuje ścieżki operacji. Ślad może
+pokazać:
+
+- Która operacja rozpoczęła żądanie.
+- Gdzie żądanie traciło czas.
+- Która operacja podrzędna zwróciła błąd.
+- Które logi, problemy, akcje i metryki mają to samo ID śladu.
+- Która usługa wysłała każdy span i z jakiego środowiska oraz wydania.
+
+## Pola śladu i spanu
+
+| Pole | Znaczenie |
+| --- | --- |
+| `trace_id` | Identyfikuje ślad, do którego należy span. |
+| `span_id` | Identyfikuje jedną operację w śladzie. |
+| `parent_span_id` | Łączy operację podrzędną z operacją, która ją rozpoczęła. Span główny nie ma tej wartości. |
+| `name` | Nazwa operacji, na przykład szablon trasy. |
+| `operation` | Rodzaj pracy, na przykład `http.server` lub `db.query`. |
+| `status` | Zgłoszony wynik, na przykład `ok`, `error` lub `cancelled`. |
+| `started_at` | Kiedy operacja się rozpoczęła. |
+| `duration_ms` | Jak długo trwała operacja, w milisekundach. |
+| `service_name`, `environment`, `release` | Zakres usługi, która wysłała span. |
+
+Span główny rozpoczyna ślad i nie ma spanu nadrzędnego. Spany podrzędne mają to
+samo ID śladu, własne ID spanów i ID spanu nadrzędnego. Tylko te identyfikatory
+łączą operacje. Same znaczniki czasu tego nie robią. LogBrew uznaje span za span
+błędu tylko wtedy, gdy jego `status` to `error`.
+
+## Żądanie przechodzące przez kilka usług
+
+1. Usługa webowa rozpoczyna span serwera dla trasy realizacji zakupu.
+2. Klient płatności tworzy span podrzędny dla swojego wychodzącego żądania HTTP.
+3. Usługa płatności kontynuuje ślad własnym spanem serwera.
+4. Helper bazy danych rejestruje span podrzędny dla zapisu.
+5. Aplikacja wysyła bezpieczny log błędu wewnątrz aktywnego spanu płatności.
+
+Każdy z 5 rekordów ma to samo ID śladu. Jeśli usługa nie otrzyma kontekstu
+śladu, jej praca nie trafia do śladu, nawet gdy czasy się pokrywają.
+
+## Propaguj kontekst
+
+Zestawy SDK LogBrew korzystają z kontekstu śladu W3C. Na przykład SDK dla
+Node.js, gdy dostanie prawidłowy nagłówek `traceparent`, kontynuuje ślad nowym
+spanem żądania. Jeśli nagłówka brakuje lub jest nieprawidłowy, SDK rozpoczyna
+nowy span główny. Logi, problemy, akcje i metryki zarejestrowane w zakresie tego żądania
+należą do śladu żądania.
+
+Instrumentacja ruchu wychodzącego dodaje nagłówek `traceparent` tylko do
+żądań kierowanych do celów, które skonfigurujesz, na przykład w
+`tracePropagationTargets`. Wysyłaj kontekst śladu tylko do zaufanych usług
+objętych instrumentacją. ID śladu wiąże ze sobą operacje. Nie służy do
+uwierzytelniania.
+
+Wiadomość w kolejce też może przenosić kontekst śladu. W Node.js wywołaj
+`createLogBrewQueueTraceHeaders()` w operacji producenta, aby dodać do
+wiadomości nagłówek `traceparent`. W konsumencie przekaż ten nagłówek do
+`queueOperationWithLogBrewSpan()` jako `traceparent`. Zobacz
+[Śledzenie kolejek w JavaScript](/pl/guides/sdk-ingestion#javascript-queue-tracing).
+
+Integracje żądań i ruchu wychodzącego dla Node.js i Pythona nie zapisują w
+spanach treści żądań ani odpowiedzi, ciągów zapytań, dowolnych nagłówków ani
+surowej wartości `traceparent`. Nazywaj spany według szablonów tras, a nie
+konkretnych adresów URL. Integracje dla twojego środowiska uruchomieniowego
+opisuje [przewodnik po integracji SDK](/pl/guides/sdk-ingestion).
+
+## <span id="capture-spans">Spany rejestracji</span>
+
+LogBrew zapisuje każdy nowy log, problem, akcję i metrykę z ID śladu. Jeśli
+sygnał nie odwołuje się do spanu z tej samej wysyłki, LogBrew dodaje dla niego
+jeden span rejestracji:
+
+| Pole | Wartość |
+| --- | --- |
+| `name` | `log capture`, `issue capture`, `action capture` lub `metric capture` |
+| `operation` | `logbrew.log`, `logbrew.issue`, `logbrew.action` lub `logbrew.metric` |
+| `duration_ms` | `0` |
+| `parent_span_id` | Span, który był aktywny, gdy aplikacja zarejestrowała sygnał. Puste, gdy żaden span nie był aktywny. |
+| `status` | `error` dla problemu, logu `error` lub `critical` albo nieudanej akcji. W pozostałych przypadkach puste. |
+| `attributes.logbrew.evidence` | `signal_capture` |
+
+Wtedy `span_id` sygnału wskazuje jego span rejestracji. Jeśli sygnał nie miał
+kontekstu śladu, LogBrew tworzy dla niego nowe ID śladu. Taki ślad pokazuje, że
+LogBrew zapisał sygnał. Nie pokazuje ścieżki żądania. Nie traktuj spanów
+rejestracji w jednym śladzie jako jednego żądania.
+
+Spany rejestracji wliczają się do `span_count` i `error_span_count`. Dlatego
+log błędu może sprawić, że `--status error` wybierze ślad, w którym nie
+zawiodła żadna operacja aplikacji. Zanim wyciągniesz wnioski, sprawdź
+`operation` każdego spanu błędu.
+
+## Odczytaj ślad
+
+Użyj dokładnego ID śladu z logu, problemu lub listy śladów:
+
+```bash
+logbrew read traces --project "<project_id>" --status error --since 24h --json
+logbrew read trace "<trace_id>" --project "<project_id>" --json
+```
+
+`--status error` wybiera ślady z co najmniej jednym spanem błędu. `--status ok`
+wybiera ślady bez spanu błędu. `--min-duration-ms 500` wybiera ślady, które
+trwały 500 milisekund lub dłużej.
+
+Najpierw odczytaj czas trwania spanu głównego. Potem zbadaj najdłuższe spany
+podrzędne i statusy błędów. Miej na oku projekt, usługę, środowisko i wydanie,
+aby ślad ze środowiska staging nie stał się dowodem dla środowiska
+produkcyjnego.
+
+Jeden ślad pokazuje jedno wykonanie, a nie punkt odniesienia dla wydajności.
+Zanim zaproponujesz zmianę poprawiającą wydajność, porównaj kilka śladów z trendem
+powiązanej metryki.
+
+### Podsumowanie śladu
+
+`GET /api/telemetry/traces/{trace_id}/summary` zwraca podsumowanie bez
+atrybutów spanów:
+
+| Pole | Znaczenie |
+| --- | --- |
+| `root_span` | Najwcześniejszy span, którego spanu nadrzędnego nie ma w śladzie. Jeśli każdy span ma span nadrzędny w śladzie – najwcześniejszy span. |
+| `slowest_child_span` | Najdłuższy span, który ma span nadrzędny. |
+| `slowest_path` | Znany łańcuch spanów nadrzędnych od spanu głównego do najwolniejszego spanu podrzędnego. |
+| `error_spans` | Do 5 najdłuższych spanów ze statusem `error`. |
+| `services` | Liczba spanów, liczba spanów błędów i najdłuższy czas trwania spanu dla każdej usługi. |
+| `duration_ms` | Czas od najwcześniejszego początku spanu do najpóźniejszego końca spanu. |
+
+Jeśli `root_span.parent_span_id` ma wartość, prawdziwego spanu głównego nie ma
+w śladzie. Nie traktuj `root_span` jako początku żądania.
+
+### Wyjaśnij ślad
+
+`logbrew explain trace` zwraca analizę śladu:
+
+```bash
+logbrew explain trace "<trace_id>" --json
+```
+
+| Pole | Znaczenie |
+| --- | --- |
+| `analysis.status` | `errors_observed`, `latency_focus` lub `no_error_observed`. |
+| `analysis.first_error_span`, `analysis.first_error_path` | Najwcześniejszy span błędu i jego znany łańcuch spanów nadrzędnych. |
+| `analysis.bottleneck_span`, `analysis.bottleneck_path` | Najdłuższy span, który ma span nadrzędny, oraz jego znany łańcuch spanów nadrzędnych. |
+| `correlations` | Problemy, logi, akcje i metryki z tym samym ID śladu. Każda lista ma `status` i `truncated`. |
+| `evidence` | Pola zarejestrowane, brakujące, zamaskowane i obcięte. |
+| `next_actions` | Kolejne odczyty w kolejności priorytetu. |
+
+`analysis.causality` ma wartość `evidence_only`. Analiza nie dowodzi przyczyny
+źródłowej. CLI żąda odpowiedzi w wersji 3, w której każdy powiązany problem,
+akcja i metryka ma też dokładne `span_id`.
+
+Aby zbadać jeden span razem z jego spanem nadrzędnym, spanami podrzędnymi i
+granicami usług, uruchom:
+
+```bash
+logbrew explain span "<trace_id>" "<span_id>" --project "<project_id>" \
+  --environment production --release "<release>" --json
+```
+
+`topology.parent_chain_status` informuje, czy łańcuch spanów nadrzędnych jest
+kompletny:
+
+| Wartość | Znaczenie |
+| --- | --- |
+| `root` | Span nie ma ID spanu nadrzędnego. |
+| `complete` | Każdy span nadrzędny aż do spanu głównego jest w śladzie. |
+| `missing` | ID spanu nadrzędnego wskazuje span, którego nie ma w śladzie. |
+| `cycle` | ID spanów nadrzędnych tworzą pętlę. |
+| `truncated` | Limit odpowiedzi nie pozwala zwrócić pełnego łańcucha. |
+| `unavailable` | Odczyt śladu nie mógł się zakończyć. |
+
+## Brakujący kontekst śladu
+
+Nie każde zdarzenie ma ślad swojego żądania. Sprawdź stan śladu:
+
+| Stan | Znaczenie |
+| --- | --- |
+| `available` | Można odczytać dokładne dowody ze śladu. |
+| `not_linked` | Zdarzenie nie ma ID śladu. Niektóre starsze zdarzenia nie mają ID śladu. |
+| `not_found` | Zdarzenie ma ID śladu, ale żaden ślad nie pasuje do wybranego zakresu. |
+| `unavailable` | Nie udało się wtedy odczytać dowodów ze śladu. |
+
+`not_linked` nie jest błędem. Ślad `available` też może pokazać, że zdarzenie
+nie miało kontekstu żądania. Jeśli span rejestracji zdarzenia nie ma
+`parent_span_id`, w chwili rejestracji zdarzenia żaden span nie był aktywny.
+Często tak jest w przypadku pracy w tle poza zakresem żądania. Aby znaleźć
+brakujące powiązanie:
+
+1. Odczytaj projekt, usługę, środowisko, wydanie i czas zdarzenia.
+2. Sprawdź, czy praca wykonała się wewnątrz żądania lub operacji objętej
+   instrumentacją.
+3. Sprawdź, czy integracje klienta i serwera propagują kontekst przez tę
+   granicę.
+4. Po poprawieniu instrumentacji zarejestruj nowe zdarzenie i odczytaj je.
+
+Nowa wersja SDK nie dodaje kontekstu śladu do zdarzeń wysłanych wcześniej. Nie
+łącz zdarzenia ze śladem na podstawie znacznika czasu, trasy, komunikatu ani
+wydania.
+
+## Zaplanuj śledzenie dla jednego projektu
+
+Zacznij od jednego ważnego żądania lub zadania, na przykład realizacji zakupu.
+Dodawaj instrumentację po jednej granicy naraz:
+
+1. Utwórz span dla przychodzącego żądania lub operacji w tle.
+2. Dodaj spany podrzędne dla ważnych wywołań wychodzących.
+3. Kontynuuj kontekst śladu W3C przez granice zaufanych usług.
+4. Wyślij bezpieczny log wewnątrz aktywnego spanu.
+5. Odczytaj ten log, otwórz jego ID śladu i sprawdź span główny, spany
+   podrzędne, usługę, środowisko, wydanie, status i czas trwania.
+
+Kolejną granicę dodaj dopiero wtedy, gdy ta kontrola się powiedzie. Wspólny
+ślad pokazuje korelację. Nie dowodzi, że jeden span spowodował problem.
+
+Aby sprawdzić nazwy spanów, uruchom
+`logbrew traces --project "<project_id>" --pagination cursor --json`. Obiekt
+`naming_quality` liczy ślady na tej stronie, które mają ogólną nazwę spanu
+głównego (`generic_name_traces`) lub niedopasowaną trasę
+(`unmatched_route_traces`). Jeśli nazwy wymagają poprawy,
+`naming_quality.next_action.code` ma wartość `improve_trace_naming`.

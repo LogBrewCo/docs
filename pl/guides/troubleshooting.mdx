@@ -1,0 +1,227 @@
+---
+title: "Rozwiązywanie problemów z brakującymi logami aplikacji"
+sidebarTitle: "Rozwiązywanie problemów"
+description: "Bezpiecznie sprawdź w LogBrew brakujące logi aplikacji, konfigurację projektu, filtry, dowody problemów i powiązania ze śladami."
+---
+
+Użyj tej strony, gdy telemetrii brakuje, jest niepełna albo zbyt szeroka.
+Najpierw sprawdź dostęp. Potem, szukając przyczyny, nie zmieniaj projektu,
+usługi, wydania, środowiska ani zakresu czasu.
+
+<Note>
+  W pracy z agentami dodawaj `--json`. Nieudane sprawdzenie zwraca stałe pole
+  `next`.
+</Note>
+
+## Zacznij od szybkich sprawdzeń
+
+| Objaw | Pierwsze sprawdzenie | Następny krok |
+| --- | --- | --- |
+| CLI nie jest zalogowany | `logbrew status --json` | Człowiek uruchamia `logbrew login`. |
+| Brakuje projektu | `logbrew projects --json` | Użyj ID z listy projektów. |
+| Stan konfiguracji jest niejasny | `logbrew doctor --project "<project_id>" --json` | Postępuj zgodnie ze zwróconą wartością `next`. |
+| Logi są puste | Odczytaj logi dla dokładnego projektu i zakresu czasu | Inne rodzaje sygnałów sprawdź osobno. |
+| Wyniki są zbyt szerokie | Dodaj filtry projektu, usługi, wydania i środowiska | Zachowaj ten sam zakres przy każdym odczycie. |
+| Brakuje śladu | Odczytaj szczegóły problemu | Odczytuj ślad tylko wtedy, gdy odpowiedź zawiera ID śladu. |
+| Ramki JavaScript pokazują zbudowany kod | Sprawdź, czy build i mapa źródeł tworzą parę | Postępuj według strony [Mapy źródeł JavaScript](/pl/guides/source-maps). |
+| Agent MCP nie może odczytać projektu | Sprawdź zatwierdzone projekty | Postępuj według sekcji [Problemy z połączeniem MCP](/pl/guides/mcp#fix-connection-problems). |
+
+## <span id="recover-missing-first-telemetry">Napraw brak pierwszej telemetrii</span>
+
+Zanim zmienisz konfigurację SDK, uruchom te polecenia tylko do odczytu:
+
+```bash
+logbrew version --json
+logbrew status --json
+logbrew projects --json
+logbrew doctor --project "<project_id>" --json
+```
+
+`logbrew doctor` sprawdza dostęp do API, uwierzytelnianie, projekt, klucz
+wysyłania, konfigurację, telemetrię i widoczność logów. Nie zmienia projektu.
+Odczytaj ogólny `status` i każde sprawdzenie w
+[raporcie diagnostyki projektu](/pl/reference/cli#read-a-project-doctor-report). Kod wyjścia
+`0` nie oznacza, że wszystkie sprawdzenia się powiodły.
+
+| Status diagnostyki | Następny krok |
+| --- | --- |
+| `needs_ingest_key` | Utwórz klucz wysyłania przypisany do projektu. Zobacz [Wymień klucz wysyłania](/pl/guides/rotate-ingest-key). |
+| `needs_setup` | Dokończ konfigurację SDK. Zobacz [Integracja SDK](/pl/guides/sdk-ingestion). |
+| `needs_telemetry` | Wyślij z aplikacji jedno bezpieczne zdarzenie testowe, a potem ponownie uruchom diagnostykę. |
+| `ready` | Odczytaj najnowsze logi, problemy, wydania lub ślady. |
+
+Raport może mieć też status `auth_invalid`, `project_missing`,
+`api_unreachable` lub `check_failed`.
+[Raport diagnostyki projektu](/pl/reference/cli#read-a-project-doctor-report)
+podaje następny krok dla każdego z nich.
+
+Projekt ze statusem `ready` nadal może nie mieć logów, bo każdy rodzaj sygnału
+jest osobny. Sprawdzenie `logs` może mieć wartość `empty` lub `unavailable`.
+Nieudany odczyt logów to nie to samo co pusty wynik.
+
+### Wyślij jedno bezpieczne zdarzenie testowe
+
+Wyślij z zainstalowanego SDK jeden testowy log z unikalnym komunikatem. Nie
+dołączaj tokena, danych użytkownika ani treści żądania. Zapisz ID projektu,
+usługę, środowisko, wydanie, czas rozpoczęcia w UTC i wersję SDK. Poczekaj na
+dostarczenie, a potem odczytaj krótki zakres czasu w tym samym projekcie. Nie
+wysyłaj kolejnych zdarzeń testowych, dopóki dostarczanie trwa.
+
+## Znajdź brakujące logi
+
+Najpierw odczytaj mały, dokładny zakres:
+
+```bash
+logbrew read releases --project "<project_id>" --environment production --json
+logbrew read logs --project "<project_id>" --environment production \
+  --release checkout@1 --since 1h --limit 20 --json
+```
+
+Sprawdź te punkty po kolei:
+
+1. ID projektu należy do aplikacji, która wysłała zdarzenie.
+2. Usługa, wydanie i środowisko pasują dokładnie, łącznie z wielkością liter
+   i białymi znakami.
+3. Zakres czasu obejmuje czas zdarzenia. LogBrew zwraca czasy zdarzeń w
+   UTC. `--until` to górna granica, która nie należy do zakresu.
+4. Żaden filtr wyszukiwania ani ważności nie ukrywa zdarzenia.
+5. Aplikacja wysłała rodzaj sygnału, który odczytujesz. Log nie tworzy
+   problemu ani śladu.
+
+Jeśli zdarzenia nadal brakuje, usuwaj filtry po jednym:
+
+1. Zachowaj projekt i poszerz zakres czasu.
+2. Usuń filtr wydania.
+3. Usuń filtr środowiska.
+4. Usuń filtr usługi.
+5. Usuń filtry wyszukiwania i ważności.
+
+Zatrzymaj się, gdy zdarzenie się pojawi. Ostatni usunięty filtr nie pasuje do
+konfiguracji aplikacji. Nie odczytuj wszystkich projektów zamiast
+skonfigurowanego projektu.
+
+| Wynik | Co pokazuje | Następne sprawdzenie |
+| --- | --- | --- |
+| Brak wierszy w jednym projekcie | Brak dopasowań w tym zakresie | Sprawdź czas i filtry. |
+| Są logi, ale nie ma problemów | Żaden zgrupowany błąd nie pasuje do filtrów | Sprawdź, czy aplikacja wysłała błąd. |
+| Problem bez śladu | Wystąpienie nie ma użytecznego powiązania ze śladem | Odczytaj status śladu w analizie problemu. |
+| Jest wydanie, ale nie ma logów | Wydanie ma inne sygnały, ale nie ma logów w tym zakresie | Porównaj liczniki w `logbrew read releases`. Odczytaj każdy rodzaj sygnału w tym samym projekcie. |
+| Zdarzenie pojawia się po usunięciu filtra | Ten filtr wykluczał zdarzenie | Popraw filtr albo wartość w aplikacji. |
+
+Strona wyników to nie suma wszystkich wyników. Z `--pagination cursor`
+kontynuuj ze zwróconym `next_cursor` i zachowaj te same filtry. Zobacz
+[Paginacja kursorowa](/pl/reference/telemetry-api-filters#cursor-pagination).
+
+### Sprawdź widok na pulpicie
+
+Pulpit pokazuje migawkę każdej listy. W widoku logów włącz **Na żywo**, aby
+dodawać nowe logi, gdy tylko dotrą. Inne widoki nie aktualizują się na żywo.
+Przeładuj stronę, aby dostać nową migawkę. Nieaktualna migawka to nie to samo
+co pusty wynik.
+
+LogBrew przechowuje tylko telemetrię, którą wysyła aplikacja. Przed
+dostarczeniem usuń poświadczenia, treści żądań, wartości parametrów zapytania i
+dane osobowe. Wybór pól sprawdzisz na stronie
+[Kontrola rejestrowanych danych](/pl/guides/safe-capture).
+
+## Sprawdź problemy i ślady
+
+Używaj ID problemu lub ID śladu, które zwrócił LogBrew. Nigdy go nie
+wymyślaj.
+
+```bash
+logbrew read issues --project "<project_id>" --environment production \
+  --status unresolved --since 24h --json
+logbrew read issue "<issue_id>" --json
+logbrew read trace "<trace_id>" --project "<project_id>" --json
+logbrew read logs --trace "<trace_id>" --project "<project_id>" --json
+```
+
+`--status` przyjmuje `unresolved`, `resolved` i `archived`. `ignored` wybiera
+te same problemy co `archived`.
+
+Status problemu i status śladu to różne rzeczy. Wartości statusu śladu
+`not_linked`, `not_found` i `unavailable` mają różne znaczenia. Każdą z nich
+opisuje strona [Zbadaj problem](/pl/guides/investigate-an-issue). Zanim
+rozwiążesz, zarchiwizujesz lub ponownie otworzysz problem, odczytaj go i jego
+logi.
+
+## Obsłuż błędy CLI i API
+
+W trybie JSON błąd CLI zawiera `ok`, `error`, `message` i `next`:
+
+```json
+{
+  "ok": false,
+  "error": "not_logged_in",
+  "message": "not logged in: run logbrew login",
+  "next": "run logbrew login"
+}
+```
+
+Gdy API zwraca błąd, `error` ma wartość `api_error`. Błąd ma też `status`
+(status HTTP), `api_code` (`code` z API), `api_error` i `api_next`. Przy
+błędzie `rate_limited` ma też `retry_after_seconds`. CLI nie ponawia żądań
+automatycznie.
+
+| Status lub błąd | Naprawa |
+| --- | --- |
+| `not_logged_in` lub HTTP `401` | Człowiek uruchamia `logbrew login`. Potem ponów odczyt. |
+| HTTP `403` | Użyj właściwego poświadczenia dla projektu. Zmiana problemu wymaga też uprawnienia do zarządzania problemami w projekcie. Nie pokazuj wartości poświadczenia. |
+| HTTP `404` | Użyj aktualnego ID projektu, problemu lub śladu z odpowiedzi. |
+| HTTP `422` | Popraw wskazane pole. |
+| HTTP `429` z `rate_limited` | Odczekaj `retry_after_seconds`, a potem ponów raz. |
+| HTTP `429` z innym kodem | Zatrzymaj automatyczne ponowienia. Postępuj zgodnie z `api_next`. |
+| HTTP `5xx` | Poczekaj, ponów jeden odczyt i zgłoś problem, jeśli nie ustępuje. |
+
+Każdy kod błędu opisuje strona [Błędy API](/pl/reference/api-errors).
+
+## <span id="secure-a-compromised-account">Zabezpiecz przejęte konto</span>
+
+Jeśli ktoś inny może mieć token dostępu do konta, token odświeżania lub plik
+cookie sesji, wyloguj wszystkich klientów LogBrew. Wykonaj procedurę
+[wylogowania z całego konta](/pl/reference/account-api#every-logbrew-login).
+Tę operację musi zatwierdzić człowiek. `logbrew logout` i wylogowanie w
+przeglądarce wylogowują tylko jednego klienta, więc to nie wystarczy.
+
+Wylogowanie z całego konta zatrzymuje też każde połączenie MCP zatwierdzone
+przed nim. Po sukcesie wyczyść lokalne poświadczenia LogBrew na każdym kliencie
+i zaloguj się ponownie z zaufanego klienta. Zatwierdzaj klientów MCP ponownie
+dopiero wtedy, gdy im ufasz. Jeśli odpowiedź zaginie, nie zgłaszaj, że wszyscy
+klienci są wylogowani, i nie powtarzaj żądania automatycznie.
+
+Wylogowanie z całego konta nie wymienia kluczy wysyłania projektów. Jeśli klucz
+wysyłania został ujawniony, [wymień klucz wysyłania](/pl/guides/rotate-ingest-key).
+
+## Bezpieczne rozwiązywanie problemów
+
+Do odczytów w CLI używaj poświadczenia dostępu do konta. Poświadczenia
+wysyłania przypisanego do projektu używaj tylko do zapisów z SDK. Nie umieszczaj
+tokenów, nagłówków autoryzacji, surowych logów, danych klientów, treści żądań,
+lokalnych ścieżek ani kodu źródłowego w poleceniu, czacie ani zgłoszeniu do
+pomocy technicznej.
+
+Zanim zgłosisz problem, powtórz jeden odczyt z najmniejszym zakresem, przy
+którym błąd nadal występuje. Zapisz polecenie bez wartości poświadczeń, kod
+błędu, ID projektu i wartości filtrów. Jeśli sprawdzenia nie rozwiążą
+problemu, [zgłoś problem](/pl/guides/report-a-problem).
+
+## Powiązane strony
+
+<CardGroup cols={2}>
+  <Card title="Szybki start" icon="rocket" href="/pl/quickstart">
+    Wyślij i odczytaj pierwsze bezpieczne zdarzenie.
+  </Card>
+
+  <Card title="Przewodnik po CLI" icon="square-terminal" href="/pl/guides/cli">
+    Używaj dokładnych filtrów i wyjścia JSON.
+  </Card>
+
+  <Card title="Zbadaj problem" icon="search" href="/pl/guides/investigate-an-issue">
+    Odczytaj dowody problemu, zanim zmienisz jego status.
+  </Card>
+
+  <Card title="Błędy API" icon="triangle-alert" href="/pl/reference/api-errors">
+    Obsłuż każdy kod błędu.
+  </Card>
+</CardGroup>

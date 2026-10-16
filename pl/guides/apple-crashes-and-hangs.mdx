@@ -1,0 +1,394 @@
+---
+title: "Raportowanie awarii i zawieszeń aplikacji iOS"
+sidebarTitle: "Awarie i zawieszenia Apple"
+description: "Skonfiguruj raportowanie awarii aplikacji iOS, prześlij pasujące pliki dSYM i odczytaj w LogBrew zsymbolizowane logi awarii."
+---
+
+Ten proces pozwala rejestrować natywne awarie i zawieszenia głównego wątku w
+aplikacji iOS. Rejestrowanie zawieszeń wymaga UIKit. Prześlij pasujący dSYM,
+aby zobaczyć miejsca w kodzie źródłowym w ramkach stosu.
+
+Gdy aplikacja ulega awarii, zapisuje lokalny raport. Przy kolejnym
+uruchomieniu aplikacja wywołuje ponowne wysyłanie (replay), aby przekazać
+dowody awarii do LogBrew. LogBrew nie wysyła surowego raportu Apple.
+
+<Note>
+  Używaj LogBrew Swift 0.1.6 lub nowszego. Do przesyłania artefaktów
+  debugowania używaj natywnego CLI LogBrew 0.1.24 lub nowszego.
+</Note>
+
+<Warning>
+  W aplikacji używaj konfiguracji wysyłania przypisanej do projektu. Do
+  przesyłania artefaktów i odczytu problemów zaloguj się na konto. Z maszyny
+  do buildów artefakty może przesyłać również klucz artefaktów projektu.
+  Nigdy nie umieszczaj w aplikacji tokena dostępu do konta ani klucza
+  artefaktów.
+</Warning>
+
+## Zaplanuj zakres rejestrowania
+
+Sprawdź, kiedy aplikacja może ponownie wysłać każdy rodzaj niepowodzenia.
+
+| Niepowodzenie | Wynik rejestrowania | Czas dostarczenia |
+| --- | --- | --- |
+| Krytyczna awaria na platformie Apple | Nieobsłużone zdarzenie natywnej awarii | Kolejne uruchomienie aplikacji |
+| Zawieszenie głównego wątku, po którym aplikacja wróciła do działania | Obsłużone zdarzenie zawieszenia | Ponowne wysyłanie po powrocie do działania |
+| Zawieszenie zakończone zamknięciem procesu | Nieobsłużone zdarzenie zawieszenia | Kolejne uruchomienie aplikacji |
+
+Ustaw wartość wydania przed buildem. Musi ona identyfikować wersję aplikacji
+i build. Użyj tej samej wartości w SDK, przy przesyłaniu dSYM i w filtrze
+problemów.
+
+Nie dołączaj do metadanych awarii danych użytkownika, treści żądań ani
+nagłówków.
+
+## Dodaj produkt obsługi awarii
+
+Najpierw [skonfiguruj telemetrię SDK](/pl/guides/sdk-ingestion) w aplikacji.
+Ponowne wysyłanie używa tych obiektów `client` i `transport`.
+
+Dodaj publiczny zestaw SDK przez Swift Package Manager.
+
+```swift
+.package(
+    url: "https://github.com/LogBrewCo/sdk.git",
+    from: "0.1.6"
+)
+```
+
+Dodaj produkt `LogBrew`, aby wysyłać telemetrię. Dodaj `LogBrewCrash` tylko
+wtedy, gdy aplikacja jawnie włącza rejestrowanie natywnych awarii lub
+zawieszeń.
+
+Integracja rejestrowania obsługuje iOS 15 lub nowszy. Utrzymuj jeden obiekt
+rejestrowania należący do aplikacji, bo natywne procedury obsługi błędów
+krytycznych działają w całym procesie.
+
+## Skonfiguruj jedną dokładną tożsamość
+
+Użyj tego samego projektu, wydania, środowiska i usługi w konfiguracji
+aplikacji i przy przesyłaniu artefaktów. LogBrew nie wylicza ani nie zastępuje
+tych wartości.
+
+```swift
+import Foundation
+import LogBrew
+import LogBrewCrash
+
+let applicationSupport = try FileManager.default.url(
+    for: .applicationSupportDirectory,
+    in: .userDomainMask,
+    appropriateFor: nil,
+    create: true
+)
+
+let identity = try NativeArtifactIdentity(
+    projectId: "550e8400-e29b-41d4-a716-446655440000",
+    release: "com.example.app@1.2.3+45",
+    environment: "production",
+    service: "ios-app"
+)
+
+let watchdog: NativeHangWatchdogConfiguration? = nil
+
+let crashCapture = NativeCrashCapture(
+    configuration: try NativeCrashConfiguration(
+        storageDirectory: applicationSupport.appendingPathComponent(
+            "LogBrewCrash",
+            isDirectory: true
+        ),
+        artifactIdentity: identity,
+        hangWatchdog: watchdog
+    )
+)
+
+try crashCapture.install()
+```
+
+Zainstaluj obiekt rejestrowania w głównym wątku, zanim utworzysz główny
+interfejs. Najpierw utwórz jego katalog nadrzędny. Katalog na raporty musi
+należeć do aplikacji i być prywatny.
+
+Obiekt rejestrowania zapisuje wyjątki Mach, sygnały, wyjątki C++ i wyjątki
+Objective-C. Lokalny raport nie zawiera zawartości pamięci, nazw kolejek ani
+logów konsoli.
+
+Lokalny raport awarii może zawierać poufne dane aplikacji i urządzenia. Nie
+umieszczaj go w kopiach zapasowych w chmurze ani w katalogach współdzielonych.
+Zamiast surowego raportu LogBrew wysyła UUID ramek, architektury i przesunięcia
+(offsety).
+
+`NativeCrashConfiguration` ma dwa opcjonalne limity:
+
+| Parametr | Domyślnie | Zakres | Działanie |
+| --- | --- | --- | --- |
+| `maxStoredReports` | `5` | od 1 do 32 | Liczba lokalnych raportów, które przechowuje aplikacja. |
+| `maxReplayBytes` | 4 MiB | od 1 KiB do 16 MiB | Ponowne wysyłanie odrzuca raport większy niż ten rozmiar. |
+
+Wartość spoza zakresu sprawia, że konfiguracja zgłasza
+`crash_invalid_configuration`.
+
+## Włącz rejestrowanie zawieszeń
+
+Rejestrowanie zawieszeń jest wyłączone, gdy `watchdog` ma wartość `nil`. Aby
+je włączyć, zastąp powyższą deklarację `watchdog`, zanim wywołasz `install()`:
+
+```swift
+let watchdog = try NativeHangWatchdogConfiguration(
+    threshold: 2
+)
+```
+
+Próg podajesz w sekundach, od 1 do 30. Rejestrowanie zawieszeń wymaga też
+`artifactIdentity`. Bez niej konfiguracja zgłasza
+`crash_invalid_configuration`.
+
+Utrzymuj jeden obiekt `crashCapture` przez cały czas życia procesu. Drugiego
+obiektu rejestrowania nie da się zainstalować. Jego wywołanie `install()`
+zgłasza `crash_capture_owned`. Aby zmienić próg, użyj nowej wartości przy
+kolejnym uruchomieniu aplikacji.
+
+Zawieszenie, po którym aplikacja wróciła do działania, jest wysyłane ponownie
+z `crash.handled` ustawionym na `true`. Trwające zawieszenie przerwane
+zamknięciem procesu jest wysyłane ponownie z `crash.handled` ustawionym na
+`false`.
+
+Oba warianty zawierają liczbowe metadane `durationMs`. Zachowują tę samą
+tożsamość artefaktu, której używają ramki krytycznej awarii.
+
+Watchdog wstrzymuje działanie, gdy aplikacja jest nieaktywna lub działa pod
+debuggerem. Wyłącza też rejestrowanie przy poważnym obciążeniu termicznym.
+
+Krótki próg może zgłaszać zwykłą pracę głównego wątku jako zawieszenia.
+Przetestuj próg w konfiguracji builda, którą wydajesz. Stan obsłużenia opisuje
+powrót do działania. Nie oznacza problemu jako rozwiązanego. Obsłużone
+zawieszenie i tak zablokowało interfejs, więc też je przejrzyj.
+
+## Wyślij raporty ponownie po uruchomieniu
+
+Po zainstalowaniu rejestrowania wyślij ponownie oczekujące raporty przez
+klienta SDK.
+
+```swift
+let replay = try crashCapture.replayPendingReports(
+    in: client,
+    transport: transport
+)
+
+print(
+    "acknowledged=\(replay.acknowledged) " +
+    "discarded=\(replay.discarded) " +
+    "pending=\(replay.pending)"
+)
+```
+
+Aplikacja musi wywołać ponowne wysyłanie. Sam powrót do działania po
+zawieszeniu nie wysyła zdarzenia. Wywołaj tę samą metodę po powrocie do
+działania albo przy kolejnym uruchomieniu.
+
+Ponowne wysyłanie przetwarza poprawne raporty od najstarszego i zachowuje ich
+stałe ID zdarzeń. Po nieudanym dostarczeniu raport nadal oczekuje. Gdy
+LogBrew przyjmie raport, aplikacja go usuwa.
+
+Ponowne wysyłanie odrzuca raporty, których nie może odczytać, i raporty
+większe niż `maxReplayBytes`. Sprawdź wszystkie trzy liczniki. Sam zerowy
+licznik oczekujących raportów nie dowodzi dostarczenia.
+
+Włącz trwałe dostarczanie przed ponownym wysyłaniem, gdy nieudane żądanie musi
+przetrwać kolejny restart. Nie wywołuj `purge()`, gdy naprawiasz zwykłe
+problemy z siecią lub uwierzytelnianiem.
+
+## Prześlij pasujący dSYM
+
+Zarchiwizuj aplikację z włączonymi informacjami debugowania. Zachowaj dSYM z
+dokładnie tego builda, którego używają użytkownicy.
+
+Sprawdź UUID jego obrazów.
+
+```bash
+xcrun dwarfdump --uuid "path/to/App.app.dSYM"
+```
+
+Przed przesłaniem zweryfikuj artefakt lokalnie.
+
+```bash
+logbrew debug-artifacts upload "path/to/App.app.dSYM" \
+  --project "<project UUID>" \
+  --release "com.example.app@1.2.3+45" \
+  --environment "production" \
+  --service "ios-app" \
+  --expect-image-uuid "<Mach-O UUID>" \
+  --dry-run \
+  --json
+```
+
+Powtórz `--expect-image-uuid` dla każdej wymaganej architektury. Polecenie
+kończy się błędem, gdy znaleziony zbiór UUID różni się od oczekiwanego.
+
+Sprawdź dostęp do konta. Potem uruchom to samo polecenie bez `--dry-run`.
+
+```bash
+logbrew status --json
+
+logbrew debug-artifacts upload "path/to/App.app.dSYM" \
+  --project "<project UUID>" \
+  --release "com.example.app@1.2.3+45" \
+  --environment "production" \
+  --service "ios-app" \
+  --expect-image-uuid "<Mach-O UUID>" \
+  --json
+```
+
+Polecenie przesyłania weryfikuje obsługiwane obiekty Apple i sprawdza każdą
+przesłaną tożsamość. Nie umieszcza lokalnych ścieżek ani nazw plików w
+metadanych API.
+
+Wynik pokazuje pole JSON `status`:
+
+| `status` | Znaczenie |
+| --- | --- |
+| `validated` | Przebieg próbny znalazł oczekiwane obiekty. Nic nie zostało przesłane. |
+| `verified` | Dostęp do konta pozwolił przesłać i zweryfikować każdą tożsamość. |
+| `already_present` | LogBrew ma już każdą tożsamość. |
+| `uploaded` | Pliki przesłano kluczem artefaktów projektu. CLI nie mógł ich zweryfikować. |
+
+Maszyna do buildów może przesyłać pliki z kluczem artefaktów projektu w
+`LOGBREW_TOKEN` zamiast dostępu do konta. Utwórz klucz tak, jak opisuje
+sekcja [Utwórz klucz artefaktów](/pl/guides/source-maps#create-an-artifact-key).
+Takie przesłanie zgłasza `uploaded`. Później zweryfikuj każdą tożsamość z
+dostępem do konta:
+
+```bash
+logbrew debug-artifacts lookup \
+  --project "<project UUID>" \
+  --release "com.example.app@1.2.3+45" \
+  --environment "production" \
+  --service "ios-app" \
+  --image-uuid "<Mach-O UUID>" \
+  --architecture arm64 \
+  --json
+```
+
+`status: "found"` potwierdza artefakt. `status: "missing"` oznacza, że LogBrew
+nie ma artefaktu dla tej tożsamości.
+
+Rozwiązywanie ramek dopasowuje UUID obrazu i pełną tożsamość artefaktu, a nie
+nazwę pliku źródłowego. Ponowny build tego samego kodu może mieć inne UUID.
+Prześlij dokładnie ten pakiet dSYM, a nie cały katalog builda.
+
+## Sprawdź dane odczytane z LogBrew
+
+Przefiltruj listę problemów, używając tego samego zakresu co w aplikacji.
+Ten przykład wybiera problemy `unresolved`. Problem rozwiązany lub
+zarchiwizowany się nie pojawi.
+
+```bash
+logbrew read issues \
+  --project "<project UUID>" \
+  --release "com.example.app@1.2.3+45" \
+  --environment "production" \
+  --service "ios-app" \
+  --status "unresolved" \
+  --since "24h" \
+  --json
+```
+
+Odpowiedź listy wskazuje zgrupowany problem. Odczytaj jego szczegóły, aby
+LogBrew rozwiązał ramki po swojej stronie.
+
+```bash
+logbrew read issue "<issue UUID>" --json
+```
+
+Pasujący artefakt dodaje obiekt `symbolication`. Ten przykład pokazuje wybrane
+pola problemu z rozwiązaną ramką, a nie pełną odpowiedź.
+
+```json
+{
+  "severity": "critical",
+  "attributes": {
+    "metadata": {
+      "crash.replayed": true
+    }
+  },
+  "symbolication": {
+    "status": "resolved",
+    "frames": [
+      {
+        "index": 0,
+        "status": "resolved",
+        "resolved": {
+          "source": "AppRuntime.swift",
+          "line": 42,
+          "column": 1,
+          "name": "terminateForCrash()"
+        }
+      }
+    ]
+  }
+}
+```
+
+## Odczytaj dowody awarii
+
+Każda ramka ma własny `status`. Pole `symbolication.status` używa tych samych
+wartości:
+
+| `status` | Znaczenie |
+| --- | --- |
+| `resolved` | Pasujący artefakt rozwiązał ramkę. `resolved` zawiera źródło, wiersz, kolumnę lub nazwę funkcji, które dostarcza artefakt. |
+| `artifact_not_found` | Żaden przesłany artefakt nie pasuje do tożsamości zdarzenia i UUID obrazu. |
+| `source_not_resolved` | Pasujący artefakt istnieje, ale nie rozwiązał tej ramki. |
+| `invalid_metadata` | Zdarzenie ma niepełne lub niespójne metadane artefaktu. |
+| `unavailable` | Nie udało się dokończyć odczytu rozwiązania ramki. |
+
+W notatkach zostaw nierozwiązaną ramkę jako nierozwiązaną. Nie zgłaszaj jej
+jako pustego stosu.
+
+LogBrew rozwiązuje ramki, gdy odczytujesz problem. dSYM przesłany później może
+rozwiązać ramki wcześniejszego zdarzenia. Nie może dodać ramek, których
+zdarzenie nie zarejestrowało.
+
+Ramka aplikacji zawęża szukanie w kodzie, ale nie dowodzi przyczyny.
+Breadcrumby, łańcuch wyjątków i dowody ze śladu znajdziesz w analizie
+problemu:
+
+```bash
+logbrew investigate issue "<issue UUID>" --json
+```
+
+W tej odpowiedzi ramka z `source: "symbolicated"` pochodzi z przesłanego
+artefaktu. Ramka z `source: "captured"` to miejsce, które wysłała aplikacja.
+Pola odpowiedzi opisuje strona [Zbadaj problem](/pl/guides/investigate-an-issue).
+
+Przy każdym odczycie zachowaj pełny zakres: projekt, wydanie, środowisko i
+usługę. Nie rozszerzaj nieudanego wyszukiwania na inne projekty.
+
+## Sprawdź konfigurację produkcyjną
+
+Wywołaj zatwierdzony testowy błąd we wdrożonym buildzie. Nigdy nie używaj
+działania klienta jako wyzwalacza. Sprawdzaj punkty po kolei i zatrzymaj
+się przy pierwszym niepowodzeniu:
+
+1. Tożsamość w aplikacji zgadza się z tożsamością przesłanego artefaktu.
+2. Kolejne uruchomienie wysyła ponownie jedno potwierdzone zdarzenie, bez
+   odrzuconych i bez oczekujących raportów.
+3. Lista problemów w tym zakresie zwraca problem testowy z oczekiwanym stanem obsłużenia.
+4. Oczekiwana ramka aplikacji zostaje rozwiązana.
+5. Kolejne czyste uruchomienie nie dodaje następnego wystąpienia.
+
+## Bezpiecznie przywróć działanie
+
+| Wynik | Naprawa |
+| --- | --- |
+| Uwierzytelnianie przy przesyłaniu kończy się błędem | Uruchom `logbrew login`, sprawdź wynik `logbrew status --json` i powtórz dokładnie to samo przesyłanie. |
+| Walidacja UUID przy przesyłaniu kończy się błędem | Wybierz dSYM z wdrożonego builda i powtórz przebieg próbny. |
+| `artifact_not_found` | Sprawdź tożsamość zdarzenia i prześlij pasujący dSYM z tym samym zakresem. |
+| `source_not_resolved` | Zachowaj pełne informacje debugowania builda i sprawdź ustawienia wdrożonego builda. |
+| `invalid_metadata` | Sprawdź, czy używasz LogBrew Swift 0.1.6 lub nowszego. Zarejestruj nowe zdarzenie z dokładną tożsamością. |
+| `unavailable` | Zostaw problem widoczny i później ponów ten sam odczyt szczegółów w tym samym zakresie. |
+| Ponowne wysyłanie nadal oczekuje | Popraw stan transportu lub uwierzytelniania, a potem uruchom aplikację ponownie bez usuwania raportu. |
+| Ponowne wysyłanie zgłasza odrzucone wpisy | Nie licz ich jako dostarczonych. Sprawdź konfigurację rejestrowania i odtwórz sytuację, używając nowego zatwierdzonego zdarzenia testowego. |
+
+Ogólną analizę problemów opisuje strona
+[Zbadaj problem przez API](/pl/guides/investigate-an-issue).

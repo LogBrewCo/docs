@@ -1,0 +1,220 @@
+---
+title: "Telemetria aplikacji: logi, ślady i metryki"
+sidebarTitle: "Telemetria"
+description: "Porównaj logi, ślady, metryki, problemy i akcje produktowe. Wybierz sygnał LogBrew do swojej analizy."
+---
+
+Telemetria to ustrukturyzowane dowody, które aplikacja wysyła o swoim
+zachowaniu. Logi rejestrują zgłoszone zdarzenia. Ślady łączą operacje.
+Metryki mierzą wartości. Problemy grupują błędy. Akcje rejestrują aktywność w
+produkcie.
+
+Pola projektu, usługi, środowiska, wydania i czasu określają zakres każdego
+wyniku. Sygnały, które rejestruje twoje SDK, opisuje
+[przewodnik po integracji SDK](/pl/guides/sdk-ingestion).
+
+## <span id="choose-the-correct-telemetry-data-type">Wybierz sygnał</span>
+
+| Sygnał | Zastosowanie |
+| --- | --- |
+| Problemy | Powtarzające się błędy, na przykład wyjątek przy realizacji zakupu, który ma 18 wystąpień. |
+| Logi | Jedno zdarzenie zgłoszone przez aplikację, na przykład nieudana płatność. |
+| Ślady | Operacje i czas trwania jednego żądania w usługach objętych instrumentacją. |
+| Metryki | Zmierzona wartość w czasie, na przykład czas trwania żądania lub liczba ukończonych zadań. |
+| Akcje | Aktywność w produkcie, na przykład wyświetlenie strony, wyświetlenie ekranu lub interakcja. |
+
+Analizę błędu zacznij od problemów lub logów. Użyj dostępnego śladu, aby zbadać
+jedno wykonanie. Użyj trendu metryki, aby zbadać szerszy okres. Aktywność i
+utrzymanie opisuje strona [Analityka produktowa](/pl/concepts/product-analytics).
+
+Rejestruj tylko pola, których potrzebuje analiza. Używaj stałych nazw usług,
+operacji i metryk. Nie wysyłaj poświadczeń, danych płatniczych ani surowych
+treści żądań. Mechanizmy kontroli opisuje
+[przewodnik po kontroli rejestrowanych danych](/pl/guides/safe-capture).
+
+## Logi
+
+Log to wpis z aplikacji z jednego momentu w czasie. Przydatny log zawiera:
+
+- Czas wystąpienia zdarzenia w źródle.
+- Kanoniczny poziom ważności.
+- Zakres projektu i usługi.
+- Środowisko i wydanie.
+- Identyfikatory śladu i spanu, gdy log ma aktywny kontekst śladu.
+- Małe, nazwane atrybuty z kontekstem zdarzenia.
+
+Odpowiedź z logiem zawiera te wartości w polach `occurred_at`, `severity`,
+`project_id`, `service_name`, `environment`, `release`, `trace_id`, `span_id`
+i `attributes`. Kontekst umieszczaj w nazwanych atrybutach, a nie w treści
+komunikatu.
+
+Logi z kilku usług w jednym widoku nie są ze sobą powiązane śladem. Takie
+powiązanie tworzy tylko kontekst śladu.
+
+## Ślady
+
+Ślad zawiera spany jednego żądania lub jednej operacji. Span główny nie ma
+spanu nadrzędnego. Span podrzędny wskazuje swój span nadrzędny. Wszystkie spany
+w śladzie mają to samo ID śladu i różne ID spanów. Zobacz
+[Śledzenie rozproszone](/pl/concepts/distributed-tracing).
+
+Log, problem, akcja lub metryka wysłane bez aktywnego kontekstu śladu dostają
+ślad rejestracji. Ten ślad zawiera tylko spany rejestracji. Nie pokazuje
+ścieżki żądania. Zobacz
+[Spany rejestracji](/pl/concepts/distributed-tracing#capture-spans).
+
+## <span id="read-the-metric-value">Metryki</span>
+
+Metryka rejestruje zmierzoną wartość w czasie. Każdą metrykę odczytuj razem z
+jej nazwą, jednostką, wymiarami, projektem, zakresem czasu i długością przedziału.
+LogBrew wybiera `value` każdego punktu na podstawie `kind` i `temporality`
+metryki:
+
+| Kontrakt metryki | `aggregation.code` | `value` punktu |
+| --- | --- | --- |
+| `gauge` z `instant` | `gauge_last` | Ostatni stan w przedziale, na przykład długość kolejki. |
+| `counter` z `delta` | `delta_sum` | Suma zmian w przedziale, na przykład liczba ukończonych zadań. |
+| `histogram` z `delta` | `distribution_p95` | Przybliżony 95. percentyl, na przykład czasu trwania żądania. |
+| Strumień `cumulative` | `raw_cumulative_last` | Ostatnia surowa suma. Nie jest to tempo zmian. |
+| Inna para | `raw_last` | Ostatnia surowa próbka. |
+
+Na przykład trzy próbki licznika typu delta o wartościach `2`, `3` i `5` w
+jednym przedziale dają punkt z `value` równym `10` i `sample_count` równym `3`.
+Trzy próbki typu gauge o tych samych wartościach, w tej kolejności, dają punkt
+z `value` równym `5`. Wartość p95 nie jest średnią. Około 95% zarejestrowanych
+obserwacji ma wartość równą jej lub mniejszą.
+
+Dla `status: "ready"` dostępna jest agregacja pochodna. Dla
+`status: "limited"` przeczytaj `aggregation.limitation` i używaj tylko
+surowych wartości. Nie sumuj wartości typu gauge ani strumienia skumulowanego.
+Przedział bez punktu nie oznacza zmierzonego zera. Pola zapytań opisuje strona
+[Filtry zapytań](/pl/reference/telemetry-api-filters).
+
+`GET /api/telemetry/metrics/series` zwraca te punkty. Wymaga `project_id`,
+`name` i `since`. Każdy szereg ma jedno `identity` z polami `kind`, `unit` i
+`temporality`. Szeregi o różnych tożsamościach pozostają oddzielne. Każdy punkt
+może też zawierać:
+
+| Pole | Znaczenie |
+| --- | --- |
+| `min`, `max`, `average` | Zakres i średnia próbek w przedziale. |
+| `p50`, `p95`, `p99` | Przybliżone percentyle histogramu. |
+| `rate_per_second` | Suma licznika delta podzielona przez długość przedziału. |
+| `trace_exemplars` | Próbkowane ID śladów z przedziału. Otwórz jeden z tych śladów, aby zbadać żądanie z tego przedziału. |
+
+`coverage.truncated` ma wartość `true`, gdy `series_limit` pominął szeregi o
+mniejszej liczbie danych. Aby porównać okno metryki z poprzednim oknem o tej
+samej długości, uruchom:
+
+```bash
+logbrew explain metric '<metric-name>' --project '<project-id>' --since 24h --json
+```
+
+## Problemy
+
+Problem grupuje powtarzające się błędy według stałego odcisku palca. Ma
+ważność, status, liczbę wystąpień, czas pierwszego wystąpienia i czas
+ostatniego wystąpienia. Szczegóły problemu mogą zawierać łańcuchy wyjątków,
+ramki stosu, breadcrumby, powiązane logi i powiązanie ze śladem.
+
+`last_seen_at` to najnowsze wystąpienie w grupie. Wybrane wystąpienie może być
+starsze. Odczytaj oba czasy.
+
+`status` problemu to `unresolved`, `resolved` lub `archived`. Odpowiedź API w
+wersji 1 pokazuje `archived` jako `ignored`. Wersje odpowiedzi 2 i 3 dodają
+`priority` (`high`, `medium` lub `low`) i `priority_source`. Wersja 3 dodaje
+też `assignee`. Zobacz
+[Wartości statusu](/pl/guides/issue-workflow#status-values) i
+[Priorytet](/pl/guides/issue-workflow#priority).
+
+## Akcje
+
+Akcja rejestruje aktywność w produkcie. Obsługiwana klasyfikacja oznacza ją
+jako wyświetlenie strony, wyświetlenie ekranu lub interakcję. Sama nazwa
+zdarzenia nie ustawia klasyfikacji. Ten kontekst dodasz według przewodnika
+[Rejestrowanie zdarzeń produktowych](/pl/guides/product-events).
+
+Sesje to nie użytkownicy. Anonimowe podmioty to nie zidentyfikowani
+użytkownicy.
+
+## <span id="shared-fields">Wspólne pola</span>
+
+| Pole | Zastosowanie |
+| --- | --- |
+| `project_id` | Wskazuje projekt, do którego należy telemetria, i wyznacza granicę odczytu. |
+| `service_name` | Identyfikuje aplikację lub usługę, która wysłała sygnał. |
+| `environment` | Oddziela dane ze środowisk production, staging, preview i local. |
+| `release` | Identyfikuje wdrożoną wersję kodu. |
+| `occurred_at` | Podaje czas wystąpienia jednego logu lub jednej akcji w źródle. Spany używają `started_at`. |
+| `trace_id` | Łączy sygnały zarejestrowane w tym samym kontekście śladu. |
+| `span_id` | Identyfikuje span, do którego sygnał należy w swoim śladzie. |
+
+## <span id="severity-values">Wartości ważności</span>
+
+| Wartość kanoniczna | Akceptowane aliasy wejściowe |
+| --- | --- |
+| `info` | `trace`, `debug`, `info` |
+| `warning` | `warn`, `warning` |
+| `error` | `error` |
+| `critical` | `fatal`, `critical` |
+
+LogBrew akceptuje aliasy na wejściu w dowolnej wielkości liter. API, CLI i
+zdarzenia na żywo używają wartości kanonicznych. Nieznane wartości ważności są
+odrzucane. Ważność to zapisana pilność. Nie pokazuje wpływu na biznes ani
+przyczyny źródłowej.
+
+Użytkownik może zmienić wyświetlaną ważność problemu lub logu. Odpowiedź
+zawiera wtedy obiekt `triage` z polem `effective_severity`. Pole `severity`
+zachowuje zarejestrowaną wartość.
+
+## Odczyty na żywo i migawki
+
+`logbrew read` zwraca migawkę dla wybranego projektu, zakresu czasu i filtrów.
+Aby odczytać nowe zdarzenia, uruchom to polecenie ponownie. `logbrew watch` przesyła
+strumieniowo nowe logi, problemy i akcje, dopóki połączenie jest otwarte. Nie
+przesyła śladów ani metryk. Błąd połączenia nie dowodzi, że projekt jest pusty.
+
+## <span id="evidence-quality-and-trace-lifecycle">Stany dowodów</span>
+
+Odpowiedzi rozróżniają te stany: zarejestrowane, brakujące, zamaskowane,
+obcięte i niedostępne. Dowody ze śladu mają 4 stany: `available`,
+`not_linked`, `not_found` i `unavailable`. Ich znaczenie opisuje
+[przegląd](/pl/introduction#follow-exact-relationships), a pola pokrycia –
+sekcja [Ograniczenia dowodów](/pl/introduction#read-evidence-states-before-drawing-a-conclusion).
+Nowsza wersja SDK nie dodaje pól do zdarzeń, które wysłano wcześniej.
+
+## <span id="a-practical-investigation">Zbadaj jeden projekt</span>
+
+<Steps>
+  <Step title="Znajdź nierozwiązane problemy">
+    ```bash
+    logbrew read issues --project '<project-id>' --status unresolved --since 24h --json
+    ```
+  </Step>
+
+  <Step title="Odczytaj jeden problem">
+    To polecenie odczytuje przechowywaną historię problemu. Filtr `--since` z
+    listy nie ma tu zastosowania.
+
+    ```bash
+    logbrew investigate issue '<issue-id>' --json
+    ```
+  </Step>
+
+  <Step title="Otwórz dostępny ślad">
+    Użyj ID śladu tylko wtedy, gdy wybrane wystąpienie je zwraca.
+
+    ```bash
+    logbrew read trace '<trace-id>' --project '<project-id>' --json
+    ```
+  </Step>
+
+  <Step title="Odczytaj powiązane dowody">
+    Filtruj logi, akcje i metryki według tego samego projektu, usługi,
+    środowiska i wydania. Nie łącz sygnałów wyłącznie na podstawie czasu.
+  </Step>
+</Steps>
+
+Opis pól odpowiedzi znajdziesz na stronach
+[API telemetrii](/pl/reference/telemetry-api) i
+[Formaty odpowiedzi](/pl/reference/telemetry-response-shapes).

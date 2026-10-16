@@ -1,0 +1,201 @@
+---
+title: "Maskowanie logów: trzymaj dane wrażliwe z dala od logów"
+sidebarTitle: "Kontrola rejestrowanych danych"
+description: "Wybierz zatwierdzone pola logów. Uruchom lokalny test danych wrażliwych. Poznaj ograniczenia kontroli rejestrowania w JavaScript, Node.js i przeglądarce."
+---
+
+Zanim włączysz rejestrowanie, wybierz, co aplikacja wysyła. Nie umieszczaj w
+zdarzeniach haseł, tokenów dostępu, zawartości formularzy ani prywatnych
+danych użytkowników.
+
+Buduj każde zdarzenie z zatwierdzonych pól. Nie kopiuj do metadanych całego
+obiektu żądania, odpowiedzi ani błędu. Maskowanie zastępuje wrażliwą wartość.
+Filtr pomija całe zdarzenie. Poprawne zdarzenie SDK nadal może zawierać dane,
+których aplikacja nie może wysyłać.
+
+Ten przewodnik dotyczy tych wersji pakietów:
+
+- `@logbrew/sdk` 0.1.28
+- `@logbrew/node` 0.1.12
+- `@logbrew/browser` 0.1.11
+
+Dla innych środowisk uruchomieniowych przeczytaj przewodnik pakietu na stronie
+[Integracja SDK](/pl/guides/sdk-ingestion).
+
+## Wybierz pola do rejestrowania
+
+Gdy realizacja zakupu się nie powiedzie, zapisz stały komunikat, szablon trasy
+i kod statusu. Nie zapisuj imion i nazwisk, adresów e-mail ani danych płatniczych.
+
+| Pole | Reguła rejestrowania |
+| --- | --- |
+| Komunikat | Użyj stałego tekstu, takiego jak `checkout.failed`. Nie wstawiaj tekstu z formularza ani poświadczeń. |
+| Trasa | Użyj szablonu, takiego jak `/orders/:id`. Ścieżka URL, parametry zapytania lub fragment mogą zawierać prywatne wartości. |
+| Status | Przyjmuj tylko poprawny kod statusu, a nie tekst z danych wpisanych przez użytkownika. |
+| Metadane | Wybieraj nazwane pola. Nie kopiuj wszystkich właściwości żądania, odpowiedzi ani błędu. |
+| Podmiot i sesja | Używaj zatwierdzonych identyfikatorów telemetrii, a nie tokena logowania ani pliku cookie sesji. |
+
+Kontekst użytkownika i sesji opisuje strona
+[Rejestrowanie zdarzeń produktowych](/pl/guides/product-events#set-users-and-sessions-on-each-event).
+ID może identyfikować osobę, nawet jeśli nie zawiera imienia ani nazwiska.
+
+## Przetestuj wybór pól lokalnie
+
+Użyj Node.js 18 lub nowszego. W pustym katalogu zainstaluj pakiet:
+
+```bash
+npm install --save-exact @logbrew/sdk@0.1.28
+```
+
+Ten test nie używa prawdziwego klucza i nie wysyła żadnego żądania. Zapisz go
+jako `safe-capture.mjs`:
+
+```js
+import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import { LogBrewClient, SdkError } from "@logbrew/sdk";
+
+try {
+  const client = LogBrewClient.create({
+    apiKey: "local-preview-only",
+    sdkName: "privacy-check",
+    sdkVersion: "0.1.28",
+    automaticDelivery: false
+  });
+
+  function recordCheckoutFailure(input) {
+    const status = input?.status;
+    if (!Number.isInteger(status) || status < 400 || status > 599) {
+      return false;
+    }
+    client.log(randomUUID(), new Date().toISOString(), {
+      message: "checkout.failed",
+      level: "error",
+      metadata: { route: "/checkout", status }
+    });
+    return true;
+  }
+
+  const excludedValue = "SYNTHETIC_PRIVATE_VALUE";
+  assert.equal(recordCheckoutFailure({
+    status: 503,
+    authorization: excludedValue,
+    body: excludedValue
+  }), true);
+  assert.equal(recordCheckoutFailure({ status: excludedValue }), false);
+
+  const preview = client.previewJson();
+  const batch = JSON.parse(preview);
+  assert.equal(batch.events.length, 1);
+  assert.equal(preview.includes(excludedValue), false);
+  assert.deepEqual(batch.events[0].attributes.metadata, {
+    route: "/checkout",
+    status: 503
+  });
+  client.purgePendingEvents();
+  console.log(JSON.stringify({
+    ok: true,
+    checked_events: 1,
+    excluded_value_found: false
+  }));
+} catch (error) {
+  console.error(JSON.stringify({
+    ok: false,
+    error: error instanceof SdkError ? error.code : "privacy_check_failed"
+  }));
+  process.exitCode = 1;
+}
+```
+
+
+Uruchom test:
+
+```bash
+node safe-capture.mjs
+```
+
+Oczekiwany wynik:
+
+```json
+{"ok":true,"checked_events":1,"excluded_value_found":false}
+```
+
+Niespełniona asercja wypisuje `"ok":false` i kończy działanie z kodem 1. Błąd
+walidacji SDK wypisuje swój kod błędu SDK. Nie wypisuj ani nie przesyłaj
+podglądu, który zawiera prawdziwe dane.
+
+Użyj tego samego wzorca w kodzie rejestrowania i zachowaj asercje w testach.
+Dodaj sprawdzenie dla każdego pola i każdej wartości, których aplikacja nie
+może wysyłać. Jeśli używasz maskowania opartego na wzorcach, uruchom
+sprawdzenia ponownie po każdej zmianie reguły. Ten test sprawdza jeden log w
+kolejce. Nie zastępuje przeglądu prywatności.
+
+## Komunikaty błędów i stosy wywołań
+
+| Sposób rejestrowania | Działanie |
+| --- | --- |
+| `createIssueAttributesFromError` (rdzeń) | Zachowuje tekst błędu w komunikacie problemu i w `metadata.errorMessage`. Dodaje `metadata.errorStack` tylko z `includeErrorStack: true`. Wpisy łańcucha wyjątków oznaczają każdy komunikat jako `redacted` i nie zawierają jego tekstu. |
+| Konwersja konsoli w rdzeniu | Może zachować tekst błędu w komunikacie logu i w metadanych. |
+| `createBrowserErrorEvent` (przeglądarka) | Używa stałego podsumowania błędu, usuwa `metadata.errorMessage` i oznacza komunikaty łańcucha wyjątków jako zamaskowane. |
+
+Własne `options.message` nie usuwa `metadata.errorMessage`. Sprawdź całe
+zdarzenie, a nie tylko jego tytuł. Usuwaj wrażliwe wartości z komunikatów
+błędów już u źródła.
+
+## Używaj każdego mechanizmu kontroli tam, gdzie działa
+
+### Rdzeń JavaScript i Node.js
+
+`LogBrewClient.create` przyjmuje `eventFilter`. Zwróć `false`, aby pominąć
+zdarzenie, zanim trafi do kolejki. Każda inna zwrócona wartość zachowuje
+zdarzenie. Filtr dostaje kopię zdarzenia, więc jej zmiany niczego nie
+maskują. `createLogBrewNodeClient` i `createLogBrewBrowserClient` nie stosują
+`eventFilter` w tych wersjach.
+
+`droppedEvents()` liczy zdarzenia porzucone z powodu limitów rozmiaru lub
+kolejki.
+Nie liczy zdarzeń, które pominął `eventFilter`.
+
+Klient Node dodaje kontekst środowiska uruchomieniowego, taki jak wersja Node,
+system operacyjny i architektura. Ustaw `captureRuntimeContext: false`, aby go
+pominąć. To ustawienie nie usuwa kontekstu, który dostarcza aplikacja, i nie
+zatrzymuje rejestrowania.
+
+### Przeglądarka
+
+Klient przeglądarkowy domyślnie rejestruje błędy globalne, nieobsłużone
+odrzucenia promise i początkowe wyświetlenie strony. Ustaw
+`captureGlobalErrors`, `captureUnhandledRejections` lub `capturePageViews` na
+`false`, aby wyłączyć wybrany rodzaj.
+
+Wyświetlenia stron zawierają ścieżkę (pathname). Pomijają parametry zapytania,
+fragment, tytuł dokumentu i pełny user agent, chyba że ustawisz
+`includeQueryString`, `includeHash`, `includeDocumentTitle` lub
+`includeUserAgent`. Jeśli ścieżka może zawierać prywatne wartości, wyłącz
+automatyczne wyświetlenia stron i wysyłaj własne wyświetlenie strony z
+bezpieczną nazwą trasy.
+
+`sanitizeMetadata` zmienia tylko metadane. Nie zmienia nazw wyświetleń stron
+ani akcji. Nazwa wyświetlenia strony zawiera konkretną ścieżkę, na przykład
+`page_view /orders/1234`. `routeTemplate` w metadanych ustawia miejsce
+widoczne w sekcji Analityka, ale nie zmienia nazwy. `shouldCaptureError` pomija
+tylko problemy z przeglądarki. Nie filtruje logów ani innych sygnałów.
+
+Ustaw `captureRuntimeContext: false`, aby pominąć markę przeglądarki,
+platformę i rodzinę urządzenia. To ustawienie nie steruje `includeUserAgent`.
+
+## Przed rejestrowaniem prawdziwych danych
+
+Przetestuj każdy włączony sposób rejestrowania na danych syntetycznych, także
+ścieżki błędów i integracje logów.
+
+Zmiany w rejestrowaniu dotyczą tylko nowych zdarzeń. `purgePendingEvents()`
+czyści bezczynną lokalną kolejkę i kończy się błędem, gdy trwa dostarczanie.
+Nie zatrzymuje późniejszego rejestrowania ani nie usuwa zdarzeń, które LogBrew
+przyjął. Przeglądarkowe `uninstall()` usuwa listenery, ale zachowuje zdarzenia
+w kolejce. Te metody nie są procesem zgody ani usuwania danych.
+
+Potem wyślij jedno syntetyczne zdarzenie według
+[szybkiego startu](/pl/quickstart). Jeśli go brakuje, zobacz
+[Rozwiązywanie problemów](/pl/guides/troubleshooting). Błędy HTTP opisuje
+strona [Błędy API](/pl/reference/api-errors).

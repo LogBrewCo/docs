@@ -1,0 +1,256 @@
+---
+title: "Mapy źródeł JavaScript z Vite"
+sidebarTitle: "Mapy źródeł JavaScript"
+description: "Prześlij mapy źródeł JavaScript z builda Vite. Nie umieszczaj poświadczeń w aplikacji. Mapuj zminifikowane ramki stosu na oryginalne miejsca w kodzie."
+---
+
+Zminifikowany plik JavaScript może zawierać wiele wierszy źródła w jednym
+wierszu. Ramka stosu z takiego pliku wskazuje wygenerowany wiersz i kolumnę.
+[Mapa źródeł (source map)](https://ecma-international.org/publications-and-standards/standards/ecma-426/)
+łączy tę pozycję z oryginalnym plikiem, wierszem i kolumną.
+
+Ten przewodnik używa wtyczki Vite z `@logbrew/sdk` 0.1.28. Potrzebujesz
+aplikacji Vite, dostępu do plików wynikowych jej builda i uprawnienia do
+tworzenia klucza projektu. Pliki debugowania Apple opisuje strona
+[Awarie i zawieszenia Apple](/pl/guides/apple-crashes-and-hangs).
+
+## Połącz build ze zdarzeniami
+
+Do przesyłania i do zdarzeń działającej aplikacji używaj tego samego projektu,
+wydania, środowiska i usługi. Nazwy wersji opisuje strona
+[Wydania](/pl/concepts/releases). Ten przewodnik używa `web@1.2.3`, `staging`
+i `checkout-web`.
+
+Zmieniaj wydanie, gdy zmienia się zbudowany kod. Prześlij przygotowany build,
+a potem wdróż ten sam build. Po przesłaniu nie buduj go ponownie i nie zmieniaj
+jego kodu JavaScript.
+
+## Dodaj wtyczkę Vite
+
+Zainstaluj SDK w katalogu aplikacji:
+
+```bash
+npm install @logbrew/sdk@0.1.28
+```
+
+Dodaj wtyczkę do `vite.config.js`. Zachowaj pozostałe wtyczki i ustawienia
+builda. Zastąp ID projektu:
+
+```js
+import { createLogBrewViteReleaseArtifactsPlugin } from "@logbrew/sdk/vite-release-artifacts";
+
+export default {
+  plugins: [
+    createLogBrewViteReleaseArtifactsPlugin({
+      projectId: "<project_id>",
+      release: "web@1.2.3",
+      environment: "staging",
+      service: "checkout-web",
+      minifiedPathPrefix: "https://app.example.com"
+    })
+  ]
+};
+```
+
+`minifiedPathPrefix` to wdrożony adres URL katalogu builda. Wtyczka dodaje do
+niego ścieżkę każdego pliku w tym katalogu. Na przykład
+`dist/assets/app.js` staje się `https://app.example.com/assets/app.js`. Jeśli
+serwujesz build pod `/web`, dodaj `/web` do prefiksu. Nie dodawaj `/assets`
+do prefiksu.
+
+Bez opcji `upload` wtyczka niczego nie wysyła do LogBrew. Poza tym:
+
+- Ustawia `build.sourcemap` na `"hidden"`, gdy go nie ustawisz. Jeśli masz
+  ustawione `false`, zmień je na `"hidden"`.
+- Zachowuje nazwy funkcji, gdy nie ustawisz opcji minifikatora. Jeśli
+  ustawiasz własne opcje, zachowaj w nich nazwy.
+
+Ukryte mapy źródeł pozostają w plikach wynikowych builda jako zwykłe pliki.
+Dostęp do nich nie jest kontrolowany. Nie używaj map źródeł inline. Wtyczka nie
+akceptuje mapy wewnątrz pliku JavaScript.
+
+## Zbuduj i sprawdź lokalnie
+
+Uruchom build produkcyjny:
+
+```bash
+npm run build
+```
+
+Wtyczka nadaje każdemu plikowi JavaScript i jego mapie źródeł ten sam Debug
+ID. Usuwa osadzone `sourcesContent` i lokalną ścieżkę katalogu głównego
+aplikacji. Zapisuje `dist/logbrew-release-artifacts.json`.
+
+Otwórz manifest. Upewnij się, że `validation.status` ma wartość `ready` i że
+manifest wymienia pliki tego builda oraz ich wdrożone adresy URL. Ukryte mapy
+powodują ostrzeżenie `sourceMappingURL comment missing`. To ostrzeżenie jest
+oczekiwane.
+
+Nie przesyłaj mapy, która zawiera prywatną ścieżkę lub tekst źródłowy, którego
+nie chcesz udostępniać. Przesyłane pliki zawierają też skompilowany JavaScript,
+więc nie umieszczaj sekretów w bundlu aplikacji.
+
+Sprawdź przesyłanie lokalnie. To polecenie nie wysyła żadnego żądania i nie
+wymaga klucza:
+
+```bash
+npx --no-install logbrew-release-artifacts upload-js \
+  --build-dir dist \
+  --manifest dist/logbrew-release-artifacts.json \
+  --endpoint https://api.logbrew.co/api/release-artifacts \
+  --allow-hosted \
+  --dry-run
+```
+
+Kontynuuj tylko wtedy, gdy polecenie kończy się kodem `0` i wypisuje
+`"status": "dry_run"`. To polecenie sprawdza pliki lokalne i manifest. Nie testuje
+serwera. Jeśli twój build używa innego katalogu wynikowego, zmień obie
+ścieżki.
+
+Aby sprawdzić mapowanie, uruchom zbudowaną aplikację i skopiuj jedną
+wygenerowaną ramkę stosu z plikiem, wierszem i kolumną:
+
+```bash
+npx --no-install logbrew-release-artifacts symbolicate-js \
+  --build-dir dist \
+  --manifest dist/logbrew-release-artifacts.json \
+  --stack-frame "at checkoutTotal (https://app.example.com/assets/index-a1b2c3.js:2:780)"
+```
+
+Upewnij się, że wynik zawiera `"status": "resolved"`. Obiekt `original`
+pokazuje plik źródłowy, wiersz i kolumnę. To polecenie działa lokalnie i
+niczego nie przesyła.
+
+## <span id="create-an-artifact-key">Utwórz klucz artefaktów</span>
+
+Zaloguj się w [CLI LogBrew](/pl/guides/cli). Znajdź ID projektu:
+
+```bash
+logbrew projects --json
+```
+
+Utwórz klucz artefaktów dla projektu. Użyj nowej ścieżki pliku w katalogu
+dostępnym tylko dla właściciela:
+
+```bash
+install -d -m 700 "$HOME/.logbrew" &&
+logbrew projects keys create "<project_id>" \
+  --ingest-key-file "$HOME/.logbrew/checkout-web.artifact" \
+  --label "Checkout web build" \
+  --kind artifact \
+  --json
+```
+
+Kontynuuj dopiero wtedy, gdy polecenie zakończy się powodzeniem. Jeśli wynik
+jest niejasny, uruchom ponownie to samo polecenie z tymi samymi argumentami.
+Nie używaj `--abandon-retry`.
+
+Klucz artefaktów jest przypisany do projektu i służy tylko do zapisu. Przesyła
+mapy źródeł i pliki debugowania. Nie może wysyłać telemetrii ani odczytywać
+metadanych artefaktów. Nie używaj zamiast niego poświadczenia konta ani klucza
+SDK aplikacji.
+
+Zapisz klucz jako `LOGBREW_RELEASE_ARTIFACT_TOKEN` w ustawieniach sekretów
+środowiska builda. Nie wypisuj go i nie commituj. Nie umieszczaj go w zmiennej
+widocznej po stronie klienta, takiej jak `VITE_*` lub `EXPO_PUBLIC_*`.
+
+Ustaw zmienną w procesie, który uruchamia przesyłanie. Helper nie odczytuje
+plików `.env`. Vite nie wczytuje ich do `process.env` podczas
+[ewaluacji konfiguracji](https://vite.dev/config/#using-environment-variables-in-config).
+
+## Prześlij przygotowany build
+
+Użyj tych samych sprawdzonych plików i manifestu. To polecenie wysyła pliki do
+LogBrew:
+
+```bash
+npx --no-install logbrew-release-artifacts upload-js \
+  --build-dir dist \
+  --manifest dist/logbrew-release-artifacts.json \
+  --endpoint https://api.logbrew.co/api/release-artifacts \
+  --allow-hosted
+```
+
+`"status": "uploaded"` oznacza, że LogBrew przyjął przesłane pliki. Jeśli polecenie
+zakończy się błędem, przerwij i skorzystaj z tabeli poniżej.
+
+Helper ponawia próbę do 2 razy po błędzie sieci, odpowiedzi `408`, `429` lub
+`5xx`. Za każdym razem wysyła te same przygotowane pliki. Liczbę ponowień
+zmienisz opcją `--max-retries`.
+
+Gdy ręczne przesyłanie działa, możesz zamiast niego przesyłać pliki podczas
+builda Vite. Dodaj tę opcję do konfiguracji wtyczki:
+
+```js
+upload: {
+  endpoint: "https://api.logbrew.co/api/release-artifacts",
+  allowHostedUpload: true,
+  tokenEnv: "LOGBREW_RELEASE_ARTIFACT_TOKEN"
+}
+```
+
+Używaj jednej metody przesyłania. Wtyczka zatrzymuje build przy błędzie
+przygotowania lub przesyłania. Dodaj `dryRun: true`, aby przetestować bez
+przesyłania.
+
+Wtyczka nie usuwa map źródeł z katalogu wynikowego. Nie wdrażaj plików `.map`
+ani manifestu na publiczną stronę internetową lub do CDN.
+
+Aby zmapować ramkę z zarejestrowanego problemu, uruchom `symbolicate-js` z tą
+ramką na tym samym przygotowanym buildzie.
+
+## <span id="verify-a-new-issue">Odczytaj nowy problem</span>
+
+Wdróż ten sam przygotowany build do środowiska testowego. Wywołaj jeden
+bezpieczny błąd testowy przez swoją ścieżkę rejestrowania problemów. W tym
+teście nie wysyłaj danych od użytkowników, poświadczeń ani surowego stosu
+wywołań.
+
+Znajdź nowy problem w tym samym kontekście projektu i builda:
+
+```bash
+logbrew read issues --project "<project_id>" \
+  --release "web@1.2.3" --environment staging \
+  --service checkout-web --since 1h --json
+```
+
+Skopiuj ID problemu z wyniku. Odczytaj jego najnowsze wystąpienie:
+
+```bash
+logbrew investigate issue "<issue_id>" --occurrence latest --json
+```
+
+Najpierw odczytaj czas zdarzenia, projekt, usługę, środowisko i wydanie. Potem
+odczytaj `event.stack_frames`. Ramka z `source: "symbolicated"` ma oryginalny
+plik, wiersz i kolumnę z przesłanych plików. Ramka z `source: "captured"` ma
+lokalizację, którą wysłała aplikacja.
+
+`logbrew read issue "<issue_id>" --json` zwraca też obiekt `symbolication`.
+Każda ramka w nim ma `status`: `resolved`, `artifact_not_found`,
+`source_not_resolved`, `invalid_metadata` lub `unavailable`. Tylko ramka
+`resolved` ma oryginalną lokalizację.
+
+LogBrew mapuje ramki podczas odczytu problemu. Dzięki plikom przesłanym po
+błędzie LogBrew może zmapować także wcześniejsze zdarzenie z tym samym Debug ID.
+Zmapowana ramka
+wskazuje kod do zbadania. Nie pokazuje, co spowodowało błąd. Pozostałe pola
+opisuje przewodnik [Zbadaj problem](/pl/guides/investigate-an-issue).
+
+## Napraw nieudane sprawdzenie
+
+| Wynik | Następny krok |
+| --- | --- |
+| Status manifestu inny niż `ready` | Przeczytaj `validation.errors`. Popraw ustawienia builda i zbuduj ponownie. Nie edytuj manifestu. |
+| Build zatrzymuje się, bo brakuje mapy źródeł lub jest ona inline | Ustaw `build.sourcemap` na `"hidden"` lub `true`. Zbuduj ponownie. |
+| `auth_missing` | Ustaw `LOGBREW_RELEASE_ARTIFACT_TOKEN` w procesie przesyłania. Przebieg próbny nie testuje klucza. |
+| `auth_failed` (`401` lub `403`) | Użyj klucza artefaktów dla tego samego projektu. Nie używaj klucza SDK aplikacji ani klucza konta. |
+| `validation_failed` (`400` lub `413`) | Sprawdź przygotowane pliki i ich rozmiar. Nie wysyłaj ponownie tych samych plików. |
+| `validation_failed` z błędem lokalnym | Przeczytaj `validation.errors`. Jeśli plik zmienił się po buildzie, zbuduj i sprawdź ponownie. |
+| `retryable_error` | Wszystkie ponowne próby po błędzie sieci, odpowiedzi `408`, `429` lub błędzie serwera zakończyły się niepowodzeniem. Ponów później z tymi samymi przygotowanymi plikami. |
+| `upload_failed` | Serwer zwrócił inny status. Sprawdź wartość `--endpoint`. |
+| Ramka nie zostaje zmapowana | Sprawdź Debug ID, prefiks wdrożonego adresu URL i build. Nie używaj mapy z innego builda ani wydania. |
+| Nie pojawia się nowy problem | Zanim przetestujesz mapy źródeł, sprawdź rejestrowanie problemów, klucz SDK aplikacji i filtr czasu. |
+
+Nie umieszczaj plików źródłowych, kluczy ani prywatnych ścieżek w wiadomościach
+do pomocy technicznej. Zobacz [Rozwiązywanie problemów](/pl/guides/troubleshooting)
+i [Błędy API](/pl/reference/api-errors).
