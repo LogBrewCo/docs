@@ -1,0 +1,290 @@
+---
+title: "Szybki start z LogBrew: logowanie w Node.js"
+sidebarTitle: "Szybki start"
+description: "Utwórz projekt, skonfiguruj logowanie w Node.js, wyślij jedno bezpieczne zdarzenie z SDK i odczytaj zapisany log bez ujawniania poświadczeń."
+---
+
+Utwórz projekt deweloperski. Wyślij jeden log z Node.js. Odczytaj go z
+LogBrew. CLI tworzy projekt i zapisuje jego klucz wysyłania. Logowanie w
+przeglądarce jest potrzebne tylko wtedy, gdy CLI nie ma ważnego dostępu do
+konta.
+
+<Note>
+  W przepływach pracy agentów używaj `--json`. Przechowuj poświadczenia w
+  chronionej konfiguracji lokalnej. Między ludźmi, narzędziami i agentami
+  przekazuj tylko nazwy zmiennych.
+</Note>
+
+## <span id="first-project-success-path">Zanim zaczniesz</span>
+
+Przygotuj:
+
+- Node.js 18 lub nowszy.
+- CLI LogBrew w wersji 0.1.30 lub nowszej.
+- `jq`.
+- Bash lub Zsh.
+- Katalog pakietu aplikacji Node.js działającej po stronie serwera.
+
+Przykład używa projektu `quickstart-node`, środowiska `development` i wydania
+`quickstart@1`. Oddziel ten test od środowiska produkcyjnego. Dla innego
+środowiska uruchomieniowego skorzystaj z
+[przewodnika po integracji SDK](/pl/guides/sdk-ingestion).
+
+<Warning>
+  Trzymaj plik z kluczem wysyłania poza repozytorium, z prawem odczytu tylko
+  dla siebie. Nie umieszczaj tego klucza serwerowego w kodzie przeglądarki,
+  publicznym bundlu ani prompcie.
+</Warning>
+
+## Wyślij i odczytaj pierwszy log
+
+<Steps>
+  <Step title="Sprawdź stan konta" id="confirm-account-access">
+    Zainstaluj CLI poleceniem z [przewodnika po CLI](/pl/guides/cli). Następnie
+    sprawdź stan konta w CLI.
+
+    ```bash
+    logbrew status --json
+    ```
+
+    **Punkt kontrolny:** status pokazuje uwierzytelniony dostęp do konta. Jeśli
+    tak nie jest, człowiek jednorazowo uruchamia `logbrew login`. Potem ponownie
+    uruchom `logbrew status --json`. Agent nie może rozpoczynać nowego
+    logowania, gdy obecne uwierzytelnienie działa.
+  </Step>
+
+  <Step title="Utwórz jeden projekt z CLI">
+    Wskaż nowy plik w katalogu dostępnym tylko dla właściciela. CLI zapisuje
+    klucz wysyłania projektu w tym pliku, zanim zgłosi powodzenie. Nigdy nie
+    wypisuje klucza ani ścieżki jego pliku.
+
+    ```bash
+    install -d -m 700 "$HOME/.logbrew"
+
+    project_result="$(
+      logbrew projects create quickstart-node \
+        --runtime node \
+        --environment development \
+        --ingest-key-file "$HOME/.logbrew/quickstart-node.ingest" \
+        --json
+    )"
+    export LOGBREW_PROJECT_ID="$(jq -er '.project.id' <<<"$project_result")"
+    jq '{status, setup_status: .setup.status, ingest_key_kind: .ingest_key.kind, next}' \
+      <<<"$project_result"
+    unset project_result
+    ```
+
+    Tworzenie projektu zmienia stan konta. Plik docelowy nie może istnieć.
+    Jeśli wynik jest niejasny, uruchom dokładnie to samo polecenie ponownie. CLI
+    ponownie użyje tożsamości oczekującego żądania. Użyj `--abandon-retry` tylko
+    wtedy, gdy chcesz zacząć inną próbę.
+
+    **Punkt kontrolny:** wynik pokazuje `status: "created"`, status
+    konfiguracji `created` i rodzaj klucza wysyłania. Projekt istnieje, a klucz
+    jest zapisany. To nie potwierdza dostarczenia telemetrii. Zobacz
+    [Projekty](/pl/concepts/projects).
+  </Step>
+
+  <Step title="Zainstaluj SDK dla Node.js">
+    ```bash
+    npm install @logbrew/sdk @logbrew/node
+    ```
+
+    Nigdy nie używaj poświadczenia konta jako konfiguracji SDK. Nie umieszczaj
+    klucza projektu w wynikach poleceń, promptach, zgłoszeniach, plikach
+    źródłowych ani konfiguracji pakietów.
+  </Step>
+
+  <Step title="Wyślij jeden bezpieczny log z SDK">
+    Wyślij znaczniki wydania i środowiska razem z jednym logiem `info`, który
+    zawiera tylko wartości zastępcze. Klucz jest ustawiony tylko dla tego
+    procesu Node.js. Tożsamość aplikacji trafia do `context`.
+
+    Każde uruchomienie tworzy nowe ID zdarzeń. Jeśli SDK ponawia dostarczenie w
+    tym samym uruchomieniu, wysyła tę samą treść z tymi samymi ID. LogBrew nie
+    zapisuje drugi raz przyjętego zdarzenia, gdy ponowienie wyśle je jeszcze
+    raz.
+
+    ```bash
+    LOGBREW_SERVER_API_KEY="$(< "$HOME/.logbrew/quickstart-node.ingest")" \
+      node --input-type=module <<'JS'
+    import { randomUUID } from "node:crypto";
+    import { SdkError } from "@logbrew/sdk";
+    import { createLogBrewNodeClient } from "@logbrew/node";
+
+    const client = createLogBrewNodeClient({
+      context: {
+        schemaVersion: 1,
+        resource: { service: { name: "quickstart-node", version: "quickstart@1" } }
+      }
+    });
+    const occurredAt = new Date().toISOString();
+
+    client.release(randomUUID(), occurredAt, {
+      version: "quickstart@1",
+      metadata: { service: "quickstart-node" }
+    });
+    client.environment(randomUUID(), occurredAt, { name: "development" });
+    client.log(randomUUID(), occurredAt, {
+      message: "LogBrew quickstart check",
+      level: "info",
+      logger: "quickstart-node"
+    });
+
+    try {
+      const response = await client.shutdown();
+      console.log(JSON.stringify({
+        ok: true,
+        status_code: response.statusCode,
+        attempts: response.attempts
+      }));
+    } catch (error) {
+      console.error(JSON.stringify({
+        ok: false,
+        error: error instanceof SdkError ? error.code : "delivery_failed"
+      }));
+      process.exitCode = 1;
+    }
+    JS
+    ```
+
+    Nie umieszczaj w zdarzeniu poświadczeń, nagłówków, treści żądań, danych
+    klientów ani ścieżek lokalnych.
+
+    **Punkt kontrolny:** skrypt wypisuje `"ok":true` i `status_code` z zakresu
+    `2xx`. Po ponowieniu `attempts` jest większe niż `1`. Udane wysłanie nie
+    kończy sprawdzania.
+
+    Jeśli dostarczenie się nie powiedzie, skrypt kończy działanie z kodem `1` i
+    wypisuje krótki błąd w formacie JSON, na przykład
+    `{"ok":false,"error":"unauthenticated"}`. Nie wypisuje treści żądania ani
+    klucza. Odrzucony klucz projektu powoduje `unauthenticated`. Nowe
+    logowanie w CLI tego nie naprawi.
+  </Step>
+
+  <Step title="Odczytaj raport diagnostyki projektu" id="verify-readiness-with-the-project-doctor">
+    Do tego odczytu CLI używa zapisanego dostępu do konta. Nie używaj klucza
+    wysyłania projektu.
+
+    ```bash
+    : "${LOGBREW_PROJECT_ID:?set the project UUID}"
+
+    logbrew doctor --project "$LOGBREW_PROJECT_ID" --json
+    ```
+
+    **Punkt kontrolny:** raport ma `status: "ready"`. Odczytaj też każdy
+    element w `checks`. Kod wyjścia `0` nie pokazuje, że wszystkie sprawdzenia
+    się powiodły. Przy innym statusie postępuj zgodnie z `next` i
+    [opisem raportu diagnostyki projektu](/pl/reference/cli#read-a-project-doctor-report).
+    Projekt `ready` nie potwierdza, że ten log testowy dotarł.
+  </Step>
+
+  <Step title="Odczytaj log testowy">
+    Użyj projektu, wydania i środowiska z paczki SDK.
+
+    ```bash
+    logbrew read logs --project "$LOGBREW_PROJECT_ID" \
+      --release quickstart@1 \
+      --environment development \
+      --since 1h \
+      --json
+    ```
+
+    **Punkt kontrolny:** `LogBrew quickstart check` pojawia się dla tego
+    projektu, wydania i środowiska. To potwierdza dostarczenie tylko logu
+    testowego.
+  </Step>
+</Steps>
+
+## <span id="understand-the-test-result">Odczytaj wynik testu</span>
+
+Przykład wysyła trzy zdarzenia. Tylko jedno z nich to log. Znaczniki wydania i
+środowiska dodają kontekst do logu.
+
+| Pole w przykładzie | Zapisane dane |
+| --- | --- |
+| `message` | Operacja, którą zapisuje test: `LogBrew quickstart check`. |
+| `level: "info"` | Zwykłe zdarzenie testowe, a nie błąd. |
+| `logger` | Logger aplikacji, który utworzył wpis. |
+| `occurredAt` | Czas utworzenia zdarzenia w tym uruchomieniu jako znacznik czasu UTC. |
+| `context.resource.service` | Usługa aplikacji i jej wersja, a nie tożsamość SDK. |
+
+Pozostaw test na poziomie `info`. Nie zmieniaj go na `error`, żeby łatwiej go
+znaleźć. Zamiast tego użyj filtrów projektu i czasu. Zobacz
+[Wartości ważności](/pl/concepts/telemetry#severity-values).
+
+Wiersz `console.log` wypisuje wynik dostarczenia w terminalu. Wywołanie
+`client.log` wysyła log do LogBrew. Udane pierwsze dostarczenie wypisuje:
+
+```json
+{ "ok": true, "status_code": 200, "attempts": 1 }
+```
+
+Klucz wysyłania wybiera projekt, który otrzyma log. Filtr `--project` w CLI
+nie przenosi zdarzeń.
+
+Ten log nie ma kontekstu śladu, ponieważ przykład nie tworzy spanu żądania.
+Nie oznacza to, że wysłanie logu się nie powiodło. Odczyt w CLI to migawka.
+Uruchom go ponownie, aby odczytać późniejsze zdarzenia, albo użyj
+`logbrew watch logs --json`, aby oglądać strumień na żywo.
+
+## Typowe działania naprawcze
+
+| Wynik | Następny krok |
+| --- | --- |
+| Status CLI nie pokazuje uwierzytelnienia | Człowiek uruchamia `logbrew login`. Potem ponownie uruchom polecenie statusu. |
+| Plik klucza wysyłania już istnieje | Wybierz nieużywaną ścieżkę. Nie nadpisuj nieznanego poświadczenia. |
+| Wynik tworzenia projektu jest niejasny | Uruchom ponownie dokładnie to samo polecenie tworzenia. |
+| `unauthenticated` | Sprawdź klucz wysyłania projektu, a nie poświadczenie konta w CLI. Nowe logowanie tego nie naprawi. |
+| `rate_limited` | Poczekaj, zanim wyślesz ponownie. Nie ponawiaj w pętli i nie twórz nowego klucza. |
+| `transport_error` lub `network_failure` | Sprawdź łączność. Nieudana odpowiedź nie dowodzi, że wcześniejsze żądanie nie przyniosło skutku. |
+| `delivery_failed` | Zatrzymaj się i zbadaj błąd. Nie wypisuj sekretów ani treści żądania. |
+| `status` raportu diagnostyki ma inną wartość niż `ready` | Odczytaj `checks` i `next` w [raporcie diagnostyki projektu](/pl/reference/cli#read-a-project-doctor-report). Zachowaj ten sam projekt. |
+| Odczyt logów jest pusty | Porównaj projekt, środowisko, wydanie i zakres czasu z wysłaną paczką. |
+
+Jeśli telemetrii nadal brakuje, wykonaj
+[sprawdzenia pierwszej telemetrii](/pl/guides/troubleshooting#recover-missing-first-telemetry).
+Jeśli to nie pomoże, [zgłoś problem](/pl/guides/report-a-problem). Nie załączaj
+poświadczeń, surowej telemetrii, danych klientów, ścieżek lokalnych ani kodu
+źródłowego.
+
+## Przejdź do swojej aplikacji
+
+- Utwórz klienta jeden raz, w kodzie inicjalizującym aplikację.
+- Przypnij wersje SDK w plikach pakietów. Testuj aktualizacje poza
+  środowiskiem produkcyjnym.
+- Wczytuj klucz wysyłania z istniejącej konfiguracji sekretów. Wymień go po
+  możliwym wycieku. Zobacz [Wymień klucz wysyłania](/pl/guides/rotate-ingest-key).
+- Używaj stałych nazw usługi, środowiska i wydania z konfiguracji wdrożenia.
+  Zobacz [Wydania](/pl/concepts/releases).
+- Pisz komunikaty logów, które podają operację i jej wynik, na przykład
+  `Report generation completed`. Nie umieszczaj w komunikacie prywatnych
+  wartości. Nie kopiuj do logu całego żądania ani rekordu użytkownika.
+- Każdy log aplikacji powinien mieć jednego nadawcę, aby uniknąć duplikatów.
+  Zanim dodasz LogBrew, znajdź integrację, która już wysyła każdy wpis.
+- Przed wdrożeniem produkcyjnym wyślij jedno bezpieczne zdarzenie przez
+  rzeczywistą ścieżkę kodu i odczytaj je. Sprawdź jego komunikat, usługę,
+  wydanie i środowisko. Samodzielny przykład nie testuje ścieżki kodu twojej
+  aplikacji.
+
+Ten przykład nie konfiguruje rejestrowania w przeglądarce, map źródeł (source
+maps) ani rejestrowania w aplikacjach mobilnych. W tych przypadkach zacznij od
+[przewodnika po integracji SDK](/pl/guides/sdk-ingestion).
+
+<CardGroup cols={2}>
+  <Card title="Projekty" icon="folder-kanban" href="/pl/concepts/projects">
+    Sprawdzaj stan konfiguracji i zarządzaj kluczami wysyłania projektu.
+  </Card>
+
+  <Card title="Integracja SDK" icon="cloud-upload" href="/pl/guides/sdk-ingestion">
+    Wybierz pakiet SDK dla swojego środowiska uruchomieniowego.
+  </Card>
+
+  <Card title="Zbadaj problem" icon="bug" href="/pl/guides/investigate-an-issue">
+    Prześledź dowody ze śladu i powiązanych logów dla jednego problemu.
+  </Card>
+
+  <Card title="Zgłoś problem" icon="life-buoy" href="/pl/guides/report-a-problem">
+    Wyślij bezpieczne, prywatne zgłoszenie do pomocy technicznej.
+  </Card>
+</CardGroup>

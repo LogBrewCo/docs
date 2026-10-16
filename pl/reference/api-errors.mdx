@@ -1,0 +1,534 @@
+---
+title: "Obsługa błędów API i kody błędów API"
+sidebarTitle: "Błędy API"
+description: "Poznaj kody błędów API LogBrew, statusy HTTP i przykłady JSON. Korzystaj ze zwróconych instrukcji, aby poprawiać żądania i bezpiecznie je ponawiać."
+---
+
+Błędy API LogBrew używają jednej koperty JSON (envelope). Do sterowania programem
+używaj `code` i `next_action`. `error` i `next` pokazuj jako zwykły tekst. Nie
+opieraj logiki na brzmieniu `error` ani `next`.
+
+```json
+{
+  "error": "invalid since value",
+  "code": "validation_failed",
+  "next": "use since=24h, since=7d, or an RFC3339 timestamp",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+| Pole | Znaczenie |
+| --- | --- |
+| `error` | Krótki opis problemu dla człowieka. |
+| `code` | Stały kod błędu. Użyj go, aby wybrać gałąź obsługi w kliencie. |
+| `next` | Opis kroku naprawczego dla człowieka. Tekst zależy od trasy. |
+| `next_action.code` | Stałe działanie naprawcze do sterowania programem. |
+| `next_action.target` | Obiekt, którego dotyczy działanie naprawcze, na przykład `auth` lub `request`. |
+
+Niektóre odpowiedzi zawierają dodatkowe pola, takie jak `limit`, `reset_at` lub
+`retry_after_seconds`. Wymienia je tabela [kodów błędów](#error-codes).
+
+## Obsłuż odpowiedź z błędem
+
+1. Odczytaj status HTTP.
+2. Zanim odczytasz `code`, upewnij się, że treść odpowiedzi to JSON.
+3. Aby wybrać gałąź obsługi w kliencie, użyj razem statusu i `code`.
+4. `error` i `next` pokazuj jako zwykły tekst. Nie renderuj ich jako HTML i nie uruchamiaj jako poleceń.
+5. Do automatycznego naprawiania używaj `next_action`. Jeśli klient nie rozpoznaje działania, zatrzymaj się i pokaż błąd.
+6. Zachowaj zwrócone wartości `limit`, `reset_at` i `retry_after_seconds` razem z nieudanym żądaniem.
+7. Zanim ponowisz żądanie, zastosuj [zasady ponawiania](#retry-rules).
+
+Jeśli odpowiedź nie ma koperty JSON, zachowaj status HTTP i zapisz, że kod jest
+niedostępny. Nie wymyślaj `code` LogBrew. Taki wynik może dać serwer proxy lub
+błąd sieci.
+
+Nie zastępuj `code` LogBrew nazwą statusu HTTP. Na przykład odpowiedź `400`
+może zawierać `invalid_json` lub `invalid_path`. Każdy kod wymaga innej
+poprawki.
+
+W logach zapisuj status HTTP i `code`. Nie zapisuj w logach całej treści
+odpowiedzi, poświadczeń ani tokenów odzyskiwania.
+
+## <span id="error-codes">Kody błędów</span>
+
+Ten sam `code` może wystąpić w kilku trasach. Tekst `next` i wartości
+`next_action` mogą się różnić w zależności od trasy. Używaj zwróconych
+wartości. Endpoint zwraca tylko kody związane z jego uwierzytelnianiem,
+metodą, treścią żądania i limitami.
+
+| HTTP | `code` | Znaczenie | Działanie klienta |
+| --- | --- | --- | --- |
+| `400`, `413`, `415` lub `422` | `invalid_json` | Treść nie jest poprawnym JSON-em, jest za duża, ma niewłaściwy typ zawartości lub nie pasuje do struktury JSON wymaganej przez trasę. | Wyślij poprawny JSON z `Content-Type: application/json` i polami wymaganymi przez trasę. |
+| `400`, `413` lub `500` | `invalid_multipart` | Serwer nie może odczytać przesyłanych danych `multipart/form-data`. | Przy `400` lub `413` popraw formularz lub jego rozmiar. Przy `500` zastosuj [zasady ponawiania](#retry-rules). |
+| `400` lub `500` | `invalid_path` | Serwer nie może odczytać wartości w ścieżce URL, na przykład ID projektu lub problemu. | Przy `400` popraw ID i jego typ. Przy `500` zastosuj [zasady ponawiania](#retry-rules). |
+| `400`, `405` lub `426` | `invalid_websocket_upgrade` | Połączenie podglądu na żywo nie jest poprawnym żądaniem przejścia na WebSocket. | Połącz się metodą `GET` z nagłówkami przejścia na WebSocket. Zobacz [format zdarzeń na żywo](/pl/reference/telemetry-response-shapes#live-event-response-format). |
+| `401` | `unauthorized` | Brakuje uwierzytelnienia konta albo jest ono nieprawidłowe lub wygasło. | Zaloguj się ponownie. W CLI uruchom `logbrew login`. |
+| `401` | `ingest_key_invalid` | Przyjmowanie telemetrii nie ma ważnego klucza wysyłania przypisanego do projektu. | Skonfiguruj aktualny klucz wysyłania dla tego projektu. |
+| `402` | `subscription_required` | Ta czynność wymaga płatnego planu. | Postępuj zgodnie z `next`. Wskazuje krok dotyczący planu albo prosi o kontakt z pomocą techniczną. |
+| `403` | `forbidden` | Konto nie ma dostępu do zasobu lub czynności. | Użyj konta z dostępem. Nie próbuj innych ID. |
+| `403` | `role_forbidden` | Konto nie może wprowadzić tej zmiany roli w organizacji. | Poproś właściciela lub administratora organizacji o wprowadzenie zmiany. |
+| `404` | `not_found` | Zasób lub trasa API nie są dostępne dla konta. | Ponownie odczytaj listę zasobów należących do konta. Potem sprawdź ID, ścieżkę i filtry. |
+| `405` | `method_not_allowed` | Trasa istnieje, ale nie obsługuje tej metody HTTP. | Użyj metody wskazanej w `next`. |
+| `408` | `request_timeout` | Żądanie nie zakończyło się na czas. | Zawęź zakres albo poczekaj i wyślij żądanie ponownie. |
+| `409` | `idempotency_conflict` | `Idempotency-Key` lub `deployment_id` użyto ponownie dla innego żądania. | Ponów pierwotne żądanie bez zmian albo użyj nowego klucza dla nowej pracy. |
+| `409` | `account_link_conflict` | Tożsamość logowania należy do innego konta. | Rozwiąż powiązanie kont w ustawieniach konta. Nie twórz drugiego konta dla tej samej tożsamości. |
+| `409` | `account_recovery_available` | Konto jest w okresie odzyskiwania. | Wykonaj zwrócone działanie odzyskiwania. Zachowaj token odzyskiwania w tajemnicy. |
+| `410` | `account_recovery_expired` | Okres odzyskiwania konta się skończył. | Zaloguj się, aby utworzyć nowe konto. |
+| `422` | `validation_failed` | Wartość zapytania, pole, filtr, kursor, nagłówek lub zakres czasu są nieprawidłowe. | Popraw wskazaną wartość. Potem wyślij żądanie ponownie. |
+| `422` | `invite_invalid` | Zaproszenie do organizacji ma nieprawidłowy adres e-mail lub rolę. | Popraw zaproszenie. Potem wyślij je ponownie. |
+| `422` | `member_limit_exceeded` | Organizacja ma już maksymalną liczbę członków. | Poproś właściciela organizacji o usunięcie członka lub zmianę planu. |
+| `422` | `organization_limit_exceeded` | Konto ma już maksymalną liczbę organizacji. | Usuń organizację, zmień plan lub skontaktuj się z pomocą techniczną. |
+| `423` | `organization_paused` | Organizacja jest wstrzymana, ponieważ jej płatna subskrypcja nie jest aktywna. | Wznów aktywną płatną subskrypcję. |
+| `429` | `rate_limited` | Klient wysłał zbyt wiele żądań. Odpowiedź zawiera też `retry_after_seconds`. | Poczekaj `retry_after_seconds`. Potem ponów żądanie z rosnącymi odstępami (backoff). |
+| `429` | `usage_limit_exceeded` | Przyjmowanie danych osiągnęło przydział konta na okres rozliczeniowy. Odpowiedź zawiera też `limit` i `reset_at`. | Wstrzymaj wysyłanie danych do `reset_at` albo zmień plan. |
+| `429` | `artifact_storage_limit_exceeded` | Przesyłanie artefaktu wydania lub pliku debugowania osiągnęło limit miejsca. Odpowiedź zawiera też `limit`. | Poczekaj, zanim prześlesz ponownie. Jeśli limit nie ustępuje, skontaktuj się z pomocą techniczną. |
+| `429` | `invitation_limit_exceeded` | Organizacja osiągnęła dzienny przydział zaproszeń. Odpowiedź zawiera też `limit` i `reset_at`. | Poczekaj do `reset_at` albo zmień plan. |
+| `500` | `storage_error`, `json_error` lub `internal_error` | Serwer nie dokończył żądania. | Zastosuj [zasady ponawiania](#retry-rules). Jeśli błąd się powtarza, [zgłoś problem](/pl/guides/report-a-problem). |
+| `503` | `service_unavailable` | API nie może teraz przyjąć żądania. | Poczekaj. Potem wyślij żądanie ponownie. |
+| `503` | `artifact_storage_unavailable` | Przesyłanie artefaktów wydań i plików debugowania jest chwilowo niedostępne. | Poczekaj, zanim prześlesz ponownie. Nie uruchamiaj równoległych przesyłań. |
+| `503` | `billing_unavailable` | Płatności lub zarządzanie planem są chwilowo niedostępne. | Poczekaj. Potem ponów czynność rozliczeniową. |
+
+Nieznane ID i ID, do którego nie masz dostępu, mogą zwrócić tę samą odpowiedź.
+Nie używaj tekstu błędu, aby ustalić, do którego konta należy ID. Nieznana
+ścieżka API zwraca `404` z `not_found`.
+
+### Pola limitów
+
+| `code` | Wartości `limit` | Inne pola |
+| --- | --- | --- |
+| `usage_limit_exceeded` | `issue_events`, `log_bytes`, `metric_bytes` lub `trace_spans` | `reset_at`: koniec okresu rozliczeniowego (RFC3339). |
+| `invitation_limit_exceeded` | `invitations_per_day` | `reset_at`: początek następnego dnia UTC (RFC3339). |
+| `artifact_storage_limit_exceeded` | Nazwa granicy miejsca, na przykład `artifact_completed_project_bytes` | Brak. |
+| `rate_limited` | Brak | `retry_after_seconds`: liczba pełnych sekund oczekiwania, co najmniej `1`. |
+
+Bieżący przydział i wykorzystanie odczytasz przez
+[API konta](/pl/reference/account-api#account-usage).
+
+## <span id="retry-rules">Zasady ponawiania</span>
+
+O ponowieniu decyduj na podstawie kodu i operacji. Sam status nie wystarczy.
+
+| Odpowiedź | Zasada ponawiania |
+| --- | --- |
+| `validation_failed`, `invalid_json`, `invalid_path` (`400`), `invalid_multipart` (`400` lub `413`) lub `invalid_websocket_upgrade` | Najpierw popraw wskazaną wartość żądania. Nie wysyłaj ponownie tego samego żądania. |
+| `unauthorized` lub `ingest_key_invalid` | Najpierw wymień lub odśwież właściwe poświadczenie. |
+| `forbidden`, `role_forbidden` lub `not_found` | Nie ponawiaj z innymi ID. Ponownie odczytaj listę zasobów należących do konta albo uzyskaj dostęp od właściciela. |
+| `method_not_allowed` | Użyj metody z `next`. Nie wysyłaj ponownie odrzuconej metody. |
+| `idempotency_conflict` | Ponów pierwotne żądanie bez zmian albo użyj nowego klucza dla nowej pracy. |
+| `rate_limited` | Poczekaj `retry_after_seconds`. Potem stosuj wykładniczo rosnące odstępy (exponential backoff) z losowym rozrzutem (jitter). |
+| `usage_limit_exceeded` lub `invitation_limit_exceeded` | Poczekaj do `reset_at` albo zmień plan. |
+| `artifact_storage_limit_exceeded` | Poczekaj, zanim prześlesz ponownie. Jeśli limit nie ustępuje, skontaktuj się z pomocą techniczną. |
+| `subscription_required`, `organization_paused`, `member_limit_exceeded` lub `organization_limit_exceeded` | Postępuj zgodnie z `next`. Ponowienie bez zmiany planu lub członkostwa znowu się nie powiedzie. |
+| `request_timeout`, `service_unavailable`, `artifact_storage_unavailable` lub `billing_unavailable` | Poczekaj. Potem wyślij odczyt ponownie z tym samym zakresem. Dla zapisu zastosuj [zasady zapisu](#writes). |
+| `storage_error`, `json_error`, `internal_error` lub inny `5xx` | Poczekaj. Potem wyślij odczyt ponownie. Dla zapisu zastosuj [zasady zapisu](#writes). Jeśli błąd się powtarza, [zgłoś problem](/pl/guides/report-a-problem). |
+
+- Nie uruchamiaj równoległych ponowień dla jednego nieudanego żądania.
+- Przy `rate_limited` odpowiedź ma też nagłówki `Retry-After` i
+  `X-RateLimit-After`. Oba zawierają tę samą liczbę sekund co
+  `retry_after_seconds`.
+- Przekroczenie limitu czasu nie dowodzi, że wynik jest pusty.
+
+Limit żądań kontroluje częstotliwość żądań. Limit wykorzystania kontroluje
+przydział konta na okres rozliczeniowy. Oba używają `429`. Nie mieszaj ich
+pól. Gdy obowiązuje którykolwiek z nich, pokaż, że zbieranie danych lub odczyt
+są opóźnione. Nie pokazuj starych danych jako wyniku nowego odczytu.
+
+### <span id="writes">Zapisy</span>
+
+Przekroczenie limitu czasu, odpowiedź `5xx` lub błąd sieci nie dowodzi, że
+zapis się nie powiódł. Zanim ponownie wyślesz zapis:
+
+1. Jeśli trasa obsługuje klucz idempotencji, wyślij ponownie ten sam klucz i
+   tę samą treść. Nowego klucza używaj tylko dla nowej pracy.
+2. Jeśli trasa nie ma klucza idempotencji, najpierw odczytaj zasób. Wyślij
+   zapis ponownie tylko wtedy, gdy zmiany nie ma.
+3. Jeśli nie możesz znaleźć wyniku, zatrzymaj automatyczne ponawianie i
+   poinformuj użytkownika.
+
+Te trasy przyjmują klucz ponowienia:
+
+| Trasa | Klucz ponowienia |
+| --- | --- |
+| `POST /api/projects` | Opcjonalny nagłówek `Idempotency-Key`. |
+| `POST /api/projects/{project_id}/ingest-keys` | Opcjonalny nagłówek `Idempotency-Key`. |
+| `POST /api/support/tickets` | Opcjonalny nagłówek `Idempotency-Key`. |
+| `POST /api/support/tickets/{ticket_id}/context` | Wymagany nagłówek `Idempotency-Key`. |
+| `PUT /api/telemetry/deployments/{deployment_id}` | `deployment_id` w ścieżce. |
+
+Wartość `Idempotency-Key` ma od 1 do 128 widocznych znaków ASCII. Inne
+wartości zwracają `422` z `validation_failed`.
+
+`idempotency_conflict` oznacza, że klucz należy do innego żądania. Nie
+zmieniaj treści ponowienia, które używa pierwotnego klucza.
+
+## Błędy struktury żądania
+
+`invalid_json` oznacza, że serwer nie może przyjąć treści żądania jako JSON o
+strukturze wymaganej przez trasę. Sprawdź typ zawartości, rozmiar treści,
+składnię JSON, wymagane pola i typy pól. Status HTTP pokazuje, która część
+zawiodła:
+
+| HTTP | Przyczyna |
+| --- | --- |
+| `400` | Treść nie jest poprawnym JSON-em. |
+| `413` | Treść jest za duża. |
+| `415` | Nagłówek `Content-Type` nie ma wartości `application/json`. |
+| `422` | JSON jest poprawny, ale brakuje pola albo pole ma niewłaściwy typ. |
+
+`validation_failed` z błędem `invalid query parameters` oznacza, że serwer nie
+może odczytać ciągu zapytania. Sprawdź nazwy parametrów i typy wartości. Nie
+wysyłaj nieznanych parametrów zapytania.
+[Dokumentacja filtrów zapytań](/pl/reference/telemetry-api-filters) wymienia
+parametry każdej trasy.
+
+`invalid_path` ze statusem `400` oznacza, że wartość w ścieżce, na przykład ID
+projektu, ma niewłaściwy format. Nie przenoś wartości ze ścieżki do parametru
+zapytania.
+
+Odpowiedź `500` z `invalid_path` lub `invalid_multipart` nie dowodzi, że
+żądanie było błędne. Zastosuj [zasady ponawiania](#retry-rules).
+
+## Błędy uwierzytelniania i dostępu
+
+- `unauthorized` oznacza, że brakuje uwierzytelnienia konta albo jest ono
+  nieprawidłowe lub wygasło. Wyślij `Authorization: Bearer <token>` albo
+  zaloguj się ponownie. Niektóre trasy zwracają `next_action.code` o wartości
+  `authorize_request` z `next` zależnym od trasy, na przykład przy połączeniu
+  podglądu na żywo bez ważnego biletu.
+- `ingest_key_invalid` dotyczy tylko przyjmowania telemetrii. Skonfiguruj
+  aktualny klucz dla właściwego projektu.
+- `forbidden` oznacza, że konto nie może wykonać tej czynności. Nie ponawiaj z
+  innymi ID zasobów.
+- `not_found` oznacza, że zasób nie jest dostępny dla konta.
+
+Nie używaj klucza wysyłania zamiast tokena bearer konta. Nie używaj tokena
+bearer konta zamiast klucza wysyłania.
+
+## Chroń szczegóły błędów
+
+- Odpowiedź `account_recovery_available` zawiera krótkotrwały
+  `recovery_token`. Przechowuj go w chronionym stanie klienta. Nie umieszczaj
+  go w logach, adresach URL, zrzutach ekranu, zgłoszeniach do pomocy
+  technicznej ani promptach agentów.
+- Kody `500` zawsze mają komunikat `Internal error`. Odpowiedź nie wskazuje
+  komponentu, który zawiódł. Nie zgaduj przyczyny.
+- Nie dodawaj poświadczeń, prywatnej diagnostyki ani danych klientów do
+  pokazywanego błędu.
+- Odpowiedź API nie daje pozwolenia na zakup, usunięcie ani inną zmianę konta.
+  Przed takimi czynnościami uzyskaj zgodę użytkownika.
+
+## Przykłady
+
+Te przykłady pokazują strukturę koperty. Tekst `error` i `next` może się różnić w
+zależności od trasy.
+
+### Błąd walidacji
+
+```json
+{
+  "error": "issue status must be unresolved, resolved, or archived",
+  "code": "validation_failed",
+  "next": "use status=unresolved, status=resolved, or status=archived",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+### <span id="invalid-query-parameters">Nieprawidłowe parametry zapytania</span>
+
+```json
+{
+  "error": "invalid query parameters",
+  "code": "validation_failed",
+  "next": "check query parameter names and value types, then retry",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+### <span id="invalid-json">Nieprawidłowy JSON</span>
+
+```json
+{
+  "error": "invalid JSON request body",
+  "code": "invalid_json",
+  "next": "send Content-Type: application/json with a body matching this endpoint",
+  "next_action": {
+    "code": "send_valid_json",
+    "target": "request"
+  }
+}
+```
+
+### <span id="invalid-path-value">Nieprawidłowa wartość w ścieżce</span>
+
+```json
+{
+  "error": "invalid URL path parameters",
+  "code": "invalid_path",
+  "next": "check path resource IDs and value types, then retry",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+### Nieprawidłowe przesyłanie multipart
+
+```json
+{
+  "error": "invalid multipart form-data request",
+  "code": "invalid_multipart",
+  "next": "send multipart/form-data with a valid boundary and expected parts",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+### Nieprawidłowe przejście na WebSocket
+
+```json
+{
+  "error": "invalid WebSocket upgrade request",
+  "code": "invalid_websocket_upgrade",
+  "next": "connect with GET /api/feed/live?ticket=<ticket> using WebSocket upgrade headers",
+  "next_action": {
+    "code": "connect_live_feed",
+    "target": "live_feed"
+  }
+}
+```
+
+### <span id="authentication-failure">Błąd uwierzytelniania</span>
+
+```json
+{
+  "error": "Invalid or expired token",
+  "code": "unauthorized",
+  "next": "send Authorization: Bearer <token>, include the logbrew_session cookie, or sign in again",
+  "next_action": {
+    "code": "sign_in",
+    "target": "auth"
+  }
+}
+```
+
+### Nieprawidłowy klucz wysyłania
+
+Ta odpowiedź dotyczy przyjmowania telemetrii, a nie odczytów konta. Klucz musi
+należeć do projektu podanego w żądaniu.
+
+```json
+{
+  "error": "Invalid ingest key",
+  "code": "ingest_key_invalid",
+  "next": "create a project-scoped ingest key, then retry ingestion with that key",
+  "next_action": {
+    "code": "configure_ingest_key",
+    "target": "project_ingest_key"
+  }
+}
+```
+
+### <span id="resource-not-found">Nie znaleziono zasobu</span>
+
+```json
+{
+  "error": "issue not found",
+  "code": "not_found",
+  "next": "check the resource id or filters and retry",
+  "next_action": {
+    "code": "check_resource",
+    "target": "resource"
+  }
+}
+```
+
+### Brak dostępu
+
+```json
+{
+  "error": "Insufficient permissions",
+  "code": "forbidden",
+  "next": "use an account with access to this resource",
+  "next_action": {
+    "code": "request_access",
+    "target": "auth"
+  }
+}
+```
+
+### <span id="unsupported-method">Nieobsługiwana metoda</span>
+
+```json
+{
+  "error": "Method not allowed",
+  "code": "method_not_allowed",
+  "next": "send GET /api/account/usage with Authorization or the logbrew_session cookie",
+  "next_action": {
+    "code": "use_supported_method",
+    "target": "api_method"
+  }
+}
+```
+
+### Przekroczenie limitu czasu żądania
+
+```json
+{
+  "error": "Request timed out",
+  "code": "request_timeout",
+  "next": "retry read-only requests later or narrow the request scope. Before repeating a write, check whether it succeeded and follow this endpoint's idempotency guidance",
+  "next_action": {
+    "code": "retry_or_narrow_scope",
+    "target": "request"
+  }
+}
+```
+
+### Konflikt idempotencji
+
+```json
+{
+  "error": "Idempotency key was already used",
+  "code": "idempotency_conflict",
+  "next": "retry the original support request or use a new Idempotency-Key",
+  "next_action": {
+    "code": "use_new_idempotency_key",
+    "target": "request"
+  }
+}
+```
+
+### Limit żądań
+
+```json
+{
+  "error": "Rate limit exceeded",
+  "code": "rate_limited",
+  "next": "wait for retry_after_seconds, then retry with exponential backoff and jitter",
+  "next_action": {
+    "code": "retry_with_backoff",
+    "target": "request"
+  },
+  "retry_after_seconds": 1
+}
+```
+
+### Limit wykorzystania
+
+Tekst `next` i `next_action` zależą od tego, czy zmiana planu jest dostępna.
+Jeśli nie jest, `next_action.code` ma wartość `wait_or_contact_support`, a cel
+to `support`.
+
+```json
+{
+  "error": "Usage limit exceeded",
+  "code": "usage_limit_exceeded",
+  "next": "wait until reset_at or upgrade your plan before retrying ingestion",
+  "next_action": {
+    "code": "wait_or_upgrade",
+    "target": "billing"
+  },
+  "limit": "log_bytes",
+  "reset_at": "2026-11-01T00:00:00+00:00"
+}
+```
+
+### Limit miejsca na artefakty
+
+```json
+{
+  "error": "Release artifact storage limit exceeded",
+  "code": "artifact_storage_limit_exceeded",
+  "next": "wait before retrying the upload, or contact LogBrew support if the limit persists",
+  "next_action": {
+    "code": "wait_or_contact_support",
+    "target": "support"
+  },
+  "limit": "artifact_completed_project_bytes"
+}
+```
+
+### Dostępne odzyskiwanie konta
+
+Ta odpowiedź zawiera też `deleted_at` i krótkotrwały `recovery_token`.
+Przechowuj token w chronionym stanie klienta.
+
+```json
+{
+  "error": "Account recovery available",
+  "code": "account_recovery_available",
+  "next": "restore account with POST /api/auth/restore",
+  "next_action": {
+    "code": "restore_account",
+    "target": "account_recovery"
+  },
+  "deleted_at": "2026-09-04T09:00:00Z",
+  "recovery_token": "<recovery token>"
+}
+```
+
+### Okres odzyskiwania konta wygasł
+
+```json
+{
+  "error": "Account recovery window expired",
+  "code": "account_recovery_expired",
+  "next": "create a new account after deletion completes",
+  "next_action": {
+    "code": "create_account",
+    "target": "auth"
+  }
+}
+```
+
+### Organizacja wstrzymana
+
+```json
+{
+  "error": "Organization paused",
+  "code": "organization_paused",
+  "next": "resume an active paid subscription before using this organization",
+  "next_action": {
+    "code": "resume_subscription",
+    "target": "billing"
+  }
+}
+```
+
+### Błąd serwera
+
+`storage_error`, `json_error` i `internal_error` mają ten sam komunikat
+`error`. Wartości `code`, `next` i `next_action` są różne.
+
+```json
+{
+  "error": "Internal error",
+  "code": "internal_error",
+  "next": "retry read-only requests later. Before repeating a write, check whether it succeeded and follow this endpoint's idempotency guidance. Contact LogBrew support if the problem persists",
+  "next_action": {
+    "code": "retry_or_contact_support",
+    "target": "support"
+  }
+}
+```
+
+| `code` | `next_action.code` | `next_action.target` |
+| --- | --- | --- |
+| `storage_error` | `retry_or_check_storage` | `backend_status` |
+| `json_error` | `send_valid_json` | `request` |
+| `internal_error` | `retry_or_contact_support` | `support` |
+
+Endpointy, uwierzytelnianie i filtry opisuje strona
+[API telemetrii](/pl/reference/telemetry-api).

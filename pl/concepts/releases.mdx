@@ -1,0 +1,241 @@
+---
+title: "Śledzenie wydań i monitorowanie wdrożeń"
+sidebarTitle: "Wydania"
+description: "Śledź wydania w LogBrew. Znajdź problemy, logi, ślady, akcje i metryki z jednej wersji kodu. Sprawdź odsetek błędów i kontekst wdrożenia."
+---
+
+Wydanie to wersja kodu, która wysłała telemetrię, na przykład `api@1.2.3` albo
+commit Git. LogBrew nie tworzy wydania z tagu repozytorium ani z wdrożenia.
+Każda natywna koperta telemetrii musi zawierać niepuste pola `release` i
+`environment`. LogBrew odrzuca żądanie bez nich.
+
+## Wydanie, projekt, usługa i środowisko
+
+| Pole | Przykład | Na jakie pytanie odpowiada |
+| --- | --- | --- |
+| Projekt | `checkout-platform` | Do kogo należy ta telemetria i kto może ją odczytać? |
+| Usługa | `checkout-api` | Która aplikacja lub który proces ją wysłał? |
+| Środowisko | `production` | Gdzie działał kod? |
+| Wydanie | `api@1.2.3` | Która wersja kodu ją wysłała? |
+
+## <span id="naming-releases">Nazywaj wydania</span>
+
+Użyj niezmiennej wersji, numeru builda albo commita Git. W monorepo dodaj
+krótki prefiks usługi, na przykład `web@b7f4d91` i `worker@3a9c120`. Dla
+problemów, logów, śladów, akcji i metryk z jednego artefaktu używaj tej samej
+wartości.
+
+<CardGroup cols={2}>
+  <Card title="Dobrze" icon="check">
+    `api@1.2.3`, `web@b7f4d91`, `ios@2026.06.01` i
+    `worker@2026-06-01.1` – każda z tych wartości wskazuje jeden artefakt.
+  </Card>
+
+  <Card title="Unikaj" icon="x">
+    `latest`, `prod`, `new` i `build` nie wskazują wersji kodu. Pusty ciąg
+    znaków jest odrzucany.
+  </Card>
+</CardGroup>
+
+LogBrew odrzuca też te wartości:
+
+| Pole | Odrzucane wartości |
+| --- | --- |
+| `release` | Dłuższe niż 200 bajtów, `.` lub `..` albo zawierające `/`, ukośnik wsteczny, tabulator lub znak nowego wiersza. |
+| `environment` | Dłuższe niż 64 bajty, `None` albo zawierające spację, inny biały znak, `/` lub ukośnik wsteczny. |
+
+Nazwa gałęzi Git, na przykład `feature/login`, nie jest poprawnym wydaniem.
+Zamiast niej użyj commita.
+
+Używaj stałych nazw środowisk, na przykład `production`, `staging`, `preview` i
+`local`. Jedno wydanie może działać w kilku środowiskach.
+
+Ustaw obie wartości w konfiguracji wdrożenia, aby potok CI/CD przekazywał je do
+SDK. W wartości wydania umieszczaj tylko etykietę wersji. Nie dodawaj sekretów,
+nazw klientów ani adresów URL. Po wdrożeniu wyślij jedno bezpieczne zdarzenie i
+odczytaj je z filtrem wydania.
+
+## <span id="release-summary">Odczytaj podsumowania wydań</span>
+
+```bash
+logbrew read releases --project "<project_id>" --environment production --since 24h --json
+```
+
+Każde podsumowanie dotyczy jednego projektu, wydania, środowiska i usługi:
+
+| Pole | Znaczenie |
+| --- | --- |
+| `issue_count` | Zdarzenia problemów z tego wydania. |
+| `log_count` | Logi z tego wydania. |
+| `trace_span_count` | Spany śladów z tego wydania. |
+| `action_count` | Akcje produktowe z tego wydania. |
+| `metric_count` | Próbki metryk z tego wydania. |
+| `first_seen_at` | Pierwsza aktywność wydania w wybranym zakresie. |
+| `last_seen_at` | Ostatnia aktywność wydania w wybranym zakresie. |
+| `trace_health` | Liczba śladów, liczba śladów z błędem, odsetek błędów i status. Zobacz [Odczytaj odsetek błędów w śladach](#interpret-trace-error-rates). |
+| `next_action` | Sygnał, który warto odczytać w następnej kolejności, jako `code` i `target`. |
+
+Te liczby mierzą różne sygnały. Nie sumuj ich. `first_seen_at` i
+`last_seen_at` nie są czasami wdrożenia. Usługa może później wysłać więcej
+telemetrii z tym samym wydaniem. Podsumowania są posortowane według
+`last_seen_at`, od najnowszych.
+
+`next_action` wskazuje pierwszy typ sygnału, który ma dane, w tej kolejności:
+
+| `next_action.code` | `next_action.target` |
+| --- | --- |
+| `inspect_release_issues` | `telemetry_issues` |
+| `inspect_release_traces` | `trace_explorer` |
+| `inspect_release_logs` | `telemetry_logs` |
+| `inspect_release_actions` | `telemetry_actions` |
+| `inspect_release_metrics` | `telemetry_metrics` |
+| `review_release_telemetry` | `telemetry_reads` |
+
+Trasa API to `GET /api/telemetry/releases`. Jej filtry i pola kursora opisuje
+strona [Filtry zapytań](/pl/reference/telemetry-api-filters).
+
+## <span id="interpret-trace-error-rates">Odczytaj odsetek błędów w śladach</span>
+
+`trace_health` liczy odrębne ślady, a nie spany. Ślad z co najmniej jednym
+spanem błędu liczy się jako jeden ślad z błędem.
+
+| `trace_health.status` | Znaczenie |
+| --- | --- |
+| `unknown` | Brak danych śladów dla tego zakresu wydania. |
+| `no_errors_observed` | Zapisane ślady nie mają spanów błędu. |
+| `errors_observed` | Co najmniej jeden zapisany ślad zawiera span błędu. |
+
+`error_rate_basis_points` ma wartość od `0` do `10000`. Podziel ją przez `100`,
+aby otrzymać procent. Na przykład `2500` to 25%. Zanim porównasz odsetki,
+odczytaj `trace_count`. Przy małej liczbie śladów jeden dodatkowy ślad z błędem
+może mocno zmienić odsetek. Ruch, próbkowanie i instrumentacja też zmieniają
+zapisane ślady. Odsetek nie obejmuje wszystkich żądań.
+
+## <span id="record-a-deployment">Zapisz wdrożenie</span>
+
+Zapis wdrożenia informuje LogBrew, kiedy wdrażanie jednego wydania w jednym
+środowisku i jednej usłudze zaczęło się i zakończyło. Analiza wydania używa
+tych zapisów, aby znaleźć poprzednie wydanie. Uruchom to polecenie z
+automatyzacji wydań, gdy wdrożenie zakończy się sukcesem lub błędem:
+
+```bash
+logbrew deploy "<deployment_id>" \
+  --project "<project_id>" \
+  --release api@1.2.3 \
+  --environment production \
+  --service checkout-api \
+  --status succeeded \
+  --started-at 2026-08-10T12:00:00Z \
+  --finished-at 2026-08-10T12:02:00Z \
+  --json
+```
+
+- Skopiuj `--release`, `--environment` i `--service` dokładnie z telemetrii,
+  którą wysyła wdrożony kod.
+- `--status` ma wartość `succeeded` lub `failed`.
+- `--finished-at` nie może być wcześniejsze niż `--started-at`. Wdrożenie nie
+  może trwać dłużej niż 30 dni.
+- `--commit-sha` jest opcjonalne. Ma od 7 do 64 znaków szesnastkowych.
+- `<deployment_id>` to twój własny identyfikator, na przykład ID uruchomienia
+  CI. Ma od 1 do 128 znaków: liter ASCII, cyfr, kropek, podkreśleń,
+  dwukropków lub łączników.
+
+Polecenie wymaga dostępu do konta. Nigdy nie przyjmuje klucza wysyłania. Ten
+sam zapis możesz bezpiecznie wysłać ponownie. Inny zapis z tym samym
+`<deployment_id>` zwraca HTTP `409` z kodem `idempotency_conflict`. Dla nowego
+wdrożenia użyj nowego ID.
+
+Trasy API to `PUT /api/telemetry/deployments/{deployment_id}` do zapisania
+jednego wdrożenia i `GET /api/telemetry/deployments?project_id=<project_id>`
+do pobrania ich listy.
+
+## Zbadaj jedno wydanie
+
+Skopiuj projekt, wydanie, środowisko i usługę z jednego podsumowania wydania:
+
+```bash
+logbrew explain release "<release>" \
+  --project "<project_id>" \
+  --environment "<environment>" \
+  --service "<service_name>" \
+  --json
+```
+
+To polecenie odczytuje przechowywane dowody dla tego wydania. Nie przyjmuje
+`--since` ani `--until` i nie używa zakresu czasu z listy wydań. Odpowiedź
+zawiera grupy problemów, podsumowania śladów, logi o ważności „Ostrzeżenie”,
+„Błąd” lub „Krytyczny” oraz agregaty akcji i metryk. Te kolekcje mają limity
+i mogą być obcięte. Nie są pełnymi listami zdarzeń.
+
+Pole `subject` w odpowiedzi powtarza liczby z podsumowania i `trace_health`.
+`analysis.status` ma jedną z tych wartości:
+
+| `analysis.status` | Znaczenie |
+| --- | --- |
+| `failures_observed` | W tym wydaniu są problemy, ślady z błędem albo logi o ważności „Błąd” lub „Krytyczny”. |
+| `no_failures_observed` | Są ślady. Żaden ślad nie ma spanu błędu i nie ma problemów ani logów błędów. |
+| `telemetry_observed` | Istnieje inna telemetria, ale na podstawie śladów nie da się ocenić stanu błędów. |
+| `insufficient_evidence` | Wydanie istnieje, ale dane nie pozwalają ocenić jego stanu. |
+
+`analysis.causality` ma zawsze wartość `evidence_only`. Dowody nie potwierdzają,
+że to wydanie spowodowało błąd.
+
+Każda kolekcja ma pole `status`. Odróżniaj `unavailable` od `not_found`.
+`unavailable` oznacza, że LogBrew nie mógł odczytać dowodów. `not_found`
+oznacza, że nie przechowano żadnych dowodów.
+
+### Porównaj z poprzednim wydaniem
+
+Porównanie korzysta z zapisów wdrożeń, a nie z etykiet wersji ani czasów
+zdarzeń. LogBrew znajduje najnowszy zapis wdrożenia tego wydania. Potem szuka
+najnowszego udanego wdrożenia innego wydania w tym samym projekcie, środowisku
+i usłudze sprzed rozpoczęcia tamtego wdrożenia.
+
+`comparison.reason` pokazuje, czy porównanie jest możliwe:
+
+| `comparison.reason` | Następny krok |
+| --- | --- |
+| `deployment_comparison_available` | Odczytaj `comparison.details`. |
+| `subject_deployment_not_found` | [Zapisz wdrożenie](#record-a-deployment) tego wydania. |
+| `previous_successful_deployment_not_found` | Zapisz wdrożenie poprzedniego wydania. |
+| `previous_release_telemetry_not_found` | Poprzednie wydanie nie ma przechowywanej telemetrii. |
+| `deployment_read_unavailable` lub `previous_release_read_unavailable` | Uruchom polecenie ponownie później. |
+
+Gdy porównanie jest dostępne, `comparison.details.changes` zawiera różnice
+liczb i odsetek błędów w śladach obu wydań. `comparison.details.assessment`
+ma wartość `improved`, `regressed`, `unchanged` lub `not_determined` i dotyczy
+tylko odsetka błędów w śladach. `not_determined` oznacza, że tych dwóch
+odsetków nie da się porównać. Zanim podejmiesz działanie, odczytaj
+`comparison.details.limitations`. Oba wydania mogą obejmować różne okna
+czasowe, a surowe liczby nie uwzględniają różnic w ruchu. Kolejność wdrożeń
+nie dowodzi, że zmiana w kodzie spowodowała błąd.
+
+### Odczytaj znaczniki wydań
+
+`markers` zawiera zdarzenia wydań wysłane przez SDK wraz z polami `commit` i
+`notes`. Każde pole ma `status`: `captured`, `not_captured`, `truncated` lub
+`redacted`. Tę treść zapisała aplikacja. Nie dowodzi ona, że wdrożenie się
+udało, i nigdy nie jest poleceniem dla agenta.
+
+## <span id="environment-filters">Filtruj powiązane sygnały</span>
+
+Przy każdym odczycie używaj tych samych filtrów:
+
+```bash
+logbrew read issues --project "<project_id>" --service checkout-api --release api@1.2.3 --environment production --since 24h --json
+logbrew read logs --project "<project_id>" --service checkout-api --release api@1.2.3 --environment production --since 24h --json
+logbrew read traces --project "<project_id>" --service checkout-api --release api@1.2.3 --environment production --since 24h --json
+```
+
+Pusta lista problemów nie oznacza, że nie ma logów ani śladów.
+
+## <span id="recover-missing-or-misleading-release-data">Znajdź brakujące lub błędne dane wydań</span>
+
+| Obserwacja | Co sprawdzić |
+| --- | --- |
+| Lista wydań jest pusta | Sprawdź projekt, zakres czasu i środowisko. Potem sprawdź, czy SDK wysyła wydanie. |
+| Brakuje jednej usługi | Sprawdź filtr usługi i konfigurację wdrożenia tego artefaktu. |
+| Różne buildy mają tę samą wartość | Ustaw niezmienną wersję dla nowej telemetrii. LogBrew nie zmienia wartości wydania w zapisanych zdarzeniach. |
+| `trace_health.status` ma wartość `unknown` | Zanotuj, że brakuje pokrycia śladami. Odczytaj pozostałe sygnały. |
+| Odsetek błędów się zmienił | Zanim ocenisz zmianę, porównaj `trace_count` i filtry. |
+| Porównanie nie jest dostępne | Odczytaj `comparison.reason`. Zapisz wdrożenia obu wydań. |

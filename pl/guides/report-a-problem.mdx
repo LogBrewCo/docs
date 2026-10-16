@@ -1,0 +1,224 @@
+---
+title: "API pomocy technicznej: utwórz i śledź zgłoszenie"
+sidebarTitle: "Zgłoś problem"
+description: "Utwórz zgłoszenie do pomocy technicznej LogBrew z CLI lub przez API. Dodaj bezpieczną diagnostykę, śledź status i dosyłaj kontekst."
+---
+
+Utwórz zgłoszenie do pomocy technicznej, gdy problem wymaga dalszych działań.
+Osoba lub agent AI może potem śledzić zgłoszenie i dodawać kontekst, o który
+poproszono. Zgłoszenie mogą odczytać tylko konto, które je utworzyło, i zespół
+pomocy technicznej LogBrew.
+
+<Warning>
+  Użyj tokena bearer konta, na przykład `$LOGBREW_TOKEN`. Nigdy
+  nie używaj klucza wysyłania projektu. Zanim napiszesz tytuł, opis lub
+  diagnostykę, usuń prywatne dane. Automatyczne maskowanie nie zastępuje tego
+  przeglądu.
+</Warning>
+
+## Utwórz zgłoszenie
+
+W CLI uruchom:
+
+```bash
+logbrew support create --category docs_confusion \
+  --title "First event is not visible" \
+  --description "Steps: send one info event, then read logs in the same project. Expected: one row. Observed: no rows." \
+  --project "<project_id>" --json
+```
+
+CLI ustawia `source` na `cli`. `--diagnostics` dodaje tylko nazwę pliku
+binarnego, wersję CLI, system operacyjny i architekturę. Wszystkie flagi
+pokazuje `logbrew support --help`.
+
+CLI nie wysyła klucza ponowienia przy tworzeniu zgłoszenia. Jeśli wynik jest
+niepewny, uruchom `logbrew support list --json`, zanim ponownie uruchomisz
+polecenie. W przeciwnym razie możesz utworzyć drugie zgłoszenie.
+
+Przez API wyślij `POST /api/support/tickets` z polami `source`, `category`,
+`title` i `description`. Aby ponowienie było bezpieczne, utwórz jeden klucz
+ponowienia dla zgłoszenia i wyślij go w nagłówku `Idempotency-Key`. Ten
+przykład używa fikcyjnych wartości:
+
+```bash
+LOGBREW_SUPPORT_RETRY_KEY="$(uuidgen)"
+
+curl -sS "https://api.logbrew.co/api/support/tickets" \
+  -H "Authorization: Bearer ${LOGBREW_TOKEN:?Set an account access bearer}" \
+  -H "Idempotency-Key: ${LOGBREW_SUPPORT_RETRY_KEY:?Create a retry key for this report}" \
+  -H "Content-Type: application/json" \
+  --data '{
+    "source": "docs",
+    "category": "docs_confusion",
+    "title": "First event is not visible",
+    "description": "Steps: send one info event, then read logs in the same project. Expected: one row. Observed: no rows.",
+    "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    "diagnostics": {
+      "steps": 2,
+      "expected": "one matching row",
+      "observed": "no matching rows"
+    }
+  }'
+```
+
+Klucz ponowienia zawiera od 1 do 128 widocznych znaków ASCII, bez spacji. Aby
+ponowić żądanie, wyślij ten sam klucz z tą samą treścią. Odpowiedź zwróci wtedy
+to samo zgłoszenie. Dla innego zgłoszenia użyj nowego klucza. Przekroczenie
+limitu czasu nie dowodzi, że zgłoszenie nie zostało utworzone. Nagłówek
+`Idempotency-Key` jest opcjonalny. Bez niego powtórzone żądanie może utworzyć
+kolejne zgłoszenie.
+
+Pola opcjonalne to `project_id`, `environment`, `runtime`, `framework`,
+`sdk_package`, `sdk_version`, `release`, `trace_id`, `event_id` i
+`diagnostics`. Pomiń `project_id`, gdy problem nie dotyczy konkretnego
+projektu. `project_id` musi wskazywać aktywny projekt na twoim koncie.
+
+| Pole | Akceptowane wartości |
+| --- | --- |
+| `source` | `cli`, `sdk`, `website`, `docs`, `mobile` |
+| `category` | `sdk_install_failure`, `ingest_failure`, `auth_failure`, `project_setup`, `dashboard_issue`, `docs_confusion`, `cli_issue`, `mobile_issue`, `billing_question`, `other` |
+| `title` | Od 1 do 160 znaków po usunięciu przez LogBrew spacji na początku i na końcu. |
+| `description` | Od 1 do 4000 znaków po usunięciu przez LogBrew spacji na początku i na końcu. |
+| Inne pola tekstowe | Maksymalnie 256 znaków w każdym polu. |
+
+Udane żądanie zwraca HTTP `200`:
+
+```json
+{
+  "ticket_id": "sup_11111111111141118111111111111111",
+  "status": "open",
+  "created_at": "2026-10-01T09:30:00Z",
+  "next": "Support ticket created. LogBrew will review the attached diagnostics.",
+  "next_action": {
+    "code": "review_ticket",
+    "target": "support_ticket"
+  }
+}
+```
+
+ID zgłoszeń zaczynają się od `sup_`. `next` to wskazówka dla człowieka, a
+`next_action` służy do sterowania programem.
+
+Aby usunąć projekt, użyj ustawień projektu lub `logbrew projects delete`. Nie
+proś o usunięcie projektu w zgłoszeniu do pomocy technicznej.
+
+## Napisz przydatne zgłoszenie
+
+- W każdym zgłoszeniu opisz jeden problem.
+- Wybierz najlepiej pasującą wartość `category`. Użyj `other` tylko wtedy, gdy
+  żadna kategoria nie pasuje.
+- W `title` podaj jeden objaw i jedną część produktu.
+- W `description` opisz kroki, a potem oczekiwany i zaobserwowany wynik.
+- Dodaj ID projektu, wydania, śladu lub zdarzenia tylko wtedy, gdy dotyczą
+  tego samego błędu.
+
+Używaj tych kluczy `diagnostics`:
+
+| Klucz | Zawartość |
+| --- | --- |
+| `steps` | Liczba kroków do odtworzenia. |
+| `expected` | Krótki opis oczekiwanego wyniku. |
+| `observed` | Krótki opis zaobserwowanego wyniku. |
+| `command_name` | Nazwa polecenia i podpolecenia, bez argumentów. |
+| `exit_code` | Liczbowy kod wyjścia procesu. |
+| `error_code` | Stały kod błędu. |
+| `error_summary` | Krótkie, zamaskowane podsumowanie błędu. |
+| `retry_count` | Liczba identycznych ponownych prób. |
+| `last_delivery_status` | Status HTTP ostatniej próby dostarczenia, na przykład `401`. |
+
+`diagnostics` to obiekt JSON o rozmiarze do 16 KB po zamaskowaniu. LogBrew
+zastępuje wartość tekstem `[redacted]`, gdy jej klucz wskazuje poświadczenie,
+sesję lub adres e-mail. Zastępuje też tekst, który wygląda jak poświadczenie,
+adres URL lub ścieżka lokalna. LogBrew skraca też długie ciągi znaków i
+ogranicza zagnieżdżenie, liczbę kluczy i liczbę elementów list. Nie polegaj na
+tym maskowaniu. Zanim wyślesz żądanie, usuń prywatne dane.
+
+## <span id="track-the-ticket">Śledź zgłoszenie</span>
+
+| Polecenie CLI | Trasa API | Wynik |
+| --- | --- | --- |
+| `logbrew support list` | `GET /api/support/tickets` | Wyświetla zgłoszenia konta. |
+| `logbrew support show <ticket_id>` | `GET /api/support/tickets/{ticket_id}` | Odczytuje jedno zgłoszenie i jego następne działanie. |
+| `logbrew support context <ticket_id>` | `GET /api/support/tickets/{ticket_id}/context` | Odczytuje kontekst dodany do zgłoszenia. |
+| `logbrew support reply <ticket_id>` | `POST /api/support/tickets/{ticket_id}/context` | Dodaje kontekst, o który poproszono. |
+| `logbrew support close <ticket_id>` | `PATCH /api/support/tickets/{ticket_id}` | Ustawia `closed`. |
+| `logbrew support reopen <ticket_id>` | `PATCH /api/support/tickets/{ticket_id}` | Ustawia `open`. |
+
+Lista przyjmuje `project_id`, `status`, `source`, `category`, `release` i
+`limit`. Domyślny `limit` to 100, a maksymalny to 500. Aby użyć paginacji
+kursorowej, wyślij `pagination=cursor`. Na kolejnych stronach powtórz te same
+filtry i wyślij `cursor_time` oraz `cursor_id` z `next_cursor`. ID kursora to
+ID zgłoszenia z prefiksem `sup_`. Zakończ, gdy `next_cursor` ma wartość `null`.
+CLI używa flag `--project`, `--status`, `--source`, `--category`, `--release`,
+`--limit`, `--pagination`, `--cursor-time` i `--cursor-id`.
+
+Wartości statusu to `open`, `routed`, `in_progress`, `waiting_on_user`,
+`resolved` i `closed`. Możesz ustawić tylko `open` lub `closed`. Powtórzone
+żądanie zamknięcia lub ponownego otwarcia kończy się powodzeniem i niczego nie
+zmienia, więc możesz ponowić dokładnie to samo żądanie. Postępuj zgodnie ze
+zwróconym statusem i `next_action`:
+
+| Status | `next_action.code` | Następny krok |
+| --- | --- | --- |
+| `open`, `routed`, `in_progress` | `await_owner_update` | Poczekaj na aktualizację. Odczytaj zgłoszenie ponownie później. |
+| `waiting_on_user` | `provide_context` | Wyślij kontekst, o który poproszono. |
+| `resolved`, `closed` | `open_new_ticket_if_needed` | Utwórz nowe zgłoszenie, jeśli problem wystąpi ponownie. |
+
+## Dodaj kontekst, o który poproszono
+
+Odpowiedz, gdy zgłoszenie prosi o kontekst. Takie zgłoszenie ma status
+`waiting_on_user`, a `next_action.code` ma wartość `provide_context`.
+
+```bash
+logbrew support reply sup_11111111111141118111111111111111 \
+  --context "The same project and time filters still return no logs." \
+  --retry-key "<retry_key>" --json
+```
+
+Treść żądania API zawiera `context` i opcjonalnie `diagnostics`. Tekst
+`context` musi mieć od 1 do 4000 znaków. Nie umieszczaj w `context`
+poświadczeń, adresów URL, nazw hostów ani ścieżek lokalnych. API odrzuca taki
+tekst z kodem `422`. Wyślij klucz ponowienia w nagłówku `Idempotency-Key`.
+Trasa kontekstu wymaga tego nagłówka. Klucz zawiera od 1 do 128 widocznych
+znaków ASCII, bez spacji. Dla każdej odpowiedzi użyj nowego klucza. Użyj
+klucza ponownie tylko wtedy, gdy ponawiasz tę samą odpowiedź.
+
+API przyjmuje kontekst, gdy zgłoszenie ma status `open`, `routed`,
+`in_progress` lub `waiting_on_user`. Przyjmuje 1 odpowiedź na każdy stan
+zgłoszenia. Po odpowiedzi poczekaj na zmianę statusu, zanim wyślesz więcej
+kontekstu. Odpowiedź na zgłoszenie `waiting_on_user` zmienia jego status na
+`open`. Nie zakładaj tej zmiany, tylko odczytaj zwrócony `status`.
+
+Udana odpowiedź zwraca `ticket_id`, `context_id`, `status`, `created_at`,
+`next` i `next_action`. `context_id` zaczyna się od `ctx_`. Zanim odpowiesz na
+kolejną prośbę, odczytaj zgłoszenie ponownie.
+
+`GET /api/support/tickets/{ticket_id}/context` zwraca 20 najnowszych wpisów
+kontekstu, od najstarszego. Każdy wpis zawiera `context_id`, `context`,
+`diagnostics` i `created_at`. Ta lista nie ma kursora.
+
+Odpowiedź na zgłoszenie `resolved` lub `closed` zwraca `422` z
+`code: "validation_failed"`. Otwórz zgłoszenie ponownie tylko wtedy, gdy
+użytkownik chce kontynuować tę sprawę. `next_action` nie daje agentowi
+uprawnień do zmiany stanu konta.
+
+## Obsłuż błędy
+
+| Status HTTP | `code` | Co zrobić |
+| --- | --- | --- |
+| `401` | `unauthorized` | Wyślij ważny token bearer konta. |
+| `404` | `not_found` | Wyświetl zgłoszenia konta i użyj zwróconego ID z prefiksem `sup_`. Przy błędzie projektu sprawdź `project_id` albo go pomiń. |
+| `405` | `method_not_allowed` | Użyj metody z tabeli w sekcji [Śledź zgłoszenie](#track-the-ticket). |
+| `409` | `idempotency_conflict` | Klucz ponowienia został użyty z innym żądaniem. Ponów pierwotne żądanie albo odczytaj zgłoszenie i użyj nowego klucza. |
+| `422` | `validation_failed` | Popraw wskazane pole. Dla PATCH wysyłaj tylko `status: "open"` lub `status: "closed"`. |
+| `429` | `rate_limited` | Poczekaj, a potem ponów żądanie. |
+
+Odpowiedzi z błędem zawierają `error`, `code`, `next` i `next_action`. Zobacz
+[Błędy API](/pl/reference/api-errors).
+
+## Zadbaj o bezpieczeństwo zgłoszenia
+
+Nigdy nie wysyłaj sekretów, tokenów, nagłówków autoryzacji, kluczy wysyłania,
+surowych logów, danych klientów, ścieżek lokalnych, hostów ani niezwiązanego
+kodu źródłowego. Wyślij krótkie, zamaskowane podsumowanie. Sprawdzenia, które
+możesz wykonać samodzielnie, opisuje strona [Rozwiązywanie problemów](/pl/guides/troubleshooting).

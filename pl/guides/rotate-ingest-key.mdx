@@ -1,0 +1,175 @@
+---
+title: "Rotacja klucza API: wymień klucz wysyłania LogBrew"
+sidebarTitle: "Wymień klucz wysyłania"
+description: "Wymień klucz wysyłania LogBrew. Przetestuj nowy klucz przed planowanym unieważnieniem starego. Naprawiaj błędy bez ujawniania poświadczeń."
+---
+
+Rotacja zastępuje klucz wysyłania projektu. Nie zmienia projektu ani
+zapisanej w nim telemetrii. Do zarządzania kluczami używaj uwierzytelnienia konta.
+Klucz wysyłania może tylko wysyłać telemetrię. Nie może zarządzać kluczami.
+
+Zanim zaczniesz, [zainstaluj CLI i zaloguj się](/pl/guides/cli). Ustaw
+`LOGBREW_PROJECT_ID` na UUID projektu. Ustaw `LOGBREW_API_URL` na
+`https://api.logbrew.co`. Przykłady używają powłoki Bash, curl 7.76.0 lub
+nowszego i jq.
+
+Przy planowanej rotacji utwórz, wdróż i przetestuj nowy klucz, zanim
+unieważnisz stary. Częstotliwość rotacji ustal w swojej polityce
+bezpieczeństwa. Jeśli klucz ma datę wygaśnięcia, wymień go przed tą datą.
+
+<Warning>
+  Ujawniony klucz to incydent bezpieczeństwa. Unieważnij go natychmiast,
+  nawet zanim wdrożysz nowy klucz. Aplikacje, które nadal używają
+  unieważnionego klucza, nie mogą wysyłać telemetrii.
+</Warning>
+
+<Steps>
+  <Step title="Utwórz nowy klucz">
+    `POST /api/projects/{project_id}/ingest-keys` przyjmuje niepusty `label`
+    o długości do 120 znaków. `kind` ma wartość `cli`, `sdk`, `browser`,
+    `server` lub `artifact`. Klucz `artifact` nie może wysyłać telemetrii.
+    Opcjonalne `expires_at` musi być czasem RFC3339 z przyszłości.
+
+    Użyj tego samego `kind` co stary klucz. Gdy pominiesz `--kind`, CLI używa
+    `sdk`, a gdy pominiesz `--label` – `CLI-created SDK key`. CLI nie ma flagi
+    daty wygaśnięcia. Aby ustawić `expires_at`, użyj API.
+
+    CLI zapisuje jednorazowy token do nowego pliku dostępnego tylko dla
+    właściciela, poza systemem kontroli wersji. Wypisuje metadane, a nie
+    token:
+
+    ```bash
+    : "${LOGBREW_PROJECT_ID:?set LOGBREW_PROJECT_ID}" &&
+    : "${LOGBREW_REPLACEMENT_KEY_FILE:?choose a new private key file}" &&
+    logbrew projects keys create "$LOGBREW_PROJECT_ID" \
+      --ingest-key-file "$LOGBREW_REPLACEMENT_KEY_FILE" \
+      --label "checkout production rotation" --kind server --json
+    ```
+
+    Kontynuuj dopiero wtedy, gdy polecenie się powiedzie. Ustaw `NEW_KEY_ID`
+    na zwrócone `ingest_key.id`.
+
+    Jeśli wynik jest niepewny, uruchom dokładnie to samo polecenie ponownie.
+    CLI użyje ponownie swojego oczekującego klucza ponowienia. Nie używaj
+    `--abandon-retry` przy tym ponowieniu.
+
+    Klient, który wywołuje API bezpośrednio, dostaje token raz, w odpowiedzi.
+    Aby ponowić żądanie, wyślij ten sam nagłówek `Idempotency-Key` z tą samą
+    treścią. Przez 24 godziny takie ponowienie zwraca ten sam klucz. Nigdy nie
+    wypisuj tokena, nie commituj go i nie udostępniaj.
+  </Step>
+
+  <Step title="Wdróż nowy klucz, gdy stary jest nadal aktywny">
+    Umieść nowy token w chronionym ustawieniu wdrożenia. Wdróż aplikację.
+    Pozostaw stary klucz aktywny. Nie umieszczaj żadnego z tokenów w kodzie
+    źródłowym, wynikach builda ani logach.
+  </Step>
+
+  <Step title="Wyślij jedno syntetyczne zdarzenie">
+    Załaduj nowy token do zmiennej powłoki `new_ingest_key`. Nie wypisuj go.
+    Wyślij jeden syntetyczny log z nowym kluczem, a potem go odczytaj:
+
+    ```bash
+    occurred_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+
+    curl --fail-with-body -sS "$LOGBREW_API_URL/api/telemetry/ingest" \
+      -H "Authorization: Bearer $new_ingest_key" \
+      -H "Content-Type: application/json" \
+      --data @- <<JSON &&
+    {
+      "project_id": "$LOGBREW_PROJECT_ID",
+      "environment": "production",
+      "release": "ingest-key-rotation@1",
+      "service_name": "checkout-api",
+      "sdk_name": "native-api",
+      "sdk_version": "0.1.0",
+      "items": [
+        {
+          "type": "log",
+          "data": {
+            "level": "info",
+            "message": "ingest key rotation check",
+            "source": "setup",
+            "attributes": {},
+            "occurred_at": "$occurred_at"
+          }
+        }
+      ]
+    }
+    JSON
+
+    logbrew read logs --project "$LOGBREW_PROJECT_ID" \
+      --release ingest-key-rotation@1 \
+      --environment production \
+      --since "$occurred_at" \
+      --json
+    ```
+
+    Kontynuuj dopiero wtedy, gdy odczyt zwróci ten log z tym samym
+    `occurred_at`. Starszy log ze sprawdzenia rotacji nie dowodzi, że nowy
+    klucz działa. Potwierdź też, że wdrożona aplikacja wysyła telemetrię.
+    Jeśli polecenie się nie powiedzie, zatrzymaj się i przeczytaj odpowiedź.
+    Pozostaw stary klucz aktywny, chyba że został ujawniony.
+  </Step>
+
+  <Step title="Wyświetl metadane kluczy bez sekretów">
+    Ustaw `LOGBREW_ACCOUNT_BEARER` na podstawie uwierzytelnienia konta.
+    Znajdź ID starego klucza. Potwierdź, że `NEW_KEY_ID` ma status `active`:
+
+    ```bash
+    (
+      set -o pipefail
+      curl --fail-with-body -sS "$LOGBREW_API_URL/api/projects/$LOGBREW_PROJECT_ID/ingest-keys" \
+        -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+        | jq -e 'select(type == "array") | map({id, label, kind, token_prefix, status, created_at, expires_at, revoked_at})'
+    )
+    ```
+
+    Odpowiedź to tablica metadanych kluczy bez tokenów. Status ma wartość
+    `active`, `expired` lub `revoked`. Klucz ma status `expired`, gdy minął
+    jego czas `expires_at`.
+  </Step>
+
+  <Step title="Unieważnij tylko stary klucz">
+    Ustaw `OLD_KEY_ID` na podstawie listy. Polecenie unieważnia stary klucz
+    tylko wtedy, gdy oba ID są różne:
+
+    ```bash
+    if [ -n "${OLD_KEY_ID:-}" ] && [ -n "${NEW_KEY_ID:-}" ] \
+      && [ "$OLD_KEY_ID" != "$NEW_KEY_ID" ]; then
+      (
+        set -o pipefail
+        curl --fail-with-body -sS -X DELETE \
+          "$LOGBREW_API_URL/api/projects/$LOGBREW_PROJECT_ID/ingest-keys/$OLD_KEY_ID" \
+          -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+          | jq -e --arg id "$OLD_KEY_ID" \
+            'select(.id == $id and .status == "revoked") | {id, label, kind, token_prefix, status, created_at, expires_at, revoked_at}'
+      )
+    else
+      printf '%s\n' 'Set different old and replacement key IDs before revocation.' >&2
+      false
+    fi
+    ```
+
+    `DELETE` jest idempotentne. Zwraca metadane klucza z
+    `status: "revoked"` i ustawionym `revoked_at`. Po niepewnej odpowiedzi
+    możesz je bezpiecznie powtórzyć.
+
+    Uruchom `unset new_ingest_key`. Z plikiem klucza postępuj zgodnie ze swoją
+    polityką dotyczącą sekretów.
+  </Step>
+</Steps>
+
+## Bezpiecznie napraw błędy
+
+| Odpowiedź | Następny krok |
+| --- | --- |
+| `404`, `code: "not_found"` | Potwierdź, że konto jest właścicielem projektu i kluczy o tych ID. Postępuj zgodnie z `next_action.code: "check_resource"`. Nie próbuj innych ID. |
+| `code: "validation_failed"` | Popraw wskazane pole, wartość lub znacznik czasu. Postępuj zgodnie z `next` i `next_action`. |
+| `401` lub `403` przy zarządzaniu kluczami | Użyj uwierzytelnienia konta, a nie klucza wysyłania. |
+| `401`, `code: "ingest_key_invalid"` przy żądaniu wysyłania | Klucz jest unieważniony, wygasł lub nie nadaje się do telemetrii. Użyj nowego, aktywnego klucza dla wybranego projektu. Postępuj zgodnie z `next_action.code: "configure_ingest_key"`. |
+| `401` lub `403` przy żądaniu wysyłania | Użyj nowego klucza wysyłania dla wybranego projektu. Nie używaj poświadczenia konta. |
+
+Jeśli rotacja nadal się nie udaje, [zgłoś problem](/pl/guides/report-a-problem).
+Udostępnij tylko metadane klucza. Nie dołączaj poświadczeń, nagłówków,
+surowej telemetrii, danych klientów, lokalnych ścieżek ani kodu źródłowego.

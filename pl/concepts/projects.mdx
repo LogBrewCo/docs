@@ -1,0 +1,184 @@
+---
+title: "Konfiguracja projektu LogBrew i sprawdzanie sygnałów"
+sidebarTitle: "Projekty i konfiguracja"
+description: "Skonfiguruj projekt LogBrew. Wybierz nazwy usług i środowisk, sprawdź status konfiguracji i znajdź zdarzenia testowe aplikacji."
+---
+
+Projekt to granica dostępu do telemetrii. Każdy przyjęty sygnał należy do
+jednego projektu, a każde polecenie odczytu może filtrować według projektu.
+
+Utwórz osobny projekt, gdy telemetria wymaga osobnej granicy własności lub
+dostępu. W większości zespołów to jedna aplikacja, usługa lub obszar produktu.
+Repozytorium nie musi odpowiadać jednemu projektowi. Monorepo może wysyłać
+kilka usług do jednego projektu. Rozróżniaj je nazwami usług.
+
+## <span id="project-service-environment">Projekt, usługa, środowisko</span>
+
+| Pojęcie | Przykład | Zastosowanie |
+| --- | --- | --- |
+| Projekt | `checkout-platform` | Własność i dostęp. |
+| Usługa | `checkout-api` | Aplikacja lub usługa, która wysłała sygnał. |
+| Środowisko | `production` | Kontekst uruchomieniowy. |
+| Wydanie | `api@1.2.3` | Wersja kodu. |
+
+## <span id="recommended-model">Skonfiguruj projekt</span>
+
+[Zainstaluj CLI](/pl/guides/cli). Uruchom `logbrew status --json`, aby
+sprawdzić dostęp do konta. Jeśli dostęp jest nieważny, polecenie
+`logbrew login` musi uruchomić człowiek. Klucz wysyłania projektu nie pozwala
+się zalogować.
+
+<Steps>
+  <Step title="Utwórz lub wybierz projekt">
+    Najpierw wyświetl listę projektów. Utwórz projekt tylko wtedy, gdy jeszcze
+    nie istnieje.
+
+    ```bash
+    logbrew projects --json
+    install -d -m 700 "$HOME/.logbrew"
+
+    logbrew projects create checkout-api \
+      --runtime node \
+      --environment production \
+      --ingest-key-file "$HOME/.logbrew/checkout-api.ingest" \
+      --json
+    ```
+
+    CLI zapisuje klucz wysyłania do nowego pliku, który może czytać tylko
+    właściciel. Nigdy nie wypisuje klucza ani ścieżki pliku. Jeśli wynik jest
+    niejasny, uruchom ponownie dokładnie to samo polecenie. Nie zmieniaj nazwy
+    projektu ani pliku klucza. CLI użyje ponownie tożsamości oczekującego
+    żądania. [Szybki start](/pl/quickstart) pokazuje, jak odczytać ID projektu
+    z wyniku.
+
+    Dla istniejącego projektu zapisz stan konfiguracji:
+
+    ```bash
+    logbrew projects setup "<project_id>" --source cli --environment production --json
+    ```
+
+    Aby utworzyć kolejny klucz wysyłania dla istniejącego projektu, użyj
+    `logbrew projects keys create`.
+    [Przewodnik po wymianie klucza wysyłania](/pl/guides/rotate-ingest-key)
+    pokazuje to polecenie.
+
+    `logbrew setup --create-project` tylko wyświetla pomoc. Nie tworzy
+    projektu.
+  </Step>
+
+  <Step title="Ustaw nazwy usług w SDK">
+    Używaj nazw z repozytorium i wdrożenia, takich jak `api`, `worker`,
+    `web`, `ios` lub `checkout-api`. Nazwa usługi to etykieta, a nie selektor
+    projektu. To klucz wysyłania wybiera projekt. Zmiana nazwy usługi nie
+    przenosi zapisanych zdarzeń. Jeśli nie możesz znaleźć zdarzenia, zanim
+    utworzysz kolejny projekt, sprawdź projekt i klucz wysyłania, których
+    używa aplikacja.
+  </Step>
+
+  <Step title="Używaj standardowych środowisk">
+    Używaj `production`, `staging`, `preview` i `local`. Jeśli twoje
+    wdrożenie używa innych nazw, stosuj je konsekwentnie. Nazwa środowiska nie
+    może zawierać spacji, `/` ani ukośnika odwrotnego.
+  </Step>
+
+  <Step title="Wyślij zdarzenie testowe i odczytaj je">
+    Skonfiguruj SDK z kluczem wysyłania projektu, jak opisuje
+    [przewodnik po integracji SDK](/pl/guides/sdk-ingestion).
+    Utworzenie projektu nie instaluje SDK w aplikacji. Nie umieszczaj klucza
+    w systemie kontroli wersji. Ustaw usługę, środowisko i wydanie w
+    aplikacji. Wyślij jedno bezpieczne zdarzenie, a potem je odczytaj:
+
+    ```bash
+    logbrew read logs --project "<project_id>" --json
+    ```
+
+    Każdy sygnał ma własną listę. Pusta lista logów nie oznacza, że projekt
+    nie ma problemów ani śladów.
+
+    Na pulpicie wybierz ten sam projekt i zakres czasu, który obejmuje
+    zdarzenie testowe. Upewnij się, że filtry usługi, środowiska i wydania
+    pasują do zdarzenia.
+  </Step>
+</Steps>
+
+## <span id="diagnose-project-setup">Zdiagnozuj konfigurację projektu</span>
+
+Odczytaj stan konfiguracji za pomocą diagnostyki projektu. Nie wnioskuj o
+stanie konfiguracji z plików lokalnych ani z pustego zapytania o logi.
+
+```bash
+: "${LOGBREW_PROJECT_ID:?set a project UUID}"
+
+logbrew doctor --project "$LOGBREW_PROJECT_ID" --json
+```
+
+CLI zwraca raport z polami `status`, `checks` i `next`. Kod wyjścia `0` nie
+oznacza, że wszystkie sprawdzenia zakończyły się powodzeniem. Przeczytaj każdy
+element w `checks`. Zobacz
+[Odczytaj raport diagnostyki projektu](/pl/reference/cli#read-a-project-doctor-report).
+
+### Bezpośrednia odpowiedź API
+
+Klient API wywołuje `GET /api/projects/{project_id}/doctor` z
+uwierzytelnieniem konta. Endpoint nie ma parametrów zapytania ani treści
+żądania. Do tego odczytu nigdy nie używaj klucza wysyłania projektu.
+
+Odpowiedź `200` ma te klucze: `project_id`, `state`, `setup_status`,
+`setup_acknowledged`, `has_active_ingest_key`, `first_telemetry_seen_at`,
+`last_seen_at`, `last_signal`, `next` i `next_action`. Znaczniki czasu mają
+format RFC3339 lub wartość `null`. `last_signal` to podsumowanie bezpieczne do
+wyświetlenia, a nie surowy sygnał.
+
+| `state` | `next_action.code` | `next_action.target` |
+| --- | --- | --- |
+| `needs_ingest_key` | `create_ingest_key` | `project_ingest_keys` |
+| `needs_setup` | `choose_setup_path` | `project_setup` |
+| `needs_telemetry` | `send_first_telemetry` | `telemetry_ingest` |
+| `ready` | `inspect_recent_telemetry` | `telemetry_reads` |
+
+Diagnostyka najpierw sprawdza klucz wysyłania. Projekt bez aktywnego klucza
+wysyłania ma stan `needs_ingest_key` niezależnie od statusu konfiguracji.
+
+`setup_status` przyjmuje wartość `created`, `setup_started`, `sdk_seen`,
+`first_telemetry_seen` lub `active`. `setup_acknowledged` ma wartość `true`
+tylko dla 3 ostatnich wartości. `created` daje `needs_setup`. `setup_started` i
+`sdk_seen` dają `needs_telemetry`. `first_telemetry_seen` i `active` dają
+`ready`.
+
+| Odpowiedź | Następny krok |
+| --- | --- |
+| `404`, `code: "not_found"` | Nieistniejący projekt, zarchiwizowany projekt i projekt, którego twoje konto nie może odczytać, dają ten sam wynik. Odczytaj ID projektu ponownie z `logbrew projects`. Nie próbuj innych ID. |
+| `405`, `code: "method_not_allowed"` | Użyj `GET` bez treści i bez parametrów zapytania. |
+
+Jeśli odczyt nadal się nie udaje, [zgłoś problem](/pl/guides/report-a-problem).
+Nie dołączaj poświadczeń, nagłówków, treści sygnałów, danych klientów, ścieżek
+lokalnych ani kodu źródłowego.
+
+## <span id="archive-or-delete-a-project">Zarchiwizuj lub usuń projekt</span>
+
+Zarchiwizuj projekt, aby usunąć go z listy aktywnych projektów:
+
+```bash
+logbrew projects archive "<project_id>" --yes --json
+```
+
+Polecenie wymaga `--yes`. Po archiwizacji klucze wysyłania projektu przestają
+przyjmować nową telemetrię. Trasa API to `DELETE /api/projects/{project_id}`.
+Zwraca `204` bez treści. Zarchiwizowane projekty wyświetlisz przez
+`GET /api/projects/archived`. Projekt przywrócisz przez
+`POST /api/projects/{project_id}/restore`. Ta trasa też zwraca `204`.
+
+Usuń projekt na stałe tylko wtedy, gdy masz pewność:
+
+```bash
+logbrew projects delete "<project_id>" --confirm "<project_id>" --json
+```
+
+Po `--confirm` powtórz dokładne ID projektu. Przyjęte żądanie od razu
+dezaktywuje projekt i planuje jego trwałe usunięcie. Potem nie można już
+przywrócić projektu.
+
+## <span id="rotate-an-ingest-key-without-telemetry-loss">Wymień klucz wysyłania</span>
+
+[Przewodnik po wymianie klucza wysyłania](/pl/guides/rotate-ingest-key) opisuje
+procedurę zastąpienia, wdrożenia, testu i unieważnienia klucza.
