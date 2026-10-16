@@ -24,6 +24,7 @@ range fixed while you find the cause.
 | Results are too broad | Add project, service, release, and environment filters | Keep the same scope in each read. |
 | A trace is missing | Read the issue detail | Read a trace only when the response has a trace ID. |
 | JavaScript frames show built code | Check the build and source-map pair | Follow [JavaScript source maps](/guides/source-maps). |
+| An MCP agent cannot read a project | Check the approved projects | Follow [MCP connection problems](/guides/mcp#fix-connection-problems). |
 
 ## Recover missing first telemetry
 
@@ -49,7 +50,14 @@ does not mean that every check passed.
 | `needs_telemetry` | Send one safe test event from the app, then run the doctor again. |
 | `ready` | Read recent logs, issues, releases, or traces. |
 
+The report can also have the status `auth_invalid`, `project_missing`,
+`api_unreachable`, or `check_failed`. The
+[doctor report](/reference/cli#read-a-project-doctor-report) gives the next
+step for each one.
+
 A `ready` project can still have no logs, because each signal type is separate.
+The `logs` check can be `empty` or `unavailable`. A failed log read is not an
+empty result.
 
 ### Send one safe test event
 
@@ -74,8 +82,8 @@ Check these items in order:
 1. The project ID belongs to the app that sent the event.
 2. Service, release, and environment match exactly, including case and
    whitespace.
-3. The time range includes the event time. An app-supplied `occurred_at` must
-   be in UTC.
+3. The time range includes the event time. LogBrew returns event times in
+   UTC. `--until` is an exclusive upper bound.
 4. No search or severity filter hides the event.
 5. The app sent the signal type that you read. A log does not create an issue
    or a trace.
@@ -97,7 +105,19 @@ project.
 | No rows in one project | No match in that scope | Check time and filters. |
 | Logs, but no issues | No grouped error matches the filters | Check that the app sent an error. |
 | Issue without a trace | The occurrence has no usable trace link | Read the trace status in the issue investigation. |
+| A release, but no logs | The release has other signals, but no logs in that scope | Compare the counts in `logbrew read releases`. Read each signal type in the same project. |
 | Event appears after you remove a filter | That filter excluded the event | Fix the filter or the app value. |
+
+A result page is not a total. With `--pagination cursor`, continue with the
+returned `next_cursor` and keep the same filters. See
+[Cursor pagination](/reference/telemetry-api-filters#cursor-pagination).
+
+### Check the dashboard view
+
+The dashboard shows a snapshot of each list. On the logs view, turn on
+**Live** to add new logs as they arrive. Other views do not update live.
+Reload the page to get a new snapshot. A stale snapshot is different from an
+empty result.
 
 LogBrew stores only the telemetry that the app sends. Remove credentials,
 request bodies, query values, and personal data before delivery. Use
@@ -111,14 +131,17 @@ Use an issue ID or trace ID that LogBrew returned. Never invent one.
 logbrew read issues --project "<project_id>" --environment production \
   --status unresolved --since 24h --json
 logbrew read issue "<issue_id>" --json
-logbrew read trace "<trace_id>" --json
-logbrew read logs --trace "<trace_id>" --json
+logbrew read trace "<trace_id>" --project "<project_id>" --json
+logbrew read logs --trace "<trace_id>" --project "<project_id>" --json
 ```
+
+`--status` accepts `unresolved`, `resolved`, and `archived`. `ignored` selects
+the same issues as `archived`.
 
 Issue status and trace status are different. The trace status values
 `not_linked`, `not_found`, and `unavailable` have different meanings. See
 [Investigate an issue](/guides/investigate-an-issue) for each value. Read the
-issue and its logs before you resolve, ignore, or reopen it.
+issue and its logs before you resolve, archive, or reopen it.
 
 ## Handle CLI and API errors
 
@@ -133,13 +156,19 @@ In JSON mode, a CLI error contains `ok`, `error`, `message`, and `next`:
 }
 ```
 
+When the API returns an error, `error` is `api_error`. The error also has
+`status` (the HTTP status), `api_code` (the API `code`), `api_error`, and
+`api_next`. For a `rate_limited` error, it also has `retry_after_seconds`. The
+CLI does not retry automatically.
+
 | Status or error | Recovery |
 | --- | --- |
 | `not_logged_in` or HTTP `401` | A person runs `logbrew login`. Then retry the read. |
-| HTTP `403` | Use the correct credential for the project. Do not show the credential value. |
+| HTTP `403` | Use the correct credential for the project. An issue change also needs permission to manage issues in the project. Do not show the credential value. |
 | HTTP `404` | Use a current project, issue, or trace ID from a response. |
 | HTTP `422` | Correct the named field. |
-| HTTP `429` | Stop automatic retries. Follow the returned guidance. |
+| HTTP `429` with `rate_limited` | Wait `retry_after_seconds`, then retry once. |
+| HTTP `429` with another code | Stop automatic retries. Follow `api_next`. |
 | HTTP `5xx` | Wait, retry one read, and report the problem if it continues. |
 
 See [API errors](/reference/api-errors) for each error code.
@@ -149,8 +178,14 @@ See [API errors](/reference/api-errors) for each error code.
 If someone else might have an account access token, refresh token, or session
 cookie, sign out all LogBrew clients. Follow the
 [account-wide sign-out](/reference/account-api#every-logbrew-login)
-procedure. A person must approve this action. After success, clear local
-LogBrew credentials on each client and sign in again from a trusted client.
+procedure. A person must approve this action. `logbrew logout` and a browser
+sign-out end only one client, so they are not enough.
+
+The account-wide sign-out also stops every MCP connection that was approved
+before it. After success, clear local LogBrew credentials on each client and
+sign in again from a trusted client. Approve MCP clients again only after you
+trust them. If the response is lost, do not report that all clients are signed
+out, and do not repeat the request automatically.
 
 Account-wide sign-out does not rotate project ingest keys. If an ingest key was
 exposed, [rotate the ingest key](/guides/rotate-ingest-key).

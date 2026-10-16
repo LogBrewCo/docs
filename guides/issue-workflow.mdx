@@ -19,19 +19,22 @@ before you open the detail:
 | --- | --- |
 | `title` | Captured failure title. |
 | `severity` | Captured severity. |
+| `triage.effective_severity` | Severity that LogBrew uses after issue rules. `severity` keeps the captured value. `triage.rule_applied` is `true` when a rule applies. |
 | `occurrence_count` | Number of retained occurrences in the group. |
 | `first_seen_at` | Time of the earliest retained occurrence. |
 | `last_seen_at` | Time of the latest retained occurrence. |
 | `project_id` | Project that contains the issue. |
-| `service_name` | Service that sent the occurrence. |
-| `release` | Release reported with the occurrence. |
-| `environment` | Environment reported with the occurrence. |
+| `service_name` | Service of the latest occurrence. |
+| `release` | Release of the latest occurrence. |
+| `environment` | Environment of the latest occurrence. |
 | `status` | Workflow state of the issue. See [Status values](#status-values). |
 | `priority` | Triage order of the issue. See [Priority](#priority). |
+| `priority_source` | `manual` when a person set the priority. `derived` when it follows severity. |
 | `assignee` | Account that owns the next step, or `null`. See [Assign issues](#assign-issues). |
 
 The occurrence count is not an affected-user count. Counts and times apply to
-the returned scope, not to the full error history. When you report a count,
+the returned scope, not to the full error history. A `--since` or `--until`
+filter limits the occurrences that LogBrew counts. When you report a count,
 also report the filters that produced it.
 
 ## Status values
@@ -43,13 +46,20 @@ also report the filters that produced it.
 | `archived` | The team removed the issue from active triage. |
 
 `archived` was previously named `ignored`. The two names select the same
-issues. The CLI and API version 2 show `archived`. The live watch stream and
-API version 1 show `ignored`.
+issues, and both are accepted as input. `logbrew read`, `logbrew issues`, and
+API versions 2 and 3 show `archived`. API version 1 (the default), the live
+watch stream, and the issue investigation response show `ignored`. The
+dashboard shows the statuses as Unsolved, Solved, and Archived.
 
 Status applies to the whole issue, not to one occurrence. Severity shows
 urgency, and status records the decision. Keep the two separate. A `critical`
 issue can be `resolved` after a verified fix. An `archived` issue keeps its
 captured severity.
+
+LogBrew does not reopen a resolved issue automatically. When a new occurrence
+arrives after resolution, the investigation reports
+`lifecycle.effective_status` as `regressed`. The `status` stays `resolved`
+until a person reopens the issue.
 
 ## Priority
 
@@ -63,8 +73,9 @@ Priority sets the order in which the team triages issues:
 
 Each issue has a priority. If nobody sets it, it follows the issue severity:
 `error` and `critical` are `high`, `warning` is `medium`, and `info` is `low`.
-Then `priority_source` is `derived`. When a person sets the priority, it stays
-fixed and `priority_source` is `manual`.
+When an issue rule changes the severity, priority follows
+`triage.effective_severity`. Then `priority_source` is `derived`. When a person
+sets the priority, it stays fixed and `priority_source` is `manual`.
 
 To list the issues to examine first:
 
@@ -83,8 +94,9 @@ Assign an issue to show who owns the next step. An issue has 0 or 1 assignee.
     logbrew issues assignees --project "<project_id>" --json
     ```
 
-    The list has every account that can read the project. Copy the
-    `user_id`. You cannot assign an account that cannot read the project.
+    The list has every account that can read the project. Each entry has
+    `user_id`, `name`, and `email`. Copy the `user_id`. You cannot assign an
+    account that cannot read the project.
   </Step>
 
   <Step title="Assign the issue">
@@ -146,8 +158,9 @@ changed or removed the assignee in the meantime.
 
     The detail and investigation reads do not use list filters. Compare
     `subject.project_id`, `event.occurred_at`, release, and environment with
-    your scope. Follow [Investigate an issue](/guides/investigate-an-issue) for
-    the full evidence review.
+    your scope. The recommended occurrence can be older than the latest one.
+    Follow [Investigate an issue](/guides/investigate-an-issue) for the full
+    evidence review.
   </Step>
 
   <Step title="Follow trace evidence only when available">
@@ -155,12 +168,13 @@ changed or removed the assignee in the meantime.
     the trace ID from the response. Never invent one.
 
     ```bash
-    logbrew read trace "<trace_id>" --json
+    logbrew read trace "<trace_id>" --project "<project_id>" --json
     logbrew read logs --trace "<trace_id>" --project "<project_id>" \
       --since 24h --json
     ```
 
-    If the status is `not_linked`, continue with the issue evidence.
+    The trace read has no time filter. If the status is `not_linked`,
+    continue with the issue evidence.
   </Step>
 
   <Step title="Verify the candidate deployment">
@@ -175,7 +189,8 @@ changed or removed the assignee in the meantime.
     ```
 
     No recurrence in the observation window does not prove a permanent fix.
-    Follow the returned next action.
+    If `status` is `insufficient_traffic` or `unavailable`, keep the issue
+    `unresolved`. Follow the returned next action.
   </Step>
 
   <Step title="Change status, priority, or assignee">
@@ -190,9 +205,12 @@ changed or removed the assignee in the meantime.
     logbrew issues assign me "<issue_id>" --json
     ```
 
-    Check the exit code and the returned `status`, `priority`, and
-    `assignee`. If the
-    result is missing, read the issue again before the next change.
+    Without `--project`, each command takes 1 issue ID. Check the exit code
+    and the returned `status`, `priority`, and `assignee`. If the result is
+    missing, read the issue again before the next change.
+
+    Older scripts can use `logbrew set issue "<issue_id>" resolved` and the
+    `resolve`, `ignore`, and `reopen` shortcuts. `ignore` sets `archived`.
   </Step>
 </Steps>
 
@@ -205,8 +223,9 @@ logbrew issues archive "<issue_id_1>" "<issue_id_2>" "<issue_id_3>" \
   --project "<project_id>" --json
 ```
 
-The command applies one change to every issue. The result has 1 entry for
-each issue, in the order of the command:
+The command applies one change to every issue. Each issue ID can appear only
+once. The CLI rejects more than 100 IDs or a repeated ID before it sends a
+request. The result has 1 entry for each issue, in the order of the command:
 
 | Outcome | Meaning |
 | --- | --- |
@@ -214,10 +233,13 @@ each issue, in the order of the command:
 | `unchanged` | The issue already had the requested value. |
 | `not_found` | The project has no issue with this ID. LogBrew changed nothing for it. |
 
-You can run the same command again after a network failure. Issues that
-changed already show `unchanged`. For more than 100 issues, run more commands.
-For a `not_found` result, copy the ID again from an issue list of that
-project.
+Each entry has `issue_id`, `outcome`, and `issue`. `issue` is the current
+issue, or `null` for `not_found`. You can run the same command again after a
+network failure. Issues that changed already show `unchanged`. For more than
+100 issues, run more commands. For a `not_found` result, copy the ID again from
+an issue list of that project. See
+[Update issues in bulk](/reference/telemetry-api#update-issues-in-bulk) for
+the API request.
 
 ## Choose the next status
 
@@ -229,8 +251,9 @@ project.
   decision applies to every occurrence of the issue. The command has no reason
   field, so record the reason in your team's work record.
 - **Reopen with `unresolved`** when a new occurrence arrives after
-  resolution. Compare it with the occurrence used for resolution. Do not
-  create a different issue.
+  resolution. `lifecycle.regression.first_reappeared_occurrence` identifies
+  it. Compare it with the occurrence used for resolution. Do not create a
+  different issue.
 
 ## Hand off the investigation
 
@@ -239,10 +262,12 @@ Give the next person references, not a raw event dump:
 - Issue ID, status, priority, assignee, and severity.
 - Project, service, environment, and release.
 - First-seen time, last-seen time, and occurrence count.
-- Selected occurrence ID and why it was selected.
+- Selected occurrence ID and `occurrence_selection.reason`.
+- `fix.status`, `cause.status`, and their `provenance`.
 - Trace status and trace ID, if available.
 - Reproduction status and missing evidence.
 - Candidate deployment verification result.
+- The next action that the response returned.
 
 Label proposed causes and fixes as proposals.
 
@@ -253,16 +278,26 @@ standard output. A parse error exits with code `2`. A runtime error exits with
 code `1`. JSON errors go to standard error and contain `ok: false`, `error`,
 `message`, and `next`. Show `next` as guidance. Do not run it automatically.
 
+For example, `logbrew issues archive "<issue_id_1>" "<issue_id_2>" --json`
+has no `--project`. It exits with code `2` before a request, with the error
+`invalid_issue_command`.
+
+When the API rejects a request, `error` is `api_error`. Read `status` for the
+HTTP status and `api_code` for the API error code.
+
 | Result | Recovery |
 | --- | --- |
 | `not_logged_in` | Ask a person to run `logbrew login`, then retry the read. |
+| `invalid_issue_command` | Correct the command. Use `--project` for more than 1 issue, at most 100 IDs, and each ID once. |
 | Invalid issue ID | Copy the exact ID from an issue list or detail response. |
 | Issue not found | Confirm the signed-in account and the project. |
-| A change fails with HTTP `403` | The account cannot manage issues in this project. Ask a person with access. |
-| `invalid_assignee` | Use `me`, `none`, or a user ID from `logbrew issues assignees`. |
-| An assign fails with `validation_failed` | The assignee cannot read the project. Pick an account from `logbrew issues assignees`, or give that member access to the project first. |
+| A change fails with `status` `403` | The account cannot manage issues in this project. Ask a person with access. |
+| `invalid_assignee` | The `--assignee` filter takes `me`, `none`, or a user ID. |
+| An assign fails with `status` `422` and `api_code` `validation_failed` | The assignee cannot read the project. Pick an account from `logbrew issues assignees`, or give that member access to the project first. |
+| `investigation_response_invalid` | The response failed CLI validation. Retry once. If it repeats, update the CLI or report the problem. Do not bypass validation. |
 | Trace status `not_linked` | Continue with the issue evidence. Do not read a trace. |
 | Trace status `unavailable` | Retry the investigation read later. |
+| Verification `insufficient_traffic` | Keep the issue `unresolved`. Wait for traffic on the candidate release, then verify again. |
 
 A failed response does not prove that a status, priority, or assignee change
 had no effect. Read the
