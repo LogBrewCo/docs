@@ -89,7 +89,7 @@ configuration.
 | Ruby | `gem install logbrew-sdk` |
 | Go | `go get github.com/LogBrewCo/sdk/go/logbrew@latest` |
 | Rust | `cargo add logbrew` |
-| Java / Spring | Add `co.logbrew:logbrew-sdk:0.1.6` from Maven Central. |
+| Java / Spring | Add `co.logbrew:logbrew-sdk:0.1.9` from Maven Central. |
 | .NET | `dotnet add package LogBrew --version 0.1.7` |
 | ASP.NET Core | `dotnet add package LogBrew.AspNetCore --version 0.1.2` |
 | C++ / CMake | Pin `cpp/logbrew-cpp/v0.2.3` with CMake `FetchContent`. |
@@ -164,14 +164,14 @@ For Maven, add the released package:
 <dependency>
   <groupId>co.logbrew</groupId>
   <artifactId>logbrew-sdk</artifactId>
-  <version>0.1.6</version>
+  <version>0.1.9</version>
 </dependency>
 ```
 
 For Gradle Kotlin DSL, add the same Maven Central artifact:
 
 ```kotlin
-implementation("co.logbrew:logbrew-sdk:0.1.6")
+implementation("co.logbrew:logbrew-sdk:0.1.9")
 ```
 
 Use Java 11 or newer.
@@ -184,7 +184,7 @@ Spring Kafka capture is explicitly opt in with
 `logbrew.kafka.enabled=true`. It uses the application's existing Spring Kafka
 dependency and client bean.
 
-The [Java SDK artifact on Maven Central](https://central.sonatype.com/artifact/co.logbrew/logbrew-sdk/0.1.6)
+The [Java SDK artifact on Maven Central](https://central.sonatype.com/artifact/co.logbrew/logbrew-sdk/0.1.9)
 identifies the released package. Its public guide covers bounded HTTP delivery,
 shutdown, logging, Spring configuration, Kafka correlation, and privacy limits.
 
@@ -277,20 +277,37 @@ globally patch every client by default.
 ## <span id="required-envelope-fields">Direct native envelope</span>
 
 Use `POST /api/telemetry/ingest` only for a custom client that no public
-LogBrew SDK supports. Public SDKs use their own batch format. All items in one
-native envelope share the project, service, release, environment, and optional
-trace context.
+LogBrew SDK supports. Public SDKs use their own batch format. This endpoint
+does not accept that format.
+
+Send 1 to 512 items in one native envelope. All items in one envelope share
+the project, service, release, environment, and optional trace context.
 
 | Field | Required | Notes |
 | --- | --- | --- |
-| `project_id` | Yes | UUID for the LogBrew project. |
-| `environment` | Yes | Non-empty deployment environment. |
-| `release` | Yes | Non-empty code version. |
-| `service_name` | Yes | Logical service name, such as `checkout-api`. |
+| `project_id` | Yes | UUID for the LogBrew project. It must match the project of the ingest key. |
+| `environment` | Yes | Deployment environment. 64 characters or fewer, with no whitespace, `/`, or `\`. The value `None` is rejected. |
+| `release` | Yes | Code version. 200 characters or fewer, with no `/`, `\`, tabs, or newlines. It cannot be `.` or `..`. |
+| `service_name` | Yes | Logical service name, such as `checkout-api`. It must not be blank. |
 | `sdk_name` | Yes | SDK or custom-client identifier. |
 | `sdk_version` | Yes | SDK or custom-client version. |
-| `items` | Yes | One or more `log`, `trace_span`, `issue`, or `action` items. |
-| `trace_id` | No | Trace ID shared by correlated envelope items. |
+| `items` | Yes | 1 to 512 `log`, `trace_span`, `issue`, or `action` items. |
+| `trace_id` | No | Trace ID shared by correlated envelope items. Required when an item has `span_id`. |
+
+### Item fields
+
+Each item has a `type` and a `data` object. A log item uses `level`. An issue
+item uses `severity`. Both accept the values in [Severity values](/concepts/telemetry#severity-values).
+
+| Item field | Applies to | Notes |
+| --- | --- | --- |
+| `id` | All items | Optional client event ID. 1 to 200 characters, unique in the envelope. |
+| `span_id` | `log`, `issue`, `action` | Optional. 16 hexadecimal characters, not all zeros. The envelope must have `trace_id`. |
+| `name` | `action` | Required. 64 UTF-8 bytes or fewer. It must not start with `$`, start or end with whitespace, or contain control or invisible formatting characters. |
+
+Send an `id` with each item when your client can retry. When a retry sends
+an accepted item again with the same `id` and content, LogBrew does not store
+it again. The response counts that item in `already_accepted`.
 
 ### Example request
 
@@ -310,7 +327,8 @@ test event's current UTC time. Use your own service and release values.
     {
       "type": "log",
       "data": {
-        "severity": "warning",
+        "id": "evt_example_log_0001",
+        "level": "warning",
         "message": "checkout retry scheduled",
         "source": "runtime",
         "attributes": { "route": "/checkout" },
@@ -320,6 +338,7 @@ test event's current UTC time. Use your own service and release values.
     {
       "type": "action",
       "data": {
+        "id": "evt_example_action_0001",
         "name": "checkout_failed",
         "distinct_id": "user_123",
         "session_id": "session_456",
@@ -347,25 +366,73 @@ curl --fail-with-body --silent --show-error \
 
 Read the HTTP status and body. `--fail-with-body` preserves an error body and
 returns a nonzero exit status for HTTP errors. A network failure or timeout
-does not tell you whether LogBrew accepted the request. Do not automatically
-send this native request again after an uncertain result.
+does not tell you whether LogBrew accepted the request. Send the same file
+again only when its items have `id` values. Without `id` values, a second
+send can store the items two times.
 
 ### Response
 
-The ingestion response returns accepted item counts by stream.
+A successful request returns `200` with counts of the new items by stream.
+`already_accepted` counts items that an earlier request already delivered.
 
 ```json
 {
   "issues": 0,
   "logs": 1,
   "trace_spans": 0,
-  "actions": 1
+  "actions": 1,
+  "already_accepted": 0,
+  "next": "review accepted telemetry in logs, issues, traces, actions, or live feed",
+  "next_action": {
+    "code": "review_ingested_telemetry",
+    "target": "telemetry_reads"
+  }
 }
 ```
 
-If the request fails, follow the returned `code` in
-[API errors](/reference/api-errors). For an authentication error, use a
-project-scoped ingest key. Do not replace it with an account credential.
+### Errors
+
+An invalid or revoked ingest key returns `401`. A key for a different project
+also returns `401`:
+
+```json
+{
+  "error": "Invalid ingest key",
+  "code": "ingest_key_invalid",
+  "next": "create a project-scoped ingest key, then retry ingestion with that key",
+  "next_action": {
+    "code": "configure_ingest_key",
+    "target": "project_ingest_key"
+  }
+}
+```
+
+Use a project-scoped ingest key. Do not replace it with an account
+credential. An artifact key cannot send telemetry.
+
+An envelope that breaks a field rule returns `422` with code
+`validation_failed`. The `error` field names the rule. The `next` field tells
+you how to fix the request. For example, `"items": []` returns:
+
+```json
+{
+  "error": "native telemetry envelope cannot be empty",
+  "code": "validation_failed",
+  "next": "send at least one native telemetry item",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+Do not send an envelope when there are no events. An envelope with more than
+512 items returns `422` with the error
+`native telemetry envelope exceeds the item limit`. Split it into batches of
+512 or fewer items. Keep the project and shared context in each batch.
+
+For usage limits, rate limits, and service failures, follow the returned
+`code` in [API errors](/reference/api-errors).
 
 <Tip>
   Set release and environment in SDK setup. Create or continue trace context

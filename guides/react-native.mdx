@@ -20,7 +20,7 @@ Install both packages in the app directory. Keep the app's React and React
 Native dependencies:
 
 ```bash
-npm install @logbrew/sdk@0.1.27 @logbrew/react-native@0.1.34
+npm install @logbrew/sdk@0.1.28 @logbrew/react-native@0.1.35
 ```
 
 ## Create a project SDK key
@@ -50,16 +50,19 @@ logbrew projects keys create "<project_id>" \
 Continue only after the command succeeds. If the result is unclear, run the
 same command again with the same arguments. Do not use `--abandon-retry`.
 
-Keep the key file out of source control. For local Expo development, put the
-key in an ignored `.env.local` file at the app root:
+Keep the key file out of source control. Do not use the account credential
+that authorized the CLI. For local Expo development, put the key in an
+ignored `.env.local` file at the app root:
 
 ```dotenv
 EXPO_PUBLIC_LOGBREW_CLIENT_KEY=<your_project_sdk_key>
 ```
 
-Reload the app fully after you change the value. See
+Keep the direct `process.env.EXPO_PUBLIC_LOGBREW_CLIENT_KEY` reference in the
+setup module below. Reload the app fully after you change the value. See
 [Expo environment variables](https://docs.expo.dev/guides/environment-variables/)
-for build-time configuration.
+for build-time configuration. A bare React Native app loads the key through
+its own configuration instead.
 
 ## Create the client
 
@@ -122,6 +125,10 @@ queue. Do not add a second flush timer. The AppState listener requests a
 final flush when the app becomes inactive or goes to the background. Call
 `stopAppStateListener()` when the app tears down.
 
+With the native queue, only one active client can use a key. A second client
+for the same key fails with `configuration_error`. This is one more reason to
+create the client once.
+
 ## Send and find the test log
 
 Call `verifyLogBrewSetup()` once from a development-only test action. Await
@@ -163,8 +170,30 @@ the native module. Use `persistentQueue: "disabled"` only when you want a
 memory queue.
 
 The native queue holds at most 1,000 events and 4 MiB of event data. Smaller
-client limits also apply. Delivery is at least once, so retries can send an
-event two times. A background flush is an attempt, not proof of delivery.
+client limits also apply. Events in the native queue keep their event IDs
+after a restart.
+
+Delivery is at least once, so a retry can send an event two times. When the
+event ID and content match an event that LogBrew already accepted, LogBrew
+does not store it again. A background flush is an attempt, not proof of
+delivery. Test offline capture and an app restart. Then find the saved event
+in the project.
+
+### Read the delivery state
+
+`client.deliveryHealth()` returns queue and delivery state without event
+content. Read these fields first:
+
+| Field | Meaning |
+| --- | --- |
+| `storage` | `persistent` or `memory`. |
+| `deliveryState` | The current state of automatic delivery. |
+| `lastOutcome` | The result of the last delivery attempt. |
+| `lastStatusClass` | The class of the last response status, or a network error. |
+| `pausedReason` | `authentication` after a `401`. `rate_limit` after a `429`. |
+| `queueEvents` | The number of events that wait for delivery. |
+| `acceptedEvents` | The number of events that LogBrew accepted. |
+| `droppedByReason` | Counts of events that the client dropped, by reason. |
 
 ## Choose the log content
 
@@ -188,10 +217,10 @@ bodies out of error reports.
 | Result | Next step |
 | --- | --- |
 | Missing client key | Setup stops before it sends. Load the project SDK key through the app configuration. |
-| `401`, `unauthenticated` | LogBrew rejected the key. Correct or replace the project SDK key before you create a new client. Never use an account credential. |
-| `429`, `rate_limited` | The SDK keeps the batch and pauses automatic delivery. Do not add a retry loop. |
+| `401`, `unauthenticated` | LogBrew rejected the key. Automatic delivery pauses with `pausedReason: "authentication"`. Correct or replace the project SDK key before you create a new client. Never use an account credential. |
+| `429`, `rate_limited` | The SDK keeps the batch and pauses automatic delivery with `pausedReason: "rate_limit"`. Do not add a retry loop. |
 | `400`, `transport_error` | LogBrew rejected the request. Check the event fields and package versions. |
-| `network_failure` | The SDK has no delivery result. Check connectivity and `deliveryHealth()`. |
+| `network_failure` | The SDK has no delivery result. LogBrew can have accepted the event. Check connectivity and `deliveryHealth()`. |
 | `5xx`, `transport_error` | The SDK already retried. Read the saved logs before you retry manually. |
 | Empty CLI result | Check the project, key, event time, and filters. |
 

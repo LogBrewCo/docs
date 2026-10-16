@@ -174,8 +174,14 @@ Request metrics and Python log forwarding are separate choices.
 Start with the defaults. Add request metrics when you need a latency view.
 Add the logging handler only to the loggers that help an investigation.
 
-Transport failures do not break the Flask response. Set
-`raise_flush_errors=True` only for a controlled diagnostic.
+By default, the initializer owns an HTTP transport. It queues each event, and
+a background worker starts delivery as soon as one event is in the queue.
+Delivery does not hold the response open. Transport failures do not break the
+Flask response.
+
+`flush_on_response=True` sends queued events on the response path instead.
+With that option, `raise_flush_errors=True` raises delivery errors. Use both
+only for a controlled diagnostic.
 
 ## Control log content
 
@@ -189,24 +195,41 @@ A log inside a request inherits the active trace and span. A log outside a
 request has no request trace.
 
 The handler sends the formatted message, logger name, and LogBrew level. It
-also sends the source file name, function, line, thread, and process names,
-but not the full source path. Primitive values from `extra={...}` become
-metadata. Review those values before you log from a user-facing request.
+also sends the source file name, module, function, line, thread, and process
+names, but not the full source path. Primitive values from `extra={...}`
+become metadata. Review those values before you log from a user-facing
+request.
 
-Python `DEBUG` records become LogBrew `info`. The original Python level name
-and number stay in metadata.
+Python `DEBUG` records become LogBrew `info`. `WARNING` becomes `warning`, and
+`CRITICAL` becomes `critical`. The original Python level name and number stay
+in metadata. To send fewer records, give the handler its own level, such as
+`LogBrewLoggingHandler(logbrew.client, level=logging.WARNING)`.
+
+The console and LogBrew can receive the same record. For example, configure
+the console before you create the Flask app:
+
+```python
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+)
+```
+
+The console gets formatted text. LogBrew keeps the message, level, logger, and
+metadata as separate fields.
 
 A log record with `exc_info` includes the exception type and message. The
 full exception text is sent only when the handler has
-`include_exception_text=True`. Do not put credentials, personal data, or
-request bodies in log or exception messages.
+`include_exception_text=True`. This is separate from automatic exception
+capture, which never sends the exception message. Do not put credentials,
+personal data, or request bodies in log or exception messages.
 
 ## What the integration captures
 
 | Signal | Default behavior |
 | --- | --- |
 | Request trace | One server span with method, Flask route template, status code, and duration. |
-| Exception issue | Unhandled type, fixed `Unhandled exception` summary, `flask.middleware` mechanism, handled state, and up to 32 sanitized frames. |
+| Exception issue | Title `<METHOD> <route template> failed`, unhandled type, fixed `Unhandled exception` summary, `flask.middleware` mechanism, handled state, and up to 32 sanitized frames. |
 | Application log | Opt in with `LogBrewLoggingHandler`; an in-request log inherits the active trace and span. |
 | Request metric | Opt in with `capture_request_metrics=True`; emits the `http.server.duration` delta histogram with the description `Duration of one completed server request.` |
 | Inbound trace | Continues a valid W3C `traceparent` with a new child span. |
@@ -215,6 +238,13 @@ Span names use the HTTP method and the matched route template. For example,
 `/orders/100` and `/orders/200` share `GET /orders/<int:order_id>`. An
 unmatched request uses the fixed `<unmatched>` label. A missing or invalid
 `traceparent` starts a new trace.
+
+Span metadata contains the method, route template, endpoint, status code, and
+duration. It does not contain the concrete path or a query string.
+
+In 0.1.6 and newer, the request span covers the full Flask dispatch.
+Before-request hooks, error handlers, and teardown share the request trace. A
+streamed response ends its span when the body finishes or closes.
 
 ### Test exception capture
 
@@ -260,7 +290,9 @@ examples.
 
 Give each helper a stable operation name and a route or statement template.
 Do not put record IDs, customer values, SQL bind values, or message payloads
-in those names. Outbound HTTP helpers add one W3C `traceparent` header. They
+in those names. Add child spans only where the dependency matters to the
+request. A span for every small call makes the trace harder to read.
+Outbound HTTP helpers add one W3C `traceparent` header. They
 do not capture full URLs, query strings, bodies, cookies, or arbitrary
 headers. Database, cache, and queue helpers do not capture bind values,
 results, cache values, or queue payloads.
@@ -284,7 +316,12 @@ such as `--lazy-apps`. The Python client rejects reuse after a process fork.
 
 Call `logbrew.client.shutdown()` from the process manager's per-worker
 shutdown hook. It sends the remaining queued events and closes the client. Do
-not call it after every request.
+not call it after every request. After shutdown, the client rejects new
+events from that worker.
+
+A response can finish before the worker sends its last queued events. During
+a deploy or scale-down, a graceful shutdown gives those events a final
+delivery attempt.
 
 ## Recover from setup problems
 
