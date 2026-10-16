@@ -1,0 +1,374 @@
+---
+title: "Referência da CLI do LogBrew: comandos e filtros"
+sidebarTitle: "Referência da CLI"
+description: "Encontre comandos, filtros, paginação por cursor, acompanhamento ao vivo, saída JSON e erros da CLI do LogBrew."
+---
+
+A [CLI de código aberto do LogBrew](https://github.com/LogBrewCo/cli) lê
+telemetria e gerencia dados da conta a partir de um terminal. Comece pelo
+[guia da CLI](/pt-BR/guides/cli) para ver a instalação, o login e as tarefas
+comuns.
+
+## Como a CLI funciona
+
+Use texto legível em um terminal. Use `--json` em scripts e agentes de
+programação.
+
+O login da conta é necessário para as leituras da conta. Antes de iniciar um
+login, execute `logbrew status --json`. Uma pessoa precisa concluir a
+autorização no navegador. As chaves de ingestão do projeto enviam telemetria.
+Elas não substituem o login da conta.
+
+A criação de projetos e de chaves, as mudanças de status, prioridade e
+responsável de problemas, as implantações e as atualizações de suporte
+alteram dados da conta. Antes de executar uma dessas ações, confirme que a
+ação e o alvo estão corretos.
+
+Execute `logbrew --help` para ver todos os comandos. Adicione `--help` a um
+comando, como `logbrew read logs --help`, para ver as flags dele. Execute
+`logbrew help json` para ver as regras de JSON.
+
+| Família de comandos | Finalidade |
+| --- | --- |
+| `login`, `whoami`, `me`, `logout` | Iniciar o login, ler a identidade da conta ou encerrar a sessão local. |
+| `status`, `health`, `doctor`, `version`, `examples` | Ler o acesso, a prontidão do projeto, a versão da CLI ou exemplos para a primeira execução. |
+| `setup` | Ler manifestos locais e imprimir um plano de configuração do SDK. Ele não muda arquivos nem executa o comando de instalação. |
+| `projects` | Ler o catálogo de projetos ativos. |
+| `projects repositories` | Ler os repositórios conectados ou descobrir componentes em um repositório. |
+| `projects create`, `projects keys create` | Criar um projeto ou criar uma chave de ingestão para um projeto existente. |
+| `projects setup` | Registrar a configuração observada de um projeto existente. |
+| `projects archive`, `projects delete` | Arquivar um projeto ou excluir o projeto permanentemente depois de uma confirmação. |
+| `usage`, `account usage` | Ler o uso, os limites, o estado da cota e as datas de reinício. |
+| `mcp grants`, `mcp revoke` | Listar pelo nome os clientes MCP conectados à sua conta ou revogar uma conexão. |
+| `read` | Ler logs, problemas, ações, versões, métricas, traces ou um item. |
+| `explain` | Ler evidências limitadas de um problema, log, ação, trace, span, métrica ou versão. |
+| `investigate issue` | Ler as evidências da investigação de um problema ou verificar uma implantação candidata. |
+| `issues archive`, `issues resolve`, `issues reopen` | Definir o status de 1 problema ou de até 100 problemas em um projeto. |
+| `issues priority` | Definir a prioridade de 1 problema ou de até 100 problemas em um projeto. |
+| `issues assign`, `issues unassign` | Definir ou remover o responsável de 1 problema ou de até 100 problemas em um projeto. |
+| `issues assignees` | Listar as contas que podem ser responsáveis por problemas em um projeto. |
+| `set issue`, `resolve`, `close`, `ignore`, `reopen` | Definir o status de 1 problema. `close` significa `resolved`. `ignore` e `ignored` significam `archived`. |
+| `deploy` | Registrar uma implantação concluída. |
+| `debug-artifacts` | Fazer upload de arquivos de depuração nativos da Apple ou do Android, ou consultar uma identidade de imagem. |
+| `analytics` | Ler a visão geral, propriedades, comparações, caminhos, funis, retenção ou ciclo de vida. |
+| `support` | Criar, ler, responder, fechar ou reabrir relatos de suporte. |
+| `watch` | Transmitir logs, problemas ou ações ao vivo. |
+
+## <span id="read-a-project-doctor-report">Ler o relatório do doctor de um projeto</span>
+
+Use um ID de projeto de `logbrew projects --json`:
+
+```bash
+logbrew doctor --project "<project_id>" --json
+```
+
+O comando lê o estado do projeto e um log recente. Ele não cria projeto, não
+muda chave e não registra configuração.
+
+O relatório tem `status`, `checks` e `next`. Cada verificação tem `check`,
+`status` e `next`. As verificações são `api`, `auth`, `project`,
+`ingest_key`, `setup`, `telemetry` e `logs`.
+
+O código de saída `0` significa que a CLI gravou um relatório. Ele não
+significa que o projeto está pronto. Leia o `status` do relatório e cada
+verificação. Uma verificação `not_checked` não passou.
+
+| `status` do relatório | Significado e próximo passo |
+| --- | --- |
+| `auth_invalid` | O acesso da conta está ausente ou é inválido. Uma pessoa executa `logbrew login`. |
+| `project_missing` | Esta conta não consegue acessar o projeto. Use um ID de `logbrew projects --json`. |
+| `api_unreachable` | A requisição à API não foi concluída. Verifique a conexão de rede e execute o comando de novo. |
+| `check_failed` | Uma requisição falhou ou a resposta dela era inválida. Execute o comando de novo sem mudanças. Se ele falhar de novo, abra [Relatar um problema](/pt-BR/guides/report-a-problem). |
+| `needs_ingest_key` | O projeto não tem chave de ingestão ativa. Crie uma chave só se você tiver permissão para mudar o projeto. |
+| `needs_setup` | É preciso configurar o SDK. Siga o [início rápido](/pt-BR/quickstart). |
+| `needs_telemetry` | A configuração começou, mas o LogBrew não tem telemetria do projeto. Envie um sinal de teste. |
+| `ready` | O projeto tem uma chave ativa e telemetria. Leia o sinal da sua tarefa. |
+
+Quando a leitura do projeto dá certo, a verificação `logs` é `visible`,
+`empty`, `unavailable`, `error` ou `invalid_response`. Essa verificação não
+muda o `status` do relatório. Um resultado de logs vazio não diz nada sobre
+outros sinais. Uma leitura com falha não é um resultado vazio.
+
+Use `next` como orientação de recuperação. Ele não dá permissão para mudar o
+estado da conta ou do projeto.
+
+### Exemplo: acesso da conta ausente
+
+Sem credenciais da conta, o comando não faz nenhuma requisição à API. Ele
+grava este relatório na saída padrão e termina com o código `0`:
+
+```json
+{
+  "checks": [
+    { "check": "api", "next": "run the API reachability check first", "status": "not_checked" },
+    { "check": "auth", "next": "run logbrew login", "status": "missing" },
+    { "check": "project", "next": "resolve the prior check first", "status": "not_checked" },
+    { "check": "ingest_key", "next": "resolve the prior check first", "status": "not_checked" },
+    { "check": "setup", "next": "resolve the prior check first", "status": "not_checked" },
+    { "check": "telemetry", "next": "resolve the prior check first", "status": "not_checked" },
+    { "check": "logs", "next": "resolve the prior check first", "status": "not_checked" }
+  ],
+  "next": "run logbrew login",
+  "status": "auth_invalid"
+}
+```
+
+Este relatório é diferente do
+[diagnóstico da API de projetos](/pt-BR/concepts/projects#diagnose-project-setup).
+Ele não contém os campos de API `state`, `setup_status` ou `next_action`.
+
+## <span id="filters">Filtros</span>
+
+| Filtro | Comandos |
+| --- | --- |
+| `--project <project_id>` | logs, issues, actions, releases, metrics, traces, trace |
+| `--release <release>` | logs, issues, actions, releases, metrics, traces, trace |
+| `--environment <environment>` | logs, issues, actions, releases, metrics, traces, trace |
+| `--service <service_name>` | logs, issues, actions, releases, metrics, traces |
+| `--since 24h` | logs, issues, actions, releases, metrics, traces, analytics |
+| `--until <RFC3339>` | logs, issues, actions, releases, metrics, traces, analytics |
+| `--limit 100` | logs, issues, actions, releases, metrics, traces |
+| `--severity error` | logs, watch |
+| `--search checkout` | logs |
+| `--trace <trace_id>` | logs |
+| `--status unresolved` | issues (`unresolved`, `resolved`, `archived`) |
+| `--priority high` | issues (`high`, `medium`, `low`) |
+| `--assignee me` | issues (`me`, `none` ou um ID de usuário) |
+| `--status error` | traces (`error`, `ok`) |
+| `--min-duration-ms <milliseconds>` | traces |
+| `--name <name>` | actions, metrics |
+| `--user <distinct_id>` | actions |
+
+`--since` aceita uma duração, como `24h` ou `7d`, ou um timestamp RFC 3339.
+`--until` aceita um timestamp RFC 3339. Ele é um horário final exclusivo e
+precisa ser posterior a `--since`. A leitura de um problema pelo ID não
+aceita `--until`.
+
+A gravidade do log é `info`, `warning`, `error` ou `critical`. O status do
+problema é o estado dele no fluxo de trabalho, não a gravidade.
+`--status ignored` é um nome antigo de `--status archived`. `--status open`
+significa `unresolved`, e `--status closed` significa `resolved`.
+`--assignee none` seleciona problemas sem responsável. Outro valor de
+`--assignee` que não seja `me` nem um ID de usuário falha com
+`invalid_assignee`.
+
+A CLI também aceita estes aliases: `--project-id`, `--env`, `--service-name`,
+`--trace-id`, `--distinct-id` e `--level` para `--severity`. Em scripts
+novos, use os nomes da tabela.
+
+Este comando lê os erros de 1 dia:
+
+```bash
+logbrew read logs --severity error \
+  --since 2026-10-01T00:00:00Z --until 2026-10-02T00:00:00Z --json
+```
+
+O ID do projeto seleciona o projeto. O nome do serviço seleciona um
+componente nesse projeto. Coloque aspas em valores que contêm espaços:
+
+```bash
+logbrew read logs --project "<project_id>" \
+  --service checkout-api --since 24h \
+  --severity error --search "checkout failed" --json
+```
+
+Para um texto de busca que começa com hífen, coloque `--` antes do texto:
+
+```bash
+logbrew logs --json -- --timeout
+```
+
+## Selecionar uma ocorrência do problema
+
+Um problema agrupa ocorrências correspondentes. Leia o problema para ver o
+status, o número de ocorrências e os horários da primeira e da última
+ocorrência:
+
+```bash
+logbrew read issue "<issue_id>" --json
+```
+
+Use `explain issue` ou `investigate issue` para ver as evidências de uma
+ocorrência. Sem `--occurrence`, o LogBrew seleciona a ocorrência recomendada.
+Ela nem sempre é o evento mais recente. Para ler o evento mais recente:
+
+```bash
+logbrew explain issue "<issue_id>" --occurrence latest --json
+```
+
+`--occurrence` também aceita `recommended`, `first` ou um ID de ocorrência
+que o LogBrew retornou. Esses comandos rejeitam filtros de projeto, versão,
+ambiente e tempo. Antes de comparar evidências, leia o timestamp da
+ocorrência selecionada. Consulte
+[Investigar um problema](/pt-BR/guides/investigate-an-issue) para ver os
+campos de evidências.
+
+## <span id="change-issue-status-and-priority">Mudar o status e a prioridade de problemas</span>
+
+Use 1 ID de problema para mudar 1 problema:
+
+```bash
+logbrew issues archive "<issue_id>" --json
+logbrew issues priority high "<issue_id>" --json
+```
+
+`archive` define `archived`, `resolve` define `resolved` e `reopen` define
+`unresolved`. A prioridade é `high`, `medium` ou `low`. Uma prioridade que
+você define fica fixa. Caso contrário, a prioridade acompanha a gravidade do
+problema.
+
+Para mudar mais de 1 problema, adicione `--project`. Todos os problemas
+precisam estar nesse projeto. Um comando muda até 100 problemas:
+
+```bash
+logbrew issues resolve "<issue_id_1>" "<issue_id_2>" \
+  --project "<project_id>" --json
+```
+
+O resultado tem 1 entrada para cada problema. Cada entrada é `updated`,
+`unchanged` ou `not_found`. Um problema `unchanged` já tinha o valor
+solicitado. Você pode executar o mesmo comando de novo depois de uma falha de
+rede.
+
+Esses comandos não pedem confirmação. Confira antes os IDs dos problemas. As
+leituras e mudanças de problemas mostram `archived` em vez de `ignored`, além
+de `priority`, `priority_source` e `assignee` de cada problema. Consulte a
+[resposta de problema](/pt-BR/reference/telemetry-response-shapes#issue-response).
+
+## Atribuir problemas
+
+Um problema tem 0 ou 1 responsável. Liste as contas às quais você pode
+atribuir problemas em um projeto:
+
+```bash
+logbrew issues assignees --project "<project_id>" --json
+```
+
+Atribua 1 problema a uma conta, ou a você mesmo com `me`:
+
+```bash
+logbrew issues assign "<user_id>" "<issue_id>" --json
+logbrew issues assign me "<issue_id>" --json
+```
+
+Remova o responsável:
+
+```bash
+logbrew issues unassign "<issue_id>" --json
+```
+
+Adicione `--project` para mudar até 100 problemas desse projeto, como no
+status e na prioridade. O responsável precisa conseguir ler o projeto. Para
+encontrar os problemas atribuídos a você:
+
+```bash
+logbrew read issues --project "<project_id>" --assignee me \
+  --status unresolved --json
+```
+
+A saída em texto mostra o nome do responsável. Se a conta não tiver nome, ela
+mostra o endereço de e-mail e depois o ID do usuário. Um problema sem
+responsável mostra `unassigned`. Use a CLI 0.1.83 ou posterior.
+
+## <span id="read-the-next-page">Ler a próxima página</span>
+
+Logs, problemas, ações, métricas e traces aceitam paginação por cursor.
+Versões não aceitam. Use `--pagination cursor` na primeira página:
+
+```bash
+logbrew read logs --project "<project_id>" --since 24h \
+  --pagination cursor --limit 100 --json
+```
+
+A resposta tem `logs` e `next_cursor`. Um `next_cursor` não nulo tem `time` e
+`id`. Envie esses valores com `--cursor-time` e `--cursor-id`:
+
+```bash
+logbrew read logs --project "<project_id>" --since 24h \
+  --pagination cursor --limit 100 \
+  --cursor-time "<returned_time>" \
+  --cursor-id "<returned_id>" --json
+```
+
+Mantenha os mesmos filtros e o mesmo limite em todas as páginas. Pare quando
+`next_cursor` for `null`. Use o cursor, e não a contagem de linhas, para
+decidir se há mais páginas. A última página pode estar vazia:
+
+```json
+{
+  "logs": [],
+  "next_cursor": null
+}
+```
+
+Problemas, ações e métricas usam o mesmo formato, com `issues`, `actions` ou
+`metrics` no lugar de `logs`.
+
+## <span id="live-watch">Acompanhamento ao vivo</span>
+
+`logbrew watch --json` transmite logs, problemas e ações ao vivo. Adicione
+`logs`, `issues` ou `actions` para transmitir um único tipo. `tail`, `follow`
+e `stream` são aliases de `watch`. O watch não aceita traces nem spans.
+
+O watch precisa de `--json`. Sem essa flag, o comando escreve
+`watch streams JSON for agents` e termina com o código `1`.
+
+Os eventos de problemas do watch mostram um problema arquivado como
+`ignored`, sem prioridade. Leia o problema para ver o status e a prioridade
+atuais.
+
+O watch aceita só `--severity`, como `--severity error,critical`.
+`logbrew watch actions` não aceita `--severity`. A CLI aplica esse filtro
+depois de receber os eventos. Ele não reduz o que o servidor envia. O watch
+não tem filtro de projeto, versão, ambiente ou tempo. Para esses filtros, use
+um comando `read`. Depois de uma desconexão temporária, a CLI aguarda e se
+reconecta.
+
+## <span id="read-results-and-errors">Ler resultados e erros</span>
+
+Coloque `--json` antes ou depois do comando. Leia o código de saída antes de
+usar a saída. Não faça parsing da saída legível para pessoas. Ela pode mudar
+entre versões da CLI.
+
+| Código de saída | Significado |
+| --- | --- |
+| `0` | Sucesso. O JSON está na saída padrão. |
+| `1` | O comando falhou durante a execução, por exemplo por um erro de API ou de rede. |
+| `2` | A CLI rejeitou o comando antes de executá-lo. |
+
+A saída de sucesso mantém o formato da resposta da API. Ela pode ser um array
+ou um objeto. Sem paginação por cursor, uma leitura de logs retorna um array.
+Um array vazio significa que nenhum log corresponde. Isso não é um erro.
+
+Os erros vão para a saída de erro padrão. A exceção é
+`debug-artifacts --json`, que grava os erros na saída padrão. Um erro JSON
+tem `ok`, `error`, `message` e `next`. Use `error` como o código estável da
+falha. Examine `next` antes de executar o comando que ele sugere.
+
+Por exemplo, `logbrew watch traces --json` termina com o código `2` e
+escreve:
+
+```json
+{
+  "ok": false,
+  "error": "unknown_resource",
+  "message": "unknown resource: traces",
+  "next": "use logbrew traces for recent traces, or logbrew trace <trace_id> for one trace"
+}
+```
+
+`logbrew read logs --limit 0 --json` termina com o código `2` e escreve:
+
+```json
+{
+  "ok": false,
+  "error": "invalid_limit",
+  "message": "invalid limit: 0",
+  "next": "use --limit with a positive whole number"
+}
+```
+
+Corrija o valor e execute o comando de novo. Um comando rejeitado não é um
+resultado vazio. Consulte [Erros da API](/pt-BR/reference/api-errors) para
+erros HTTP e a [referência da API de telemetria](/pt-BR/reference/telemetry-api)
+para requisições diretas à API.

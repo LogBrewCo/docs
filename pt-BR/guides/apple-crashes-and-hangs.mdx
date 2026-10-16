@@ -1,0 +1,401 @@
+---
+title: "Relatórios de crash no iOS: crashes e travamentos"
+sidebarTitle: "Crashes e travamentos da Apple"
+description: "Configure relatórios de crash no aplicativo iOS, faça upload dos dSYMs correspondentes e leia no LogBrew os logs de crash simbolizados."
+---
+
+Use este fluxo para capturar crashes nativos e travamentos da thread principal
+em um aplicativo iOS. A captura de travamentos requer UIKit. Faça upload do
+dSYM correspondente para ver os locais no código-fonte nos frames da pilha.
+
+O aplicativo salva um relatório local quando sofre um crash. Em uma
+inicialização posterior, seu aplicativo chama o reenvio (replay) para enviar
+as evidências do crash ao LogBrew. O LogBrew não envia o relatório bruto da
+Apple.
+
+<Note>
+  Use o LogBrew Swift 0.1.6 ou posterior. Para fazer upload de artefatos de
+  depuração, use a CLI nativa do LogBrew 0.1.24 ou posterior.
+</Note>
+
+<Warning>
+  Dentro do aplicativo, use uma configuração de ingestão com escopo de projeto.
+  Use um login da conta para uploads de artefatos e leituras de problemas. Uma
+  chave de artefato do projeto também pode fazer upload a partir de uma
+  máquina de build.
+  Nunca inclua no aplicativo um token de acesso da conta ou uma chave de
+  artefato.
+</Warning>
+
+## Planeje o escopo da captura
+
+Confira quando seu aplicativo pode reenviar cada tipo de falha.
+
+| Falha | Resultado da captura | Momento da entrega |
+| --- | --- | --- |
+| Crash fatal da Apple | Um evento de crash nativo não tratado | Uma inicialização posterior do aplicativo |
+| Travamento da thread principal recuperado | Um evento de travamento tratado | No reenvio, depois da recuperação |
+| Travamento seguido de encerramento | Um evento de travamento não tratado | Uma inicialização posterior do aplicativo |
+
+Defina o valor da versão implantada antes do build. Ele precisa identificar a
+versão e o build do aplicativo. Use o mesmo valor no SDK, no upload do dSYM e
+no filtro de problemas.
+
+Não anexe payloads de usuários, corpos de requisição ou cabeçalhos aos
+metadados do crash.
+
+## Adicione o produto de crash
+
+Primeiro, [configure a telemetria do SDK](/pt-BR/guides/sdk-ingestion) no seu
+aplicativo. O reenvio usa esse `client` e esse `transport`.
+
+Adicione o SDK público pelo Swift Package Manager.
+
+```swift
+.package(
+    url: "https://github.com/LogBrewCo/sdk.git",
+    from: "0.1.6"
+)
+```
+
+Adicione o produto `LogBrew` para enviar telemetria. Adicione `LogBrewCrash`
+só quando o aplicativo ativar explicitamente a captura nativa de crashes ou
+de travamentos.
+
+A integração de captura é compatível com iOS 15 ou posterior. Mantenha um
+único objeto de captura, controlado pelo aplicativo, porque os handlers
+nativos de erros fatais valem para o processo inteiro.
+
+## Configure uma identidade exata
+
+Use o mesmo projeto, a mesma versão, o mesmo ambiente e o mesmo serviço na
+configuração em tempo de execução e no upload do artefato. O LogBrew não
+deriva nem substitui esses valores.
+
+```swift
+import Foundation
+import LogBrew
+import LogBrewCrash
+
+let applicationSupport = try FileManager.default.url(
+    for: .applicationSupportDirectory,
+    in: .userDomainMask,
+    appropriateFor: nil,
+    create: true
+)
+
+let identity = try NativeArtifactIdentity(
+    projectId: "550e8400-e29b-41d4-a716-446655440000",
+    release: "com.example.app@1.2.3+45",
+    environment: "production",
+    service: "ios-app"
+)
+
+let watchdog: NativeHangWatchdogConfiguration? = nil
+
+let crashCapture = NativeCrashCapture(
+    configuration: try NativeCrashConfiguration(
+        storageDirectory: applicationSupport.appendingPathComponent(
+            "LogBrewCrash",
+            isDirectory: true
+        ),
+        artifactIdentity: identity,
+        hangWatchdog: watchdog
+    )
+)
+
+try crashCapture.install()
+```
+
+Instale o objeto de captura na thread principal antes de criar a UI raiz.
+Crie antes o diretório pai dele. Mantenha o diretório de armazenamento
+privado e sob controle do aplicativo.
+
+O objeto de captura registra exceções Mach, sinais, exceções C++ e exceções
+Objective-C. O relatório local não inclui o conteúdo da memória, nomes de
+filas nem logs do console.
+
+O relatório de crash local pode conter detalhes sensíveis do aplicativo e do
+dispositivo. Mantenha esse relatório fora de backups na nuvem e de diretórios
+compartilhados. O LogBrew envia UUIDs de frames, arquiteturas e offsets em
+vez do relatório bruto.
+
+`NativeCrashConfiguration` tem dois limites opcionais:
+
+| Parâmetro | Padrão | Faixa | Efeito |
+| --- | --- | --- | --- |
+| `maxStoredReports` | `5` | 1 a 32 | O número de relatórios locais que o aplicativo mantém. |
+| `maxReplayBytes` | 4 MiB | 1 KiB a 16 MiB | O reenvio descarta um relatório maior que esse tamanho. |
+
+Um valor fora da faixa faz a configuração lançar
+`crash_invalid_configuration`.
+
+## Ative a captura de travamentos
+
+A captura de travamentos fica desativada quando `watchdog` é `nil`. Para
+ativá-la, substitua a declaração de `watchdog` acima antes de chamar
+`install()`:
+
+```swift
+let watchdog = try NativeHangWatchdogConfiguration(
+    threshold: 2
+)
+```
+
+O limite de tempo é em segundos, de 1 a 30. A captura de travamentos também
+requer `artifactIdentity`. Sem esse valor, a configuração lança
+`crash_invalid_configuration`.
+
+Mantenha um único objeto `crashCapture` durante toda a vida do processo. Um
+segundo objeto de captura não consegue ser instalado. A chamada `install()`
+dele lança `crash_capture_owned`. Para mudar o limite de tempo, use o novo
+valor na próxima inicialização do aplicativo.
+
+Um travamento recuperado é reenviado com `crash.handled` definido como
+`true`. Um travamento ainda em andamento quando o processo foi encerrado é
+reenviado com `crash.handled` definido como `false`.
+
+As duas formas incluem os metadados numéricos `durationMs`. Elas mantêm a
+mesma identidade de artefato usada pelos frames de crashes fatais.
+
+O watchdog pausa enquanto o aplicativo está inativo ou sob um depurador. Ele
+também suprime a captura durante pressão térmica séria.
+
+Um limite de tempo curto pode relatar como travamento um trabalho normal da
+thread principal. Teste o limite de tempo com a configuração de build que você
+publica. O estado “tratado” descreve a recuperação. Ele não marca o problema
+como resolvido. Um travamento tratado ainda bloqueou a interface, então
+revise-o também.
+
+## Reenvie depois da inicialização
+
+Depois de instalar a captura, reenvie os relatórios pendentes pelo cliente do
+SDK.
+
+```swift
+let replay = try crashCapture.replayPendingReports(
+    in: client,
+    transport: transport
+)
+
+print(
+    "acknowledged=\(replay.acknowledged) " +
+    "discarded=\(replay.discarded) " +
+    "pending=\(replay.pending)"
+)
+```
+
+Seu aplicativo precisa chamar o reenvio. A recuperação do travamento, por si
+só, não envia nenhum evento. Chame o mesmo método depois da recuperação ou na
+próxima inicialização.
+
+O reenvio processa primeiro os relatórios válidos mais antigos e mantém os IDs
+estáveis dos eventos. Uma entrega com falha deixa o relatório pendente. Uma
+entrega aceita remove o relatório.
+
+O reenvio descarta os relatórios que não consegue ler e os relatórios maiores
+que `maxReplayBytes`. Confira as três contagens. Uma contagem de pendentes
+igual a zero, por si só, não comprova a entrega.
+
+Ative a entrega persistente antes do reenvio quando uma requisição com falha
+precisar sobreviver a outra reinicialização. Não chame `purge()` durante a
+recuperação rotineira de rede ou de autenticação.
+
+## Faça upload do dSYM correspondente
+
+Gere o archive do aplicativo com as informações de depuração ativadas. Guarde
+o dSYM do build exato que os usuários executam.
+
+Inspecione os UUIDs de imagem dele.
+
+```bash
+xcrun dwarfdump --uuid "path/to/App.app.dSYM"
+```
+
+Valide o artefato localmente antes do upload.
+
+```bash
+logbrew debug-artifacts upload "path/to/App.app.dSYM" \
+  --project "<project UUID>" \
+  --release "com.example.app@1.2.3+45" \
+  --environment "production" \
+  --service "ios-app" \
+  --expect-image-uuid "<Mach-O UUID>" \
+  --dry-run \
+  --json
+```
+
+Repita `--expect-image-uuid` para cada arquitetura necessária. O comando falha
+quando o conjunto de UUIDs encontrado é diferente do conjunto esperado.
+
+Confira o acesso da conta. Depois, execute o mesmo comando sem `--dry-run`.
+
+```bash
+logbrew status --json
+
+logbrew debug-artifacts upload "path/to/App.app.dSYM" \
+  --project "<project UUID>" \
+  --release "com.example.app@1.2.3+45" \
+  --environment "production" \
+  --service "ios-app" \
+  --expect-image-uuid "<Mach-O UUID>" \
+  --json
+```
+
+O comando de upload valida os objetos Apple compatíveis e verifica cada
+identidade do upload. Ele não inclui caminhos locais nem nomes de arquivos
+nos metadados da API.
+
+O `status` do JSON mostra o resultado:
+
+| `status` | Significado |
+| --- | --- |
+| `validated` | A simulação (dry run) encontrou os objetos esperados. Nenhum upload foi feito. |
+| `verified` | O acesso da conta fez o upload e verificou todas as identidades. |
+| `already_present` | O LogBrew já tem todas as identidades. |
+| `uploaded` | Uma chave de artefato do projeto fez o upload dos arquivos. A CLI não conseguiu verificá-los. |
+
+Uma máquina de build pode fazer upload com uma chave de artefato do projeto
+em `LOGBREW_TOKEN`, em vez do acesso da conta. Crie a chave como mostrado em
+[Criar uma chave de artefato](/pt-BR/guides/source-maps#create-an-artifact-key).
+Esse upload informa `uploaded`. Depois, verifique cada identidade com o acesso
+da conta:
+
+```bash
+logbrew debug-artifacts lookup \
+  --project "<project UUID>" \
+  --release "com.example.app@1.2.3+45" \
+  --environment "production" \
+  --service "ios-app" \
+  --image-uuid "<Mach-O UUID>" \
+  --architecture arm64 \
+  --json
+```
+
+`status: "found"` confirma o artefato. `status: "missing"` significa que o
+LogBrew não tem nenhum artefato para essa identidade.
+
+A resolução usa o UUID da imagem e a identidade completa do artefato, não o
+nome do arquivo de origem. Um novo build do mesmo código pode ter UUIDs
+diferentes. Faça upload do pacote dSYM exato, não de um diretório de build
+inteiro.
+
+## Verifique a leitura no LogBrew
+
+Filtre a lista de problemas com o mesmo escopo de execução. Este exemplo
+seleciona problemas `unresolved`. Um problema resolvido ou arquivado não
+aparece.
+
+```bash
+logbrew read issues \
+  --project "<project UUID>" \
+  --release "com.example.app@1.2.3+45" \
+  --environment "production" \
+  --service "ios-app" \
+  --status "unresolved" \
+  --since "24h" \
+  --json
+```
+
+A resposta da lista identifica o problema agrupado. Leia o detalhe dele para
+solicitar a resolução de frames no LogBrew.
+
+```bash
+logbrew read issue "<issue UUID>" --json
+```
+
+Um artefato correspondente adiciona um objeto `symbolication`. Este exemplo
+mostra campos selecionados de um problema com um frame resolvido, não a
+resposta completa.
+
+```json
+{
+  "severity": "critical",
+  "attributes": {
+    "metadata": {
+      "crash.replayed": true
+    }
+  },
+  "symbolication": {
+    "status": "resolved",
+    "frames": [
+      {
+        "index": 0,
+        "status": "resolved",
+        "resolved": {
+          "source": "AppRuntime.swift",
+          "line": 42,
+          "column": 1,
+          "name": "terminateForCrash()"
+        }
+      }
+    ]
+  }
+}
+```
+
+## Leia as evidências do crash
+
+Cada frame tem o próprio `status`. O campo `symbolication.status` usa os
+mesmos valores:
+
+| `status` | Significado |
+| --- | --- |
+| `resolved` | Um artefato correspondente resolveu o frame. `resolved` tem o arquivo de origem, a linha, a coluna ou o nome da função que o artefato fornece. |
+| `artifact_not_found` | Nenhum artefato no LogBrew corresponde à identidade do evento e ao UUID da imagem. |
+| `source_not_resolved` | Existe um artefato correspondente, mas ele não resolveu este frame. |
+| `invalid_metadata` | O evento tem metadados de artefato incompletos ou inconsistentes. |
+| `unavailable` | Não foi possível concluir a leitura da resolução do frame. |
+
+Mantenha um frame não resolvido como não resolvido nas suas anotações. Não o
+relate como uma pilha vazia.
+
+O LogBrew resolve os frames quando você lê o problema. Um dSYM com upload
+feito depois pode resolver frames de um evento anterior. Ele não pode adicionar
+frames que o evento não capturou.
+
+Um frame da aplicação restringe a busca no código, mas não comprova a causa.
+Para ver os breadcrumbs, a cadeia de exceções e as evidências de trace, leia a
+investigação do problema:
+
+```bash
+logbrew investigate issue "<issue UUID>" --json
+```
+
+Nessa resposta, um frame com `source: "symbolicated"` veio de um artefato do
+upload. Um frame com `source: "captured"` é o local que o aplicativo enviou.
+Veja os campos da resposta em
+[Investigar um problema](/pt-BR/guides/investigate-an-issue).
+
+Mantenha o escopo completo de projeto, versão, ambiente e serviço em todas as
+leituras. Não amplie para outros projetos uma busca que falhou.
+
+## Verifique a configuração de produção
+
+Use uma falha de teste aprovada no build implantado. Nunca use a ação de um
+cliente como gatilho. Confira cada item na ordem e pare na primeira falha:
+
+1. A identidade em tempo de execução corresponde à identidade do artefato do
+   upload.
+2. Uma inicialização posterior reenvia um evento confirmado, com zero
+   relatórios descartados e zero pendentes.
+3. A lista de problemas com escopo retorna o problema de teste com o estado
+   “tratado” esperado.
+4. O frame da aplicação esperado é resolvido.
+5. Uma inicialização limpa posterior não adiciona outra ocorrência.
+
+## Recupere com segurança
+
+| Resultado | Recuperação |
+| --- | --- |
+| A autenticação do upload falha | Execute `logbrew login`, confirme com `logbrew status --json` e repita exatamente o mesmo upload. |
+| A validação de UUID do upload falha | Selecione o dSYM do build implantado e repita a simulação. |
+| `artifact_not_found` | Verifique a identidade do evento e faça upload do dSYM correspondente com o mesmo escopo. |
+| `source_not_resolved` | Preserve todas as informações de depuração do build e inspecione as configurações do build implantado. |
+| `invalid_metadata` | Confirme que você usa o LogBrew Swift 0.1.6 ou posterior. Capture um novo evento com a identidade exata. |
+| `unavailable` | Mantenha o problema visível e repita mais tarde a mesma leitura de detalhe com escopo. |
+| O reenvio continua pendente | Corrija o estado do transporte ou da autenticação e abra o aplicativo de novo sem apagar o relatório. |
+| O reenvio informa entradas descartadas | Não as conte como entregues. Confira a configuração da captura e reproduza com um novo evento de teste aprovado. |
+
+Para a investigação geral de problemas, use
+[Investigar um problema com a API](/pt-BR/guides/investigate-an-issue).

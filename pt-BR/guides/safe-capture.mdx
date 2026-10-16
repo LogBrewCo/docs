@@ -1,0 +1,201 @@
+---
+title: "Ocultação de dados: mantenha dados sensíveis fora dos logs"
+sidebarTitle: "Controlar dados capturados"
+description: "Selecione campos de log aprovados. Teste localmente se há dados sensíveis. Veja os limites dos controles de captura em JavaScript, Node.js e navegador."
+---
+
+Selecione o que sua aplicação envia antes de ativar a captura. Mantenha
+senhas, tokens de acesso, conteúdo de formulários e dados privados de
+usuários fora dos eventos.
+
+Monte cada evento a partir de campos aprovados. Não copie para os metadados um
+objeto inteiro de requisição, resposta ou erro. A ocultação substitui um valor
+sensível. Um filtro omite um evento inteiro. Um evento válido do SDK ainda pode
+conter dados que sua aplicação não deve enviar.
+
+Este guia vale para estas versões de pacotes:
+
+- `@logbrew/sdk` 0.1.28
+- `@logbrew/node` 0.1.12
+- `@logbrew/browser` 0.1.11
+
+Para outros runtimes, leia o guia do pacote em
+[Integração do SDK](/pt-BR/guides/sdk-ingestion).
+
+## Selecione os campos da captura
+
+Para um checkout com falha, registre uma mensagem fixa, um modelo de rota e
+um código de status. Não registre nomes, endereços de e-mail ou dados de
+pagamento.
+
+| Campo | Regra de captura |
+| --- | --- |
+| Mensagem | Use um texto fixo, como `checkout.failed`. Não insira texto de formulários nem credenciais. |
+| Rota | Use um modelo, como `/orders/:id`. O caminho, a query ou o fragmento de uma URL podem conter valores privados. |
+| Status | Aceite só um código de status válido, não uma string vinda da entrada do usuário. |
+| Metadados | Selecione campos nomeados. Não copie todas as propriedades de uma requisição, resposta ou erro. |
+| Identidade e sessão | Use identificadores de telemetria aprovados, não um token de login ou um cookie de sessão. |
+
+Para o contexto de usuário e de sessão, consulte
+[Captura de eventos de produto](/pt-BR/guides/product-events#set-users-and-sessions-on-each-event).
+Um ID pode identificar uma pessoa mesmo quando não contém um nome.
+
+## Teste a seleção de campos localmente
+
+Use Node.js 18 ou mais recente. Em um diretório vazio, instale o pacote:
+
+```bash
+npm install --save-exact @logbrew/sdk@0.1.28
+```
+
+Este teste não usa nenhuma chave real e não envia nenhuma requisição. Salve o
+teste como `safe-capture.mjs`:
+
+```js
+import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import { LogBrewClient, SdkError } from "@logbrew/sdk";
+
+try {
+  const client = LogBrewClient.create({
+    apiKey: "local-preview-only",
+    sdkName: "privacy-check",
+    sdkVersion: "0.1.28",
+    automaticDelivery: false
+  });
+
+  function recordCheckoutFailure(input) {
+    const status = input?.status;
+    if (!Number.isInteger(status) || status < 400 || status > 599) {
+      return false;
+    }
+    client.log(randomUUID(), new Date().toISOString(), {
+      message: "checkout.failed",
+      level: "error",
+      metadata: { route: "/checkout", status }
+    });
+    return true;
+  }
+
+  const excludedValue = "SYNTHETIC_PRIVATE_VALUE";
+  assert.equal(recordCheckoutFailure({
+    status: 503,
+    authorization: excludedValue,
+    body: excludedValue
+  }), true);
+  assert.equal(recordCheckoutFailure({ status: excludedValue }), false);
+
+  const preview = client.previewJson();
+  const batch = JSON.parse(preview);
+  assert.equal(batch.events.length, 1);
+  assert.equal(preview.includes(excludedValue), false);
+  assert.deepEqual(batch.events[0].attributes.metadata, {
+    route: "/checkout",
+    status: 503
+  });
+  client.purgePendingEvents();
+  console.log(JSON.stringify({
+    ok: true,
+    checked_events: 1,
+    excluded_value_found: false
+  }));
+} catch (error) {
+  console.error(JSON.stringify({
+    ok: false,
+    error: error instanceof SdkError ? error.code : "privacy_check_failed"
+  }));
+  process.exitCode = 1;
+}
+```
+
+Execute o teste:
+
+```bash
+node safe-capture.mjs
+```
+
+Saída esperada:
+
+```json
+{"ok":true,"checked_events":1,"excluded_value_found":false}
+```
+
+Uma asserção com falha imprime `"ok":false` e termina com o código 1. Um erro
+de validação do SDK imprime o código de erro do SDK. Não imprima nem faça
+upload de uma prévia que contenha dados reais.
+
+Use o mesmo padrão no seu código de captura e mantenha as asserções nos seus
+testes. Adicione uma verificação para cada campo e valor que sua aplicação não
+deve enviar. Se você usa ocultação baseada em padrões, execute as
+verificações de novo depois de cada mudança de regra. Este teste verifica um
+log na fila. Ele não substitui uma revisão de privacidade.
+
+## Mensagens de erro e pilhas
+
+| Caminho de captura | Comportamento |
+| --- | --- |
+| `createIssueAttributesFromError` (core) | Mantém o texto do erro na mensagem do problema e em `metadata.errorMessage`. Adiciona `metadata.errorStack` só com `includeErrorStack: true`. As entradas da cadeia de exceções marcam cada mensagem como `redacted` e não levam o texto dela. |
+| Conversão do console no core | Pode manter o texto do erro na mensagem e nos metadados do log. |
+| `createBrowserErrorEvent` (navegador) | Usa um resumo fixo do erro, remove `metadata.errorMessage` e marca as mensagens da cadeia de exceções como ocultadas. |
+
+Um `options.message` personalizado não remove `metadata.errorMessage`.
+Confira o evento completo, não só o título. Mantenha valores sensíveis fora
+das mensagens de erro já na origem.
+
+## Use cada controle no escopo dele
+
+### Core JavaScript e Node.js
+
+`LogBrewClient.create` aceita `eventFilter`. Retorne `false` para omitir um
+evento antes que ele entre na fila. Qualquer outro valor de retorno mantém o
+evento. O filtro recebe uma cópia do evento, então mudar essa cópia não oculta
+nada. `createLogBrewNodeClient` e `createLogBrewBrowserClient` não aplicam
+`eventFilter` nestas versões.
+
+`droppedEvents()` conta os eventos descartados por limites de tamanho ou de
+fila. Ele não conta os eventos que `eventFilter` omitiu.
+
+O cliente Node adiciona contexto do runtime, como a versão do Node, o sistema
+operacional e a arquitetura. Defina `captureRuntimeContext: false` para
+omitir esse contexto. Essa configuração não remove o contexto que sua
+aplicação fornece e não interrompe a captura.
+
+### Navegador
+
+Por padrão, o cliente de navegador captura erros globais, rejeições não
+tratadas e uma visualização de página inicial. Defina `captureGlobalErrors`,
+`captureUnhandledRejections` ou `capturePageViews` como `false` para desativar
+um deles.
+
+As visualizações de página incluem o pathname. Elas omitem a query string, o
+fragmento, o título do documento e o user agent completo, a não ser que você
+defina `includeQueryString`, `includeHash`, `includeDocumentTitle` ou
+`includeUserAgent`. Se um pathname puder conter valores privados, desative as
+visualizações de página automáticas e envie sua própria visualização de
+página com um nome de rota seguro.
+
+`sanitizeMetadata` muda só os metadados. Ele não muda os nomes de
+visualizações de página nem de ações. O nome de uma visualização de página
+contém o pathname concreto, como `page_view /orders/1234`. Um `routeTemplate`
+nos metadados define a página ou tela usada em Análises, mas não muda o nome.
+`shouldCaptureError` omite só problemas do navegador. Ele não filtra logs nem
+outros sinais.
+
+Defina `captureRuntimeContext: false` para omitir a marca do navegador, a
+plataforma e a família do dispositivo. Essa configuração não controla
+`includeUserAgent`.
+
+## Antes da captura real
+
+Teste cada caminho de captura ativado com dados sintéticos, incluindo os
+caminhos de erro e as integrações de logging.
+
+As mudanças na captura valem só para eventos novos. `purgePendingEvents()`
+limpa uma fila local ociosa e falha enquanto a entrega está ativa. Ele não
+impede capturas posteriores nem remove eventos que o LogBrew aceitou. O
+`uninstall()` do navegador remove os listeners, mas mantém os eventos na fila.
+Esses métodos não são um fluxo de consentimento nem de exclusão.
+
+Depois, envie um evento sintético com o [início rápido](/pt-BR/quickstart). Se
+ele não aparecer, consulte [Solução de problemas](/pt-BR/guides/troubleshooting).
+Para erros HTTP, consulte [Erros da API](/pt-BR/reference/api-errors).

@@ -1,0 +1,188 @@
+---
+title: "Source maps de JavaScript com Vite"
+sidebarTitle: "Source maps de JavaScript"
+description: "Faça upload de source maps de JavaScript de um build do Vite. Mantenha credenciais fora do app. Ligue frames minificados ao código-fonte original."
+---
+
+Um arquivo JavaScript minificado pode juntar muitas linhas do código-fonte em uma só. Um frame da pilha desse arquivo aponta para uma linha e uma coluna do código gerado. Um [source map](https://ecma-international.org/publications-and-standards/standards/ecma-426/) liga essa posição ao arquivo, à linha e à coluna originais.
+
+Este guia usa o plugin do Vite incluído no `@logbrew/sdk` 0.1.28. Você precisa de um app Vite, de acesso à saída do build e de permissão para criar uma chave de projeto. Para arquivos de depuração da Apple, veja [Crashes e travamentos da Apple](/pt-BR/guides/apple-crashes-and-hangs).
+
+## Mantenha o build e os eventos juntos
+
+Use o mesmo projeto, a mesma versão, o mesmo ambiente e o mesmo serviço no upload e nos eventos de runtime do app. Veja [Versões](/pt-BR/concepts/releases) para saber como nomear versões. Este guia usa `web@1.2.3`, `staging` e `checkout-web`.
+
+Mude a versão sempre que o código do build mudar. Faça upload do build preparado e depois implante esse mesmo build. Não refaça o build nem altere o JavaScript dele depois do upload.
+
+## Adicione o plugin do Vite
+
+Instale o kit de desenvolvimento de software (SDK) no diretório do app:
+
+```bash
+npm install @logbrew/sdk@0.1.28
+```
+
+Adicione o plugin ao `vite.config.js`. Mantenha os seus outros plugins e as configurações de build. Substitua o ID do projeto:
+
+```js
+import { createLogBrewViteReleaseArtifactsPlugin } from "@logbrew/sdk/vite-release-artifacts";
+
+export default {
+  plugins: [
+    createLogBrewViteReleaseArtifactsPlugin({
+      projectId: "<project_id>",
+      release: "web@1.2.3",
+      environment: "staging",
+      service: "checkout-web",
+      minifiedPathPrefix: "https://app.example.com"
+    })
+  ]
+};
+```
+
+`minifiedPathPrefix` é a URL implantada do diretório do build. O plugin acrescenta o caminho de cada arquivo dentro desse diretório. Por exemplo, `dist/assets/app.js` vira `https://app.example.com/assets/app.js`. Se você servir o build em `/web`, inclua `/web` no prefixo. Não adicione `/assets` ao prefixo.
+
+Sem a opção `upload`, o plugin não envia nada ao LogBrew. Ele também:
+
+- Define `build.sourcemap` como `"hidden"` quando você não define esse valor. Se você definiu como `false`, mude para `"hidden"`.
+- Mantém os nomes das funções quando você não define opções do minificador. Se você definir as suas, mantenha os nomes nelas.
+
+Os source maps do tipo hidden ficam na saída do build como arquivos comuns. Eles não têm controle de acesso. Não use source maps inline. O plugin não aceita um map dentro do arquivo JavaScript.
+
+## Faça o build e confira localmente
+
+Execute o build de produção:
+
+```bash
+npm run build
+```
+
+O plugin dá o mesmo Debug ID a cada arquivo JavaScript e ao source map dele. Ele remove o `sourcesContent` incorporado e o caminho local da raiz do app. Ele grava `dist/logbrew-release-artifacts.json`.
+
+Abra o manifesto. Confira se `validation.status` é `ready` e se ele lista os arquivos e as URLs implantadas deste build. Os maps do tipo hidden geram o aviso `sourceMappingURL comment missing`. Esse aviso é esperado.
+
+Não faça upload de um map que contenha um caminho privado ou um código-fonte que você não quer compartilhar. O upload também inclui o JavaScript compilado, então mantenha segredos fora do bundle do app.
+
+Confira o upload localmente. Este comando não envia nenhuma requisição e não precisa de chave:
+
+```bash
+npx --no-install logbrew-release-artifacts upload-js \
+  --build-dir dist \
+  --manifest dist/logbrew-release-artifacts.json \
+  --endpoint https://api.logbrew.co/api/release-artifacts \
+  --allow-hosted \
+  --dry-run
+```
+
+Continue somente quando o comando sair com o código `0` e exibir `"status": "dry_run"`. Isso confere os arquivos locais e o manifesto. Não testa o servidor. Se o seu build usar outro diretório de saída, mude os dois caminhos.
+
+Para conferir um mapeamento, execute o app compilado e copie um frame da pilha gerado, com o arquivo, a linha e a coluna:
+
+```bash
+npx --no-install logbrew-release-artifacts symbolicate-js \
+  --build-dir dist \
+  --manifest dist/logbrew-release-artifacts.json \
+  --stack-frame "at checkoutTotal (https://app.example.com/assets/index-a1b2c3.js:2:780)"
+```
+
+Confira se o resultado tem `"status": "resolved"`. O objeto `original` mostra o arquivo, a linha e a coluna do código-fonte. Este comando roda localmente e não faz upload de nada.
+
+## <span id="create-an-artifact-key">Crie uma chave de artefato</span>
+
+Entre na conta com a [CLI do LogBrew](/pt-BR/guides/cli). Encontre o ID do projeto:
+
+```bash
+logbrew projects --json
+```
+
+Crie uma chave de artefato para o projeto. Use um novo caminho de arquivo, em um diretório que só o dono pode acessar:
+
+```bash
+install -d -m 700 "$HOME/.logbrew" &&
+logbrew projects keys create "<project_id>" \
+  --ingest-key-file "$HOME/.logbrew/checkout-web.artifact" \
+  --label "Checkout web build" \
+  --kind artifact \
+  --json
+```
+
+Continue somente depois que o comando der certo. Se o resultado não estiver claro, execute o mesmo comando de novo com os mesmos argumentos. Não use `--abandon-retry`.
+
+Uma chave de artefato tem escopo de projeto e só de escrita. Ela faz upload de source maps e de arquivos de depuração. Ela não pode enviar telemetria nem ler os metadados dos artefatos. Não use uma credencial da conta nem uma chave de SDK de runtime no lugar dela.
+
+Guarde a chave como `LOGBREW_RELEASE_ARTIFACT_TOKEN` nas configurações de segredos do seu ambiente de build. Não exiba a chave nem faça commit dela. Não coloque a chave em uma variável visível no cliente, como `VITE_*` ou `EXPO_PUBLIC_*`.
+
+Defina a variável no processo que executa o upload. O helper não lê arquivos `.env`. O Vite não carrega esses arquivos em `process.env` durante a [avaliação da configuração](https://vite.dev/config/#using-environment-variables-in-config).
+
+## Faça upload do build preparado
+
+Use os mesmos arquivos e o mesmo manifesto que você conferiu. Este comando envia o upload ao LogBrew:
+
+```bash
+npx --no-install logbrew-release-artifacts upload-js \
+  --build-dir dist \
+  --manifest dist/logbrew-release-artifacts.json \
+  --endpoint https://api.logbrew.co/api/release-artifacts \
+  --allow-hosted
+```
+
+`"status": "uploaded"` mostra que o LogBrew aceitou o upload. Se o comando sair com erro, pare e use a tabela abaixo.
+
+O helper tenta de novo até 2 vezes depois de um erro de rede ou de uma resposta `408`, `429` ou `5xx`. Ele envia os mesmos arquivos preparados em cada tentativa. Use `--max-retries` para mudar esse número.
+
+Depois que o upload manual funcionar, você pode fazer o upload durante o build do Vite. Adicione esta opção à configuração do plugin:
+
+```js
+upload: {
+  endpoint: "https://api.logbrew.co/api/release-artifacts",
+  allowHostedUpload: true,
+  tokenEnv: "LOGBREW_RELEASE_ARTIFACT_TOKEN"
+}
+```
+
+Use um único método de upload. O plugin interrompe o build quando há um erro na preparação ou no upload. Adicione `dryRun: true` para testar sem fazer upload.
+
+O plugin não exclui os source maps do diretório de saída. Não implante arquivos `.map` nem o manifesto no site público ou na CDN.
+
+Para mapear um frame de um problema capturado, execute `symbolicate-js` com esse frame sobre o mesmo build preparado.
+
+## <span id="verify-a-new-issue">Leia um novo problema</span>
+
+Implante o mesmo build preparado no ambiente de teste. Provoque um erro de teste seguro pelo seu caminho de captura de problemas. Não envie entradas de usuários, credenciais nem uma pilha bruta neste teste.
+
+Encontre o novo problema com o mesmo projeto e o mesmo contexto de build:
+
+```bash
+logbrew read issues --project "<project_id>" \
+  --release "web@1.2.3" --environment staging \
+  --service checkout-web --since 1h --json
+```
+
+Copie o ID do problema do resultado. Leia a ocorrência mais recente dele:
+
+```bash
+logbrew investigate issue "<issue_id>" --occurrence latest --json
+```
+
+Leia primeiro o horário do evento, o projeto, o serviço, o ambiente e a versão. Depois leia `event.stack_frames`. Um frame com `source: "symbolicated"` tem o arquivo, a linha e a coluna originais do seu upload. Um frame com `source: "captured"` tem o local que o app enviou.
+
+`logbrew read issue "<issue_id>" --json` também retorna um objeto `symbolication`. Cada frame desse objeto tem um `status`: `resolved`, `artifact_not_found`, `source_not_resolved`, `invalid_metadata` ou `unavailable`. Só um frame `resolved` tem um local original.
+
+O LogBrew mapeia os frames quando você lê o problema. Um upload feito depois do erro pode mapear um evento anterior que tenha o mesmo Debug ID. Um frame mapeado aponta para o código que deve ser examinado. Ele não mostra o que causou o erro. Veja [Investigar um problema](/pt-BR/guides/investigate-an-issue) para conhecer os outros campos.
+
+## Corrija uma verificação que falhou
+
+| Resultado | Próximo passo |
+| --- | --- |
+| O status do manifesto não é `ready` | Leia `validation.errors`. Corrija as configurações do build e faça o build de novo. Não edite o manifesto. |
+| O build para porque um source map está ausente ou inline | Defina `build.sourcemap` como `"hidden"` ou `true`. Faça o build de novo. |
+| `auth_missing` | Defina `LOGBREW_RELEASE_ARTIFACT_TOKEN` no processo de upload. Uma simulação (dry run) não testa a chave. |
+| `auth_failed` (`401` ou `403`) | Use uma chave de artefato do mesmo projeto. Não use uma chave de runtime nem uma chave da conta. |
+| `validation_failed` (`400` ou `413`) | Confira os arquivos preparados e o tamanho deles. Não envie o mesmo upload de novo. |
+| `validation_failed` com um erro local | Leia `validation.errors`. Se um arquivo mudou depois do build, faça o build e confira de novo. |
+| `retryable_error` | Todas as novas tentativas falharam depois de um erro de rede, de `408`, de `429` ou de um erro do servidor. Tente de novo mais tarde com os mesmos arquivos preparados. |
+| `upload_failed` | O servidor retornou outro status. Confira o valor de `--endpoint`. |
+| O frame não é resolvido | Confira o Debug ID, o prefixo da URL implantada e o build. Não use um map de outro build ou de outra versão. |
+| Nenhum problema novo aparece | Confira a captura de problemas, a chave de runtime e o filtro de tempo antes de testar os source maps. |
+
+Mantenha arquivos de código-fonte, chaves e caminhos privados fora das mensagens de suporte. Veja [Solução de problemas](/pt-BR/guides/troubleshooting) e [Erros da API](/pt-BR/reference/api-errors).
