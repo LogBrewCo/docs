@@ -40,10 +40,10 @@ Other install paths include the GitHub Release installers,
 | --- | --- |
 | Introduction | What LogBrew is and what it tracks. |
 | Quickstart | Log in, set up telemetry, and read JSON from the CLI. |
-| Use with AI agents | Follow a read-first investigation loop for coding agents. |
+| AI coding agents | Follow a read-first investigation loop for coding agents. |
 | Troubleshooting | Fix common CLI, telemetry, filter, and trace lookup problems. |
 | CLI reference | Check command grammar and common filters. |
-| Telemetry response shapes | Read the JSON shapes for lists, cursor pages, and errors. |
+| Response formats | Read the JSON shapes for lists, cursor pages, and errors. |
 
 ## Documentation map
 
