@@ -50,7 +50,7 @@ Other install paths include the GitHub Release installers,
 | Section | What it covers |
 | --- | --- |
 | Start | Product overview and first working CLI flow. |
-| Concepts | Telemetry, distributed tracing, product analytics, releases, projects, and the mobile app. |
+| Concepts | Telemetry, distributed tracing, product analytics, releases, and projects. |
 | Guides | SDK setup, safe capture, key rotation, product events, source maps, CLI usage, AI-agent workflow, troubleshooting, and issue triage. |
 | Reference | Terminology, CLI grammar, telemetry API, filters, response shapes, errors, and account API. |
 
