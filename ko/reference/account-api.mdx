@@ -1,0 +1,349 @@
+---
+title: "계정 API와 API 사용량 한도"
+sidebarTitle: "계정 API"
+description: "LogBrew 계정 사용량 한도, 할당량 기록, 구독 준비 상태, 로그아웃 응답을 읽으세요."
+---
+
+계정 API로 사용량, 할당량 상태, 사용량 기록, 구독 준비 상태를 읽고 로그아웃하세요. 계정 읽기에는 계정 bearer 토큰이나 브라우저 세션을 사용합니다. 계정 요청에 프로젝트 수집 키를 사용하지 마세요. 계정 자격 증명을 SDK 설정이나 수집 설정에 사용하지 마세요.
+
+| 작업 | 엔드포인트 |
+| --- | --- |
+| 현재 사용량과 할당량 상태 읽기 | `GET /api/account/usage` |
+| 시간별 사용량 읽기 | `GET /api/account/usage/history` |
+| 구독 및 조직 준비 상태 읽기 | `GET /api/account/subscription` |
+| 앱 또는 CLI 로그인 1개 로그아웃 | `POST /api/auth/logout` |
+| 모든 LogBrew 로그인 해지 | `POST /api/auth/logout-all` |
+| 브라우저 세션 지우기 | `POST /api/auth/web/logout` |
+
+오류는 표준 [API 오류 형식](/ko/reference/api-errors)을 사용합니다. 유효한 계정 인증 없이 읽으면 `code: "unauthorized"`와 함께 `401`을 반환합니다. 이 실패를 사용량 0, 빈 그래프, 무료 요금제로 표시하지 마세요. 지원하지 않는 메서드는 `code: "method_not_allowed"`와 함께 `405`를 반환하며, `next`에 지원되는 요청이 나옵니다.
+
+계정 API는 금액이 아니라 텔레메트리 사용량을 보고합니다. 요금, 청구서, 결제 상태는 보고하지 않습니다.
+
+## <span id="account-usage">계정 사용량</span>
+
+`GET /api/account/usage`는 사용량과 할당량의 기준 엔드포인트입니다. 사용량 합계, 초기화 시각, 할당량 상태, 프로젝트별 및 텔레메트리 스트림별 내역에 사용하세요. SDK 파일, CLI 파일, 클라이언트 카운터로 사용량을 계산하지 마세요. CLI 명령어 `logbrew usage`가 이 엔드포인트를 읽습니다. [CLI 레퍼런스](/ko/reference/cli)를 참고하세요.
+
+```bash
+curl "https://api.logbrew.co/api/account/usage" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER"
+```
+
+가상의 값을 사용한 응답 예입니다. 이 무료 계정에는 프로젝트가 1개 있으며, 현재 기간에 로그만 보냈습니다.
+
+```json
+{
+  "period_start": "2026-06-01T00:00:00Z",
+  "period_end": "2026-07-01T00:00:00Z",
+  "reset_at": "2026-07-01T00:00:00Z",
+  "plan": { "tier": "free", "status": "free" },
+  "limits": { "events": null, "bytes": null, "projects": null, "retention_days": 30 },
+  "usage": { "events": 27000, "bytes": 10485760, "projects": 1 },
+  "state": "ok",
+  "warning_threshold": 0.8,
+  "percent_used": 0.2,
+  "warning": false,
+  "blocked": false,
+  "limit": null,
+  "next": "continue sending telemetry",
+  "next_action": {
+    "code": "continue_sending_telemetry",
+    "target": "telemetry_ingest",
+    "state": "ok",
+    "limit": null,
+    "reset_at": "2026-07-01T00:00:00Z"
+  },
+  "by_project": [
+    { "project_id": "00000000-0000-4000-8000-000000000001", "events": 27000, "bytes": 10485760 }
+  ],
+  "by_stream": [
+    { "kind": "logs", "events": 27000, "bytes": 10485760 }
+  ]
+}
+```
+
+| 필드 | 의미 |
+| --- | --- |
+| `period_start`, `period_end` | 현재 사용량 기간입니다. 끝 시각은 포함하지 않습니다. |
+| `reset_at` | 사용량 허용치가 초기화되는 시각입니다. `period_end`와 같습니다. |
+| `plan.tier` | 요금제 식별자로, `free`, `pro`, `scale` 중 하나입니다. |
+| `plan.status` | `free`, `trial`, `active`, `past_due`, `disabled` 중 하나입니다. |
+| `limits.events`, `limits.bytes`, `limits.projects` | 호환성 필드이며 값은 `null`입니다. `null`은 무제한이라는 뜻이 아닙니다. 할당량 상태는 `state`, `limit`, `percent_used`를 사용하세요. |
+| `limits.retention_days` | 요금제의 데이터 보존 기간(일) 또는 `null`입니다. |
+| `usage.events`, `usage.bytes` | 기간 안의 모든 텔레메트리 스트림 합계입니다. |
+| `usage.projects` | 계정이 소유한 프로젝트 수입니다. |
+| `state` | `ok`, `warning`, `blocked` 중 하나입니다. |
+| `warning_threshold` | `warning` 상태가 시작되는 허용치 비율이며, 소수로 표시합니다. |
+| `percent_used` | 허용치 중 가장 높은 사용 비율이며, 백분율로 표시합니다. 예를 들어 `80`은 80%입니다. |
+| `warning`, `blocked` | `state`의 호환성 형식입니다. |
+| `limit` | 상태를 일으킨 허용치로, `events`, `bytes`, `null` 중 하나입니다. |
+| `next`, `next_action` | 현재 상태에 대한 복구 안내 텍스트와 형식이 정해진 액션입니다. |
+| `by_project` | 프로젝트별 사용량입니다. 사용량이 0이어도 소유한 프로젝트마다 행이 1개 있습니다. 배열 위치가 아니라 `project_id`로 행을 맞추세요. |
+| `by_stream` | `logs`, `issues`, `actions`, `traces` 같은 텔레메트리 스트림 `kind`별 사용량입니다. |
+
+### 할당량 상태
+
+주요 분기에는 `state`를 사용하세요. `limit`은 `state`가 `ok`일 때만 `null`입니다.
+
+| `state` | `warning` | `blocked` | `limit` | `next_action.code` | `next_action.target` |
+| --- | --- | --- | --- | --- | --- |
+| `ok` | `false` | `false` | `null` | `continue_sending_telemetry` | `telemetry_ingest` |
+| `warning` | `true` | `false` | `events` 또는 `bytes` | `reduce_usage_or_upgrade` | `pricing` |
+| `blocked` | `false` | `true` | `events` 또는 `bytes` | `wait_until_reset_or_upgrade` | `pricing` |
+
+`next_action.state`, `next_action.limit`, `next_action.reset_at`은 최상위 값을 반복합니다. `next_action.code` 값에는 대상이 `account_usage`인 `check_usage_limits`도 있습니다. 클라이언트가 이 조합을 받으면 사용량을 다시 읽고 `next`를 보여 주세요.
+
+LogBrew는 텔레메트리 유형마다 각자의 허용치를 기준으로 측정합니다. `limit`은 이를 다음과 같이 묶습니다.
+
+- `events`는 이슈 이벤트와 트레이스 스팬을 포함합니다.
+- `bytes`는 로그 바이트와 메트릭 바이트를 포함합니다.
+
+한 허용치가 차단되고 다른 허용치가 경고 상태라면 `limit`에는 차단된 허용치가 나옵니다. `warning` 상태는 사용량이 허용치의 `warning_threshold`에 도달하면 시작됩니다. `blocked` 상태는 사용량이 허용치에 도달하면 시작됩니다.
+
+`next` 텍스트는 바뀔 수 있습니다. 예를 들어 요금제를 판매하지 않을 때 바뀝니다. `next_action` 값은 바뀌지 않습니다. 현지화는 `next_action`을 기준으로 하세요. `next`를 파싱하지 마세요.
+
+계정 사용량 한도는 API 속도 제한과 다릅니다. 수집이 허용치를 넘으면 수집 요청은 `usage_limit_exceeded`와 함께 `429`를 반환하고, 본문에 `limit`과 `reset_at`이 추가됩니다. 이 오류에서 `limit`은 정확한 허용치를 나타내며, `issue_events`, `log_bytes`, `metric_bytes`, `trace_spans` 중 하나입니다. LogBrew는 요청 전체를 거부합니다. `reset_at`이 되거나 요금제가 바뀔 때까지 그 텔레메트리 유형을 다시 보내지 마세요. 클라이언트가 요청을 너무 많이 보내면 API는 `rate_limited`를 반환합니다. [API 오류](/ko/reference/api-errors#retry-rules)를 참고하세요.
+
+응답은 스냅숏입니다. 계정이 바뀐 뒤에는 다시 읽으세요.
+
+<Note>
+  `GET /api/logs/usage`는 `bytes_used`, `limit_bytes`, `month`가 담긴 이전 모바일 호환용 응답입니다. 새 연동에는 `GET /api/account/usage`를 사용하세요.
+</Note>
+
+## 사용량 기록
+
+`GET /api/account/usage/history`는 그래프와 리포트에 쓸, 개수가 정해지고 빈 구간이 0으로 채워진 사용량 시간 구간을 반환합니다. `interval`을 지원되는 값 하나로 설정하세요. `interval`을 생략하면 API는 `monthly`를 사용합니다. 이 경로는 다른 쿼리 키를 받지 않습니다.
+
+```bash
+curl --get "https://api.logbrew.co/api/account/usage/history" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "interval=daily"
+```
+
+| `interval` | 구간 수 | 구간 시작 |
+| --- | ---: | --- |
+| `daily` | 30 | 00:00 UTC |
+| `weekly` | 12 | 월요일 00:00 UTC |
+| `monthly` | 12 | 매월 1일 00:00 UTC |
+| `yearly` | 5 | 1월 1일 00:00 UTC |
+
+| 필드 | 의미 |
+| --- | --- |
+| `interval` | 요청한 간격입니다. |
+| `period_start`, `period_end` | 기록 기간의 시작과 끝(포함하지 않음)입니다. |
+| `current` | 현재 기간에 대한 `GET /api/account/usage` 전체 응답입니다. |
+| `buckets` | 시간 순서대로 오래된 것부터 나열한 구간입니다. 각 구간에는 `period_start`, `period_end`, `usage`, `by_project`, `by_stream`이 있습니다. |
+
+이 `yearly` 응답은 2026년 6월에 보낸 요청에 대한 가상 데이터입니다. 모든 사용량은 6월에 발생했습니다.
+
+```json
+{
+  "interval": "yearly",
+  "period_start": "2022-01-01T00:00:00Z",
+  "period_end": "2027-01-01T00:00:00Z",
+  "current": {
+    "period_start": "2026-06-01T00:00:00Z",
+    "period_end": "2026-07-01T00:00:00Z",
+    "reset_at": "2026-07-01T00:00:00Z",
+    "plan": { "tier": "free", "status": "free" },
+    "limits": { "events": null, "bytes": null, "projects": null, "retention_days": 30 },
+    "usage": { "events": 27000, "bytes": 10485760, "projects": 1 },
+    "state": "ok",
+    "warning_threshold": 0.8,
+    "percent_used": 0.2,
+    "warning": false,
+    "blocked": false,
+    "limit": null,
+    "next": "continue sending telemetry",
+    "next_action": {
+      "code": "continue_sending_telemetry",
+      "target": "telemetry_ingest",
+      "state": "ok",
+      "limit": null,
+      "reset_at": "2026-07-01T00:00:00Z"
+    },
+    "by_project": [
+      { "project_id": "00000000-0000-4000-8000-000000000001", "events": 27000, "bytes": 10485760 }
+    ],
+    "by_stream": [{ "kind": "logs", "events": 27000, "bytes": 10485760 }]
+  },
+  "buckets": [
+    { "period_start": "2022-01-01T00:00:00Z", "period_end": "2023-01-01T00:00:00Z", "usage": { "events": 0, "bytes": 0, "projects": 0 }, "by_project": [], "by_stream": [] },
+    { "period_start": "2023-01-01T00:00:00Z", "period_end": "2024-01-01T00:00:00Z", "usage": { "events": 0, "bytes": 0, "projects": 0 }, "by_project": [], "by_stream": [] },
+    { "period_start": "2024-01-01T00:00:00Z", "period_end": "2025-01-01T00:00:00Z", "usage": { "events": 0, "bytes": 0, "projects": 0 }, "by_project": [], "by_stream": [] },
+    { "period_start": "2025-01-01T00:00:00Z", "period_end": "2026-01-01T00:00:00Z", "usage": { "events": 0, "bytes": 0, "projects": 0 }, "by_project": [], "by_stream": [] },
+    {
+      "period_start": "2026-01-01T00:00:00Z",
+      "period_end": "2027-01-01T00:00:00Z",
+      "usage": { "events": 27000, "bytes": 10485760, "projects": 1 },
+      "by_project": [
+        { "project_id": "00000000-0000-4000-8000-000000000001", "events": 27000, "bytes": 10485760 }
+      ],
+      "by_stream": [{ "kind": "logs", "events": 27000, "bytes": 10485760 }]
+    }
+  ]
+}
+```
+
+허용치 초기화 시각은 `current.reset_at`을 사용하세요. 기록 기간의 끝을 사용하지 마세요. `current`는 구간의 합계가 아니며, 그 날짜는 기록 기간의 날짜와 다를 수 있습니다.
+
+마지막 구간에는 아직 끝나지 않은 현재 달력 기간이 들어 있습니다. 끝 시각이 미래라고 해서 LogBrew가 미래 사용량을 측정했다는 뜻은 아닙니다. 값이 0인 구간은 LogBrew가 그 구간에서 사용량을 세지 않았다는 뜻입니다.
+
+구간의 `usage.projects`는 그 구간에 사용량이 있는 프로젝트 수입니다. 이 값을 더해서 프로젝트 수를 구하지 마세요. 소유한 프로젝트 수는 `current.usage.projects`를 사용하세요.
+
+이벤트와 바이트는 단위가 다르므로 별도의 시계열로 그리세요. 구간에는 비용이 아니라 사용량이 들어 있습니다. 그래프에 지출, 청구서, API 요청이라는 이름을 붙이지 마세요.
+
+지원하지 않는 간격은 `422`를 반환합니다.
+
+```json
+{
+  "error": "Unsupported usage history interval",
+  "code": "validation_failed",
+  "next": "use interval=daily, weekly, monthly, or yearly",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+알 수 없는 쿼리 키도 `validation_failed`와 함께 `422`를 반환합니다.
+
+## 구독 준비 상태
+
+`GET /api/account/subscription`은 읽기 전용입니다. 유료 요금제나 조직 관리 기능을 켤지 정할 때 사용하세요. 할당량 상태는 사용량 엔드포인트를 사용하세요.
+
+```bash
+curl "https://api.logbrew.co/api/account/subscription" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER"
+```
+
+무료 계정은 다음 응답을 반환합니다. `account_id`는 가상의 값입니다.
+
+```json
+{
+  "account_id": "00000000-0000-4000-8000-0000000000aa",
+  "tier": "free",
+  "billing_interval": "none",
+  "state": "free",
+  "access_state": "active",
+  "current_period_start": null,
+  "current_period_end": null,
+  "renews_at": null,
+  "cancels_at": null,
+  "organization_creation_allowed": false,
+  "organization_creation_blocker": "subscription_required",
+  "limits": {
+    "organizations": 0,
+    "members_per_organization": 0,
+    "projects_per_organization": 0,
+    "invitations_per_day": 0
+  },
+  "next": "<display text>",
+  "next_action": {
+    "code": "choose_plan",
+    "target": "pricing"
+  }
+}
+```
+
+`next`는 표시용 텍스트입니다. 유료 요금제를 판매하는지에 따라 바뀝니다. 반환된 텍스트를 그대로 보여 주거나 `next_action`을 기준으로 현지화하세요. `next`에서 요금제 이름을 가져와 하드코딩하지 마세요.
+
+열거형 값:
+
+| 필드 | 값 |
+| --- | --- |
+| `tier` | `free`, `pro`, `scale` |
+| `billing_interval` | `none`, `monthly`, `yearly` |
+| `state` | `free`, `trialing`, `active`, `past_due`, `paused`, `canceled` |
+| `access_state` | `free`, `trialing`, `active`이면 `active`입니다. `past_due`, `paused`, `canceled`이면 `paused`입니다. |
+| `organization_creation_blocker` | `subscription_required`, `subscription_inactive`, `organization_limit_exceeded`, `null` 중 하나 |
+
+차단 사유마다 `next_action` 조합이 1개 있습니다.
+
+| `organization_creation_blocker` | `next_action.code` | `next_action.target` |
+| --- | --- | --- |
+| `null` | `create_or_manage_organization` | `organization` |
+| `subscription_required` | `choose_plan` | `pricing` |
+| `subscription_inactive` | `resume_subscription` | `billing` |
+| `organization_limit_exceeded` | `manage_organization_limit` | `organization` |
+
+tier 값은 표시 이름이 아니라 식별자입니다. 현지화된 클라이언트에서도 그대로 두세요. 유료 계정도 차단될 수 있습니다. 조직 생성을 켜기 전에 `organization_creation_allowed`를 확인하세요.
+
+이 엔드포인트는 조직을 만들거나, 초대를 보내거나, 역할을 바꾸거나, 결제를 변경하지 않습니다.
+
+## 로그아웃
+
+작업에 맞는 가장 작은 범위를 선택하세요. 이 엔드포인트들은 계정이나 프로젝트를 삭제하지 않고, 수집 키를 교체하지 않으며, 외부 로그인 제공자의 권한 부여를 해지하지 않습니다.
+
+| 범위 | 엔드포인트 | 자격 증명 |
+| --- | --- | --- |
+| 앱 또는 CLI 로그인 1개 | `POST /api/auth/logout` | JSON 본문에 그 클라이언트의 리프레시 토큰. bearer 없음. |
+| 모든 LogBrew 로그인 | `POST /api/auth/logout-all` | 계정 bearer 토큰 또는 브라우저 세션. 본문 없음. |
+| 현재 브라우저 세션 | `POST /api/auth/web/logout` | 없음. 응답이 브라우저 쿠키를 지웁니다. |
+
+### 앱 또는 CLI 로그인 1개
+
+리프레시 토큰을 가진 클라이언트에서 요청을 보내세요. `Content-Type: application/json`을 설정하세요.
+
+```json
+{
+  "refresh_token": "<current refresh token>"
+}
+```
+
+사람이나 에이전트에게 리프레시 토큰을 출력하거나 붙여 넣으라고 요청하지 마세요. 성공하면 `200`을 반환합니다.
+
+```json
+{
+  "revoked": true,
+  "next_action": {
+    "code": "clear_local_session",
+    "target": "local_credentials"
+  }
+}
+```
+
+이 요청은 리프레시 토큰 계열 1개를 해지합니다. LogBrew는 이후 그 로그인의 갱신 요청을 거부합니다. 계정의 다른 로그인은 바뀌지 않습니다. 클라이언트가 이미 가진 액세스 토큰은 만료될 때까지 유효합니다. 계정 자격 증명이 노출되었을 수 있다면 [모든 LogBrew 로그인](#every-logbrew-login)을 사용하세요.
+
+응답을 받은 뒤 클라이언트는 로컬 자격 증명을 삭제합니다. 같은 유효한 리프레시 토큰을 다시 보내면 같은 `200` 응답이 나옵니다. 토큰이 유효하지 않거나, 만료되었거나, 액세스 토큰이면 `code: "unauthorized"`, `next_action.code: "authorize_request"`와 함께 `401`을 반환합니다. 이 경우에도 로컬 자격 증명을 삭제하세요. `logbrew logout`이 이 엔드포인트를 사용합니다.
+
+### <span id="every-logbrew-login">모든 LogBrew 로그인</span>
+
+<Warning>
+  이 요청은 계정의 모든 클라이언트를 로그아웃합니다. 에이전트가 이 요청을 보내기 전에 계정 소유자의 승인을 받으세요.
+</Warning>
+
+성공하면 `200`을 반환합니다.
+
+```json
+{
+  "revoked": true,
+  "revoked_before": "2026-09-07T12:00:00.123Z",
+  "next_action": {
+    "code": "clear_local_session",
+    "target": "local_credentials"
+  }
+}
+```
+
+`revoked_before`는 해당 시각을 포함하며 밀리초 단위까지 정확합니다. LogBrew는 그 시각이나 그 이전의 로그인에서 나온 액세스 토큰, 브라우저 세션, 리프레시 토큰을 거부합니다. 그런 로그인에서 나중에 갱신된 토큰도 거부합니다. 현재 실시간 피드 세션이 끝나고, 응답이 브라우저 세션 쿠키를 지웁니다. 그 시각 이후의 로그인은 유효합니다. 각 클라이언트는 로컬 LogBrew 자격 증명을 삭제하고 다시 로그인해야 합니다.
+
+다시 로그인한 뒤 이 요청을 자동으로 반복하지 마세요. 새 요청은 새 로그인도 해지합니다.
+
+응답을 받지 못했다면 모든 로그인이 해지되었다고 보고하지 마세요. 이전 자격 증명이 나중에 `401`을 받았다고 해서 성공 응답을 대신할 수는 없습니다. 더 많은 복구 단계는 [유출된 계정 보호하기](/ko/guides/troubleshooting#secure-a-compromised-account)를 읽으세요.
+
+### 브라우저 세션
+
+`POST /api/auth/web/logout`은 브라우저의 `logbrew_session` 쿠키를 지우고 본문 없이 `204 No Content`를 반환합니다. 브라우저에서 호출하세요. 세션 쿠키를 명령어에 복사하지 마세요. 이 요청은 다른 클라이언트를 로그아웃하지 않으며, 복사된 쿠키 값을 해지하지도 않습니다. 모든 세션을 해지하려면 [모든 LogBrew 로그인](#every-logbrew-login)을 사용하세요.
+
+### 로그아웃 오류에서 복구하기
+
+| 결과 | 복구 방법 |
+| --- | --- |
+| `POST /api/auth/logout`에서 `401` | 클라이언트의 로컬 자격 증명을 삭제하세요. 다른 유형의 자격 증명을 보내지 마세요. |
+| `POST /api/auth/logout-all`에서 `401` | 사용자가 여전히 접근 권한이 필요하면 신뢰할 수 있는 클라이언트에서 로그인하세요. 요청을 반복하기 전에 다시 승인을 받으세요. |
+| `405` | `next`에 나온 메서드를, 사용자가 승인한 범위에서만 사용하세요. |
+| `POST /api/auth/logout`에서 `invalid_json` | 문자열 `refresh_token`이 담긴 JSON 객체를 `Content-Type: application/json`과 함께 보내세요. 토큰을 출력하지 마세요. |
+| 시간 초과 또는 `5xx` 상태 | 성공으로 보고하지 마세요. 로그인과 로그아웃을 자동으로 반복하는 루프를 시작하지 마세요. [쓰기 재시도 규칙](/ko/reference/api-errors#writes)을 따르세요. |
+
+텔레메트리 경로, 필터, 페이지네이션은 [텔레메트리 API](/ko/reference/telemetry-api)를 읽으세요.

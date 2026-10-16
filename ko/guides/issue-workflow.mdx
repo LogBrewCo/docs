@@ -1,0 +1,247 @@
+---
+title: "LogBrew 이슈 트리아지와 해결"
+sidebarTitle: "이슈 관리"
+description: "LogBrew에서 이슈를 관리하세요. 발생 건 근거를 확인한 다음, 이슈를 하나씩 또는 일괄로 해결, 보관, 다시 열기, 우선순위 지정, 할당하세요."
+---
+
+이슈는 핑거프린트가 같은 오류 발생 건을 묶습니다. 상태, 우선순위, 담당자를 바꾸기 전에 그룹 요약과 발생 건 1개를 확인하세요. 상태, 우선순위, 담당자를 바꾸는 것은 팀의 결정을 기록하는 일입니다. 소프트웨어를 고치거나 수집된 이벤트를 다시 쓰지는 않습니다.
+
+시작하기 전에 [LogBrew CLI](/ko/guides/cli)를 설치하고 `logbrew login`을 실행하세요.
+
+## 이슈와 발생 건
+
+이슈 목록은 전체 이벤트가 아니라 그룹 요약을 반환합니다. 상세 정보를 열기 전에 다음 필드를 확인하세요.
+
+| 필드 | 의미 |
+| --- | --- |
+| `title` | 수집된 실패 제목입니다. |
+| `severity` | 수집된 심각도입니다. |
+| `triage.effective_severity` | 이슈 규칙을 적용한 뒤 LogBrew가 사용하는 심각도입니다. `severity`에는 수집된 값이 남습니다. 규칙이 적용되면 `triage.rule_applied`가 `true`입니다. |
+| `occurrence_count` | 그룹에 보존된 발생 건 수입니다. |
+| `first_seen_at` | 보존된 발생 건 중 가장 이른 발생 건의 시각입니다. |
+| `last_seen_at` | 보존된 발생 건 중 가장 최근 발생 건의 시각입니다. |
+| `project_id` | 이슈가 속한 프로젝트입니다. |
+| `service_name` | 가장 최근 발생 건의 서비스입니다. |
+| `release` | 가장 최근 발생 건의 릴리스입니다. |
+| `environment` | 가장 최근 발생 건의 환경입니다. |
+| `status` | 이슈의 워크플로 상태입니다. [상태 값](#status-values)을 참고하세요. |
+| `priority` | 이슈의 트리아지 순서입니다. [우선순위](#priority)를 참고하세요. |
+| `priority_source` | 사람이 우선순위를 정했으면 `manual`, 심각도를 따르면 `derived`입니다. |
+| `assignee` | 다음 단계를 맡은 계정이거나 `null`입니다. [이슈 할당](#assign-issues)을 참고하세요. |
+
+발생 횟수는 영향받은 사용자 수가 아닙니다. 개수와 시각은 전체 오류 이력이 아니라 반환된 범위에 해당합니다. `--since`나 `--until` 필터는 LogBrew가 세는 발생 건을 제한합니다. 개수를 보고할 때는 그 개수를 만든 필터도 함께 알리세요.
+
+## <span id="status-values">상태 값</span>
+
+| 상태 | 의미 |
+| --- | --- |
+| `unresolved` | 이슈에 결정이 필요합니다. |
+| `resolved` | 팀이 이슈를 고친 것으로 표시했습니다. 이 상태가 수정을 증명하지는 않습니다. |
+| `archived` | 팀이 이슈를 진행 중인 트리아지에서 뺐습니다. |
+
+`archived`의 이전 이름은 `ignored`입니다. 두 이름은 같은 이슈를 선택하며, 입력으로는 둘 다 받습니다. `logbrew read`, `logbrew issues`, API 버전 2와 3은 `archived`를 보여 줍니다. API 버전 1(기본값), 실시간 감시 스트림, 이슈 조사 응답은 `ignored`를 보여 줍니다. 대시보드에서는 상태가 미해결, 해결됨, 보관됨으로 표시됩니다.
+
+상태는 발생 건 하나가 아니라 이슈 전체에 적용됩니다. 심각도는 긴급도를 나타내고, 상태는 결정을 기록합니다. 둘을 섞지 마세요. `critical` 이슈도 수정이 검증되면 `resolved`가 될 수 있습니다. `archived` 이슈도 수집된 심각도를 그대로 유지합니다.
+
+LogBrew는 해결된 이슈를 자동으로 다시 열지 않습니다. 해결 후 새 발생 건이 들어오면 조사 응답은 `lifecycle.effective_status`를 `regressed`로 보고합니다. 사람이 이슈를 다시 열 때까지 `status`는 `resolved`로 유지됩니다.
+
+## <span id="priority">우선순위</span>
+
+우선순위는 팀이 이슈를 트리아지하는 순서를 정합니다.
+
+| 우선순위 | 의미 |
+| --- | --- |
+| `high` | 이 이슈를 먼저 살펴보세요. |
+| `medium` | `high` 이슈 다음에 살펴보세요. |
+| `low` | 나중에 살펴봐도 됩니다. |
+
+모든 이슈에는 우선순위가 있습니다. 아무도 정하지 않으면 이슈 심각도를 따릅니다. `error`와 `critical`은 `high`, `warning`은 `medium`, `info`는 `low`입니다. 이슈 규칙이 심각도를 바꾸면 우선순위는 `triage.effective_severity`를 따릅니다. 이때 `priority_source`는 `derived`입니다. 사람이 우선순위를 정하면 그 값이 고정되고 `priority_source`는 `manual`입니다.
+
+먼저 살펴볼 이슈 목록을 보려면 다음을 실행하세요.
+
+```bash
+logbrew read issues --project "<project_id>" --status unresolved \
+  --priority high --since 24h --json
+```
+
+## <span id="assign-issues">이슈 할당</span>
+
+다음 단계를 누가 맡는지 보여 주려면 이슈를 할당하세요. 이슈의 담당자는 0명 또는 1명입니다.
+
+<Steps>
+  <Step title="할당할 수 있는 사람 찾기">
+    ```bash
+    logbrew issues assignees --project "<project_id>" --json
+    ```
+
+    목록에는 프로젝트를 읽을 수 있는 모든 계정이 나옵니다. 각 항목에는 `user_id`, `name`, `email`이 있습니다. `user_id`를 복사하세요. 프로젝트를 읽을 수 없는 계정에는 할당할 수 없습니다.
+  </Step>
+
+  <Step title="이슈 할당하기">
+    ```bash
+    logbrew issues assign "<user_id>" "<issue_id>" --json
+    ```
+
+    이슈를 자신에게 할당하려면 사용자 ID 대신 `me`를 쓰세요. 담당자를 없애려면 `logbrew issues unassign "<issue_id>" --json`을 사용하세요. 한 프로젝트의 이슈를 최대 100개까지 바꾸려면 `--project`를 추가하세요.
+  </Step>
+
+  <Step title="내 이슈 읽기">
+    ```bash
+    logbrew read issues --project "<project_id>" --assignee me \
+      --status unresolved --json
+    ```
+
+    담당자가 없는 이슈를 찾으려면 `--assignee none`을 사용하세요.
+  </Step>
+</Steps>
+
+이슈를 할당하려면 프로젝트의 이슈를 관리할 권한이 있어야 합니다. 이 권한이 있으면 상태, 우선순위, 이슈 규칙, 로그 규칙도 바꿀 수 있습니다. 프로젝트를 읽을 수 있는 계정이면 누구나 담당자가 될 수 있습니다.
+
+멤버가 프로젝트 접근 권한을 잃으면 그 멤버에게 할당된 이슈에는 담당자가 표시되지 않습니다. 이 이슈는 `--assignee none` 조회에 나타납니다. 멤버가 다시 접근 권한을 얻으면 이슈에 그 멤버가 다시 표시됩니다. 단, 그 사이에 누군가 담당자를 바꾸거나 없앴다면 표시되지 않습니다.
+
+## 권장 워크플로
+
+<Steps>
+  <Step title="한 범위의 미해결 이슈 나열하기">
+    ```bash
+    logbrew read issues --project "<project_id>" --environment production \
+      --release api@1.2.3 --status unresolved --since 24h --json
+    ```
+
+    이후 목록 조회에도 같은 필터를 유지하세요. 결과가 비어 있으면 이 범위에 맞는 이슈가 없다는 뜻입니다. 프로젝트에 오류가 없다고 증명하지는 않습니다. 제목이 아니라 정확한 이슈 ID를 복사하세요.
+  </Step>
+
+  <Step title="이슈 상세 정보 읽기">
+    ```bash
+    logbrew read issue "<issue_id>" --json
+    ```
+
+    계속하기 전에 반환된 프로젝트가 맞는지 확인하세요. 조회는 스냅샷을 반환합니다. 상태를 바꾸기 전에 이슈를 다시 읽으세요.
+  </Step>
+
+  <Step title="발생 건 1개 조사하기">
+    ```bash
+    logbrew investigate issue "<issue_id>" --occurrence recommended --json
+    ```
+
+    상세 조회와 조사 조회는 목록 필터를 쓰지 않습니다. `subject.project_id`, `event.occurred_at`, 릴리스, 환경을 내 범위와 비교하세요. 추천 발생 건은 가장 최근 발생 건보다 오래되었을 수 있습니다. 근거 전체를 검토하는 방법은 [이슈 조사하기](/ko/guides/investigate-an-issue)를 따르세요.
+  </Step>
+
+  <Step title="트레이스 근거는 있을 때만 따라가기">
+    `correlations.trace.status`가 `available`일 때만 트레이스를 읽으세요. 응답에 있는 트레이스 ID를 사용하세요. 트레이스 ID를 지어내지 마세요.
+
+    ```bash
+    logbrew read trace "<trace_id>" --project "<project_id>" --json
+    logbrew read logs --trace "<trace_id>" --project "<project_id>" \
+      --since 24h --json
+    ```
+
+    트레이스 조회에는 시간 필터가 없습니다. 상태가 `not_linked`이면 이슈 근거로 조사를 이어 가세요.
+  </Step>
+
+  <Step title="후보 배포 검증하기">
+    조사한 발생 건을 기준으로 삼으세요. 배포 ID는 배포 근거나 릴리스 절차에서 가져오세요.
+
+    ```bash
+    logbrew investigate issue "<issue_id>" verify \
+      --baseline-occurrence "<occurrence_id>" \
+      --candidate-deployment "<deployment_id>" \
+      --json
+    ```
+
+    관측 기간에 재발하지 않았다고 해서 영구적으로 고쳐졌다고 증명되지는 않습니다. `status`가 `insufficient_traffic`이나 `unavailable`이면 이슈를 `unresolved`로 유지하세요. 반환된 다음 조치를 따르세요.
+  </Step>
+
+  <Step title="상태, 우선순위, 담당자 바꾸기">
+    명령어 하나를 실행하세요. 이 명령어는 확인을 묻지 않으므로 먼저 이슈 ID를 확인하세요.
+
+    ```bash
+    logbrew issues resolve "<issue_id>" --json
+    logbrew issues archive "<issue_id>" --json
+    logbrew issues reopen "<issue_id>" --json
+    logbrew issues priority low "<issue_id>" --json
+    logbrew issues assign me "<issue_id>" --json
+    ```
+
+    `--project`가 없으면 명령어마다 이슈 ID 1개만 받습니다. 종료 코드와 반환된 `status`, `priority`, `assignee`를 확인하세요. 결과가 없으면 다음 변경 전에 이슈를 다시 읽으세요.
+
+    이전 스크립트에서는 `logbrew set issue "<issue_id>" resolved`와 `resolve`, `ignore`, `reopen` 단축 명령어를 쓸 수 있습니다. `ignore`는 `archived`로 설정합니다.
+  </Step>
+</Steps>
+
+## 여러 이슈를 한 번에 바꾸기
+
+`--project`를 추가하면 명령어 하나로 한 프로젝트의 이슈를 최대 100개까지 바꿀 수 있습니다.
+
+```bash
+logbrew issues archive "<issue_id_1>" "<issue_id_2>" "<issue_id_3>" \
+  --project "<project_id>" --json
+```
+
+이 명령어는 모든 이슈에 같은 변경 하나를 적용합니다. 각 이슈 ID는 한 번만 넣을 수 있습니다. ID가 100개를 넘거나 중복되면 CLI가 요청을 보내기 전에 거부합니다. 결과에는 이슈마다 항목이 1개씩, 명령어에 넣은 순서대로 들어 있습니다.
+
+| 결과 | 의미 |
+| --- | --- |
+| `updated` | LogBrew가 변경을 적용했습니다. |
+| `unchanged` | 이슈에 이미 요청한 값이 있었습니다. |
+| `not_found` | 프로젝트에 이 ID의 이슈가 없습니다. LogBrew는 이 ID에 대해 아무것도 바꾸지 않았습니다. |
+
+각 항목에는 `issue_id`, `outcome`, `issue`가 있습니다. `issue`는 현재 이슈이며, `not_found`이면 `null`입니다. 네트워크 오류가 나면 같은 명령어를 다시 실행해도 됩니다. 이미 바뀐 이슈는 `unchanged`로 표시됩니다. 이슈가 100개를 넘으면 명령어를 여러 번 실행하세요. 결과가 `not_found`이면 그 프로젝트의 이슈 목록에서 ID를 다시 복사하세요. API 요청은 [이슈 일괄 업데이트](/ko/reference/telemetry-api#update-issues-in-bulk)를 참고하세요.
+
+## 다음 상태 고르기
+
+- **`unresolved` 유지**: 실패가 계속되고 있거나 수정이 검증되지 않았을 때입니다. 트레이스가 없다는 것은 이슈를 보관할 이유가 되지 않습니다.
+- **`resolved`로 설정**: 팀이 수정 근거를 받아들인 뒤에 설정하세요. 수정 제안은 근거가 아닙니다.
+- **`archived`로 설정**: 팀이 받아들이기로 한 상황이나 테스트 전용 시그널에 설정하세요. 이 결정은 이슈의 모든 발생 건에 적용됩니다. 명령어에 사유 필드가 없으므로 사유는 팀의 작업 기록에 남기세요.
+- **`unresolved`로 다시 열기**: 해결 후 새 발생 건이 들어왔을 때입니다. `lifecycle.regression.first_reappeared_occurrence`가 그 발생 건을 가리킵니다. 이 발생 건을 해결 때 사용한 발생 건과 비교하세요. 다른 이슈를 새로 만들지 마세요.
+
+## 조사 인계하기
+
+다음 담당자에게는 원시 이벤트 덤프가 아니라 참조 정보를 넘기세요.
+
+- 이슈 ID, 상태, 우선순위, 담당자, 심각도
+- 프로젝트, 서비스, 환경, 릴리스
+- 최초 발생 시각, 마지막 발생 시각, 발생 횟수
+- 선택한 발생 건 ID와 `occurrence_selection.reason`
+- `fix.status`, `cause.status`, 그리고 각각의 `provenance`
+- 트레이스 상태와 트레이스 ID(있는 경우)
+- 재현 상태와 누락된 근거
+- 후보 배포 검증 결과
+- 응답이 반환한 다음 조치
+
+제안한 원인과 수정에는 제안이라고 표시하세요.
+
+## CLI 오류 복구
+
+출력을 파싱하기 전에 프로세스 종료 코드를 확인하세요. 성공하면 JSON이 표준 출력으로 나옵니다. 파싱 오류는 코드 `2`로 종료됩니다. 런타임 오류는 코드 `1`로 종료됩니다. JSON 오류는 표준 오류로 나오며 `ok: false`, `error`, `message`, `next`를 담습니다. `next`는 안내로만 보여 주세요. 자동으로 실행하지 마세요.
+
+예를 들어 `logbrew issues archive "<issue_id_1>" "<issue_id_2>" --json`에는 `--project`가 없습니다. 이 명령어는 요청을 보내기 전에 `invalid_issue_command` 오류와 함께 코드 `2`로 종료됩니다.
+
+API가 요청을 거부하면 `error`는 `api_error`입니다. HTTP 상태는 `status`에서, API 오류 코드는 `api_code`에서 확인하세요.
+
+| 결과 | 복구 방법 |
+| --- | --- |
+| `not_logged_in` | 사람에게 `logbrew login` 실행을 요청한 다음 조회를 다시 시도하세요. |
+| `invalid_issue_command` | 명령어를 고치세요. 이슈가 1개보다 많으면 `--project`를 쓰고, ID는 최대 100개까지 각각 한 번만 넣으세요. |
+| 잘못된 이슈 ID | 이슈 목록이나 상세 응답에서 정확한 ID를 복사하세요. |
+| 이슈를 찾을 수 없음 | 로그인한 계정과 프로젝트를 확인하세요. |
+| 변경이 `status` `403`으로 실패 | 이 계정은 이 프로젝트의 이슈를 관리할 수 없습니다. 접근 권한이 있는 사람에게 요청하세요. |
+| `invalid_assignee` | `--assignee` 필터에는 `me`, `none`, 사용자 ID만 넣을 수 있습니다. |
+| 할당이 `status` `422`, `api_code` `validation_failed`로 실패 | 담당자가 프로젝트를 읽을 수 없습니다. `logbrew issues assignees`에서 계정을 고르거나, 먼저 그 멤버에게 프로젝트 접근 권한을 주세요. |
+| `investigation_response_invalid` | 응답이 CLI 검증을 통과하지 못했습니다. 한 번 다시 시도하세요. 같은 일이 반복되면 CLI를 업데이트하거나 문제를 신고하세요. 검증을 우회하지 마세요. |
+| 트레이스 상태 `not_linked` | 이슈 근거로 조사를 이어 가세요. 트레이스는 읽지 마세요. |
+| 트레이스 상태 `unavailable` | 나중에 조사 조회를 다시 시도하세요. |
+| 검증 결과 `insufficient_traffic` | 이슈를 `unresolved`로 유지하세요. 후보 릴리스에 트래픽이 들어올 때까지 기다린 다음 다시 검증하세요. |
+
+응답이 실패했다고 해서 상태, 우선순위, 담당자 변경이 적용되지 않았다는 뜻은 아닙니다. 다시 시도하기 전에 이슈를 읽으세요.
+
+## 유용한 이슈의 조건
+
+- 명확한 제목과 읽기 쉬운 메시지
+- 안정적인 핑거프린트
+- 스택 프레임(있는 경우)
+- 릴리스, 환경, 서비스 컨텍스트
+- 트레이스 컨텍스트(발생 건과 함께 수집된 경우)
+- 전체 페이로드 덤프가 아닌, 관련 있는 작은 속성
+
+목록 필터와 응답 규격은 [텔레메트리 API](/ko/reference/telemetry-api)를 참고하세요.

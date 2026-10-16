@@ -1,0 +1,479 @@
+---
+title: "API 오류 처리와 API 오류 코드"
+sidebarTitle: "API 오류"
+description: "LogBrew API 오류 코드, HTTP 상태, JSON 예시를 확인하세요. 반환된 복구 안내에 따라 요청을 고치고 안전하게 재시도하세요."
+---
+
+LogBrew API 오류는 하나의 JSON 엔벨로프를 사용합니다. 프로그램 동작에는 `code`와 `next_action`을 사용하세요. `error`와 `next`는 일반 텍스트로 보여 주세요. `error`나 `next`의 문구로 일치 여부를 판단하지 마세요.
+
+```json
+{
+  "error": "invalid since value",
+  "code": "validation_failed",
+  "next": "use since=24h, since=7d, or an RFC3339 timestamp",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+| 필드 | 의미 |
+| --- | --- |
+| `error` | 사람이 읽을 수 있는 짧은 문제 설명입니다. |
+| `code` | 바뀌지 않는 오류 코드입니다. 클라이언트 분기를 고를 때 사용하세요. |
+| `next` | 사람이 읽을 수 있는 복구 단계입니다. 텍스트는 경로마다 다릅니다. |
+| `next_action.code` | 프로그램 라우팅을 위한, 바뀌지 않는 복구 액션입니다. |
+| `next_action.target` | 복구 액션이 적용되는 대상입니다. 예를 들면 `auth`나 `request`입니다. |
+
+일부 응답에는 `limit`, `reset_at`, `retry_after_seconds` 같은 필드가 추가됩니다. 어떤 필드가 붙는지는 [오류 코드](#error-codes) 표에 나와 있습니다.
+
+## 오류 응답 처리하기
+
+1. HTTP 상태를 읽으세요.
+2. `code`를 읽기 전에 본문이 JSON인지 확인하세요.
+3. 상태와 `code`를 함께 보고 클라이언트 분기를 고르세요.
+4. `error`와 `next`는 일반 텍스트로 보여 주세요. HTML로 렌더링하거나 명령어로 실행하지 마세요.
+5. 자동 복구에는 `next_action`을 사용하세요. 클라이언트가 액션을 알아보지 못하면 멈추고 오류를 보여 주세요.
+6. 반환된 `limit`, `reset_at`, `retry_after_seconds` 값을 실패한 요청과 함께 보관하세요.
+7. 재시도하기 전에 [재시도 규칙](#retry-rules)을 따르세요.
+
+응답에 JSON 엔벨로프가 없으면 HTTP 상태를 기록하고 코드는 사용할 수 없음으로 기록하세요. LogBrew `code`를 지어내지 마세요. 프록시나 네트워크 장애로 이런 결과가 나올 수 있습니다.
+
+LogBrew `code`를 HTTP 상태 이름으로 바꾸지 마세요. 예를 들어 `400` 응답에는 `invalid_json`이나 `invalid_path`가 들어 있을 수 있습니다. 코드마다 고치는 방법이 다릅니다.
+
+로그에는 HTTP 상태와 `code`를 기록하세요. 본문 전체, 자격 증명, 복구 토큰은 로그에 남기지 마세요.
+
+## <span id="error-codes">오류 코드</span>
+
+같은 `code`가 여러 경로에서 나올 수 있습니다. `next` 텍스트와 `next_action` 값은 경로마다 다를 수 있습니다. 반환된 값을 사용하세요. 엔드포인트는 자신의 인증, 메서드, 본문, 한도에 해당하는 코드만 반환합니다.
+
+| HTTP | `code` | 의미 | 클라이언트 조치 |
+| --- | --- | --- | --- |
+| `400`, `413`, `415`, `422` | `invalid_json` | 본문이 올바른 JSON이 아니거나, 너무 크거나, 콘텐츠 유형이 틀리거나, 경로의 JSON 형태와 맞지 않습니다. | `Content-Type: application/json`과 경로에 필요한 필드를 담은 올바른 JSON을 보내세요. |
+| `400`, `413`, `500` | `invalid_multipart` | 서버가 `multipart/form-data` 업로드를 읽을 수 없습니다. | `400`이나 `413`이면 폼이나 크기를 고치세요. `500`이면 [재시도 규칙](#retry-rules)을 따르세요. |
+| `400`, `500` | `invalid_path` | 서버가 URL 경로에 있는 값을 읽을 수 없습니다. 프로젝트 ID나 이슈 ID가 그 예입니다. | `400`이면 ID와 그 타입을 고치세요. `500`이면 [재시도 규칙](#retry-rules)을 따르세요. |
+| `400`, `405`, `426` | `invalid_websocket_upgrade` | 실시간 피드 연결이 올바른 WebSocket 업그레이드가 아닙니다. | `GET`과 WebSocket 업그레이드 헤더로 연결하세요. [실시간 이벤트 형식](/ko/reference/telemetry-response-shapes#live-event-response-format)을 참고하세요. |
+| `401` | `unauthorized` | 계정 인증이 없거나, 유효하지 않거나, 만료되었습니다. | 다시 로그인하세요. CLI에서는 `logbrew login`을 실행하세요. |
+| `401` | `ingest_key_invalid` | 텔레메트리 수집에 유효한 프로젝트 범위 수집 키가 없습니다. | 해당 프로젝트의 현재 수집 키를 설정하세요. |
+| `402` | `subscription_required` | 이 작업에는 유료 요금제가 필요합니다. | `next`를 따르세요. 요금제 관련 단계를 알려 주거나 지원팀에 문의하라고 안내합니다. |
+| `403` | `forbidden` | 계정이 이 리소스나 작업에 접근할 수 없습니다. | 접근 권한이 있는 계정을 사용하세요. 다른 ID로 시도하지 마세요. |
+| `403` | `role_forbidden` | 계정이 이 조직 역할을 변경할 수 없습니다. | 조직 소유자나 관리자에게 변경을 요청하세요. |
+| `404` | `not_found` | 이 계정에서 리소스나 API 경로를 사용할 수 없습니다. | 소유한 목록을 다시 읽으세요. 그다음 ID, 경로, 필터를 확인하세요. |
+| `405` | `method_not_allowed` | 경로는 있지만 HTTP 메서드를 지원하지 않습니다. | `next`에 나온 메서드를 사용하세요. |
+| `408` | `request_timeout` | 요청이 제시간에 끝나지 않았습니다. | 범위를 좁히거나, 기다렸다가 요청을 다시 보내세요. |
+| `409` | `idempotency_conflict` | `Idempotency-Key`나 `deployment_id`가 다른 요청에 다시 쓰였습니다. | 원래 요청을 그대로 재시도하거나, 새 작업에는 새 키를 쓰세요. |
+| `409` | `account_link_conflict` | 로그인 ID가 다른 계정에 속해 있습니다. | 계정 설정에서 계정 연결을 정리하세요. 같은 ID로 계정을 하나 더 만들지 마세요. |
+| `409` | `account_recovery_available` | 계정이 복구 가능 기간에 있습니다. | 반환된 복구 액션을 따르세요. 복구 토큰은 비공개로 보관하세요. |
+| `410` | `account_recovery_expired` | 계정 복구 가능 기간이 끝났습니다. | 로그인해서 새 계정을 만드세요. |
+| `422` | `validation_failed` | 쿼리 값, 필드, 필터, 커서, 헤더, 기간 중 하나가 유효하지 않습니다. | 오류에 나온 값을 고치세요. 그다음 요청을 다시 보내세요. |
+| `422` | `invite_invalid` | 조직 초대의 이메일 주소나 역할이 유효하지 않습니다. | 초대를 고치세요. 그다음 다시 보내세요. |
+| `422` | `member_limit_exceeded` | 조직의 멤버 수가 최대치입니다. | 조직 소유자에게 멤버를 제거하거나 요금제를 변경해 달라고 요청하세요. |
+| `422` | `organization_limit_exceeded` | 계정의 조직 수가 최대치입니다. | 조직을 제거하거나, 요금제를 변경하거나, 지원팀에 문의하세요. |
+| `423` | `organization_paused` | 유료 구독이 활성 상태가 아니어서 조직이 일시 중지되었습니다. | 유료 구독을 다시 활성화하세요. |
+| `429` | `rate_limited` | 호출자가 요청을 너무 많이 보냈습니다. `retry_after_seconds`가 추가됩니다. | `retry_after_seconds`만큼 기다리세요. 그다음 백오프를 적용해 재시도하세요. |
+| `429` | `usage_limit_exceeded` | 수집이 결제 기간의 계정 허용량에 도달했습니다. `limit`과 `reset_at`이 추가됩니다. | `reset_at`까지 수집을 멈추거나 요금제를 변경하세요. |
+| `429` | `artifact_storage_limit_exceeded` | 릴리스 아티팩트나 디버그 파일 업로드가 저장 한도에 도달했습니다. `limit`이 추가됩니다. | 다시 업로드하기 전에 기다리세요. 한도가 계속되면 지원팀에 문의하세요. |
+| `429` | `invitation_limit_exceeded` | 조직이 일일 초대 허용량에 도달했습니다. `limit`과 `reset_at`이 추가됩니다. | `reset_at`까지 기다리거나 요금제를 변경하세요. |
+| `500` | `storage_error`, `json_error`, `internal_error` | 서버가 요청을 끝내지 못했습니다. | [재시도 규칙](#retry-rules)을 따르세요. 실패가 계속되면 [문제 신고](/ko/guides/report-a-problem)하세요. |
+| `503` | `service_unavailable` | 지금은 API가 요청을 받을 수 없습니다. | 기다리세요. 그다음 요청을 다시 보내세요. |
+| `503` | `artifact_storage_unavailable` | 릴리스 아티팩트와 디버그 파일 업로드를 일시적으로 사용할 수 없습니다. | 다시 업로드하기 전에 기다리세요. 업로드를 병렬로 시작하지 마세요. |
+| `503` | `billing_unavailable` | 결제나 요금제 관리를 일시적으로 사용할 수 없습니다. | 기다리세요. 그다음 결제 작업을 다시 시도하세요. |
+
+알 수 없는 ID와 접근할 수 없는 ID는 같은 응답을 반환할 수 있습니다. 오류 텍스트로 ID를 소유한 계정을 알아내려 하지 마세요. 알 수 없는 API 경로는 `not_found`와 함께 `404`를 반환합니다.
+
+### 한도 필드
+
+| `code` | `limit` 값 | 그 밖의 필드 |
+| --- | --- | --- |
+| `usage_limit_exceeded` | `issue_events`, `log_bytes`, `metric_bytes`, `trace_spans` 중 하나 | `reset_at`: 결제 기간이 끝나는 시각(RFC3339)입니다. |
+| `invitation_limit_exceeded` | `invitations_per_day` | `reset_at`: 다음 UTC 날짜가 시작되는 시각(RFC3339)입니다. |
+| `artifact_storage_limit_exceeded` | `artifact_completed_project_bytes` 같은 저장 한도 이름 | 없음 |
+| `rate_limited` | 없음 | `retry_after_seconds`: 기다릴 시간(초, 정수)입니다. 최소 `1`입니다. |
+
+현재 허용량과 사용량은 [계정 API](/ko/reference/account-api#account-usage)에서 확인하세요.
+
+## <span id="retry-rules">재시도 규칙</span>
+
+재시도 여부는 코드와 작업을 함께 보고 정하세요. 상태만으로는 부족합니다.
+
+| 응답 | 재시도 규칙 |
+| --- | --- |
+| `validation_failed`, `invalid_json`, `invalid_path`(`400`), `invalid_multipart`(`400` 또는 `413`), `invalid_websocket_upgrade` | 먼저 오류에 나온 요청 값을 고치세요. 같은 요청을 다시 보내지 마세요. |
+| `unauthorized` 또는 `ingest_key_invalid` | 먼저 올바른 자격 증명으로 바꾸거나 갱신하세요. |
+| `forbidden`, `role_forbidden`, `not_found` | 다른 ID로 재시도하지 마세요. 소유한 목록을 다시 읽거나, 소유자에게 접근 권한을 받으세요. |
+| `method_not_allowed` | `next`에 나온 메서드를 사용하세요. 거부된 메서드로 다시 보내지 마세요. |
+| `idempotency_conflict` | 원래 요청을 그대로 재시도하거나, 새 작업에는 새 키를 쓰세요. |
+| `rate_limited` | `retry_after_seconds`만큼 기다리세요. 그다음 지터를 넣은 지수 백오프를 사용하세요. |
+| `usage_limit_exceeded` 또는 `invitation_limit_exceeded` | `reset_at`까지 기다리거나 요금제를 변경하세요. |
+| `artifact_storage_limit_exceeded` | 다시 업로드하기 전에 기다리세요. 한도가 계속되면 지원팀에 문의하세요. |
+| `subscription_required`, `organization_paused`, `member_limit_exceeded`, `organization_limit_exceeded` | `next`를 따르세요. 요금제나 멤버 구성을 바꾸지 않고 재시도하면 다시 실패합니다. |
+| `request_timeout`, `service_unavailable`, `artifact_storage_unavailable`, `billing_unavailable` | 기다리세요. 그다음 같은 범위로 읽기 요청을 다시 보내세요. 쓰기라면 [쓰기 규칙](#writes)을 따르세요. |
+| `storage_error`, `json_error`, `internal_error` 또는 그 밖의 `5xx` | 기다리세요. 그다음 읽기 요청을 다시 보내세요. 쓰기라면 [쓰기 규칙](#writes)을 따르세요. 실패가 계속되면 [문제 신고](/ko/guides/report-a-problem)하세요. |
+
+- 실패한 요청 1건에 대해 재시도를 병렬로 시작하지 마세요.
+- `rate_limited` 응답에는 `Retry-After`와 `X-RateLimit-After` 헤더도 있습니다. 두 헤더 모두 `retry_after_seconds`와 같은 초 값을 담고 있습니다.
+- 시간 초과가 결과가 비어 있다는 증명은 아닙니다.
+
+속도 제한은 요청 빈도를 제어합니다. 사용량 한도는 결제 기간의 계정 허용량을 제어합니다. 둘 다 `429`를 사용합니다. 각 필드를 구분하세요. 어느 한도에 걸리든 수집이나 조회가 지연되고 있다고 보여 주세요. 오래된 데이터를 새 조회 결과처럼 보여 주지 마세요.
+
+### <span id="writes">쓰기</span>
+
+시간 초과, `5xx` 응답, 네트워크 장애가 쓰기 실패를 증명하지는 않습니다. 쓰기를 다시 보내기 전에 다음을 따르세요.
+
+1. 경로가 멱등성 키를 지원하면 같은 키와 같은 본문을 다시 보내세요. 새 키는 새 작업에만 쓰세요.
+2. 경로에 멱등성 키가 없으면 먼저 리소스를 읽으세요. 변경 사항이 반영되어 있지 않을 때만 쓰기를 다시 보내세요.
+3. 결과를 찾을 수 없으면 자동 재시도를 멈추고 사용자에게 알리세요.
+
+다음 경로는 재시도 키를 받습니다.
+
+| 경로 | 재시도 키 |
+| --- | --- |
+| `POST /api/projects` | 선택 사항인 `Idempotency-Key` 헤더입니다. |
+| `POST /api/projects/{project_id}/ingest-keys` | 선택 사항인 `Idempotency-Key` 헤더입니다. |
+| `POST /api/support/tickets` | 선택 사항인 `Idempotency-Key` 헤더입니다. |
+| `POST /api/support/tickets/{ticket_id}/context` | 필수인 `Idempotency-Key` 헤더입니다. |
+| `PUT /api/telemetry/deployments/{deployment_id}` | 경로에 있는 `deployment_id`입니다. |
+
+`Idempotency-Key` 값은 눈에 보이는 ASCII 문자 1자에서 128자입니다. 다른 값은 `validation_failed`와 함께 `422`를 반환합니다.
+
+`idempotency_conflict`는 키가 다른 요청에 속해 있다는 뜻입니다. 원래 키로 재시도할 때는 본문을 바꾸지 마세요.
+
+## 요청 형태 오류
+
+`invalid_json`은 서버가 본문을 경로의 JSON 형태로 받아들일 수 없다는 뜻입니다. 콘텐츠 유형, 본문 크기, JSON 문법, 필수 필드, 필드 타입을 확인하세요. HTTP 상태를 보면 어느 부분이 실패했는지 알 수 있습니다.
+
+| HTTP | 원인 |
+| --- | --- |
+| `400` | 본문이 올바른 JSON이 아닙니다. |
+| `413` | 본문이 너무 큽니다. |
+| `415` | `Content-Type` 헤더가 `application/json`이 아닙니다. |
+| `422` | JSON은 올바르지만 필드가 없거나 타입이 틀렸습니다. |
+
+`validation_failed`와 오류 `invalid query parameters`가 함께 오면 서버가 쿼리 문자열을 읽을 수 없다는 뜻입니다. 매개변수 이름과 값 타입을 확인하세요. 알 수 없는 쿼리 매개변수를 보내지 마세요. 경로별 매개변수는 [쿼리 필터](/ko/reference/telemetry-api-filters)에 나와 있습니다.
+
+상태 `400`과 함께 온 `invalid_path`는 프로젝트 ID 같은 경로 값의 형식이 틀렸다는 뜻입니다. 경로 값을 쿼리 매개변수로 옮기지 마세요.
+
+`invalid_path`나 `invalid_multipart`가 담긴 `500` 응답은 요청이 잘못되었다는 증명이 아닙니다. [재시도 규칙](#retry-rules)을 따르세요.
+
+## 인증 및 접근 오류
+
+- `unauthorized`는 계정 인증이 없거나, 유효하지 않거나, 만료되었다는 뜻입니다. `Authorization: Bearer <token>`을 보내거나 다시 로그인하세요. 일부 경로는 경로별 `next`와 함께 `next_action.code` `authorize_request`를 반환합니다. 유효한 티켓 없이 실시간 피드에 연결한 경우가 그 예입니다.
+- `ingest_key_invalid`는 텔레메트리 수집에만 해당합니다. 정확한 프로젝트의 현재 키를 설정하세요.
+- `forbidden`은 계정이 이 작업을 할 수 없다는 뜻입니다. 다른 리소스 ID로 재시도하지 마세요.
+- `not_found`는 이 계정에서 리소스를 사용할 수 없다는 뜻입니다.
+
+계정 bearer 토큰 대신 수집 키를 쓰지 마세요. 수집 키 대신 계정 bearer 토큰을 쓰지 마세요.
+
+## 오류 세부 정보를 안전하게 다루기
+
+- `account_recovery_available` 응답에는 수명이 짧은 `recovery_token`이 들어 있습니다. 이 토큰은 보호된 클라이언트 상태에 보관하세요. 로그, URL, 스크린숏, 지원 보고서, 에이전트 프롬프트에 넣지 마세요.
+- `500` 코드는 항상 `Internal error` 메시지를 사용합니다. 응답은 실패한 구성 요소를 알려 주지 않습니다. 원인을 추측하지 마세요.
+- 보여 주는 오류에 자격 증명, 비공개 진단 정보, 고객 데이터를 추가하지 마세요.
+- API 응답이 구매, 삭제, 그 밖의 계정 변경을 허락하는 것은 아닙니다. 이런 작업 전에는 사용자의 승인을 받으세요.
+
+## 예시
+
+다음 예시는 엔벨로프 형태를 보여 줍니다. `error`와 `next` 텍스트는 경로마다 다를 수 있습니다.
+
+### 유효성 검사 실패
+
+```json
+{
+  "error": "issue status must be unresolved, resolved, or archived",
+  "code": "validation_failed",
+  "next": "use status=unresolved, status=resolved, or status=archived",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+### <span id="invalid-query-parameters">잘못된 쿼리 매개변수</span>
+
+```json
+{
+  "error": "invalid query parameters",
+  "code": "validation_failed",
+  "next": "check query parameter names and value types, then retry",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+### <span id="invalid-json">잘못된 JSON</span>
+
+```json
+{
+  "error": "invalid JSON request body",
+  "code": "invalid_json",
+  "next": "send Content-Type: application/json with a body matching this endpoint",
+  "next_action": {
+    "code": "send_valid_json",
+    "target": "request"
+  }
+}
+```
+
+### <span id="invalid-path-value">잘못된 경로 값</span>
+
+```json
+{
+  "error": "invalid URL path parameters",
+  "code": "invalid_path",
+  "next": "check path resource IDs and value types, then retry",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+### 잘못된 multipart 업로드
+
+```json
+{
+  "error": "invalid multipart form-data request",
+  "code": "invalid_multipart",
+  "next": "send multipart/form-data with a valid boundary and expected parts",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+### 잘못된 WebSocket 업그레이드
+
+```json
+{
+  "error": "invalid WebSocket upgrade request",
+  "code": "invalid_websocket_upgrade",
+  "next": "connect with GET /api/feed/live?ticket=<ticket> using WebSocket upgrade headers",
+  "next_action": {
+    "code": "connect_live_feed",
+    "target": "live_feed"
+  }
+}
+```
+
+### <span id="authentication-failure">인증 실패</span>
+
+```json
+{
+  "error": "Invalid or expired token",
+  "code": "unauthorized",
+  "next": "send Authorization: Bearer <token>, include the logbrew_session cookie, or sign in again",
+  "next_action": {
+    "code": "sign_in",
+    "target": "auth"
+  }
+}
+```
+
+### 잘못된 수집 키
+
+이 응답은 계정 조회가 아니라 텔레메트리 수집에 해당합니다. 키는 요청에 있는 프로젝트에 속해야 합니다.
+
+```json
+{
+  "error": "Invalid ingest key",
+  "code": "ingest_key_invalid",
+  "next": "create a project-scoped ingest key, then retry ingestion with that key",
+  "next_action": {
+    "code": "configure_ingest_key",
+    "target": "project_ingest_key"
+  }
+}
+```
+
+### <span id="resource-not-found">리소스를 찾을 수 없음</span>
+
+```json
+{
+  "error": "issue not found",
+  "code": "not_found",
+  "next": "check the resource id or filters and retry",
+  "next_action": {
+    "code": "check_resource",
+    "target": "resource"
+  }
+}
+```
+
+### 접근 거부
+
+```json
+{
+  "error": "Insufficient permissions",
+  "code": "forbidden",
+  "next": "use an account with access to this resource",
+  "next_action": {
+    "code": "request_access",
+    "target": "auth"
+  }
+}
+```
+
+### <span id="unsupported-method">지원하지 않는 메서드</span>
+
+```json
+{
+  "error": "Method not allowed",
+  "code": "method_not_allowed",
+  "next": "send GET /api/account/usage with Authorization or the logbrew_session cookie",
+  "next_action": {
+    "code": "use_supported_method",
+    "target": "api_method"
+  }
+}
+```
+
+### 요청 시간 초과
+
+```json
+{
+  "error": "Request timed out",
+  "code": "request_timeout",
+  "next": "retry read-only requests later or narrow the request scope. Before repeating a write, check whether it succeeded and follow this endpoint's idempotency guidance",
+  "next_action": {
+    "code": "retry_or_narrow_scope",
+    "target": "request"
+  }
+}
+```
+
+### 멱등성 충돌
+
+```json
+{
+  "error": "Idempotency key was already used",
+  "code": "idempotency_conflict",
+  "next": "retry the original support request or use a new Idempotency-Key",
+  "next_action": {
+    "code": "use_new_idempotency_key",
+    "target": "request"
+  }
+}
+```
+
+### 속도 제한
+
+```json
+{
+  "error": "Rate limit exceeded",
+  "code": "rate_limited",
+  "next": "wait for retry_after_seconds, then retry with exponential backoff and jitter",
+  "next_action": {
+    "code": "retry_with_backoff",
+    "target": "request"
+  },
+  "retry_after_seconds": 1
+}
+```
+
+### 사용량 한도
+
+`next` 텍스트와 `next_action`은 요금제 변경이 가능한지에 따라 달라집니다. 변경할 수 없으면 `next_action.code`는 `wait_or_contact_support`이고 대상은 `support`입니다.
+
+```json
+{
+  "error": "Usage limit exceeded",
+  "code": "usage_limit_exceeded",
+  "next": "wait until reset_at or upgrade your plan before retrying ingestion",
+  "next_action": {
+    "code": "wait_or_upgrade",
+    "target": "billing"
+  },
+  "limit": "log_bytes",
+  "reset_at": "2026-11-01T00:00:00+00:00"
+}
+```
+
+### 아티팩트 저장 한도
+
+```json
+{
+  "error": "Release artifact storage limit exceeded",
+  "code": "artifact_storage_limit_exceeded",
+  "next": "wait before retrying the upload, or contact LogBrew support if the limit persists",
+  "next_action": {
+    "code": "wait_or_contact_support",
+    "target": "support"
+  },
+  "limit": "artifact_completed_project_bytes"
+}
+```
+
+### 계정 복구 가능
+
+이 응답에는 `deleted_at`과 수명이 짧은 `recovery_token`이 추가됩니다. 토큰은 보호된 클라이언트 상태에 보관하세요.
+
+```json
+{
+  "error": "Account recovery available",
+  "code": "account_recovery_available",
+  "next": "restore account with POST /api/auth/restore",
+  "next_action": {
+    "code": "restore_account",
+    "target": "account_recovery"
+  },
+  "deleted_at": "2026-09-04T09:00:00Z",
+  "recovery_token": "<recovery token>"
+}
+```
+
+### 계정 복구 기간 만료
+
+```json
+{
+  "error": "Account recovery window expired",
+  "code": "account_recovery_expired",
+  "next": "create a new account after deletion completes",
+  "next_action": {
+    "code": "create_account",
+    "target": "auth"
+  }
+}
+```
+
+### 조직 일시 중지
+
+```json
+{
+  "error": "Organization paused",
+  "code": "organization_paused",
+  "next": "resume an active paid subscription before using this organization",
+  "next_action": {
+    "code": "resume_subscription",
+    "target": "billing"
+  }
+}
+```
+
+### 서버 오류
+
+`storage_error`, `json_error`, `internal_error`는 같은 `error` 메시지를 사용합니다. `code`, `next`, `next_action` 값은 다릅니다.
+
+```json
+{
+  "error": "Internal error",
+  "code": "internal_error",
+  "next": "retry read-only requests later. Before repeating a write, check whether it succeeded and follow this endpoint's idempotency guidance. Contact LogBrew support if the problem persists",
+  "next_action": {
+    "code": "retry_or_contact_support",
+    "target": "support"
+  }
+}
+```
+
+| `code` | `next_action.code` | `next_action.target` |
+| --- | --- | --- |
+| `storage_error` | `retry_or_check_storage` | `backend_status` |
+| `json_error` | `send_valid_json` | `request` |
+| `internal_error` | `retry_or_contact_support` | `support` |
+
+엔드포인트, 인증, 필터는 [텔레메트리 API](/ko/reference/telemetry-api)를 읽으세요.

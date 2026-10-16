@@ -1,0 +1,380 @@
+---
+title: "API 쿼리 매개변수와 커서 기반 페이지네이션"
+sidebarTitle: "쿼리 필터"
+description: "프로젝트, 서비스, 릴리스, 환경, 심각도, 트레이스, 이슈 상태, 우선순위, 담당자, 시간으로 LogBrew 텔레메트리를 필터링하세요. 커서로 결과를 이어서 읽으세요."
+---
+
+조회 라우트마다 받는 쿼리 키가 다릅니다. [필터 표](#filter-matrix)에 있는 라우트는 알 수 없는 키나 유형이 잘못된 값을 `422`, `validation_failed`로 거부합니다. 표에 다르게 적힌 경우는 예외입니다. `project`, `trace`, `user` 같은 알기 쉬운 별칭은 쿼리 키가 아닙니다. 한 라우트의 필터를 다른 라우트로 옮겨 쓰지 마세요.
+
+## 필터를 적용한 요청 만들기
+
+쿼리 문자열은 경로 뒤에 붙이세요. 예약 문자가 안전하게 전달되도록 `--data-urlencode`를 사용하세요. 다음 요청은 프로젝트 1개에서 최근 24시간의 치명적 로그를 읽습니다.
+
+```bash
+curl --get "https://api.logbrew.co/api/logs" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "severity=critical" \
+  --data-urlencode "since=24h"
+```
+
+필터는 다음 순서로 추가하세요.
+
+1. `project_id`나 `project_ids`로 프로젝트를 선택하세요.
+2. `since`로 기간을 추가하고, 필요하면 `until`도 추가하세요.
+3. 서비스, 릴리스, 환경, 상태, 시그널별 필터를 추가하세요.
+4. 페이지를 더 작게 받으려면 `limit`를 설정하세요.
+5. 커서 필드는 커서 응답이 그 값을 반환한 뒤에만 추가하세요.
+
+반환된 각 행은 요청의 모든 필터와 일치합니다. 생략한 필터에는 라우트의 기본값이 적용됩니다. 예를 들어 `GET /api/logs`는 `status`를 생략하면 `status=active`를 사용합니다.
+
+## <span id="filter-matrix">필터 표</span>
+
+"필수" 열의 키는 요청에 반드시 넣어야 합니다. 나머지 키는 모두 선택 사항입니다.
+
+| 라우트 | 필수 | 선택 쿼리 키 |
+| --- | --- | --- |
+| `GET /api/logs` | 없음 | `project_id` 또는 `project_ids`, `severity`, `level`(호환용 별칭), `status`, `search`, `trace_id`, `service_name`, `release`, `environment`, `since`, `until`, `attribute_filters`, `pagination`, `cursor_time`, `cursor_id`, `limit` |
+| `GET /api/logs/attributes` | `since` | `project_id` 또는 `project_ids`, `type`, `search`, `severity`, `level`, `service_name`, `release`, `environment`, `until`, `cursor_count`, `cursor_path`, `cursor_type`, `limit` |
+| `GET /api/telemetry/issues` | 없음 | `project_id` 또는 `project_ids`, `status`, `severity`, `priority`, `assignee`, `service_name`, `release`, `environment`, `since`, `until`, `pagination`, `cursor_time`, `cursor_id`, `limit`, `response_version` |
+| `GET /api/telemetry/issues/{issue_id}` | 없음 | `response_version`. 이 라우트는 다른 키를 무시합니다. |
+| `GET /api/telemetry/issues/{issue_id}/events` | 없음 | `pagination`, `cursor_time`, `cursor_id`, `limit` |
+| `GET /api/telemetry/issues/assignees` | `project_id` | 없음 |
+| `GET /api/telemetry/actions` | 없음 | `project_id` 또는 `project_ids`, `name`, `distinct_id`, `service_name`, `release`, `environment`, `since`, `until`, `pagination`, `cursor_time`, `cursor_id`, `limit` |
+| `GET /api/telemetry/metrics` | 없음 | `project_id` 또는 `project_ids`, `name`, `service_name`, `release`, `environment`, `since`, `until`, `pagination`, `cursor_time`, `cursor_id`, `limit` |
+| `GET /api/telemetry/metrics/series` | `project_id`, `name`, `since` | `until`, `interval`, `group_by`, `service_name`, `release`, `environment`, `series_limit` |
+| `GET /api/telemetry/releases` | 없음 | `project_id` 또는 `project_ids`, `service_name`, `release`, `environment`, `since`, `until`, `pagination`, `cursor_time`, `cursor_project_id`, `cursor_release`, `cursor_environment`, `cursor_service_name`, `limit` |
+| `GET /api/telemetry/traces` | 없음 | `project_id` 또는 `project_ids`, `service_name`, `release`, `environment`, `status`, `since`, `until`, `min_duration_ms`, `pagination`, `cursor_time`, `cursor_trace_id`, `limit` |
+| `GET /api/telemetry/traces/{trace_id}` 및 `.../summary` | 없음 | `project_id`, `release`, `environment` |
+| `GET /api/telemetry/summary/volume` | `project_id`, `since` | `until`, `interval`, `service_name`, `release`, `environment`, `response_version` |
+| `GET /api/telemetry/deployments` | `project_id` | `release`, `environment`, `service_name`, `status`, `since`, `until`, `pagination`, `cursor_time`, `cursor_id`, `limit` |
+| `GET /api/telemetry/deployments/{deployment_id}` | `project_id` | 없음 |
+| `GET /api/telemetry/traces/{trace_id}/investigation` | 없음 | `project_id`, `release`, `environment`, `response_version` |
+| `GET /api/telemetry/traces/{trace_id}/spans/{span_id}/investigation` | `project_id`, `release`, `environment` | 없음 |
+| `GET /api/telemetry/issues/{issue_id}/investigation` | 없음 | `response_version`, 그리고 `selection` 또는 `occurrence_id` |
+| `GET /api/telemetry/issues/{issue_id}/correction-verification` | `baseline_occurrence_id`, `candidate_deployment_id` | 없음 |
+| `GET /api/telemetry/releases/investigation` | `project_id`, `release`, `environment`, `service_name` | `response_version` |
+| `GET /api/telemetry/metrics/investigation` | `project_id`, `name`, `since` | `until`, `interval`, `group_by`, `service_name`, `release`, `environment`, `series_limit`, `response_version` |
+| `GET /api/telemetry/analytics/overview` | `project_id`, `since` | `until`, `interval`, `top_limit`, `service_name`, `release`, `environment`, `response_version` |
+| `GET /api/telemetry/analytics/properties` | `project_id`, `since` | `until`, `limit`, `service_name`, `release`, `environment`, `response_version` |
+
+이슈 조사에서 `selection`은 `first`, `latest`, `recommended` 중 하나입니다. `selection`과 `occurrence_id` 중 하나만 보내세요. 둘 다 보내면 안 됩니다. 어느 쪽이든 2부터 13까지의 `response_version`이 필요합니다. 버전 2 이상에서 선택자를 보내지 않으면 LogBrew는 `recommended`를 사용합니다. `occurrence_id`는 `GET /api/telemetry/issues/{issue_id}/events`에서 가져오세요.
+
+`POST` 분석 라우트는 JSON 본문을 받습니다. [제품 분석](/ko/concepts/product-analytics)을 참고하세요.
+
+## 공통 필터와 시그널별 필터
+
+`service_name`, `release`, `environment`는 모든 텔레메트리 목록의 범위를 좁힙니다. SDK가 보내는 값을 그대로 사용하세요.
+
+일부 필터는 특정 시그널에만 적용됩니다.
+
+- 로그는 `search`, `trace_id`, `severity`, `attribute_filters`를 받습니다.
+- 로그는 `status`로 `active`(기본값), `ignored`, `all`을 받습니다. `ignored`는 로그 규칙 때문에 활성 보기에서 숨겨진 로그를 선택합니다.
+- 이슈는 이슈 `status`로 `unresolved`, `resolved`, `archived`를 받습니다. `ignored`는 `archived`의 이전 이름이며 같은 이슈를 선택합니다.
+- 이슈는 `severity`로 `info`, `warning`, `error`, `critical`을 받습니다.
+- 이슈는 `priority`로 `high`, `medium`, `low`를 받습니다.
+- 이슈는 `assignee`로 `me`(로그인한 계정에 할당된 이슈), `none`(담당자가 없는 이슈), 사용자 ID를 받습니다.
+- 액션과 메트릭은 `name`을 받습니다.
+- 액션은 `distinct_id`를 받습니다.
+- 트레이스는 트레이스 `status`와 `min_duration_ms`를 받습니다.
+- 배포는 `status`로 `succeeded`나 `failed`를 받습니다.
+
+로그와 이슈의 `severity` 필터는 실제 적용된 심각도를 비교합니다. 규칙이 심각도를 바꿨다면 필터는 규칙의 값을 사용합니다. [심각도 값](/ko/reference/telemetry-response-shapes#severity-values)을 참고하세요.
+
+## 기간
+
+`since`는 `24h`나 `7d`처럼 양의 정수로 된 시간 수나 일 수, 또는 RFC3339 타임스탬프를 받습니다. 짧은 기간 표기는 각 요청 시각을 기준으로 합니다.
+
+`until`은 RFC3339 타임스탬프만 받습니다. `until`은 끝 시각을 포함하지 않습니다. 정확히 `until` 시각에 있는 행은 결과에 들어가지 않습니다. `since`는 시작 시각을 포함합니다. 예를 들어 `since=2026-10-01T00:00:00Z`와 `until=2026-10-02T00:00:00Z`는 정확히 1일을 선택합니다. LogBrew는 시각을 밀리초 단위로 비교합니다.
+
+`until`은 `since`보다 늦어야 합니다. 그렇지 않거나 `until`이 RFC3339 타임스탬프가 아니면 요청이 `422`, `validation_failed`로 실패합니다.
+
+여러 페이지를 읽을 때는 RFC3339 시작 시각 하나를 정해 모든 페이지에서 유지하세요. `until`도 모든 페이지에서 같게 유지하세요.
+
+다음 요청은 1일 동안의 오류 로그를 읽습니다.
+
+```bash
+curl --get "https://api.logbrew.co/api/logs" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "severity=error" \
+  --data-urlencode "since=2026-10-01T00:00:00Z" \
+  --data-urlencode "until=2026-10-02T00:00:00Z"
+```
+
+<Note>
+  배포 목록은 다른 시간 규칙을 사용합니다. 배포 목록의 `since`와 `until`은 RFC3339 타임스탬프만 받으며, 둘 다 해당 시각을 포함합니다. 비교 기준은 배포가 끝난 시각입니다.
+</Note>
+
+## 이슈 응답 버전
+
+이슈 목록과 이슈 상세 정보는 `response_version=1`, `response_version=2`, `response_version=3`을 받습니다. 기본값은 버전 1입니다. 다른 값은 `422`, `validation_failed`로 실패합니다.
+
+- 버전 1은 보관 상태를 `ignored`로 보여 줍니다. 우선순위는 보여 주지 않습니다.
+- 버전 2는 보관 상태를 `archived`로 보여 줍니다. `priority`와 `priority_source`가 추가됩니다.
+- 버전 3에는 버전 2의 필드가 모두 있습니다. `assignee`가 추가됩니다.
+
+모든 버전이 `status=archived`, `priority`, `assignee`를 받습니다. [이슈 응답](/ko/reference/telemetry-response-shapes#issue-response)을 참고하세요.
+
+## 심각도 필터
+
+`GET /api/logs`에서는 `severity=info|warning|error|critical`을 사용하세요. 이전 `level` 키는 호환용 별칭입니다. 두 키 모두 표준 값과 별칭 `trace`, `debug`, `warn`, `fatal`을 받습니다. LogBrew는 비교하기 전에 별칭을 표준 값으로 바꿉니다.
+
+요청에 `severity`와 `level`이 모두 있으면 LogBrew는 먼저 둘 다 정규화합니다. 값이 서로 다르면 다음 오류로 거부합니다.
+
+```text
+log severity and level filters conflict; use one value
+```
+
+## <span id="trace-filters">트레이스 필터</span>
+
+트레이스 검색에서 `status`는 `error` 또는 `ok`입니다. 둘 다 포함하려면 생략하세요. `min_duration_ms`는 0 이상이어야 합니다. 이 키는 트레이스 검색에만 적용됩니다.
+
+다음 요청은 500밀리초 이상 걸린 오류 트레이스를 찾습니다.
+
+```bash
+curl --get "https://api.logbrew.co/api/telemetry/traces" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "status=error" \
+  --data-urlencode "min_duration_ms=500" \
+  --data-urlencode "since=7d"
+```
+
+트레이스 상세 정보와 요약에서는 `trace_id`를 퍼센트 인코딩해 경로 세그먼트로 넣으세요. 쿼리 키로 보내지 마세요.
+
+## <span id="project-scope">프로젝트 범위</span>
+
+프로젝트 1개를 읽으려면 `project_id=<project-uuid>`를 사용하세요. 표에서 `project_ids`가 있는 라우트에서는 `project_ids=<uuid>,<uuid>`로 프로젝트 2~50개의 정확한 집합을 지정하세요. 이 라우트에서 두 키를 모두 생략하면 계정이 읽을 수 있는 모든 프로젝트를 읽습니다. `project_id`가 필수인 라우트는 프로젝트 1개만 받습니다.
+
+```text
+project_id=00000000-0000-4000-8000-000000000001
+project_ids=00000000-0000-4000-8000-000000000001,00000000-0000-4000-8000-000000000002
+```
+
+LogBrew는 다음 선택을 `422`, `validation_failed`로 거부합니다.
+
+- `project_id`와 `project_ids`가 모두 있는 요청
+- ID가 2개보다 적거나 50개보다 많은 `project_ids` 값
+- 중복된 ID나 UUID가 아닌 ID
+
+`project_ids`의 ID 중 하나가 계정이 읽을 수 없는 프로젝트이면 요청이 `404`, `not_found`로 실패합니다. 그 ID를 빼고 계속하지 마세요. 사용자에게 새 집합을 고르도록 요청하세요.
+
+모든 커서 페이지에서 같은 프로젝트 범위를 유지하세요. 결과가 비어 있다고 프로젝트 필터를 빼지 마세요. 그러면 다른 질문을 하는 셈이 됩니다.
+
+## 시간 구간별 시계열
+
+`GET /api/telemetry/metrics/series`는 메트릭 1개를 시간 구간별로 반환합니다. `GET /api/telemetry/summary/volume`은 시그널 개수를 시간 구간별로 반환합니다. 두 라우트 모두 다음 규칙을 따릅니다.
+
+- `since`는 필수입니다. `until`은 선택 사항이며 기본값은 요청 시각입니다.
+- `since`부터 `until`까지의 범위는 최대 31일입니다.
+- `interval`은 `auto`, `1m`, `5m`, `15m`, `1h`, `6h`, `1d` 중 하나입니다. 기본값은 `auto`입니다. 시간 구간이 500개를 넘게 만드는 간격은 실패합니다.
+- `service_name`, `release`, `environment`는 정확히 일치하는 값으로 필터링합니다.
+
+메트릭 시계열에서 `name`은 `GET /api/telemetry/metrics`에 나오는 정확한 메트릭 이름입니다. `group_by`는 `none`, `service_name`, `release`, `environment` 중 하나입니다. `series_limit`은 1~20입니다.
+
+시그널 양에서는 `until`이 미래 시각이면 안 되며, `response_version`은 `1`만 받습니다.
+
+## 로그 속성 필터링
+
+`GET /api/logs/attributes`로 검색할 수 있는 속성 경로와 유형을 찾으세요. 그런 다음 `GET /api/logs`에 `attribute_filters`를 보내세요. 두 요청 모두 `since`가 필요합니다.
+
+### 속성 카탈로그 읽기
+
+다음 요청은 프로젝트 1개에서 `status`가 들어간 숫자 경로를 찾습니다.
+
+```bash
+curl --get "https://api.logbrew.co/api/logs/attributes" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "since=2026-06-01T00:00:00Z" \
+  --data-urlencode "type=number" \
+  --data-urlencode "search=status" \
+  --data-urlencode "limit=2"
+```
+
+응답은 맨 배열이 아니라 객체입니다. 다음은 속성 2개와 다음 페이지가 있는 가상의 예시입니다.
+
+```json
+{
+  "attributes": [
+    { "path": "/http/status_code", "type": "number", "observed_count": 50, "last_seen_at": "2026-06-01T12:00:03.789Z" },
+    { "path": "/response/status", "type": "number", "observed_count": 42, "last_seen_at": "2026-06-01T12:00:02.456Z" }
+  ],
+  "coverage": {
+    "total_logs": 60,
+    "fully_indexed_logs": 50,
+    "partially_indexed_logs": 2,
+    "unindexed_logs": 8
+  },
+  "next_cursor": { "observed_count": 42, "path": "/response/status", "type": "number" }
+}
+```
+
+`type`은 `string`, `number`, `boolean` 중 하나입니다. `observed_count`는 범위 안에서 그 경로와 유형을 가진 로그 수입니다. `last_seen_at`은 그중 가장 최근 로그의 시각입니다. 로그 1개에 경로가 여러 개 있을 수 있습니다. 개수를 더해서 로그 수를 구하지 마세요.
+
+`coverage`는 속성 필터로 검색할 수 있는 로그를 알려 줍니다.
+
+| 필드 | 의미 |
+| --- | --- |
+| `total_logs` | 카탈로그의 프로젝트, 시간, 심각도, 서비스, 릴리스, 환경 필터와 일치하는 로그입니다. |
+| `fully_indexed_logs` | 지원되는 속성 값을 모두 검색할 수 있는 로그입니다. |
+| `partially_indexed_logs` | 일부 값이 인덱스에서 빠진 로그입니다. 필터가 빠진 값을 놓칠 수 있습니다. |
+| `unindexed_logs` | 유형이 지정된 속성 필터로 검색할 수 없는 로그입니다. |
+
+세 그룹을 더하면 `total_logs`가 됩니다. 카탈로그의 `type`, `search`, 커서는 커버리지를 바꾸지 않습니다. `attributes` 목록이 비어 있어도 `total_logs`가 0이라는 뜻은 아닙니다.
+
+카탈로그에는 `status` 키가 없습니다. 카탈로그의 심각도 필터는 실제 적용된 심각도가 아니라 수집된 심각도를 비교합니다.
+
+`search`는 제어 문자가 없는 1~128바이트의 경로 부분 문자열입니다. `limit`는 한 페이지의 속성 수를 정합니다.
+
+### 카탈로그 이어서 읽기
+
+카탈로그는 `pagination=cursor`를 사용하지 않습니다. 모든 필터를 반복하고, `next_cursor`의 세 필드를 모두 복사하세요.
+
+| 반환된 필드 | 다음 요청 키 |
+| --- | --- |
+| `next_cursor.observed_count` | `cursor_count` |
+| `next_cursor.path` | `cursor_path` |
+| `next_cursor.type` | `cursor_type` |
+
+`next_cursor`가 `null`이면 멈추세요.
+
+### 유형별 필터 적용하기
+
+카탈로그에서 경로와 유형을 복사하세요. 경로는 점으로 구분한 키가 아니라 JSON Pointer 구문을 사용합니다. 경로에 있는 `~0`이나 `~1` 이스케이프는 그대로 두세요.
+
+다음 요청은 숫자 응답 상태가 500 이상인 로그를 읽습니다.
+
+```bash
+curl --get "https://api.logbrew.co/api/logs" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "since=2026-06-01T00:00:00Z" \
+  --data-urlencode 'attribute_filters=[{"path":"/response/status","type":"number","operator":"gte","value":500}]'
+```
+
+`attribute_filters`는 필터 1~4개로 이루어진 JSON 배열입니다. 로그는 모든 필터와 일치해야 합니다. 각 필터에는 `path`, `type`, `operator`, `value`가 있습니다. `value`의 JSON 유형은 `type`과 일치해야 합니다. 숫자 `500`은 문자열 `"500"`과 다릅니다.
+
+| `type` | `operator` 값 |
+| --- | --- |
+| `string` | `eq`, `ne`, `contains`, `starts_with` |
+| `number` | `eq`, `ne`, `gt`, `gte`, `lt`, `lte` |
+| `boolean` | `eq`, `ne` |
+
+`ne`는 해당 경로가 있는 로그에만 일치합니다. 경로가 없는 로그는 `ne`와 일치하지 않습니다. `string`에서 `case_sensitive`는 선택 사항이며 기본값은 `false`입니다. LogBrew는 `number`와 `boolean`에 대한 `"case_sensitive": true`를 거부합니다.
+
+다음 한도가 적용됩니다.
+
+- JSON 배열은 최대 4,096바이트입니다.
+- 문자열 값은 최대 1,024바이트입니다.
+- `contains`와 `starts_with`에는 비어 있지 않은 문자열이 필요합니다.
+- 숫자는 유한한 값이어야 하며 -9,007,199,254,740,992부터 9,007,199,254,740,992까지입니다.
+
+인덱스로 검색할 수 없는 로그는 필터와 일치하지 않습니다. 이런 로그도 `attribute_filters` 없는 요청에는 나타날 수 있습니다. 로그 응답은 [로그 응답](/ko/reference/telemetry-response-shapes#log-response)을 참고하세요.
+
+### 속성 오류 고치기
+
+아래 오류는 모두 `422`, `validation_failed`를 반환합니다.
+
+| `error` | 해결 방법 |
+| --- | --- |
+| `log attribute queries require since` | 카탈로그 요청이나 `attribute_filters`가 있는 로그 요청에 `since`를 추가하세요. |
+| `invalid log attribute filters` | 카탈로그에서 가져온 경로, 유형, 연산자, 값을 담은 필터 1~4개의 JSON 배열을 보내세요. |
+| `invalid log attribute cursor` | `next_cursor`에서 가져온 `cursor_count`, `cursor_path`, `cursor_type`을 함께 보내세요. |
+| `invalid log attribute search` | 128바이트 이하의 비어 있지 않은 경로 부분 문자열을 보내세요. |
+
+다시 시도하기 전에 요청을 고치세요. 필터를 빼지 마세요. 필터를 빼면 결과가 달라집니다.
+
+## <span id="cursor-pagination">커서 기반 페이지네이션</span>
+
+커서 모드는 직접 켜야 합니다. 커서 모드가 아니면 목록 라우트는 맨 배열을 반환합니다. 첫 페이지에는 커서 필드 없이 `pagination=cursor`를 보내세요. 다음 페이지마다 모든 필터를 반복하고 커서 필드를 빠짐없이 보내세요.
+
+| 라우트 | 이어 읽기 커서 필드 |
+| --- | --- |
+| 로그, 이슈, 이슈 발생 건, 액션, 메트릭, 배포 | `cursor_time`, `cursor_id` |
+| 릴리스 | `cursor_time`, `cursor_project_id`, `cursor_release`, `cursor_environment`, `cursor_service_name` |
+| 트레이스 검색 | `cursor_time`, `cursor_trace_id` |
+
+반환된 `next_cursor` 필드를 다음 요청에 다음과 같이 넣으세요.
+
+- `next_cursor.time`은 `cursor_time`에 넣습니다.
+- `next_cursor.id`는 `cursor_id`에 넣습니다.
+- 트레이스에서는 `next_cursor.trace_id`를 `cursor_trace_id`에 넣습니다.
+- 릴리스에서는 반환된 각 필드 이름 앞에 `cursor_`를 붙입니다. 예를 들어 `next_cursor.release`는 `cursor_release`에 넣습니다.
+
+`next_cursor`가 `null`이면 멈추세요. 마지막 행으로 커서를 계산하지 마세요. 릴리스 커서는 선택한 프로젝트를 바꾸지 않습니다. 원래의 `project_id`나 `project_ids`를 유지하세요.
+
+```bash
+curl --get "https://api.logbrew.co/api/logs" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "severity=error" \
+  --data-urlencode "since=2026-06-01T00:00:00Z" \
+  --data-urlencode "pagination=cursor" \
+  --data-urlencode "limit=50"
+```
+
+`limit`는 페이지 크기를 정합니다. 페이지에 이보다 적은 행이 들어 있을 수 있습니다. 이 라우트는 `page`나 `page_number`를 받지 않습니다.
+
+| 라우트 | 기본 `limit` | 최대 `limit` |
+| --- | ---: | ---: |
+| 로그, 로그 속성, 이슈, 액션, 메트릭, 릴리스, 트레이스 검색 | 100 | 500 |
+| 이슈 발생 건 | 25 | 100 |
+| 배포 | 50 | 100 |
+
+대부분의 라우트에서 LogBrew는 최댓값을 넘는 `limit`를 최댓값으로 바꿉니다. 배포 목록은 1~100 범위를 벗어난 `limit`를 `422`로 거부합니다. 배포 목록은 `pagination=cursor`가 없어도 항상 `next_cursor`가 있는 페이지 객체를 반환합니다.
+
+LogBrew는 다음 요청을 `422`, `validation_failed`로 거부합니다.
+
+- `pagination` 값이 `cursor`가 아닌 요청
+- `pagination=cursor` 없이 커서 필드를 보낸 요청
+- 커서 필드가 빠짐없이 들어 있지 않은 요청
+- `cursor_time`이 RFC3339 타임스탬프가 아닌 요청
+
+커서는 위치를 표시할 뿐 데이터를 고정하지 않습니다. 최신 상태를 보려면 첫 페이지부터 새로 시작하세요.
+
+CLI도 같은 필드를 사용합니다.
+
+```bash
+logbrew read logs --severity error --pagination cursor --limit 50 --json
+logbrew read logs --severity error --pagination cursor --limit 50 \
+  --cursor-time <time> --cursor-id <id> --json
+```
+
+## 빈 결과 진단하기
+
+목록이 비어 있으면 모든 필터와 일치하는 행이 없다는 뜻입니다. 다른 시그널에 대해서는 아무것도 알려 주지 않습니다. 다음 순서로 요청을 확인하세요.
+
+1. 프로젝트 ID를 확인하세요.
+2. 선택 필터를 하나씩 빼 보세요.
+3. 찾는 이벤트가 더 오래되었다면 `since`를 넓히세요. 찾는 이벤트가 더 최근이라면 `until`을 빼거나 더 늦은 시각으로 옮기세요.
+4. `service_name`, `release`, `environment`를 SDK가 보내는 값과 비교하세요.
+5. 로그라면, 로그 규칙이 찾는 로그를 숨길 수 있을 때 `status=all`을 추가하세요.
+6. 라우트가 각 필터를 받는지 확인하세요.
+
+## 거부된 쿼리 복구하기
+
+거부된 쿼리는 표준 오류 형식을 반환합니다. 알 수 없는 키나 유형이 잘못된 값은 `422`를 반환합니다.
+
+```json
+{
+  "error": "invalid query parameters",
+  "code": "validation_failed",
+  "next": "check query parameter names and value types, then retry",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+자주 쓰는 해결 방법은 다음과 같습니다.
+
+- 알기 쉬운 별칭을 [필터 표](#filter-matrix)에 있는 키로 바꾸세요.
+- 라우트에 필요한 이어 읽기 커서 필드를 모두 보내세요.
+- 첫 페이지 요청에서는 커서 필드를 빼세요.
+- 프로젝트 선택자는 하나만 사용하세요.
+- 지원되지 않는 심각도나 트레이스 상태는 표준 값으로 바꾸세요.
+
+오류 코드와 복구 방법은 [API 오류](/ko/reference/api-errors)를 참고하세요. 응답 본문은 [응답 형식](/ko/reference/telemetry-response-shapes)을 참고하세요.

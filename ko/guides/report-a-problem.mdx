@@ -1,0 +1,162 @@
+---
+title: "Support API: 지원 티켓 만들고 추적하기"
+sidebarTitle: "문제 신고"
+description: "CLI나 Support API로 LogBrew 지원 티켓을 만드세요. 안전한 진단 정보를 넣고, 상태를 추적하고, 추가 컨텍스트를 보내세요."
+---
+
+후속 조치가 필요한 문제가 있으면 지원 티켓을 만드세요. 그러면 사람이나 AI 에이전트가 티켓을 추적하고 요청받은 컨텍스트를 추가할 수 있습니다. 티켓은 티켓을 만든 계정과 LogBrew 지원팀만 읽을 수 있습니다.
+
+<Warning>
+  `$LOGBREW_TOKEN` 같은 계정 bearer 토큰을 사용하세요. 프로젝트 수집 키는 절대 쓰지 마세요. 제목, 설명, 진단 정보를 쓰기 전에 개인정보를 지우세요. 자동 마스킹이 이 검토를 대신하지 않습니다.
+</Warning>
+
+## 티켓 만들기
+
+CLI에서 다음을 실행하세요.
+
+```bash
+logbrew support create --category docs_confusion \
+  --title "First event is not visible" \
+  --description "Steps: send one info event, then read logs in the same project. Expected: one row. Observed: no rows." \
+  --project "<project_id>" --json
+```
+
+CLI는 `source`를 `cli`로 설정합니다. `--diagnostics`는 바이너리 이름, CLI 버전, 운영체제, 아키텍처만 추가합니다. 모든 플래그를 보려면 `logbrew support --help`를 실행하세요.
+
+CLI는 티켓을 만들 때 재시도 키를 보내지 않습니다. 결과가 불확실하면 명령어를 다시 실행하기 전에 `logbrew support list --json`을 실행하세요. 그렇지 않으면 티켓이 2개 생길 수 있습니다.
+
+API에서는 `source`, `category`, `title`, `description`과 함께 `POST /api/support/tickets`를 보내세요. 재시도를 안전하게 하려면 보고서마다 재시도 키를 한 번 만들고 `Idempotency-Key` 헤더로 보내세요. 이 예시는 가상의 값을 사용합니다.
+
+```bash
+LOGBREW_SUPPORT_RETRY_KEY="$(uuidgen)"
+
+curl -sS "https://api.logbrew.co/api/support/tickets" \
+  -H "Authorization: Bearer ${LOGBREW_TOKEN:?Set an account access bearer}" \
+  -H "Idempotency-Key: ${LOGBREW_SUPPORT_RETRY_KEY:?Create a retry key for this report}" \
+  -H "Content-Type: application/json" \
+  --data '{
+    "source": "docs",
+    "category": "docs_confusion",
+    "title": "First event is not visible",
+    "description": "Steps: send one info event, then read logs in the same project. Expected: one row. Observed: no rows.",
+    "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    "diagnostics": {
+      "steps": 2,
+      "expected": "one matching row",
+      "observed": "no matching rows"
+    }
+  }'
+```
+
+재시도 키는 공백 없이, 눈에 보이는 ASCII 문자 1자에서 128자로 이루어집니다. 재시도할 때는 같은 키와 같은 본문을 보내세요. 그러면 응답에서 같은 티켓을 돌려받습니다. 다른 보고서에는 새 키를 쓰세요. 시간 초과가 생성 실패를 증명하지는 않습니다. `Idempotency-Key` 헤더는 선택 사항입니다. 헤더 없이 요청을 반복하면 티켓이 하나 더 생길 수 있습니다.
+
+선택 필드는 `project_id`, `environment`, `runtime`, `framework`, `sdk_package`, `sdk_version`, `release`, `trace_id`, `event_id`, `diagnostics`입니다. 특정 프로젝트와 관련 없는 문제라면 `project_id`를 빼세요. `project_id`는 내 계정의 활성 프로젝트를 가리켜야 합니다.
+
+| 필드 | 허용되는 값 |
+| --- | --- |
+| `source` | `cli`, `sdk`, `website`, `docs`, `mobile` |
+| `category` | `sdk_install_failure`, `ingest_failure`, `auth_failure`, `project_setup`, `dashboard_issue`, `docs_confusion`, `cli_issue`, `mobile_issue`, `billing_question`, `other` |
+| `title` | LogBrew가 앞뒤 공백을 지운 뒤 1자에서 160자입니다. |
+| `description` | LogBrew가 앞뒤 공백을 지운 뒤 1자에서 4,000자입니다. |
+| 그 밖의 텍스트 필드 | 각각 최대 256자입니다. |
+
+요청에 성공하면 HTTP `200`이 반환됩니다.
+
+```json
+{
+  "ticket_id": "sup_11111111111141118111111111111111",
+  "status": "open",
+  "created_at": "2026-10-01T09:30:00Z",
+  "next": "Support ticket created. LogBrew will review the attached diagnostics.",
+  "next_action": {
+    "code": "review_ticket",
+    "target": "support_ticket"
+  }
+}
+```
+
+티켓 ID는 `sup_`으로 시작합니다. `next`는 사람에게 보여 주는 안내로, `next_action`은 프로그램 제어에 사용하세요.
+
+프로젝트를 삭제하려면 프로젝트 설정이나 `logbrew projects delete`를 사용하세요. 지원 티켓으로 프로젝트 삭제를 요청하지 마세요.
+
+## 쓸모 있는 보고서 쓰기
+
+- 티켓 1개에는 문제를 1개만 보고하세요.
+- 가장 가까운 `category`를 고르세요. 맞는 카테고리가 없을 때만 `other`를 쓰세요.
+- `title`에는 증상 1개와 문제가 생긴 곳 1개를 적으세요.
+- `description`에는 단계를 적고, 그다음 예상 결과와 실제 결과를 적으세요.
+- 프로젝트, 릴리스, 트레이스, 이벤트 ID는 같은 실패를 가리킬 때만 추가하세요.
+
+`diagnostics`에는 다음 키를 사용하세요.
+
+| 키 | 내용 |
+| --- | --- |
+| `steps` | 재현 단계 수입니다. |
+| `expected` | 짧은 예상 결과입니다. |
+| `observed` | 짧은 실제 결과입니다. |
+| `command_name` | 인수를 뺀 명령어와 하위 명령어 이름입니다. |
+| `exit_code` | 숫자로 된 프로세스 종료 코드입니다. |
+| `error_code` | 바뀌지 않는 오류 코드입니다. |
+| `error_summary` | 민감한 정보를 가린 짧은 오류 요약입니다. |
+| `retry_count` | 똑같이 재시도한 횟수입니다. |
+| `last_delivery_status` | 마지막 전송 시도의 HTTP 상태입니다. 예를 들면 `401`입니다. |
+
+`diagnostics`는 마스킹을 마친 뒤 최대 16KB인 JSON 객체입니다. 키 이름이 자격 증명, 세션, 이메일 주소를 가리키면 LogBrew는 값을 `[redacted]`로 바꿉니다. 자격 증명, URL, 로컬 경로처럼 보이는 텍스트도 바꿉니다. 또한 긴 문자열을 줄이고, 중첩 깊이, 키, 목록 항목 수를 제한합니다. 이 마스킹에 의존하지 마세요. 요청을 보내기 전에 개인정보를 지우세요.
+
+## <span id="track-the-ticket">티켓 추적하기</span>
+
+| CLI 명령어 | API 경로 | 결과 |
+| --- | --- | --- |
+| `logbrew support list` | `GET /api/support/tickets` | 계정의 티켓 목록을 봅니다. |
+| `logbrew support show <ticket_id>` | `GET /api/support/tickets/{ticket_id}` | 티켓 1개와 다음 액션을 읽습니다. |
+| `logbrew support context <ticket_id>` | `GET /api/support/tickets/{ticket_id}/context` | 티켓에 추가된 컨텍스트를 읽습니다. |
+| `logbrew support reply <ticket_id>` | `POST /api/support/tickets/{ticket_id}/context` | 요청받은 컨텍스트를 추가합니다. |
+| `logbrew support close <ticket_id>` | `PATCH /api/support/tickets/{ticket_id}` | `closed`로 설정합니다. |
+| `logbrew support reopen <ticket_id>` | `PATCH /api/support/tickets/{ticket_id}` | `open`으로 설정합니다. |
+
+목록은 `project_id`, `status`, `source`, `category`, `release`, `limit`을 받습니다. `limit`의 기본값은 100이고 최대값은 500입니다. 커서 기반 페이지네이션을 쓰려면 `pagination=cursor`를 보내세요. 다음 페이지부터는 같은 필터를 반복하고, `next_cursor`의 `cursor_time`과 `cursor_id`를 보내세요. 커서 ID는 `sup_` 티켓 ID입니다. `next_cursor`가 `null`이면 멈추세요. CLI는 `--project`, `--status`, `--source`, `--category`, `--release`, `--limit`, `--pagination`, `--cursor-time`, `--cursor-id` 플래그를 사용합니다.
+
+상태 값은 `open`, `routed`, `in_progress`, `waiting_on_user`, `resolved`, `closed`입니다. 직접 설정할 수 있는 값은 `open`과 `closed`뿐입니다. 닫기나 다시 열기 요청을 반복해도 아무것도 바뀌지 않고 성공으로 처리되므로, 같은 요청을 그대로 재시도할 수 있습니다. 반환된 상태와 `next_action`을 따르세요.
+
+| 상태 | `next_action.code` | 다음 단계 |
+| --- | --- | --- |
+| `open`, `routed`, `in_progress` | `await_owner_update` | 업데이트를 기다리세요. 나중에 티켓을 다시 읽으세요. |
+| `waiting_on_user` | `provide_context` | 요청받은 컨텍스트를 보내세요. |
+| `resolved`, `closed` | `open_new_ticket_if_needed` | 문제가 다시 생기면 새 티켓을 만드세요. |
+
+## 요청받은 컨텍스트 추가하기
+
+티켓에서 컨텍스트를 요청하면 답장하세요. 이런 티켓은 상태가 `waiting_on_user`이고 `next_action.code`가 `provide_context`입니다.
+
+```bash
+logbrew support reply sup_11111111111141118111111111111111 \
+  --context "The same project and time filters still return no logs." \
+  --retry-key "<retry_key>" --json
+```
+
+API 본문에는 `context`와 선택 사항인 `diagnostics`가 들어갑니다. `context` 텍스트는 1자에서 4,000자여야 합니다. `context`에 자격 증명, URL, 호스트 이름, 로컬 경로를 넣지 마세요. API는 이런 텍스트를 `422`로 거부합니다. `Idempotency-Key` 헤더로 재시도 키를 보내세요. 컨텍스트 경로에는 이 헤더가 필요합니다. 키는 공백 없이, 눈에 보이는 ASCII 문자 1자에서 128자로 이루어집니다. 답장마다 새 키를 쓰세요. 같은 답장을 재시도할 때만 키를 다시 쓰세요.
+
+API는 티켓이 `open`, `routed`, `in_progress`, `waiting_on_user` 상태일 때 컨텍스트를 받습니다. 티켓 상태 하나당 답장 1개를 받습니다. 답장한 뒤에는 상태가 바뀔 때까지 기다렸다가 컨텍스트를 더 보내세요. `waiting_on_user` 티켓에 답장하면 티켓이 `open`이 됩니다. 이 변경을 가정하지 말고 반환된 `status`를 읽으세요.
+
+답장에 성공하면 `ticket_id`, `context_id`, `status`, `created_at`, `next`, `next_action`이 반환됩니다. `context_id`는 `ctx_`로 시작합니다. 이후 요청에 답하기 전에 티켓을 다시 읽으세요.
+
+`GET /api/support/tickets/{ticket_id}/context`는 가장 최근 컨텍스트 항목 20개를 오래된 순서로 반환합니다. 각 항목에는 `context_id`, `context`, `diagnostics`, `created_at`이 있습니다. 이 목록에는 커서가 없습니다.
+
+`resolved` 또는 `closed` 티켓에 답장하면 `code: "validation_failed"`와 함께 `422`가 반환됩니다. 사용자가 그 지원 요청을 이어 가고 싶을 때만 티켓을 다시 여세요. `next_action`은 에이전트에게 계정 상태를 바꿀 권한을 주지 않습니다.
+
+## 오류에서 복구하기
+
+| HTTP 상태 | `code` | 복구 방법 |
+| --- | --- | --- |
+| `401` | `unauthorized` | 유효한 계정 bearer 토큰을 보내세요. |
+| `404` | `not_found` | 계정의 티켓 목록을 보고 반환된 `sup_` ID를 사용하세요. 프로젝트 오류라면 `project_id`를 확인하거나 빼세요. |
+| `405` | `method_not_allowed` | [티켓 추적하기](#track-the-ticket) 표에 있는 메서드를 사용하세요. |
+| `409` | `idempotency_conflict` | 재시도 키가 다른 요청에 이미 쓰였습니다. 원래 요청을 재시도하거나, 티켓을 읽고 새 키를 쓰세요. |
+| `422` | `validation_failed` | 오류에 나온 필드를 고치세요. PATCH에는 `status: "open"` 또는 `status: "closed"`만 보내세요. |
+| `429` | `rate_limited` | 기다린 뒤 다시 시도하세요. |
+
+오류 응답에는 `error`, `code`, `next`, `next_action`이 들어 있습니다. [API 오류](/ko/reference/api-errors)를 참고하세요.
+
+## 보고서를 안전하게 유지하기
+
+시크릿, 토큰, 인증 헤더, 수집 키, 원시 로그, 고객 데이터, 로컬 경로, 호스트, 관련 없는 소스 코드를 절대 보내지 마세요. 민감한 정보를 가린 짧은 요약을 보내세요. 직접 확인할 수 있는 항목은 [문제 해결](/ko/guides/troubleshooting)을 참고하세요.

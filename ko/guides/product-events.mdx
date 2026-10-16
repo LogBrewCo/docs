@@ -1,0 +1,211 @@
+---
+title: "Node.js 이벤트 트래킹 설정 가이드"
+sidebarTitle: "제품 이벤트 수집"
+description: "Node.js에서 분류된 제품 이벤트를 타입이 있는 사용자, 세션 정보와 함께 보내세요. 로컬 수집 테스트를 실행하고 CLI로 결과를 읽으세요."
+---
+
+제품 이벤트로 앱에서 일어나는 사용자 액션에 이름을 붙여 기록하세요. 예를 들면 결제 화면 열기나 구매 완료입니다. SDK는 클릭 리스너를 설치하거나 폼 내용을 수집하지 않습니다. 각 이벤트는 직접 작성한 코드가 기록합니다.
+
+집계 규칙과 리포트 종류는 [제품 분석](/ko/concepts/product-analytics)을 참고하세요.
+
+## 테스트 준비하기
+
+Node.js 18 이상 앱과 읽기 권한이 있는 LogBrew 프로젝트를 사용하세요. 텔레메트리를 보낸 적이 없다면 [빠른 시작](/ko/quickstart)부터 시작하세요. 이 테스트는 고객 활동과 분리하세요.
+
+앱 디렉터리에 패키지를 설치하세요.
+
+```bash
+npm install @logbrew/sdk@0.1.28 @logbrew/node@0.1.12
+```
+
+프로젝트의 서버 수집 키를 사용하세요. 키는 소스 관리 밖의 `LOGBREW_SERVER_API_KEY`에 보관하세요. 서버 키를 브라우저 번들에 넣지 마세요. 계정 액세스 토큰은 결과를 읽는 데 쓰며, SDK 설정에는 쓰지 않습니다.
+
+## 이벤트 1개의 의미 정하기
+
+제품에 대한 질문에서 시작하세요. 예를 들면 사용자가 결제 화면을 연 뒤 결제를 제출하는지 묻는 질문입니다. 이벤트마다 고정된 이름, 정확한 트리거, 그 이벤트를 기록하는 앱 안의 위치 1곳을 정하세요.
+
+| 이벤트 이름 | 트리거 |
+| --- | --- |
+| `checkout.opened` | 앱이 결제 화면을 엽니다. 구매가 아닙니다. |
+| `checkout.submitted` | 앱이 제출 액션을 받아들입니다. 결제 성공이 아닙니다. |
+| `checkout.completed` | 앱이 완료를 확인합니다. 클릭이나 네트워크 재시도마다 기록하지 마세요. |
+
+이벤트 이름은 릴리스와 언어가 바뀌어도 그대로 유지하세요. 이메일 주소, 주문 번호, URL, 사용자가 입력한 텍스트로 이름을 만들지 마세요.
+
+사용자 정의 속성에는 승인된 값 몇 개만 사용하세요. 예를 들어 `checkout_mode`는 `guest` 또는 `signed_in`일 수 있습니다. 값마다 새 이벤트 이름을 추가하지 마세요. 폼 내용을 보내지 마세요.
+
+비즈니스 액션은 한 곳에서만 기록하세요. 브라우저와 서버가 같은 액션을 모두 기록하면 합계가 두 배가 됩니다.
+
+## 올바른 활동 종류 사용하기
+
+| 종류 | 의미 | 수집 방법 |
+| --- | --- | --- |
+| `interaction` | 앱에서 정의한 제품 액션입니다. | 아래처럼 `createProductActionAttributes`를 사용합니다. |
+| `page_view` | 브라우저 페이지 조회입니다. | 브라우저 SDK의 페이지 조회 수집을 사용합니다. |
+| `screen_view` | 앱 화면 조회입니다. | 모바일 화면 조회 헬퍼를 사용합니다. |
+
+`createProductActionAttributes`는 이벤트 메타데이터에 `analyticsSchemaVersion: 1`과 `analyticsKind: "interaction"`을 설정합니다. 라우트 템플릿이나 화면 이름이 `analyticsSurface`를 설정합니다. 실제 URL이 아니라 `/orders/:id` 같은 라우트 템플릿을 사용하세요.
+
+이벤트 이름으로는 종류가 정해지지 않습니다. 이름이 `page_view`인 상호작용도 여전히 상호작용입니다. 로그, 이슈, 스팬은 제품 이벤트가 아닙니다. 다른 런타임은 [SDK 연동](/ko/guides/sdk-ingestion)을 참고하세요.
+
+## <span id="set-users-and-sessions-on-each-event">이벤트마다 사용자와 세션 설정하기</span>
+
+- 로그인한 사용자는 `context.subject`를 `kind: "user"`인 고정 ID로 설정하세요.
+- 익명 방문자는 `kind: "anonymous"`인 별도 ID를 사용하세요.
+- 앱의 세션 ID를 `context.session.id`에 넣으세요. 세션이 끝날 때까지 같은 값을 다시 사용하세요.
+
+이름, 이메일 주소, IP 주소, 액세스 토큰을 ID로 사용하지 마세요. 고정 ID는 한 사용자의 액션을 연결합니다. 고정 ID를 쓴다고 데이터가 익명이 되지는 않습니다.
+
+공유 서버 클라이언트에 기본 사용자나 세션을 설정하지 마세요. 각 이벤트를 만든 요청의 주체와 세션을 전달하세요. SDK는 이 ID를 만들지 않으며, 로그인, 로그아웃, 계정 전환을 감지하지도 않습니다. LogBrew는 로그인 뒤에 익명 주체를 사용자와 합치지 않습니다.
+
+## 로컬에서 예제 실행하기
+
+이 예제를 `product-events.mjs`로 저장하세요. 익명 방문, 로그인, 사용자 2명에 걸쳐 테스트 액션 5개를 기록합니다. 클라이언트에는 공유 서비스 및 배포 컨텍스트만 들어 있습니다. 이 테스트에서는 자동 전송이 꺼져 있습니다.
+
+```js
+import { randomUUID } from "node:crypto";
+import { createProductActionAttributes, SdkError } from "@logbrew/sdk";
+import { createLogBrewNodeClient } from "@logbrew/node";
+
+try {
+  const client = createLogBrewNodeClient({
+    automaticDelivery: false,
+    context: {
+      schemaVersion: 1,
+      resource: {
+        service: { name: "analytics-check", version: "analytics@1" },
+        deployment: { environment: "development", release: "analytics@1" }
+      }
+    }
+  });
+  const startedAt = new Date().toISOString();
+  client.release(randomUUID(), startedAt, { version: "analytics@1" });
+  client.environment(randomUUID(), startedAt, { name: "development" });
+
+  function record(name, subject, sessionId) {
+    client.action(randomUUID(), new Date().toISOString(), {
+      ...createProductActionAttributes({
+        name,
+        routeTemplate: "/checkout",
+        metadata: { checkout_mode: subject.kind === "user" ? "signed_in" : "guest" }
+      }),
+      context: { schemaVersion: 1, subject, session: { id: sessionId } }
+    });
+  }
+
+  record("checkout.opened", { id: "anon_demo_a", kind: "anonymous" }, randomUUID());
+  const userSession = randomUUID();
+  record("checkout.submitted", { id: "user_demo_a", kind: "user" }, userSession);
+  record("checkout.completed", { id: "user_demo_a", kind: "user" }, userSession);
+  record("checkout.opened", { id: "anon_demo_b", kind: "anonymous" }, randomUUID());
+  record("checkout.submitted", { id: "user_demo_b", kind: "user" }, randomUUID());
+
+  if (process.argv.includes("--send")) {
+    const response = await client.shutdown();
+    console.log(JSON.stringify({
+      mode: "sent",
+      status_code: response.statusCode,
+      attempts: response.attempts
+    }));
+  } else {
+    const batch = JSON.parse(client.previewJson());
+    const actions = batch.events.filter(event => event.type === "action");
+    console.log(JSON.stringify({
+      mode: "local_preview",
+      actions: actions.length,
+      kinds: [...new Set(actions.map(event => event.attributes.metadata.analyticsKind))],
+      dropped: client.droppedEvents()
+    }));
+  }
+} catch (error) {
+  console.error(JSON.stringify({
+    ok: false,
+    error: error instanceof SdkError ? error.code : "capture_failed"
+  }));
+  process.exitCode = 1;
+}
+```
+
+`--send` 없이 스크립트를 실행하세요. 이 명령어는 요청을 보내지 않습니다.
+
+```bash
+LOGBREW_SERVER_API_KEY=local-preview-only node product-events.mjs
+```
+
+예상 출력:
+
+```json
+{"mode":"local_preview","actions":5,"kinds":["interaction"],"dropped":0}
+```
+
+릴리스와 환경 마커는 제품 액션이 아닙니다. 이 결과는 로컬 큐만 보여 줍니다. LogBrew가 이벤트를 받았다는 뜻은 아닙니다. 실제 고객 컨텍스트가 있는 앱에서는 `previewJson()`을 출력하지 마세요.
+
+## 로그인과 로그아웃 처리하기
+
+- 로그인 전에는 현재 익명 주체를 각 이벤트와 함께 보내세요.
+- 로그인 후에는 종류가 `user`인 사용자의 고정 ID를 보내세요.
+- 로그아웃하면 그 사용자의 컨텍스트를 더 이상 사용하지 마세요. 개인정보 처리 방침에 따라 새 익명 주체를 만드세요.
+- 계정을 전환하면 새 사용자의 ID를 사용하세요.
+
+이 예제는 식별 정보가 바뀌면 새 세션을 시작합니다. 세션 규칙은 직접 정하고 각 이벤트에 적용하세요. 이벤트 컨텍스트는 해당 이벤트에 한해 클라이언트의 주체와 세션을 대체합니다. 이벤트에 둘 중 하나가 없으면 클라이언트 값을 사용합니다. 그래서 이 예제는 클라이언트에 주체나 세션을 설정하지 않습니다. 나중에 실행되는 작업에는 그 작업을 시작한 사용자의 식별 정보를 유지하세요.
+
+## 한 번 보내고 결과 읽기
+
+테스트 프로젝트의 서버 키를 프로세스 환경에 설정하세요. 다음 명령어를 한 번 실행하세요.
+
+```bash
+node product-events.mjs --send
+```
+
+실행할 때마다 새 이벤트 ID가 만들어지므로, 두 번째로 실행하면 이벤트 5개가 더 추가됩니다. 프로세스가 실패하면 출력에 SDK 오류 코드가 나옵니다. 키가 거부되면 다음과 같이 나옵니다.
+
+```json
+{"ok":false,"error":"unauthenticated"}
+```
+
+수집 키가 활성 상태이고 테스트 프로젝트에 속하는지 확인하세요. 계정에 로그인해도 SDK 키 문제는 해결되지 않습니다. 다른 실패는 [API 오류](/ko/reference/api-errors)와 [문제 해결](/ko/guides/troubleshooting)을 참고하세요.
+
+LogBrew가 배치를 접수하면 대시보드에서 이벤트를 찾으세요.
+
+1. **분석**을 여세요.
+2. **프로젝트**에서 테스트 프로젝트를 선택하세요.
+3. **기간**에서 **24시간**을 선택하세요.
+4. **상위 이벤트**에서 이벤트 이름 3개를, **상위 화면**에서 `/checkout`을 찾으세요.
+
+프로젝트의 다른 활동이 있으면 이 합계가 달라집니다. 서비스, 릴리스, 환경을 정확히 확인하려면 로그인한 [CLI](/ko/guides/cli)로 개요를 읽으세요.
+
+```bash
+logbrew analytics overview --project "<project_id>" --since 1h \
+  --service analytics-check --release analytics@1 \
+  --environment development --json
+```
+
+다른 활동이 없는 기간에 한 번 실행했다면 다음을 예상하세요.
+
+- `/checkout` 화면에서 상호작용 5개, 모두 세션 컨텍스트 포함.
+- 사용자 이벤트 3개와 익명 주체 이벤트 2개.
+- 사용자 2명, 익명 주체 2개, 세션 4개.
+
+고유 사용자, 주체, 세션 수는 근사치입니다. 이벤트 합계는 선택한 기간 안에서 정확합니다. 이 테스트는 전환이나 재방문을 측정하지 않습니다.
+
+| 결과 | 다음 확인 |
+| --- | --- |
+| 제품 활동이 없음 | 전송 결과, 프로젝트, 기간, 서비스, 릴리스, 환경을 확인하세요. |
+| 활동이 분류되지 않음 | `createProductActionAttributes`를 사용하세요. 이벤트 이름만으로는 종류가 정해지지 않습니다. |
+| 사용자 수가 다름 | 각 이벤트의 `context.subject`를 확인하세요. 익명 주체는 사용자로 세지 않습니다. |
+| 세션 수가 다름 | 각 이벤트의 `context.session.id`와 세션 규칙을 확인하세요. |
+| 이벤트가 예상보다 많음 | 여러 번 실행했는지, 같은 액션을 두 곳에서 기록했는지 확인하세요. |
+
+## 앱에서 이벤트 테스트하기
+
+수집 호출을 앱의 핸들러로 옮기세요. 각 이벤트의 의미, 종류, 식별 규칙은 그대로 유지하세요. 먼저 테스트용 계정으로 테스트하세요.
+
+| 앱 테스트 | 예상 수집 결과 |
+| --- | --- |
+| 제출하지 않고 결제 화면 열기 | `checkout.opened`만 수집됩니다. |
+| 검증에 실패하는 폼 제출 | `checkout.submitted`가 없습니다. 폼 내용은 절대 보내지 마세요. |
+| 제출을 받아들인 뒤 결제 실패 | `checkout.submitted`는 있고 `checkout.completed`는 없습니다. |
+| 완료가 확인된 뒤 요청 재시도 | 두 번째 `checkout.completed`가 없습니다. |
+| 로그아웃 후 다른 계정 사용 | 이후 이벤트는 새 주체와 세션을 사용합니다. |
+
+로컬 미리보기는 수집을 테스트합니다. 배치가 접수되면 전송이 테스트됩니다. 둘 다 수집 호출이 앱의 올바른 지점에서 실행된다는 것을 보여 주지는 않습니다.

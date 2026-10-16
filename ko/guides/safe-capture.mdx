@@ -1,0 +1,153 @@
+---
+title: "로그 마스킹: 민감한 데이터를 로그에서 빼기"
+sidebarTitle: "수집 데이터 관리하기"
+description: "승인된 로그 필드를 선택하세요. 민감한 데이터를 로컬에서 테스트하세요. LogBrew JavaScript, Node.js, 브라우저 수집 설정의 한계를 확인하세요."
+---
+
+수집을 켜기 전에 앱이 무엇을 보낼지 정하세요. 비밀번호, 액세스 토큰, 폼 내용, 비공개 사용자 데이터가 이벤트에 들어가지 않게 하세요.
+
+각 이벤트는 승인된 필드로만 만드세요. 요청, 응답, 오류 객체 전체를 메타데이터에 복사하지 마세요. 마스킹은 민감한 값을 다른 값으로 바꿉니다. 필터는 이벤트 전체를 뺍니다. SDK 기준으로 유효한 이벤트라도 앱이 보내면 안 되는 데이터가 들어 있을 수 있습니다.
+
+이 가이드는 다음 패키지 버전에 적용됩니다.
+
+- `@logbrew/sdk` 0.1.28
+- `@logbrew/node` 0.1.12
+- `@logbrew/browser` 0.1.11
+
+다른 런타임은 [SDK 연동](/ko/guides/sdk-ingestion)에서 패키지 가이드를 읽으세요.
+
+## 수집할 필드 선택하기
+
+결제 실패라면 고정 메시지, 라우트 템플릿, 상태 코드를 기록하세요. 이름, 이메일 주소, 결제 데이터는 기록하지 마세요.
+
+| 필드 | 수집 규칙 |
+| --- | --- |
+| 메시지 | `checkout.failed` 같은 고정 텍스트를 사용하세요. 폼 텍스트나 자격 증명을 넣지 마세요. |
+| 라우트 | `/orders/:id` 같은 템플릿을 사용하세요. URL 경로, 쿼리, 프래그먼트에는 비공개 값이 들어 있을 수 있습니다. |
+| 상태 | 유효한 상태 코드만 받으세요. 사용자 입력에서 온 문자열은 받지 마세요. |
+| 메타데이터 | 이름이 정해진 필드를 선택하세요. 요청, 응답, 오류의 모든 속성을 복사하지 마세요. |
+| 주체와 세션 | 로그인 토큰이나 세션 쿠키가 아니라 승인된 텔레메트리 식별자를 사용하세요. |
+
+사용자 및 세션 컨텍스트는 [제품 이벤트 수집](/ko/guides/product-events#set-users-and-sessions-on-each-event)을 참고하세요. 이름이 들어 있지 않은 ID라도 사람을 식별할 수 있습니다.
+
+## 필드 선택을 로컬에서 테스트하기
+
+Node.js 18 이상을 사용하세요. 빈 디렉터리에 패키지를 설치하세요.
+
+```bash
+npm install --save-exact @logbrew/sdk@0.1.28
+```
+
+이 테스트는 실제 키를 쓰지 않으며 요청도 보내지 않습니다. `safe-capture.mjs`로 저장하세요.
+
+```js
+import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import { LogBrewClient, SdkError } from "@logbrew/sdk";
+
+try {
+  const client = LogBrewClient.create({
+    apiKey: "local-preview-only",
+    sdkName: "privacy-check",
+    sdkVersion: "0.1.28",
+    automaticDelivery: false
+  });
+
+  function recordCheckoutFailure(input) {
+    const status = input?.status;
+    if (!Number.isInteger(status) || status < 400 || status > 599) {
+      return false;
+    }
+    client.log(randomUUID(), new Date().toISOString(), {
+      message: "checkout.failed",
+      level: "error",
+      metadata: { route: "/checkout", status }
+    });
+    return true;
+  }
+
+  const excludedValue = "SYNTHETIC_PRIVATE_VALUE";
+  assert.equal(recordCheckoutFailure({
+    status: 503,
+    authorization: excludedValue,
+    body: excludedValue
+  }), true);
+  assert.equal(recordCheckoutFailure({ status: excludedValue }), false);
+
+  const preview = client.previewJson();
+  const batch = JSON.parse(preview);
+  assert.equal(batch.events.length, 1);
+  assert.equal(preview.includes(excludedValue), false);
+  assert.deepEqual(batch.events[0].attributes.metadata, {
+    route: "/checkout",
+    status: 503
+  });
+  client.purgePendingEvents();
+  console.log(JSON.stringify({
+    ok: true,
+    checked_events: 1,
+    excluded_value_found: false
+  }));
+} catch (error) {
+  console.error(JSON.stringify({
+    ok: false,
+    error: error instanceof SdkError ? error.code : "privacy_check_failed"
+  }));
+  process.exitCode = 1;
+}
+```
+
+
+테스트를 실행하세요.
+
+```bash
+node safe-capture.mjs
+```
+
+예상 출력:
+
+```json
+{"ok":true,"checked_events":1,"excluded_value_found":false}
+```
+
+검증에 실패하면 `"ok":false`를 출력하고 코드 1로 종료합니다. SDK 검증 오류가 나면 해당 SDK 오류 코드를 출력합니다. 실제 데이터가 들어 있는 미리보기를 출력하거나 업로드하지 마세요.
+
+수집 코드에도 같은 패턴을 사용하고, 검증 코드는 테스트에 남겨 두세요. 앱이 보내면 안 되는 필드와 값마다 확인을 추가하세요. 패턴 기반 마스킹을 쓴다면 규칙을 바꿀 때마다 확인을 다시 실행하세요. 이 테스트는 큐에 들어간 로그 1개만 확인합니다. 개인정보 보호 검토를 대신하지 않습니다.
+
+## 오류 메시지와 스택
+
+| 수집 경로 | 동작 |
+| --- | --- |
+| `createIssueAttributesFromError` (core) | 오류 텍스트를 이슈 메시지와 `metadata.errorMessage`에 유지합니다. `metadata.errorStack`은 `includeErrorStack: true`일 때만 추가합니다. 예외 체인 항목은 각 메시지를 `redacted`로 표시하고 텍스트를 담지 않습니다. |
+| core 콘솔 변환 | 오류 텍스트를 로그 메시지와 메타데이터에 유지할 수 있습니다. |
+| `createBrowserErrorEvent` (browser) | 고정된 오류 요약을 사용하고, `metadata.errorMessage`를 제거하며, 예외 체인 메시지를 가려짐으로 표시합니다. |
+
+사용자 지정 `options.message`를 써도 `metadata.errorMessage`는 제거되지 않습니다. 제목만 보지 말고 이벤트 전체를 확인하세요. 민감한 값은 처음부터 오류 메시지에 넣지 마세요.
+
+## 각 설정을 적용 범위에 맞게 사용하기
+
+### JavaScript core와 Node.js
+
+`LogBrewClient.create`는 `eventFilter`를 받습니다. 이벤트가 큐에 들어가기 전에 빼려면 `false`를 반환하세요. 다른 값을 반환하면 이벤트를 유지합니다. 필터는 이벤트의 복사본을 받으므로, 복사본을 바꿔도 아무것도 마스킹되지 않습니다. 이 버전의 `createLogBrewNodeClient`와 `createLogBrewBrowserClient`는 `eventFilter`를 적용하지 않습니다.
+
+`droppedEvents()`는 크기 한도나 큐 한도 때문에 버려진 이벤트를 셉니다. `eventFilter`가 뺀 이벤트는 세지 않습니다.
+
+Node 클라이언트는 Node 버전, 운영체제, 아키텍처 같은 런타임 컨텍스트를 추가합니다. 빼려면 `captureRuntimeContext: false`를 설정하세요. 이 설정은 앱이 제공하는 컨텍스트를 제거하지 않으며, 수집을 멈추지도 않습니다.
+
+### 브라우저
+
+브라우저 클라이언트는 기본적으로 전역 오류, 처리되지 않은 rejection, 첫 페이지 조회를 수집합니다. 하나를 끄려면 `captureGlobalErrors`, `captureUnhandledRejections`, `capturePageViews` 중 해당 값을 `false`로 설정하세요.
+
+페이지 조회에는 경로 이름이 들어갑니다. `includeQueryString`, `includeHash`, `includeDocumentTitle`, `includeUserAgent`를 설정하지 않으면 쿼리 문자열, 프래그먼트, 문서 제목, 전체 사용자 에이전트는 빠집니다. 경로 이름에 비공개 값이 들어갈 수 있다면 자동 페이지 조회를 끄고, 안전한 라우트 이름으로 페이지 조회를 직접 보내세요.
+
+`sanitizeMetadata`는 메타데이터만 바꿉니다. 페이지 조회 이름이나 액션 이름은 바꾸지 않습니다. 페이지 조회 이름에는 `page_view /orders/1234`처럼 실제 경로 이름이 들어갑니다. 메타데이터의 `routeTemplate`은 분석 화면을 정하지만 이름은 바꾸지 않습니다. `shouldCaptureError`는 브라우저 이슈만 뺍니다. 로그나 다른 시그널은 필터링하지 않습니다.
+
+브라우저 브랜드, 플랫폼, 기기 계열을 빼려면 `captureRuntimeContext: false`를 설정하세요. 이 설정은 `includeUserAgent`를 제어하지 않습니다.
+
+## 실제 수집 전에
+
+켜 둔 수집 경로마다 오류 경로와 로깅 통합을 포함해 테스트용 데이터로 테스트하세요.
+
+수집 설정 변경은 새 이벤트에만 적용됩니다. `purgePendingEvents()`는 유휴 상태의 로컬 큐를 비우며, 전송 중에는 실패합니다. 이후 수집을 멈추거나 LogBrew가 이미 접수한 이벤트를 제거하지는 않습니다. 브라우저 `uninstall()`은 리스너를 제거하지만 큐에 있는 이벤트는 유지합니다. 이 메서드들은 동의 절차나 삭제 절차가 아닙니다.
+
+그런 다음 [빠른 시작](/ko/quickstart)으로 테스트 이벤트 1개를 보내세요. 이벤트가 보이지 않으면 [문제 해결](/ko/guides/troubleshooting)을 참고하세요. HTTP 오류는 [API 오류](/ko/reference/api-errors)를 참고하세요.
