@@ -1,0 +1,434 @@
+---
+title: "API akun dan batas penggunaan API"
+sidebarTitle: "API akun"
+description: "Baca batas penggunaan akun LogBrew, riwayat kuota, kesiapan langganan, dan respons saat keluar."
+---
+
+Gunakan API akun untuk membaca penggunaan, status kuota, riwayat penggunaan,
+dan kesiapan langganan, serta untuk keluar. Pembacaan akun memakai bearer
+akun atau sesi browser. Jangan pernah memakai kunci ingest proyek untuk
+permintaan akun. Jangan pernah memakai kredensial akun sebagai konfigurasi SDK
+atau ingest.
+
+| Tugas | Endpoint |
+| --- | --- |
+| Baca penggunaan dan status kuota saat ini | `GET /api/account/usage` |
+| Baca penggunaan dari waktu ke waktu | `GET /api/account/usage/history` |
+| Baca kesiapan langganan dan organisasi | `GET /api/account/subscription` |
+| Keluarkan satu login aplikasi atau CLI | `POST /api/auth/logout` |
+| Cabut semua login LogBrew | `POST /api/auth/logout-all` |
+| Hapus sesi browser | `POST /api/auth/web/logout` |
+
+Error memakai [envelope error API](/id/reference/api-errors) standar.
+Pembacaan tanpa autentikasi akun yang valid mengembalikan `401` dengan
+`code: "unauthorized"`. Jangan tampilkan kegagalan itu sebagai penggunaan
+nol, grafik kosong, atau paket gratis. Metode yang tidak didukung
+mengembalikan `405` dengan `code: "method_not_allowed"`, dan `next`
+menyebutkan permintaan yang didukung.
+
+API akun melaporkan penggunaan telemetri, bukan uang. API ini tidak
+melaporkan biaya, faktur, atau status pembayaran.
+
+## <span id="account-usage">Penggunaan akun</span>
+
+`GET /api/account/usage` adalah endpoint kanonis untuk penggunaan dan kuota.
+Gunakan endpoint ini untuk total penggunaan, waktu reset, status kuota, serta
+rincian per proyek dan per stream telemetri. Jangan menghitung penggunaan dari
+file SDK, file CLI, atau penghitung di klien. Perintah CLI `logbrew usage`
+membaca endpoint ini. Lihat [Referensi CLI](/id/reference/cli).
+
+```bash
+curl "https://api.logbrew.co/api/account/usage" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER"
+```
+
+Contoh respons dengan nilai sintetis. Akun gratis ini punya 1 proyek dan hanya
+mengirim log pada periode saat ini:
+
+```json
+{
+  "period_start": "2026-06-01T00:00:00Z",
+  "period_end": "2026-07-01T00:00:00Z",
+  "reset_at": "2026-07-01T00:00:00Z",
+  "plan": { "tier": "free", "status": "free" },
+  "limits": { "events": null, "bytes": null, "projects": null, "retention_days": 30 },
+  "usage": { "events": 27000, "bytes": 10485760, "projects": 1 },
+  "state": "ok",
+  "warning_threshold": 0.8,
+  "percent_used": 0.2,
+  "warning": false,
+  "blocked": false,
+  "limit": null,
+  "next": "continue sending telemetry",
+  "next_action": {
+    "code": "continue_sending_telemetry",
+    "target": "telemetry_ingest",
+    "state": "ok",
+    "limit": null,
+    "reset_at": "2026-07-01T00:00:00Z"
+  },
+  "by_project": [
+    { "project_id": "00000000-0000-4000-8000-000000000001", "events": 27000, "bytes": 10485760 }
+  ],
+  "by_stream": [
+    { "kind": "logs", "events": 27000, "bytes": 10485760 }
+  ]
+}
+```
+
+| Kolom | Arti |
+| --- | --- |
+| `period_start`, `period_end` | Periode penggunaan saat ini. Akhir periode bersifat eksklusif. |
+| `reset_at` | Waktu kuota penggunaan direset. Nilainya sama dengan `period_end`. |
+| `plan.tier` | Pengenal paket: `free`, `pro`, atau `scale`. |
+| `plan.status` | `free`, `trial`, `active`, `past_due`, atau `disabled`. |
+| `limits.events`, `limits.bytes`, `limits.projects` | Kolom kompatibilitas. Nilainya `null`. `null` tidak berarti tanpa batas. Gunakan `state`, `limit`, dan `percent_used` untuk status kuota. |
+| `limits.retention_days` | Retensi data untuk paket, dalam hari, atau `null`. |
+| `usage.events`, `usage.bytes` | Total untuk semua stream telemetri dalam periode ini. |
+| `usage.projects` | Jumlah proyek yang dimiliki akun. |
+| `state` | `ok`, `warning`, atau `blocked`. |
+| `warning_threshold` | Bagian kuota yang memicu status `warning`, dalam bentuk pecahan. |
+| `percent_used` | Bagian tertinggi dari kuota mana pun, dalam persen. Misalnya, `80` berarti 80%. |
+| `warning`, `blocked` | Bentuk kompatibilitas dari `state`. |
+| `limit` | Kuota yang menyebabkan status tersebut: `events`, `bytes`, atau `null`. |
+| `next`, `next_action` | Teks pemulihan dan tindakan bertipe untuk status saat ini. |
+| `by_project` | Penggunaan per proyek. Ada 1 baris untuk setiap proyek yang dimiliki, termasuk saat penggunaannya nol. Cocokkan baris berdasarkan `project_id`, bukan posisi di array. |
+| `by_stream` | Penggunaan per `kind` stream telemetri, seperti `logs`, `issues`, `actions`, atau `traces`. |
+
+### Status kuota
+
+Gunakan `state` untuk percabangan utama. `limit` bernilai `null` hanya jika
+`state` bernilai `ok`.
+
+| `state` | `warning` | `blocked` | `limit` | `next_action.code` | `next_action.target` |
+| --- | --- | --- | --- | --- | --- |
+| `ok` | `false` | `false` | `null` | `continue_sending_telemetry` | `telemetry_ingest` |
+| `warning` | `true` | `false` | `events` atau `bytes` | `reduce_usage_or_upgrade` | `pricing` |
+| `blocked` | `false` | `true` | `events` atau `bytes` | `wait_until_reset_or_upgrade` | `pricing` |
+
+`next_action.state`, `next_action.limit`, dan `next_action.reset_at`
+mengulang nilai di tingkat teratas. Nilai `next_action.code` juga mencakup
+`check_usage_limits` dengan target `account_usage`. Jika klien menerima
+pasangan itu, baca penggunaan lagi dan tampilkan `next`.
+
+LogBrew mengukur setiap jenis telemetri terhadap kuotanya sendiri. `limit`
+mengelompokkannya:
+
+- `events` mencakup peristiwa masalah dan span trace.
+- `bytes` mencakup byte log dan byte metrik.
+
+Jika satu kuota diblokir dan kuota lain dalam status peringatan, `limit`
+menyebutkan kuota yang diblokir. Status `warning` dimulai saat penggunaan
+mencapai `warning_threshold` dari suatu kuota. Status `blocked` dimulai saat
+penggunaan mencapai kuota.
+
+Teks `next` bisa berubah, misalnya saat paket tidak dijual. Nilai
+`next_action` tidak berubah. Buat teks terjemahan berdasarkan `next_action`.
+Jangan mem-parse `next`.
+
+Batas penggunaan akun bukan batas laju API. Saat ingest melebihi kuota,
+permintaan ingest mengembalikan `429` dengan `usage_limit_exceeded`, dan body
+menambahkan `limit` dan `reset_at`. Dalam error itu, `limit` menyebutkan kuota
+yang tepat: `issue_events`, `log_bytes`, `metric_bytes`, atau `trace_spans`.
+LogBrew menolak seluruh permintaan. Jangan kirim jenis telemetri itu lagi
+sampai `reset_at` atau sampai paket berubah. Saat klien mengirim terlalu
+banyak permintaan, API mengembalikan `rate_limited`. Lihat
+[Error API](/id/reference/api-errors#retry-rules).
+
+Respons ini adalah snapshot. Baca lagi setelah akun berubah.
+
+<Note>
+  `GET /api/logs/usage` adalah respons kompatibilitas lama untuk aplikasi
+  seluler, dengan `bytes_used`, `limit_bytes`, dan `month`. Gunakan
+  `GET /api/account/usage` untuk integrasi baru.
+</Note>
+
+## Riwayat penggunaan
+
+`GET /api/account/usage/history` mengembalikan interval waktu penggunaan
+dalam jumlah terbatas untuk grafik dan laporan. Interval waktu tanpa
+penggunaan bernilai nol. Isi `interval` dengan salah satu nilai yang didukung.
+Jika Anda tidak mengisi `interval`, API memakai `monthly`. Rute ini tidak
+menerima kunci kueri lain.
+
+```bash
+curl --get "https://api.logbrew.co/api/account/usage/history" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "interval=daily"
+```
+
+| `interval` | Jumlah interval waktu | Awal interval waktu |
+| --- | ---: | --- |
+| `daily` | 30 | 00:00 UTC |
+| `weekly` | 12 | Senin, 00:00 UTC |
+| `monthly` | 12 | Hari pertama setiap bulan, 00:00 UTC |
+| `yearly` | 5 | 1 Januari, 00:00 UTC |
+
+| Kolom | Arti |
+| --- | --- |
+| `interval` | Interval yang diminta. |
+| `period_start`, `period_end` | Awal dan akhir eksklusif dari rentang waktu riwayat. |
+| `current` | Respons `GET /api/account/usage` lengkap untuk periode saat ini. |
+| `buckets` | Interval waktu sesuai urutan waktu, yang terlama lebih dulu. Setiap interval waktu punya `period_start`, `period_end`, `usage`, `by_project`, dan `by_stream`. |
+
+Respons `yearly` ini memakai data sintetis untuk permintaan pada Juni 2026.
+Semua penggunaan terjadi pada bulan Juni:
+
+```json
+{
+  "interval": "yearly",
+  "period_start": "2022-01-01T00:00:00Z",
+  "period_end": "2027-01-01T00:00:00Z",
+  "current": {
+    "period_start": "2026-06-01T00:00:00Z",
+    "period_end": "2026-07-01T00:00:00Z",
+    "reset_at": "2026-07-01T00:00:00Z",
+    "plan": { "tier": "free", "status": "free" },
+    "limits": { "events": null, "bytes": null, "projects": null, "retention_days": 30 },
+    "usage": { "events": 27000, "bytes": 10485760, "projects": 1 },
+    "state": "ok",
+    "warning_threshold": 0.8,
+    "percent_used": 0.2,
+    "warning": false,
+    "blocked": false,
+    "limit": null,
+    "next": "continue sending telemetry",
+    "next_action": {
+      "code": "continue_sending_telemetry",
+      "target": "telemetry_ingest",
+      "state": "ok",
+      "limit": null,
+      "reset_at": "2026-07-01T00:00:00Z"
+    },
+    "by_project": [
+      { "project_id": "00000000-0000-4000-8000-000000000001", "events": 27000, "bytes": 10485760 }
+    ],
+    "by_stream": [{ "kind": "logs", "events": 27000, "bytes": 10485760 }]
+  },
+  "buckets": [
+    { "period_start": "2022-01-01T00:00:00Z", "period_end": "2023-01-01T00:00:00Z", "usage": { "events": 0, "bytes": 0, "projects": 0 }, "by_project": [], "by_stream": [] },
+    { "period_start": "2023-01-01T00:00:00Z", "period_end": "2024-01-01T00:00:00Z", "usage": { "events": 0, "bytes": 0, "projects": 0 }, "by_project": [], "by_stream": [] },
+    { "period_start": "2024-01-01T00:00:00Z", "period_end": "2025-01-01T00:00:00Z", "usage": { "events": 0, "bytes": 0, "projects": 0 }, "by_project": [], "by_stream": [] },
+    { "period_start": "2025-01-01T00:00:00Z", "period_end": "2026-01-01T00:00:00Z", "usage": { "events": 0, "bytes": 0, "projects": 0 }, "by_project": [], "by_stream": [] },
+    {
+      "period_start": "2026-01-01T00:00:00Z",
+      "period_end": "2027-01-01T00:00:00Z",
+      "usage": { "events": 27000, "bytes": 10485760, "projects": 1 },
+      "by_project": [
+        { "project_id": "00000000-0000-4000-8000-000000000001", "events": 27000, "bytes": 10485760 }
+      ],
+      "by_stream": [{ "kind": "logs", "events": 27000, "bytes": 10485760 }]
+    }
+  ]
+}
+```
+
+Gunakan `current.reset_at` untuk waktu reset kuota. Jangan pakai akhir rentang
+waktu riwayat. `current` bukan jumlah dari semua interval waktu, dan
+tanggalnya bisa berbeda dari tanggal rentang waktu riwayat.
+
+Interval waktu terakhir berisi periode kalender saat ini, yang belum lengkap.
+Waktu akhirnya yang ada di masa depan tidak berarti LogBrew mengukur
+penggunaan di masa depan. Interval waktu yang berisi nol berarti LogBrew tidak
+mencatat penggunaan apa pun di interval itu.
+
+Di dalam satu interval waktu, `usage.projects` menghitung proyek yang punya
+penggunaan di interval itu. Jangan jumlahkan angka ini untuk mendapatkan
+jumlah proyek. Gunakan `current.usage.projects` untuk jumlah proyek yang
+dimiliki.
+
+Tampilkan peristiwa dan byte sebagai deret terpisah di grafik, karena
+satuannya berbeda. Interval waktu berisi penggunaan, bukan biaya. Jangan beri
+grafik label pengeluaran, faktur, atau permintaan API.
+
+Interval yang tidak didukung mengembalikan `422`:
+
+```json
+{
+  "error": "Unsupported usage history interval",
+  "code": "validation_failed",
+  "next": "use interval=daily, weekly, monthly, or yearly",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+Kunci kueri yang tidak dikenal juga mengembalikan `422` dengan
+`validation_failed`.
+
+## Kesiapan langganan
+
+`GET /api/account/subscription` bersifat hanya baca. Gunakan endpoint ini untuk
+memutuskan apakah kontrol paket berbayar atau organisasi diaktifkan. Gunakan
+endpoint penggunaan untuk status kuota.
+
+```bash
+curl "https://api.logbrew.co/api/account/subscription" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER"
+```
+
+Akun gratis mengembalikan respons ini. Nilai `account_id` di bawah ini
+sintetis:
+
+```json
+{
+  "account_id": "00000000-0000-4000-8000-0000000000aa",
+  "tier": "free",
+  "billing_interval": "none",
+  "state": "free",
+  "access_state": "active",
+  "current_period_start": null,
+  "current_period_end": null,
+  "renews_at": null,
+  "cancels_at": null,
+  "organization_creation_allowed": false,
+  "organization_creation_blocker": "subscription_required",
+  "limits": {
+    "organizations": 0,
+    "members_per_organization": 0,
+    "projects_per_organization": 0,
+    "invitations_per_day": 0
+  },
+  "next": "<display text>",
+  "next_action": {
+    "code": "choose_plan",
+    "target": "pricing"
+  }
+}
+```
+
+`next` adalah teks tampilan. Teks ini berubah saat paket berbayar dijual atau
+tidak dijual. Tampilkan teks yang dikembalikan, atau buat teks terjemahan
+berdasarkan `next_action`. Jangan meng-hard-code nama paket dari `next`.
+
+Nilai enum:
+
+| Kolom | Nilai |
+| --- | --- |
+| `tier` | `free`, `pro`, `scale` |
+| `billing_interval` | `none`, `monthly`, `yearly` |
+| `state` | `free`, `trialing`, `active`, `past_due`, `paused`, `canceled` |
+| `access_state` | `active` untuk `free`, `trialing`, dan `active`. `paused` untuk `past_due`, `paused`, dan `canceled`. |
+| `organization_creation_blocker` | `subscription_required`, `subscription_inactive`, `organization_limit_exceeded`, atau `null` |
+
+Setiap penghambat punya satu pasangan `next_action`:
+
+| `organization_creation_blocker` | `next_action.code` | `next_action.target` |
+| --- | --- | --- |
+| `null` | `create_or_manage_organization` | `organization` |
+| `subscription_required` | `choose_plan` | `pricing` |
+| `subscription_inactive` | `resume_subscription` | `billing` |
+| `organization_limit_exceeded` | `manage_organization_limit` | `organization` |
+
+Nilai tier adalah pengenal, bukan nama tampilan. Jangan ubah nilai itu di
+klien yang dilokalkan. Akun berbayar tetap bisa diblokir. Periksa
+`organization_creation_allowed` sebelum Anda mengaktifkan pembuatan
+organisasi.
+
+Endpoint ini tidak membuat organisasi, mengirim undangan, mengubah peran, atau
+mengubah penagihan.
+
+## Keluar
+
+Pilih lingkup terkecil yang sesuai dengan tugas. Endpoint ini tidak menghapus
+akun atau proyeknya, tidak merotasi kunci ingest, dan tidak mencabut izin yang
+diberikan penyedia login pihak ketiga.
+
+| Lingkup | Endpoint | Kredensial |
+| --- | --- | --- |
+| Satu login aplikasi atau CLI | `POST /api/auth/logout` | Refresh token milik klien itu di body JSON. Tanpa bearer. |
+| Semua login LogBrew | `POST /api/auth/logout-all` | Bearer akun atau sesi browser. Tanpa body. |
+| Sesi browser saat ini | `POST /api/auth/web/logout` | Tidak ada. Respons menghapus cookie browser. |
+
+### Satu login aplikasi atau CLI
+
+Kirim permintaan dari klien yang memegang refresh token. Atur
+`Content-Type: application/json`:
+
+```json
+{
+  "refresh_token": "<current refresh token>"
+}
+```
+
+Jangan pernah meminta orang atau agen untuk mencetak atau menempelkan refresh
+token. Respons yang berhasil adalah `200`:
+
+```json
+{
+  "revoked": true,
+  "next_action": {
+    "code": "clear_local_session",
+    "target": "local_credentials"
+  }
+}
+```
+
+Permintaan ini mencabut satu keluarga refresh token. LogBrew menolak refresh
+berikutnya untuk login itu. Login lain di akun tidak berubah. Token akses yang
+sudah dimiliki klien tetap valid sampai kedaluwarsa. Jika kredensial akun
+mungkin bocor, gunakan [Semua login LogBrew](#every-logbrew-login).
+
+Setelah respons, klien menghapus kredensial lokalnya. Jika Anda mengirim lagi
+refresh token valid yang sama, responsnya tetap `200` yang sama. Jika token
+tidak valid, kedaluwarsa, atau berupa token akses, responsnya `401` dengan
+`code: "unauthorized"` dan `next_action.code: "authorize_request"`. Dalam
+kasus itu, hapus juga kredensial lokal. `logbrew logout` memakai endpoint ini.
+
+### <span id="every-logbrew-login">Semua login LogBrew</span>
+
+<Warning>
+  Permintaan ini mengeluarkan semua klien di akun. Dapatkan persetujuan
+  pemilik akun sebelum agen mengirimnya.
+</Warning>
+
+Respons yang berhasil adalah `200`:
+
+```json
+{
+  "revoked": true,
+  "revoked_before": "2026-09-07T12:00:00.123Z",
+  "next_action": {
+    "code": "clear_local_session",
+    "target": "local_credentials"
+  }
+}
+```
+
+`revoked_before` bersifat inklusif dan punya presisi milidetik. LogBrew
+menolak token akses, sesi browser, dan refresh token dari login pada atau
+sebelum waktu itu. Token yang kemudian di-refresh dari login seperti itu juga
+ditolak. Sesi feed langsung yang sedang berjalan berakhir, dan respons
+menghapus cookie sesi browser. Login setelah waktu itu tetap valid. Setiap
+klien harus menghapus kredensial LogBrew lokalnya dan masuk lagi.
+
+Jangan masuk lagi lalu mengulangi permintaan ini secara otomatis. Permintaan
+baru juga mencabut login yang baru.
+
+Jika respons hilang, jangan laporkan bahwa semua login sudah dicabut. `401`
+yang muncul kemudian dari kredensial lama tidak menggantikan respons sukses.
+Untuk langkah pemulihan lainnya, baca
+[Amankan akun yang disusupi](/id/guides/troubleshooting#secure-a-compromised-account).
+
+### Sesi browser
+
+`POST /api/auth/web/logout` menghapus cookie browser `logbrew_session` dan
+mengembalikan `204 No Content` tanpa body. Panggil endpoint ini dari browser.
+Jangan salin cookie sesi ke dalam perintah. Permintaan ini tidak mengeluarkan
+klien lain, dan tidak mencabut salinan nilai cookie. Untuk mencabut setiap
+sesi, gunakan [Semua login LogBrew](#every-logbrew-login).
+
+### Pulihkan dari error saat keluar
+
+| Hasil | Pemulihan |
+| --- | --- |
+| `401` dari `POST /api/auth/logout` | Hapus kredensial lokal klien. Jangan kirim jenis kredensial lain. |
+| `401` dari `POST /api/auth/logout-all` | Masuk dari klien tepercaya jika pengguna masih memerlukan akses. Minta persetujuan lagi sebelum Anda mengulangi permintaan. |
+| `405` | Gunakan metode yang disebutkan `next`, dan hanya untuk lingkup yang disetujui pengguna. |
+| `invalid_json` dari `POST /api/auth/logout` | Kirim objek JSON dengan `refresh_token` berupa string dan `Content-Type: application/json`. Jangan cetak token. |
+| Timeout atau status `5xx` | Jangan laporkan sukses. Jangan memulai loop masuk dan keluar otomatis. Ikuti [aturan operasi tulis](/id/reference/api-errors#writes). |
+
+Untuk rute telemetri, filter, dan paginasi, baca
+[API Telemetri](/id/reference/telemetry-api).

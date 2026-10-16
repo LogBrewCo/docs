@@ -1,0 +1,255 @@
+---
+title: "Source map JavaScript dengan Vite"
+sidebarTitle: "Source map JavaScript"
+description: "Unggah source map JavaScript dari build Vite. Jauhkan kredensial dari aplikasi. Petakan stack frame yang di-minify ke lokasi sumber aslinya."
+---
+
+File JavaScript yang di-minify dapat menaruh banyak baris sumber dalam satu
+baris. Stack frame dari file itu menunjuk ke baris dan kolom hasil build.
+[Source map](https://ecma-international.org/publications-and-standards/standards/ecma-426/)
+menghubungkan posisi itu dengan file, baris, dan kolom aslinya.
+
+Panduan ini memakai plugin Vite di `@logbrew/sdk` 0.1.28. Anda butuh aplikasi
+Vite, akses ke output build-nya, dan izin untuk membuat kunci proyek. Untuk
+file debug Apple, lihat [Crash dan hang Apple](/id/guides/apple-crashes-and-hangs).
+
+## Satukan build dan peristiwa
+
+Gunakan proyek, rilis, lingkungan, dan layanan yang sama untuk unggahan dan
+untuk peristiwa runtime aplikasi. Lihat [Rilis](/id/concepts/releases) untuk
+nama versi. Panduan ini memakai `web@1.2.3`, `staging`, dan `checkout-web`.
+
+Ubah rilis setiap kali kode hasil build berubah. Unggah build yang sudah
+disiapkan, lalu deploy build yang sama. Jangan build ulang atau ubah
+JavaScript-nya setelah diunggah.
+
+## Tambahkan plugin Vite
+
+Instal SDK di direktori aplikasi:
+
+```bash
+npm install @logbrew/sdk@0.1.28
+```
+
+Tambahkan plugin ke `vite.config.js`. Pertahankan plugin dan pengaturan build
+Anda yang lain. Ganti ID proyek:
+
+```js
+import { createLogBrewViteReleaseArtifactsPlugin } from "@logbrew/sdk/vite-release-artifacts";
+
+export default {
+  plugins: [
+    createLogBrewViteReleaseArtifactsPlugin({
+      projectId: "<project_id>",
+      release: "web@1.2.3",
+      environment: "staging",
+      service: "checkout-web",
+      minifiedPathPrefix: "https://app.example.com"
+    })
+  ]
+};
+```
+
+`minifiedPathPrefix` adalah URL direktori build setelah di-deploy. Plugin
+menambahkan path setiap file di direktori itu. Misalnya,
+`dist/assets/app.js` menjadi `https://app.example.com/assets/app.js`. Jika
+Anda menyajikan build di `/web`, sertakan `/web` dalam prefiks. Jangan
+tambahkan `/assets` ke prefiks.
+
+Tanpa opsi `upload`, plugin tidak mengirim apa pun ke LogBrew. Plugin juga:
+
+- Menetapkan `build.sourcemap` ke `"hidden"` jika Anda tidak menetapkannya.
+  Jika Anda menetapkannya ke `false`, ubah ke `"hidden"`.
+- Mempertahankan nama fungsi jika Anda tidak menetapkan opsi minifier. Jika
+  Anda menetapkan opsi sendiri, pertahankan nama fungsi di sana.
+
+Source map tersembunyi tetap ada di output build sebagai file biasa. Akses ke
+file itu tidak dibatasi. Jangan gunakan source map inline. Plugin tidak
+menerima map di dalam file JavaScript.
+
+## Build dan periksa secara lokal
+
+Jalankan build produksi:
+
+```bash
+npm run build
+```
+
+Plugin memberi setiap file JavaScript dan source map-nya Debug ID yang sama.
+Plugin menghapus `sourcesContent` yang tertanam dan path root aplikasi lokal.
+Plugin menulis `dist/logbrew-release-artifacts.json`.
+
+Buka manifest. Pastikan `validation.status` bernilai `ready` dan manifest
+mencantumkan file dan URL yang di-deploy dari build ini. Map tersembunyi memicu
+peringatan `sourceMappingURL comment missing`. Peringatan itu memang
+diharapkan.
+
+Jangan unggah map yang berisi path privat atau teks sumber yang tidak ingin
+Anda bagikan. Unggahan juga berisi JavaScript hasil kompilasi, jadi jauhkan
+rahasia dari bundle aplikasi.
+
+Periksa unggahan secara lokal. Perintah ini tidak mengirim permintaan dan
+tidak butuh kunci:
+
+```bash
+npx --no-install logbrew-release-artifacts upload-js \
+  --build-dir dist \
+  --manifest dist/logbrew-release-artifacts.json \
+  --endpoint https://api.logbrew.co/api/release-artifacts \
+  --allow-hosted \
+  --dry-run
+```
+
+Lanjutkan hanya jika perintah keluar dengan kode `0` dan menampilkan
+`"status": "dry_run"`. Langkah ini memeriksa file lokal dan manifest. Langkah
+ini tidak menguji server. Jika build Anda memakai direktori output lain, ubah
+kedua path.
+
+Untuk memeriksa pemetaan, jalankan aplikasi hasil build dan salin satu stack
+frame yang dihasilkan beserta file, baris, dan kolomnya:
+
+```bash
+npx --no-install logbrew-release-artifacts symbolicate-js \
+  --build-dir dist \
+  --manifest dist/logbrew-release-artifacts.json \
+  --stack-frame "at checkoutTotal (https://app.example.com/assets/index-a1b2c3.js:2:780)"
+```
+
+Pastikan hasilnya punya `"status": "resolved"`. Objek `original` menunjukkan
+file sumber, baris, dan kolom. Perintah ini berjalan secara lokal dan tidak
+mengunggah apa pun.
+
+## <span id="create-an-artifact-key">Buat kunci artefak</span>
+
+Masuk dengan [LogBrew CLI](/id/guides/cli). Cari ID proyek:
+
+```bash
+logbrew projects --json
+```
+
+Buat kunci artefak untuk proyek. Gunakan path file baru di direktori yang
+hanya bisa diakses pemiliknya:
+
+```bash
+install -d -m 700 "$HOME/.logbrew" &&
+logbrew projects keys create "<project_id>" \
+  --ingest-key-file "$HOME/.logbrew/checkout-web.artifact" \
+  --label "Checkout web build" \
+  --kind artifact \
+  --json
+```
+
+Lanjutkan hanya setelah perintah berhasil. Jika hasilnya tidak jelas,
+jalankan lagi perintah yang sama dengan argumen yang sama. Jangan gunakan
+`--abandon-retry`.
+
+Kunci artefak bersifat khusus proyek dan hanya bisa menulis. Kunci ini mengunggah
+source map dan file debug. Kunci ini tidak bisa mengirim telemetri atau
+membaca metadata artefak. Jangan gunakan kredensial akun atau kunci SDK
+runtime sebagai penggantinya.
+
+Simpan kunci sebagai `LOGBREW_RELEASE_ARTIFACT_TOKEN` di pengaturan rahasia
+lingkungan build Anda. Jangan tampilkan atau commit kunci itu. Jangan taruh
+kunci di variabel yang terlihat oleh klien, seperti `VITE_*` atau
+`EXPO_PUBLIC_*`.
+
+Tetapkan variabel itu di proses yang menjalankan unggahan. Helper tidak
+membaca file `.env`. Vite tidak memuat file itu ke `process.env` selama
+[evaluasi konfigurasi](https://vite.dev/config/#using-environment-variables-in-config).
+
+## Unggah build yang sudah disiapkan
+
+Gunakan file dan manifest yang sama yang sudah diperiksa. Perintah ini
+mengirim unggahan ke LogBrew:
+
+```bash
+npx --no-install logbrew-release-artifacts upload-js \
+  --build-dir dist \
+  --manifest dist/logbrew-release-artifacts.json \
+  --endpoint https://api.logbrew.co/api/release-artifacts \
+  --allow-hosted
+```
+
+`"status": "uploaded"` menunjukkan bahwa LogBrew menerima unggahan. Jika
+perintah keluar dengan error, berhenti dan gunakan tabel di bawah.
+
+Helper mencoba lagi error jaringan, `408`, `429`, atau respons `5xx` hingga 2
+kali. Helper mengirim file yang sama setiap kali. Gunakan `--max-retries`
+untuk mengubah jumlahnya.
+
+Setelah unggahan manual berhasil, Anda dapat mengunggah selama build Vite
+sebagai gantinya.
+Tambahkan opsi ini ke konfigurasi plugin:
+
+```js
+upload: {
+  endpoint: "https://api.logbrew.co/api/release-artifacts",
+  allowHostedUpload: true,
+  tokenEnv: "LOGBREW_RELEASE_ARTIFACT_TOKEN"
+}
+```
+
+Gunakan satu metode unggah. Plugin menghentikan build jika ada error
+persiapan atau unggahan. Tambahkan `dryRun: true` untuk menguji tanpa
+mengunggah.
+
+Plugin tidak menghapus source map dari direktori output. Jangan deploy file
+`.map` atau manifest ke situs web publik atau CDN.
+
+Untuk memetakan frame dari masalah yang terekam, jalankan `symbolicate-js`
+dengan frame itu terhadap build yang sama yang sudah disiapkan.
+
+## <span id="verify-a-new-issue">Baca masalah baru</span>
+
+Deploy build yang sama yang sudah disiapkan ke lingkungan pengujian. Picu satu
+error uji yang aman melalui jalur perekaman masalah Anda. Jangan kirim input
+pengguna, kredensial, atau stack mentah untuk pengujian ini.
+
+Temukan masalah baru dengan proyek dan konteks build yang sama:
+
+```bash
+logbrew read issues --project "<project_id>" \
+  --release "web@1.2.3" --environment staging \
+  --service checkout-web --since 1h --json
+```
+
+Salin ID masalah dari hasilnya. Baca kemunculan terbarunya:
+
+```bash
+logbrew investigate issue "<issue_id>" --occurrence latest --json
+```
+
+Baca waktu peristiwa, proyek, layanan, lingkungan, dan rilis terlebih dahulu.
+Lalu baca `event.stack_frames`. Frame dengan `source: "symbolicated"` punya
+file, baris, dan kolom asli dari unggahan Anda. Frame dengan
+`source: "captured"` punya lokasi yang dikirim aplikasi.
+
+`logbrew read issue "<issue_id>" --json` juga mengembalikan objek
+`symbolication`. Setiap frame di dalamnya punya `status`: `resolved`,
+`artifact_not_found`, `source_not_resolved`, `invalid_metadata`, atau
+`unavailable`. Hanya frame `resolved` yang punya lokasi asli.
+
+LogBrew memetakan frame saat Anda membaca masalah. Unggahan setelah error
+dapat memetakan peristiwa sebelumnya yang punya Debug ID yang sama. Frame
+yang sudah dipetakan menunjuk ke kode yang perlu diperiksa. Frame itu tidak
+menunjukkan penyebab error. Lihat
+[Investigasi masalah](/id/guides/investigate-an-issue) untuk kolom lainnya.
+
+## Pulihkan dari pemeriksaan yang gagal
+
+| Hasil | Langkah berikutnya |
+| --- | --- |
+| Status manifest bukan `ready` | Baca `validation.errors`. Perbaiki pengaturan build dan build lagi. Jangan edit manifest. |
+| Build berhenti karena source map tidak ada atau inline | Tetapkan `build.sourcemap` ke `"hidden"` atau `true`. Build lagi. |
+| `auth_missing` | Tetapkan `LOGBREW_RELEASE_ARTIFACT_TOKEN` di proses unggah. Dry run tidak menguji kunci. |
+| `auth_failed` (`401` atau `403`) | Gunakan kunci artefak untuk proyek yang sama. Jangan gunakan kunci runtime atau kunci akun. |
+| `validation_failed` (`400` atau `413`) | Periksa file yang sudah disiapkan dan ukurannya. Jangan kirim unggahan yang sama lagi. |
+| `validation_failed` dengan error lokal | Baca `validation.errors`. Jika ada file yang berubah setelah build, build dan periksa lagi. |
+| `retryable_error` | Semua percobaan ulang gagal setelah error jaringan, `408`, `429`, atau error server. Coba lagi nanti dengan file yang sama yang sudah disiapkan. |
+| `upload_failed` | Server mengembalikan status lain. Periksa nilai `--endpoint`. |
+| Frame tidak terpetakan | Periksa Debug ID, prefiks URL deployment, dan build-nya. Jangan gunakan map dari build atau rilis lain. |
+| Tidak ada masalah baru yang muncul | Periksa perekaman masalah, kunci runtime, dan filter waktu sebelum Anda menguji source map. |
+
+Jangan sertakan file sumber, kunci, dan path privat dalam pesan dukungan.
+Lihat [Mengatasi kendala](/id/guides/troubleshooting) dan
+[Error API](/id/reference/api-errors).

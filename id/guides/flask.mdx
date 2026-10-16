@@ -1,0 +1,350 @@
+---
+title: "Logging dan penanganan exception Flask dengan LogBrew"
+sidebarTitle: "Flask"
+description: "Konfigurasikan logging Flask, rekam exception yang tidak ditangani dan trace permintaan, lalu verifikasi setiap sinyal yang tersimpan dengan LogBrew CLI."
+---
+
+Gunakan `logbrew-flask` 0.1.5 atau yang lebih baru. Paket ini merekam span
+permintaan dan exception yang tidak ditangani. Handler logging opsional
+menghubungkan log Python dengan trace permintaan. Metrik durasi permintaan
+juga opsional.
+
+Paket ini membutuhkan Python 3.10 atau yang lebih baru dan Flask 3.1 atau yang
+lebih baru.
+
+<Note>
+  Di aplikasi, gunakan kunci ingest server khusus proyek. Jangan gunakan
+  kredensial akun yang mengotorisasi CLI.
+</Note>
+
+Ganti `<project_id>`, `<trace_id>`, dan `<issue_id>` dengan ID dari LogBrew.
+Gunakan proyek pengembangan untuk permintaan uji. Contoh shell memakai Bash.
+
+## Kirim permintaan pertama
+
+<Steps>
+  <Step title="Buat atau pilih kunci proyek">
+    Masuk dengan [CLI](/id/guides/cli). Lalu gunakan proyek baru atau proyek
+    yang sudah ada. Jangan jalankan kedua contoh. Untuk proyek baru, simpan
+    kunci ingest-nya di file baru yang hanya bisa diakses pemiliknya:
+
+    ```bash
+    install -d -m 700 "$HOME/.logbrew"
+    logbrew projects create my-flask-app \
+      --runtime flask \
+      --environment development \
+      --ingest-key-file "$HOME/.logbrew/my-flask-app.ingest" \
+      --json
+    ```
+
+    Untuk proyek yang sudah ada, ambil ID-nya dari `logbrew projects --json`.
+    Lalu buat kunci server terpisah:
+
+    ```bash
+    logbrew projects keys create "<project_id>" \
+      --kind server \
+      --label "Flask server" \
+      --ingest-key-file "$HOME/.logbrew/my-flask-app.ingest" \
+      --json
+    ```
+
+    CLI menyimpan kunci ingest dengan izin khusus pemilik. CLI tidak
+    menampilkan kunci itu atau path file-nya. Di produksi, gunakan secret
+    manager dari platform deployment Anda, bukan file lokal ini.
+
+    Jika hasil permintaan pembuatan tidak pasti, jalankan lagi perintah yang
+    sama persis.
+  </Step>
+
+  <Step title="Instal integrasi yang sudah dirilis">
+    Buat atau aktifkan virtual environment aplikasi, lalu instal paket
+    framework. Paket ini menginstal dependensi SDK inti yang kompatibel.
+
+    ```bash
+    python3 -m pip install "logbrew-flask>=0.1.5,<0.2"
+    ```
+  </Step>
+
+  <Step title="Konfigurasikan identitas deployment">
+    Muat kunci proyek secara lokal tanpa menampilkannya. Tetapkan layanan,
+    lingkungan, dan rilis yang stabil agar setiap sinyal punya konteks
+    deployment yang berguna.
+
+    ```bash
+    export LOGBREW_SERVER_API_KEY="$(tr -d '\r\n' < "$HOME/.logbrew/my-flask-app.ingest")"
+    export LOGBREW_SERVICE_NAME="my-flask-app"
+    export LOGBREW_ENVIRONMENT="development"
+    export LOGBREW_RELEASE="my-flask-app@1.0.0"
+    ```
+
+    `init_logbrew()` memeriksa argumen eksplisit terlebih dahulu, lalu
+    konfigurasi aplikasi Flask, lalu variabel lingkungan ini. Jika nama
+    layanan tidak dikonfigurasi, fungsi ini memakai nama impor Flask.
+  </Step>
+
+  <Step title="Inisialisasi Flask sekali">
+    Untuk aplikasi baru, simpan contoh ini sebagai `app.py`. Tambahkan
+    initializer setelah Anda membuat aplikasi Flask. Handler logging bersifat
+    opsional. Handler ini membuat log aplikasi berbagi trace dan span
+    permintaan yang aktif.
+
+    ```python
+    import logging
+
+    from flask import Flask
+    from logbrew_flask import init_logbrew
+    from logbrew_sdk import LogBrewLoggingHandler
+
+    app = Flask(__name__)
+    logbrew = init_logbrew(app, capture_request_metrics=True)
+
+    logger = logging.getLogger("my-flask-app")
+    logger.setLevel(logging.INFO)
+    logger.addHandler(LogBrewLoggingHandler(logbrew.client))
+
+
+    @app.get("/health")
+    def health() -> dict[str, bool]:
+        logger.info("health check completed")
+        return {"ok": True}
+    ```
+
+    Panggilan `init_logbrew(app)` yang berulang mengembalikan ekstensi Flask
+    yang sama. Panggilan itu tidak memasang hook permintaan atau exception
+    ganda. Initializer tidak menambahkan handler logging. Tambahkan handler ke
+    logger milik aplikasi satu kali.
+  </Step>
+
+  <Step title="Jalankan satu permintaan">
+    Jalankan aplikasi dan panggil rutenya dari terminal lain. Ganti `app` di
+    perintah jika aplikasi Anda memakai nama modul lain.
+
+    ```bash
+    flask --app app run
+    ```
+
+    ```bash
+    curl -fsS http://127.0.0.1:5000/health
+    ```
+
+    Pengiriman berjalan di worker latar belakang dan tidak menahan respons.
+  </Step>
+
+  <Step title="Verifikasi bukti di LogBrew">
+    Baca lingkup proyek dan deployment yang tepat. Cari trace dari permintaan
+    health dan log yang berkorelasi dari handler logging di contoh.
+
+    ```bash
+    logbrew read traces \
+      --project "<project_id>" \
+      --service my-flask-app \
+      --environment development \
+      --release my-flask-app@1.0.0 \
+      --since 1h \
+      --json
+
+    logbrew read logs \
+      --project "<project_id>" \
+      --service my-flask-app \
+      --environment development \
+      --release my-flask-app@1.0.0 \
+      --search "health check completed" \
+      --since 1h \
+      --json
+    ```
+
+    Salin ID trace dari hasil itu ke perintah investigasi terbatas ini:
+
+    ```bash
+    logbrew explain trace "<trace_id>" --json
+    ```
+
+    Pembacaan yang cocok mengonfirmasi bahwa LogBrew menyimpan sinyal itu.
+    Respons `200` lokal hanya membuktikan bahwa Flask menangani permintaan.
+  </Step>
+</Steps>
+
+## Pilih sinyal yang Anda butuhkan
+
+Initializer langsung mengaktifkan trace permintaan dan exception yang tidak
+ditangani. Metrik permintaan dan penerusan log Python adalah pilihan terpisah.
+
+| Opsi | Default | Gunakan jika |
+| --- | --- | --- |
+| `capture_successful_requests` | `True` | Anda ingin satu span untuk setiap permintaan yang selesai. Respons dengan status `500` atau lebih tetap membuat span saat opsi ini nonaktif. |
+| `capture_exceptions` | `True` | Anda ingin masalah bertipe dan span error yang sesuai untuk exception yang dilaporkan Flask sebagai tidak ditangani. |
+| `capture_request_metrics` | `False` | Anda ingin histogram durasi untuk permintaan yang selesai. |
+| `LogBrewLoggingHandler` | Tidak terpasang | Anda ingin record log Python tertentu menjadi log LogBrew. |
+| `flush_on_response` | `False` | Pertahankan default ini untuk pengiriman di latar belakang. Aktifkan hanya untuk diagnostik terkontrol yang harus menampilkan pengiriman di jalur respons. |
+
+Mulai dengan default. Tambahkan metrik permintaan jika Anda butuh tampilan
+latensi. Tambahkan handler logging hanya ke logger yang membantu investigasi.
+
+Secara default, initializer memiliki transport HTTP sendiri. Initializer
+memasukkan setiap peristiwa ke antrean, dan worker latar belakang mulai
+mengirim begitu ada satu peristiwa di antrean. Pengiriman tidak menahan
+respons. Kegagalan transport tidak merusak respons Flask.
+
+`flush_on_response=True` mengirim peristiwa yang mengantre di jalur respons
+sebagai gantinya.
+Dengan opsi itu, `raise_flush_errors=True` memunculkan error pengiriman.
+Gunakan keduanya hanya untuk diagnostik terkontrol.
+
+## Kendalikan isi log
+
+Tambahkan satu `LogBrewLoggingHandler` ke logger yang memiliki pesan yang Anda
+butuhkan. Handler ini tidak menggantikan handler konsol atau file milik
+aplikasi. Handler ini tidak mem-patch Flask atau modul logging Python.
+Menambahkan handler yang sama dua kali menggandakan log. Jika aplikasi juga
+memakai root logger, periksa propagasi sebelum Anda memasang handler kedua.
+
+Log di dalam permintaan mewarisi trace dan span yang aktif. Log di luar
+permintaan tidak punya trace permintaan.
+
+Handler mengirim pesan yang sudah diformat, nama logger, dan level LogBrew.
+Handler juga mengirim nama file sumber, modul, fungsi, baris, thread, dan nama
+proses, tetapi tidak mengirim path sumber lengkap. Nilai primitif dari
+`extra={...}` menjadi metadata. Tinjau nilai itu sebelum Anda mencatat log
+dari permintaan yang berasal dari pengguna.
+
+Record Python `DEBUG` menjadi `info` di LogBrew. `WARNING` menjadi `warning`,
+dan `CRITICAL` menjadi `critical`. Nama dan angka level Python asli tetap ada
+di metadata. Untuk mengirim lebih sedikit record, beri handler level-nya
+sendiri, seperti
+`LogBrewLoggingHandler(logbrew.client, level=logging.WARNING)`.
+
+Konsol dan LogBrew dapat menerima record yang sama. Misalnya, konfigurasikan
+konsol sebelum Anda membuat aplikasi Flask:
+
+```python
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+)
+```
+
+Konsol menerima teks yang sudah diformat. LogBrew menyimpan pesan, level,
+logger, dan metadata sebagai kolom terpisah.
+
+Record log dengan `exc_info` menyertakan tipe dan pesan exception. Teks
+exception lengkap hanya dikirim jika handler punya
+`include_exception_text=True`. Ini terpisah dari perekaman exception otomatis,
+yang tidak pernah mengirim pesan exception. Jangan masukkan kredensial, data
+pribadi, atau body permintaan ke pesan log atau exception.
+
+## Yang direkam integrasi
+
+| Sinyal | Perilaku default |
+| --- | --- |
+| Trace permintaan | Satu server span dengan metode, template rute Flask, kode status, dan durasi. |
+| Masalah exception | Judul `<METHOD> <route template> failed`, tipe yang tidak ditangani, ringkasan tetap `Unhandled exception`, mekanisme `flask.middleware`, status penanganan, dan hingga 32 frame yang sudah disanitasi. |
+| Log aplikasi | Aktifkan dengan `LogBrewLoggingHandler`; log di dalam permintaan mewarisi trace dan span yang aktif. |
+| Metrik permintaan | Aktifkan dengan `capture_request_metrics=True`; mengirim histogram delta `http.server.duration` dengan deskripsi `Duration of one completed server request.` |
+| Trace masuk | Melanjutkan W3C `traceparent` yang valid dengan child span baru. |
+
+Nama span memakai metode HTTP dan template rute yang cocok. Misalnya,
+`/orders/100` dan `/orders/200` sama-sama memakai `GET /orders/<int:order_id>`.
+Permintaan yang tidak cocok dengan rute mana pun memakai label tetap
+`<unmatched>`. `traceparent` yang tidak ada atau tidak valid memulai trace
+baru.
+
+Metadata span berisi metode, template rute, endpoint, kode status, dan durasi.
+Metadata itu tidak berisi path konkret atau string kueri.
+
+Di versi 0.1.6 dan yang lebih baru, span permintaan mencakup seluruh dispatch
+Flask. Hook before-request, handler error, dan teardown berbagi trace
+permintaan. Respons yang di-stream mengakhiri span-nya saat body selesai atau
+ditutup.
+
+### Uji perekaman exception
+
+Status `4xx` atau `5xx` muncul di span permintaan. Status itu saja tidak
+membuktikan bahwa exception terjadi. Baca trace dan masalah sebelum Anda
+mendiagnosis kegagalan. LogBrew tidak menggantikan handler error Flask dan
+tidak mengubah status respons.
+
+Di proyek pengembangan, tambahkan rute sementara. Panggil sekali. Hapus rute
+itu sebelum Anda men-deploy:
+
+```python
+@app.get("/logbrew-test-error")
+def handle_test_error() -> None:
+    raise RuntimeError("local capture check")
+```
+
+Permintaan mengembalikan status `500`. Temukan masalah baru dan metrik
+permintaannya:
+
+```bash
+logbrew read issues --project "<project_id>" --since 1h --json
+logbrew explain issue "<issue_id>" --json
+
+logbrew explain metric http.server.duration \
+  --project "<project_id>" \
+  --service my-flask-app \
+  --environment development \
+  --release my-flask-app@1.0.0 \
+  --since 1h \
+  --json
+```
+
+Periksa layanan, lingkungan, rilis, tipe exception, dan trace permintaan dari
+masalah itu. Masalah tidak boleh berisi teks `local capture check`.
+
+### Hubungkan pekerjaan keluar dengan permintaan
+
+SDK Python punya helper milik aplikasi untuk `requests`, `urllib`, `httpx`,
+`aiohttp`, database, cache, dan antrean. Setiap helper membuat child span dari
+trace permintaan yang aktif. SDK tidak mem-patch library ini secara global.
+[Paket `logbrew-flask`](https://pypi.org/project/logbrew-flask/) berisi
+contohnya.
+
+Beri setiap helper nama operasi yang stabil dan template rute atau statement.
+Jangan masukkan ID record, nilai pelanggan, nilai bind SQL, atau payload pesan
+ke nama itu. Tambahkan child span hanya jika dependensi itu penting bagi
+permintaan. Span untuk setiap panggilan kecil membuat trace lebih sulit
+dibaca. Helper HTTP keluar menambahkan satu header W3C `traceparent`. Helper
+itu tidak merekam URL lengkap, string kueri, body, cookie, atau header
+sembarang. Helper database, cache, dan antrean tidak merekam nilai bind,
+hasil, nilai cache, atau payload antrean.
+
+## Privasi dan siklus hidup proses
+
+Perekaman Flask otomatis tidak menyertakan path permintaan konkret, string
+kueri, body permintaan dan respons, cookie, header sembarang, nilai
+`traceparent` mentah, baggage, dan tracestate.
+
+Perekaman exception otomatis tidak pernah membaca atau mengirim `str(error)`.
+Perekaman ini memakai ringkasan tetap `Unhandled exception` dan menandai
+setiap pesan dalam rantai exception sebagai disamarkan. Frame berisi basename
+file dan identitas kode yang dibatasi. Frame tidak berisi teks traceback
+mentah, kode sumber, variabel lokal, atau path absolut.
+
+Buat aplikasi dan klien LogBrew di dalam setiap proses worker. Pemuatan
+aplikasi per worker yang menjadi default Gunicorn berfungsi. Jangan gunakan
+Gunicorn `--preload` dengan klien yang dibuat di proses induk. Untuk uWSGI,
+gunakan pemuatan aplikasi per worker seperti `--lazy-apps`. Klien Python
+menolak dipakai ulang setelah proses di-fork.
+
+Panggil `logbrew.client.shutdown()` dari hook shutdown per worker milik
+pengelola proses. Fungsi ini mengirim sisa peristiwa di antrean dan menutup
+klien. Jangan memanggilnya setelah setiap permintaan. Setelah shutdown, klien
+menolak peristiwa baru dari worker itu.
+
+Respons bisa selesai sebelum worker mengirim peristiwa terakhir di antrean.
+Saat deploy atau scale-down, graceful shutdown memberi peristiwa itu satu
+kesempatan pengiriman terakhir.
+
+## Pulihkan dari kendala penyiapan
+
+| Gejala | Periksa | Tindakan berikutnya |
+| --- | --- | --- |
+| `LOGBREW_SERVER_API_KEY is required` | Initializer tidak menerima kunci proyek yang tidak kosong. | Konfigurasikan kunci server khusus proyek melalui konfigurasi Flask, argumen eksplisit, atau variabel lingkungan. |
+| Tidak ada trace yang muncul | Filter proyek, layanan, lingkungan, rilis, atau waktu tidak cocok. | Jalankan `logbrew doctor --project "<project_id>" --json`, lalu ulangi pembacaan trace dengan lingkup yang sama. |
+| Trace muncul, tetapi log tidak | Instrumentasi permintaan tidak memasang handler logging Python secara otomatis. | Tambahkan satu `LogBrewLoggingHandler` ke logger milik aplikasi. |
+| Permintaan berfungsi, tetapi peristiwa terakhir tidak terekam saat shutdown | Proses keluar sebelum worker latar belakang mengirim sisa antreannya. | Panggil `logbrew.client.shutdown()` dari hook shutdown worker. |
+| Worker melaporkan `process_ownership_error` | Klien dibuat sebelum proses worker di-fork. | Muat aplikasi per worker dan buat klien baru di proses itu. |
+
+Untuk error akses akun, kunci, dan pembacaan ulang, lihat
+[Mengatasi kendala](/id/guides/troubleshooting). Untuk runtime lain, lihat
+[Integrasi SDK](/id/guides/sdk-ingestion).

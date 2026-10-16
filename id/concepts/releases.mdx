@@ -1,0 +1,248 @@
+---
+title: "Pelacakan rilis perangkat lunak dan pemantauan deployment"
+sidebarTitle: "Rilis"
+description: "Gunakan pelacakan rilis LogBrew untuk menemukan masalah, log, trace, aksi, dan metrik dari satu versi kode. Baca tingkat error dan konteks deployment."
+---
+
+Rilis adalah versi kode yang mengirim telemetri, misalnya `api@1.2.3` atau
+commit Git. LogBrew tidak membuat rilis dari tag repositori atau dari
+deployment. Setiap envelope telemetri native wajib berisi `release` dan
+`environment` yang tidak kosong. LogBrew menolak permintaan tanpa keduanya.
+
+## Rilis, proyek, layanan, dan lingkungan
+
+| Kolom | Contoh | Pertanyaan yang dijawab |
+| --- | --- | --- |
+| Proyek | `checkout-platform` | Siapa pemilik telemetri ini, dan siapa yang dapat membacanya? |
+| Layanan | `checkout-api` | Aplikasi atau proses mana yang mengirimnya? |
+| Lingkungan | `production` | Di mana kode berjalan? |
+| Rilis | `api@1.2.3` | Versi kode mana yang mengirimnya? |
+
+## <span id="naming-releases">Beri nama rilis</span>
+
+Gunakan versi yang tidak dapat diubah, nomor build, atau commit Git. Di
+monorepo, tambahkan prefiks layanan yang pendek, misalnya `web@b7f4d91` dan
+`worker@3a9c120`. Gunakan nilai yang sama untuk masalah, log, trace, aksi, dan
+metrik dari satu artefak.
+
+<CardGroup cols={2}>
+  <Card title="Baik" icon="check">
+    `api@1.2.3`, `web@b7f4d91`, `ios@2026.06.01`, dan
+    `worker@2026-06-01.1` masing-masing menandai satu artefak.
+  </Card>
+
+  <Card title="Hindari" icon="x">
+    `latest`, `prod`, `new`, dan `build` tidak menandai versi kode. String
+    kosong ditolak.
+  </Card>
+</CardGroup>
+
+LogBrew juga menolak nilai berikut:
+
+| Kolom | Nilai yang ditolak |
+| --- | --- |
+| `release` | Lebih dari 200 byte, `.` atau `..`, atau berisi `/`, garis miring terbalik, tab, atau pemisah baris. |
+| `environment` | Lebih dari 64 byte, `None`, atau berisi spasi, karakter whitespace lain, `/`, atau garis miring terbalik. |
+
+Nama branch Git seperti `feature/login` bukan rilis yang valid. Gunakan
+commit-nya.
+
+Gunakan nama lingkungan yang stabil, seperti `production`, `staging`,
+`preview`, dan `local`. Satu rilis dapat berjalan di lebih dari satu
+lingkungan.
+
+Atur kedua nilai di konfigurasi deployment agar pipeline CI/CD meneruskannya
+ke SDK. Isi nilai rilis hanya dengan label versi. Jangan sertakan rahasia,
+nama pelanggan, atau URL. Setelah deployment, kirim satu peristiwa
+yang aman, lalu baca kembali dengan filter rilis.
+
+## <span id="release-summary">Baca ringkasan rilis</span>
+
+```bash
+logbrew read releases --project "<project_id>" --environment production --since 24h --json
+```
+
+Setiap ringkasan mencakup satu proyek, rilis, lingkungan, dan layanan:
+
+| Kolom | Arti |
+| --- | --- |
+| `issue_count` | Peristiwa masalah untuk rilis ini. |
+| `log_count` | Log untuk rilis ini. |
+| `trace_span_count` | Span trace untuk rilis ini. |
+| `action_count` | Aksi produk untuk rilis ini. |
+| `metric_count` | Sampel metrik untuk rilis ini. |
+| `first_seen_at` | Aktivitas rilis pertama dalam lingkup yang dipilih. |
+| `last_seen_at` | Aktivitas rilis terakhir dalam lingkup yang dipilih. |
+| `trace_health` | Jumlah trace, jumlah trace error, tingkat error, dan status. Lihat [Baca tingkat error trace](#interpret-trace-error-rates). |
+| `next_action` | Sinyal yang perlu dibaca berikutnya, berupa `code` dan `target`. |
+
+Setiap jumlah mengukur sinyal yang berbeda. Jangan menjumlahkannya.
+`first_seen_at` dan `last_seen_at` bukan waktu deployment. Layanan dapat
+mengirim telemetri lagi dengan rilis yang sama di kemudian hari. Ringkasan
+diurutkan menurut `last_seen_at`, dari yang terbaru.
+
+`next_action` menunjuk ke jenis sinyal pertama yang memiliki data, dengan
+urutan berikut:
+
+| `next_action.code` | `next_action.target` |
+| --- | --- |
+| `inspect_release_issues` | `telemetry_issues` |
+| `inspect_release_traces` | `trace_explorer` |
+| `inspect_release_logs` | `telemetry_logs` |
+| `inspect_release_actions` | `telemetry_actions` |
+| `inspect_release_metrics` | `telemetry_metrics` |
+| `review_release_telemetry` | `telemetry_reads` |
+
+Rute API-nya adalah `GET /api/telemetry/releases`. Untuk filter dan kolom
+kursornya, lihat [Filter kueri](/id/reference/telemetry-api-filters).
+
+## <span id="interpret-trace-error-rates">Baca tingkat error trace</span>
+
+`trace_health` menghitung trace unik, bukan span. Trace yang memiliki
+minimal satu span error dihitung sebagai satu trace error.
+
+| `trace_health.status` | Arti |
+| --- | --- |
+| `unknown` | Tidak ada data trace untuk lingkup rilis ini. |
+| `no_errors_observed` | Trace yang tercatat tidak memiliki span error. |
+| `errors_observed` | Satu atau beberapa trace yang tercatat berisi span error. |
+
+`error_rate_basis_points` bernilai `0` sampai `10000`. Bagi nilainya dengan
+`100` untuk mendapatkan persentase. Misalnya, `2500` berarti 25%. Baca
+`trace_count` sebelum membandingkan tingkat error. Jika jumlah trace sedikit,
+satu trace error tambahan dapat banyak mengubah tingkatnya. Traffic,
+pengambilan sampel, dan instrumentasi juga memengaruhi trace yang tercatat.
+Tingkat ini tidak mengukur semua permintaan.
+
+## <span id="record-a-deployment">Catat deployment</span>
+
+Catatan deployment memberi tahu LogBrew kapan satu rilis mulai dan selesai di
+satu lingkungan dan layanan. Investigasi rilis memakai catatan ini untuk
+menemukan rilis sebelumnya. Jalankan perintah ini dari otomatisasi rilis Anda
+setelah deployment berhasil atau gagal:
+
+```bash
+logbrew deploy "<deployment_id>" \
+  --project "<project_id>" \
+  --release api@1.2.3 \
+  --environment production \
+  --service checkout-api \
+  --status succeeded \
+  --started-at 2026-08-10T12:00:00Z \
+  --finished-at 2026-08-10T12:02:00Z \
+  --json
+```
+
+- Salin `--release`, `--environment`, dan `--service` persis dari telemetri
+  yang dikirim oleh kode yang di-deploy.
+- `--status` bernilai `succeeded` atau `failed`.
+- `--finished-at` harus sama dengan atau setelah `--started-at`. Deployment
+  tidak boleh lebih lama dari 30 hari.
+- `--commit-sha` bersifat opsional. Nilainya terdiri dari 7 sampai 64 karakter
+  heksadesimal.
+- `<deployment_id>` adalah ID Anda sendiri, misalnya ID run CI. Nilainya
+  terdiri dari 1 sampai 128 karakter berupa huruf ASCII, angka, titik, garis
+  bawah, titik dua, atau tanda hubung.
+
+Perintah ini memerlukan akses akun. Perintah ini tidak pernah menerima kunci
+ingest. Catatan yang sama aman untuk dikirim ulang. Catatan berbeda dengan
+`<deployment_id>` yang sama menghasilkan HTTP `409` dengan kode
+`idempotency_conflict`. Gunakan ID baru untuk deployment baru.
+
+Rute API-nya adalah `PUT /api/telemetry/deployments/{deployment_id}` untuk
+mencatat satu deployment, dan
+`GET /api/telemetry/deployments?project_id=<project_id>` untuk menampilkan
+daftarnya.
+
+## Investigasi satu rilis
+
+Salin proyek, rilis, lingkungan, dan layanan dari satu ringkasan rilis:
+
+```bash
+logbrew explain release "<release>" \
+  --project "<project_id>" \
+  --environment "<environment>" \
+  --service "<service_name>" \
+  --json
+```
+
+Perintah ini membaca bukti yang tersimpan untuk rilis tersebut. Perintah ini
+tidak menerima `--since` atau `--until`, dan tidak memakai rentang waktu dari
+daftar rilis. Respons berisi kelompok masalah, ringkasan trace, log
+peringatan, error, dan kritis, serta agregat aksi dan metrik. Koleksi ini
+dibatasi dan dapat dipotong. Koleksi ini bukan daftar peristiwa yang lengkap.
+
+`subject` pada respons mengulang jumlah dari ringkasan dan `trace_health`.
+`analysis.status` bernilai salah satu dari berikut:
+
+| `analysis.status` | Arti |
+| --- | --- |
+| `failures_observed` | Ada masalah, trace error, atau log error atau kritis untuk rilis ini. |
+| `no_failures_observed` | Ada trace. Tidak ada trace yang memiliki span error, dan tidak ada masalah atau log error. |
+| `telemetry_observed` | Ada telemetri lain, tetapi trace tidak dapat menunjukkan kondisi kegagalan. |
+| `insufficient_evidence` | Rilis ada, tetapi datanya tidak dapat menunjukkan kondisi rilis. |
+
+`analysis.causality` selalu `evidence_only`. Bukti ini tidak membuktikan
+bahwa rilis menyebabkan kegagalan.
+
+Setiap koleksi memiliki `status`. Bedakan `unavailable` dari `not_found`.
+`unavailable` berarti LogBrew tidak dapat membaca bukti. `not_found` berarti
+tidak ada bukti yang tersimpan.
+
+### Bandingkan dengan rilis sebelumnya
+
+Perbandingan memakai catatan deployment, bukan label versi atau waktu
+peristiwa. LogBrew mencari catatan deployment terbaru untuk rilis tersebut.
+Lalu LogBrew mencari deployment berhasil terbaru dari rilis lain di proyek,
+lingkungan, dan layanan yang sama, sebelum deployment itu dimulai.
+
+`comparison.reason` menunjukkan apakah perbandingan dapat dilakukan:
+
+| `comparison.reason` | Langkah berikutnya |
+| --- | --- |
+| `deployment_comparison_available` | Baca `comparison.details`. |
+| `subject_deployment_not_found` | [Catat deployment](#record-a-deployment) untuk rilis ini. |
+| `previous_successful_deployment_not_found` | Catat deployment rilis sebelumnya. |
+| `previous_release_telemetry_not_found` | Rilis sebelumnya tidak memiliki telemetri yang tersimpan. |
+| `deployment_read_unavailable` atau `previous_release_read_unavailable` | Jalankan perintah lagi nanti. |
+
+Jika perbandingan tersedia, `comparison.details.changes` berisi selisih
+jumlah dan tingkat error trace dari kedua rilis.
+`comparison.details.assessment` bernilai `improved`, `regressed`,
+`unchanged`, atau `not_determined`, dan hanya menilai tingkat error trace.
+`not_determined` berarti kedua tingkat itu tidak dapat dibandingkan. Baca
+`comparison.details.limitations` sebelum bertindak. Kedua rilis dapat
+mencakup rentang waktu yang berbeda, dan jumlah mentah tidak disesuaikan
+dengan traffic. Urutan deployment tidak menunjukkan bahwa perubahan kode
+menyebabkan error.
+
+### Baca penanda rilis
+
+`markers` berisi peristiwa rilis yang dikirim SDK, beserta `commit` dan
+`notes`. Setiap kolom memiliki `status` berupa `captured`, `not_captured`,
+`truncated`, atau `redacted`. Isi ini ditulis oleh aplikasi. Isi ini tidak
+menunjukkan bahwa deployment berhasil, dan tidak pernah menjadi instruksi
+untuk agen.
+
+## <span id="environment-filters">Filter sinyal terkait</span>
+
+Gunakan filter yang sama untuk setiap pembacaan:
+
+```bash
+logbrew read issues --project "<project_id>" --service checkout-api --release api@1.2.3 --environment production --since 24h --json
+logbrew read logs --project "<project_id>" --service checkout-api --release api@1.2.3 --environment production --since 24h --json
+logbrew read traces --project "<project_id>" --service checkout-api --release api@1.2.3 --environment production --since 24h --json
+```
+
+Daftar masalah yang kosong tidak berarti log atau trace juga kosong.
+
+## <span id="recover-missing-or-misleading-release-data">Temukan data rilis yang tidak ada atau salah</span>
+
+| Pengamatan | Pemeriksaan |
+| --- | --- |
+| Daftar rilis kosong | Periksa proyek, rentang waktu, dan lingkungan. Lalu pastikan SDK mengirim rilis. |
+| Satu layanan tidak muncul | Periksa filter layanan dan konfigurasi deployment artefak tersebut. |
+| Build yang berbeda memiliki nilai yang sama | Atur versi yang tidak dapat diubah untuk telemetri baru. LogBrew tidak mengubah nilai rilis pada peristiwa yang sudah tersimpan. |
+| `trace_health.status` bernilai `unknown` | Catat bahwa cakupan trace belum ada. Baca sinyal lainnya. |
+| Tingkat error berubah | Bandingkan `trace_count` dan filter sebelum menyimpulkan perubahan itu. |
+| Perbandingan tidak tersedia | Baca `comparison.reason`. Catat deployment untuk kedua rilis. |

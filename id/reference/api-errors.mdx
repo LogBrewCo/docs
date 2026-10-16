@@ -1,0 +1,536 @@
+---
+title: "Penanganan error API dan kode error API"
+sidebarTitle: "Error API"
+description: "Baca kode error API LogBrew, status HTTP, dan contoh JSON. Ikuti instruksi pemulihan dari respons untuk memperbaiki permintaan dan mencoba lagi dengan aman."
+---
+
+Error API LogBrew memakai satu envelope JSON. Gunakan `code` dan
+`next_action` untuk perilaku program. Tampilkan `error` dan `next` sebagai
+teks biasa. Jangan mencocokkan kata-kata di `error` atau `next`.
+
+```json
+{
+  "error": "invalid since value",
+  "code": "validation_failed",
+  "next": "use since=24h, since=7d, or an RFC3339 timestamp",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+| Kolom | Arti |
+| --- | --- |
+| `error` | Penjelasan singkat tentang kendala, untuk dibaca manusia. |
+| `code` | Kode error yang stabil. Gunakan untuk memilih cabang di klien. |
+| `next` | Langkah pemulihan yang dapat dibaca manusia. Teksnya bergantung pada rute. |
+| `next_action.code` | Tindakan pemulihan yang stabil untuk routing program. |
+| `next_action.target` | Objek yang menjadi sasaran tindakan pemulihan, misalnya `auth` atau `request`. |
+
+Beberapa respons menambahkan kolom, misalnya `limit`, `reset_at`, atau
+`retry_after_seconds`. Tabel [kode error](#error-codes) menyebutkan kolom-kolom
+itu.
+
+## Tangani respons error
+
+1. Baca status HTTP.
+2. Pastikan body berupa JSON sebelum membaca `code`.
+3. Gunakan status dan `code` bersama-sama untuk memilih cabang di klien.
+4. Tampilkan `error` dan `next` sebagai teks biasa. Jangan render sebagai HTML atau jalankan sebagai perintah.
+5. Gunakan `next_action` untuk pemulihan otomatis. Jika klien tidak mengenali tindakannya, berhenti dan tampilkan error.
+6. Simpan nilai `limit`, `reset_at`, dan `retry_after_seconds` yang dikembalikan bersama permintaan yang gagal.
+7. Sebelum mencoba lagi, gunakan [aturan percobaan ulang](#retry-rules).
+
+Jika respons tidak memiliki envelope JSON, simpan status HTTP dan catat
+kodenya sebagai tidak tersedia. Jangan mengarang `code` LogBrew. Proxy atau
+kegagalan jaringan dapat menghasilkan respons seperti ini.
+
+Jangan mengganti `code` LogBrew dengan nama status HTTP. Misalnya, respons
+`400` dapat berisi `invalid_json` atau `invalid_path`. Setiap kode memerlukan
+perbaikan yang berbeda.
+
+Untuk log, catat status HTTP dan `code`. Jangan mencatat seluruh body,
+kredensial, atau token pemulihan ke log.
+
+## <span id="error-codes">Kode error</span>
+
+`code` yang sama dapat muncul di lebih dari satu rute. Teks `next` dan nilai
+`next_action` dapat berbeda menurut rute. Gunakan nilai yang dikembalikan.
+Endpoint hanya mengembalikan kode yang berlaku untuk autentikasi, metode,
+body, dan batasnya.
+
+| HTTP | `code` | Arti | Tindakan klien |
+| --- | --- | --- | --- |
+| `400`, `413`, `415`, atau `422` | `invalid_json` | Body bukan JSON yang valid, terlalu besar, memiliki content type yang salah, atau tidak cocok dengan bentuk JSON rute. | Kirim JSON yang valid dengan `Content-Type: application/json` dan kolom yang diperlukan rute. |
+| `400`, `413`, atau `500` | `invalid_multipart` | Server tidak dapat membaca unggahan `multipart/form-data`. | Untuk `400` atau `413`, perbaiki form atau ukurannya. Untuk `500`, gunakan [aturan percobaan ulang](#retry-rules). |
+| `400` atau `500` | `invalid_path` | Server tidak dapat membaca nilai di path URL, misalnya ID proyek atau ID masalah. | Untuk `400`, perbaiki ID dan tipenya. Untuk `500`, gunakan [aturan percobaan ulang](#retry-rules). |
+| `400`, `405`, atau `426` | `invalid_websocket_upgrade` | Koneksi feed langsung bukan upgrade WebSocket yang valid. | Hubungkan dengan `GET` dan header upgrade WebSocket. Lihat [Format respons peristiwa langsung](/id/reference/telemetry-response-shapes#live-event-response-format). |
+| `401` | `unauthorized` | Autentikasi akun tidak ada, tidak valid, atau kedaluwarsa. | Masuk lagi. Untuk CLI, jalankan `logbrew login`. |
+| `401` | `ingest_key_invalid` | Ingest telemetri tidak memiliki kunci ingest khusus proyek yang valid. | Konfigurasikan kunci ingest yang masih berlaku untuk proyek tersebut. |
+| `402` | `subscription_required` | Tindakan ini memerlukan paket berbayar. | Ikuti `next`. Teks ini menyebutkan langkah terkait paket atau meminta Anda menghubungi dukungan. |
+| `403` | `forbidden` | Akun tidak dapat mengakses resource atau tindakan ini. | Gunakan akun yang memiliki akses. Jangan mencoba ID lain. |
+| `403` | `role_forbidden` | Akun tidak dapat melakukan perubahan peran organisasi ini. | Minta pemilik atau admin organisasi untuk melakukan perubahan. |
+| `404` | `not_found` | Resource atau rute API tidak tersedia untuk akun. | Baca lagi daftar milik Anda. Lalu periksa ID, path, dan filter. |
+| `405` | `method_not_allowed` | Rute ada, tetapi metode HTTP tidak didukung. | Gunakan metode yang disebutkan `next`. |
+| `408` | `request_timeout` | Permintaan tidak selesai tepat waktu. | Persempit lingkupnya, atau tunggu lalu kirim permintaan lagi. |
+| `409` | `idempotency_conflict` | `Idempotency-Key` atau `deployment_id` dipakai lagi untuk permintaan yang berbeda. | Ulangi permintaan awal tanpa perubahan, atau gunakan kunci baru untuk pekerjaan baru. |
+| `409` | `account_link_conflict` | Identitas login ini milik akun lain. | Selesaikan tautan akun di pengaturan akun. Jangan membuat akun kedua untuk identitas yang sama. |
+| `409` | `account_recovery_available` | Akun sedang dalam masa pemulihan. | Ikuti tindakan pemulihan yang dikembalikan. Rahasiakan token pemulihan. |
+| `410` | `account_recovery_expired` | Masa pemulihan akun sudah berakhir. | Masuk untuk membuat akun baru. |
+| `422` | `validation_failed` | Nilai kueri, kolom, filter, kursor, header, atau rentang waktu tidak valid. | Perbaiki nilai yang disebutkan. Lalu kirim permintaan lagi. |
+| `422` | `invite_invalid` | Undangan organisasi memiliki alamat email atau peran yang tidak valid. | Perbaiki undangan. Lalu kirim lagi. |
+| `422` | `member_limit_exceeded` | Organisasi sudah mencapai jumlah anggota maksimum. | Minta pemilik organisasi menghapus anggota atau mengganti paket. |
+| `422` | `organization_limit_exceeded` | Akun sudah mencapai jumlah organisasi maksimum. | Hapus organisasi, ganti paket, atau hubungi dukungan. |
+| `423` | `organization_paused` | Organisasi dijeda karena langganan berbayarnya tidak aktif. | Aktifkan kembali langganan berbayar. |
+| `429` | `rate_limited` | Pemanggil mengirim terlalu banyak permintaan. Menambahkan `retry_after_seconds`. | Tunggu selama `retry_after_seconds`. Lalu coba lagi dengan backoff. |
+| `429` | `usage_limit_exceeded` | Ingest mencapai kuota akun untuk periode penagihan. Menambahkan `limit` dan `reset_at`. | Hentikan ingest hingga `reset_at`, atau ganti paket. |
+| `429` | `artifact_storage_limit_exceeded` | Unggahan artefak rilis atau file debug mencapai batas penyimpanan. Menambahkan `limit`. | Tunggu sebelum mengunggah lagi. Jika batasnya tetap, hubungi dukungan. |
+| `429` | `invitation_limit_exceeded` | Organisasi mencapai kuota undangan hariannya. Menambahkan `limit` dan `reset_at`. | Tunggu hingga `reset_at` atau ganti paket. |
+| `500` | `storage_error`, `json_error`, atau `internal_error` | Server tidak menyelesaikan permintaan. | Gunakan [aturan percobaan ulang](#retry-rules). Jika kegagalan berlanjut, [laporkan masalah](/id/guides/report-a-problem). |
+| `503` | `service_unavailable` | API tidak dapat menerima permintaan saat ini. | Tunggu. Lalu kirim permintaan lagi. |
+| `503` | `artifact_storage_unavailable` | Unggahan artefak rilis dan file debug untuk sementara tidak tersedia. | Tunggu sebelum mengunggah lagi. Jangan memulai unggahan paralel. |
+| `503` | `billing_unavailable` | Checkout penagihan atau pengelolaan paket untuk sementara tidak tersedia. | Tunggu. Lalu coba tindakan penagihan itu lagi. |
+
+ID yang tidak dikenal dan ID yang tidak dapat Anda akses dapat mengembalikan
+respons yang sama. Jangan memakai teks error untuk mencari tahu akun mana yang
+memiliki sebuah ID. Path API yang tidak dikenal mengembalikan `404` dengan
+`not_found`.
+
+### Kolom batas
+
+| `code` | Nilai `limit` | Kolom lain |
+| --- | --- | --- |
+| `usage_limit_exceeded` | `issue_events`, `log_bytes`, `metric_bytes`, atau `trace_spans` | `reset_at`: akhir periode penagihan (RFC3339). |
+| `invitation_limit_exceeded` | `invitations_per_day` | `reset_at`: awal hari UTC berikutnya (RFC3339). |
+| `artifact_storage_limit_exceeded` | Nama batas penyimpanan, misalnya `artifact_completed_project_bytes` | Tidak ada. |
+| `rate_limited` | Tidak ada | `retry_after_seconds`: jumlah detik penuh untuk menunggu, minimal `1`. |
+
+Baca kuota dan penggunaan saat ini dari
+[API akun](/id/reference/account-api#account-usage).
+
+## <span id="retry-rules">Aturan percobaan ulang</span>
+
+Gunakan kode dan jenis operasi untuk memutuskan percobaan ulang. Status saja
+tidak cukup.
+
+| Respons | Aturan percobaan ulang |
+| --- | --- |
+| `validation_failed`, `invalid_json`, `invalid_path` (`400`), `invalid_multipart` (`400` atau `413`), atau `invalid_websocket_upgrade` | Perbaiki nilai permintaan yang disebutkan terlebih dahulu. Jangan kirim permintaan yang sama lagi. |
+| `unauthorized` atau `ingest_key_invalid` | Ganti atau perbarui kredensial yang benar terlebih dahulu. |
+| `forbidden`, `role_forbidden`, atau `not_found` | Jangan mencoba lagi dengan ID lain. Baca lagi daftar milik Anda, atau minta akses dari pemiliknya. |
+| `method_not_allowed` | Gunakan metode di `next`. Jangan kirim lagi metode yang ditolak. |
+| `idempotency_conflict` | Ulangi permintaan awal tanpa perubahan, atau gunakan kunci baru untuk pekerjaan baru. |
+| `rate_limited` | Tunggu selama `retry_after_seconds`. Lalu gunakan exponential backoff dengan jitter. |
+| `usage_limit_exceeded` atau `invitation_limit_exceeded` | Tunggu hingga `reset_at`, atau ganti paket. |
+| `artifact_storage_limit_exceeded` | Tunggu sebelum mengunggah lagi. Jika batasnya tetap, hubungi dukungan. |
+| `subscription_required`, `organization_paused`, `member_limit_exceeded`, atau `organization_limit_exceeded` | Ikuti `next`. Percobaan ulang tanpa perubahan paket atau keanggotaan akan gagal lagi. |
+| `request_timeout`, `service_unavailable`, `artifact_storage_unavailable`, atau `billing_unavailable` | Tunggu. Lalu kirim lagi operasi baca dengan lingkup yang sama. Untuk operasi tulis, gunakan [aturan operasi tulis](#writes). |
+| `storage_error`, `json_error`, `internal_error`, atau `5xx` lainnya | Tunggu. Lalu kirim lagi operasi baca. Untuk operasi tulis, gunakan [aturan operasi tulis](#writes). Jika kegagalan berlanjut, [laporkan masalah](/id/guides/report-a-problem). |
+
+- Jangan memulai percobaan ulang paralel untuk satu permintaan yang gagal.
+- Untuk `rate_limited`, respons juga memiliki header `Retry-After` dan
+  `X-RateLimit-After`. Keduanya berisi jumlah detik yang sama dengan
+  `retry_after_seconds`.
+- Timeout tidak membuktikan bahwa hasilnya kosong.
+
+Batas laju mengatur frekuensi permintaan. Batas penggunaan mengatur kuota akun
+untuk satu periode penagihan. Keduanya memakai `429`. Pisahkan kolom
+keduanya. Selama salah satu batas berlaku, tunjukkan bahwa pengumpulan data
+atau pembacaan tertunda. Jangan tampilkan data lama sebagai hasil pembacaan
+baru.
+
+### <span id="writes">Operasi tulis</span>
+
+Timeout, respons `5xx`, atau kegagalan jaringan tidak membuktikan bahwa
+operasi tulis gagal. Sebelum mengirim operasi tulis lagi:
+
+1. Jika rute mendukung kunci idempotensi, kirim lagi kunci yang sama dan body
+   yang sama. Gunakan kunci baru hanya untuk pekerjaan baru.
+2. Jika rute tidak memiliki kunci idempotensi, baca resource terlebih dahulu.
+   Kirim lagi operasi tulis hanya jika perubahannya belum ada.
+3. Jika Anda tidak dapat menemukan hasilnya, hentikan percobaan ulang otomatis
+   dan beri tahu pengguna.
+
+Rute berikut menerima kunci percobaan ulang:
+
+| Rute | Kunci percobaan ulang |
+| --- | --- |
+| `POST /api/projects` | Header `Idempotency-Key` opsional. |
+| `POST /api/projects/{project_id}/ingest-keys` | Header `Idempotency-Key` opsional. |
+| `POST /api/support/tickets` | Header `Idempotency-Key` opsional. |
+| `POST /api/support/tickets/{ticket_id}/context` | Header `Idempotency-Key` wajib. |
+| `PUT /api/telemetry/deployments/{deployment_id}` | `deployment_id` di path. |
+
+Nilai `Idempotency-Key` berisi 1 sampai 128 karakter ASCII yang terlihat.
+Nilai lain mengembalikan `422` dengan `validation_failed`.
+
+`idempotency_conflict` berarti kunci itu milik permintaan lain. Jangan
+mengubah body percobaan ulang yang memakai kunci awal.
+
+## Error bentuk permintaan
+
+`invalid_json` berarti server tidak dapat menerima body sesuai bentuk JSON
+rute. Periksa content type, ukuran body, sintaks JSON, kolom wajib, dan tipe
+kolom. Status HTTP menunjukkan bagian mana yang gagal:
+
+| HTTP | Penyebab |
+| --- | --- |
+| `400` | Body bukan JSON yang valid. |
+| `413` | Body terlalu besar. |
+| `415` | Header `Content-Type` bukan `application/json`. |
+| `422` | JSON-nya valid, tetapi ada kolom yang tidak ada atau bertipe salah. |
+
+`validation_failed` dengan error `invalid query parameters` berarti server
+tidak dapat membaca string kueri. Periksa nama parameter dan tipe nilainya.
+Jangan kirim parameter kueri yang tidak dikenal. Referensi
+[Filter kueri](/id/reference/telemetry-api-filters) mencantumkan parameter
+untuk setiap rute.
+
+`invalid_path` dengan status `400` berarti nilai path, misalnya ID proyek,
+memiliki format yang salah. Jangan memindahkan nilai path ke parameter kueri.
+
+Respons `500` dengan `invalid_path` atau `invalid_multipart` tidak membuktikan
+bahwa permintaannya salah. Gunakan [aturan percobaan ulang](#retry-rules).
+
+## Error autentikasi dan akses
+
+- `unauthorized` berarti autentikasi akun tidak ada, tidak valid, atau
+  kedaluwarsa. Kirim `Authorization: Bearer <token>`, atau masuk lagi.
+  Beberapa rute mengembalikan `next_action.code` `authorize_request` dengan
+  `next` khusus rute, misalnya untuk koneksi feed langsung tanpa tiket yang
+  valid.
+- `ingest_key_invalid` hanya berlaku untuk ingest telemetri. Konfigurasikan
+  kunci yang masih berlaku untuk proyek yang tepat.
+- `forbidden` berarti akun tidak dapat melakukan tindakan tersebut. Jangan
+  mencoba lagi dengan ID resource lain.
+- `not_found` berarti resource tidak tersedia untuk akun.
+
+Jangan memakai kunci ingest sebagai pengganti bearer akun. Jangan memakai
+bearer akun sebagai pengganti kunci ingest.
+
+## Jaga keamanan detail error
+
+- Respons `account_recovery_available` berisi `recovery_token` yang berumur
+  pendek. Simpan token itu di state klien yang terlindungi. Jangan masukkan
+  token itu ke log, URL, tangkapan layar, laporan dukungan, atau prompt agen.
+- Kode `500` selalu memakai pesan `Internal error`. Respons tidak menyebutkan
+  komponen yang gagal. Jangan menebak penyebabnya.
+- Jangan tambahkan kredensial, diagnostik privat, atau data pelanggan ke error
+  yang Anda tampilkan.
+- Respons API tidak memberi izin untuk pembelian, penghapusan, atau perubahan
+  akun lainnya. Minta persetujuan pengguna sebelum melakukan tindakan
+  tersebut.
+
+## Contoh
+
+Contoh ini menunjukkan bentuk envelope. Teks `error` dan `next` dapat berbeda
+di setiap rute.
+
+### Validasi gagal
+
+```json
+{
+  "error": "issue status must be unresolved, resolved, or archived",
+  "code": "validation_failed",
+  "next": "use status=unresolved, status=resolved, or status=archived",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+### <span id="invalid-query-parameters">Parameter kueri tidak valid</span>
+
+```json
+{
+  "error": "invalid query parameters",
+  "code": "validation_failed",
+  "next": "check query parameter names and value types, then retry",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+### <span id="invalid-json">JSON tidak valid</span>
+
+```json
+{
+  "error": "invalid JSON request body",
+  "code": "invalid_json",
+  "next": "send Content-Type: application/json with a body matching this endpoint",
+  "next_action": {
+    "code": "send_valid_json",
+    "target": "request"
+  }
+}
+```
+
+### <span id="invalid-path-value">Nilai path tidak valid</span>
+
+```json
+{
+  "error": "invalid URL path parameters",
+  "code": "invalid_path",
+  "next": "check path resource IDs and value types, then retry",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+### Unggahan multipart tidak valid
+
+```json
+{
+  "error": "invalid multipart form-data request",
+  "code": "invalid_multipart",
+  "next": "send multipart/form-data with a valid boundary and expected parts",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+### Upgrade WebSocket tidak valid
+
+```json
+{
+  "error": "invalid WebSocket upgrade request",
+  "code": "invalid_websocket_upgrade",
+  "next": "connect with GET /api/feed/live?ticket=<ticket> using WebSocket upgrade headers",
+  "next_action": {
+    "code": "connect_live_feed",
+    "target": "live_feed"
+  }
+}
+```
+
+### <span id="authentication-failure">Autentikasi gagal</span>
+
+```json
+{
+  "error": "Invalid or expired token",
+  "code": "unauthorized",
+  "next": "send Authorization: Bearer <token>, include the logbrew_session cookie, or sign in again",
+  "next_action": {
+    "code": "sign_in",
+    "target": "auth"
+  }
+}
+```
+
+### Kunci ingest tidak valid
+
+Respons ini berlaku untuk ingest telemetri, bukan untuk pembacaan akun. Kunci
+harus milik proyek di dalam permintaan.
+
+```json
+{
+  "error": "Invalid ingest key",
+  "code": "ingest_key_invalid",
+  "next": "create a project-scoped ingest key, then retry ingestion with that key",
+  "next_action": {
+    "code": "configure_ingest_key",
+    "target": "project_ingest_key"
+  }
+}
+```
+
+### <span id="resource-not-found">Resource tidak ditemukan</span>
+
+```json
+{
+  "error": "issue not found",
+  "code": "not_found",
+  "next": "check the resource id or filters and retry",
+  "next_action": {
+    "code": "check_resource",
+    "target": "resource"
+  }
+}
+```
+
+### Akses ditolak
+
+```json
+{
+  "error": "Insufficient permissions",
+  "code": "forbidden",
+  "next": "use an account with access to this resource",
+  "next_action": {
+    "code": "request_access",
+    "target": "auth"
+  }
+}
+```
+
+### <span id="unsupported-method">Metode tidak didukung</span>
+
+```json
+{
+  "error": "Method not allowed",
+  "code": "method_not_allowed",
+  "next": "send GET /api/account/usage with Authorization or the logbrew_session cookie",
+  "next_action": {
+    "code": "use_supported_method",
+    "target": "api_method"
+  }
+}
+```
+
+### Waktu permintaan habis
+
+```json
+{
+  "error": "Request timed out",
+  "code": "request_timeout",
+  "next": "retry read-only requests later or narrow the request scope. Before repeating a write, check whether it succeeded and follow this endpoint's idempotency guidance",
+  "next_action": {
+    "code": "retry_or_narrow_scope",
+    "target": "request"
+  }
+}
+```
+
+### Konflik idempotensi
+
+```json
+{
+  "error": "Idempotency key was already used",
+  "code": "idempotency_conflict",
+  "next": "retry the original support request or use a new Idempotency-Key",
+  "next_action": {
+    "code": "use_new_idempotency_key",
+    "target": "request"
+  }
+}
+```
+
+### Batas laju
+
+```json
+{
+  "error": "Rate limit exceeded",
+  "code": "rate_limited",
+  "next": "wait for retry_after_seconds, then retry with exponential backoff and jitter",
+  "next_action": {
+    "code": "retry_with_backoff",
+    "target": "request"
+  },
+  "retry_after_seconds": 1
+}
+```
+
+### Batas penggunaan
+
+Teks `next` dan `next_action` bergantung pada apakah perubahan paket tersedia.
+Jika tidak tersedia, `next_action.code` bernilai `wait_or_contact_support` dan
+targetnya `support`.
+
+```json
+{
+  "error": "Usage limit exceeded",
+  "code": "usage_limit_exceeded",
+  "next": "wait until reset_at or upgrade your plan before retrying ingestion",
+  "next_action": {
+    "code": "wait_or_upgrade",
+    "target": "billing"
+  },
+  "limit": "log_bytes",
+  "reset_at": "2026-11-01T00:00:00+00:00"
+}
+```
+
+### Batas penyimpanan artefak
+
+```json
+{
+  "error": "Release artifact storage limit exceeded",
+  "code": "artifact_storage_limit_exceeded",
+  "next": "wait before retrying the upload, or contact LogBrew support if the limit persists",
+  "next_action": {
+    "code": "wait_or_contact_support",
+    "target": "support"
+  },
+  "limit": "artifact_completed_project_bytes"
+}
+```
+
+### Pemulihan akun tersedia
+
+Respons ini menambahkan `deleted_at` dan `recovery_token` yang berumur pendek.
+Simpan token itu di state klien yang terlindungi.
+
+```json
+{
+  "error": "Account recovery available",
+  "code": "account_recovery_available",
+  "next": "restore account with POST /api/auth/restore",
+  "next_action": {
+    "code": "restore_account",
+    "target": "account_recovery"
+  },
+  "deleted_at": "2026-09-04T09:00:00Z",
+  "recovery_token": "<recovery token>"
+}
+```
+
+### Masa pemulihan akun berakhir
+
+```json
+{
+  "error": "Account recovery window expired",
+  "code": "account_recovery_expired",
+  "next": "create a new account after deletion completes",
+  "next_action": {
+    "code": "create_account",
+    "target": "auth"
+  }
+}
+```
+
+### Organisasi dijeda
+
+```json
+{
+  "error": "Organization paused",
+  "code": "organization_paused",
+  "next": "resume an active paid subscription before using this organization",
+  "next_action": {
+    "code": "resume_subscription",
+    "target": "billing"
+  }
+}
+```
+
+### Error server
+
+`storage_error`, `json_error`, dan `internal_error` memakai pesan `error` yang
+sama. Yang berbeda adalah nilai `code`, `next`, dan `next_action`.
+
+```json
+{
+  "error": "Internal error",
+  "code": "internal_error",
+  "next": "retry read-only requests later. Before repeating a write, check whether it succeeded and follow this endpoint's idempotency guidance. Contact LogBrew support if the problem persists",
+  "next_action": {
+    "code": "retry_or_contact_support",
+    "target": "support"
+  }
+}
+```
+
+| `code` | `next_action.code` | `next_action.target` |
+| --- | --- | --- |
+| `storage_error` | `retry_or_check_storage` | `backend_status` |
+| `json_error` | `send_valid_json` | `request` |
+| `internal_error` | `retry_or_contact_support` | `support` |
+
+Untuk endpoint, autentikasi, dan filter, baca
+[API Telemetri](/id/reference/telemetry-api).

@@ -1,0 +1,481 @@
+---
+title: "Parameter kueri API dan paginasi berbasis kursor"
+sidebarTitle: "Filter kueri"
+description: "Filter telemetri LogBrew berdasarkan proyek, layanan, rilis, lingkungan, tingkat keparahan, trace, status masalah, prioritas, penanggung jawab, dan waktu. Lanjutkan hasil dengan kursor."
+---
+
+Setiap rute baca menerima kunci kuerinya sendiri. Rute di
+[matriks filter](#filter-matrix) menolak kunci yang tidak dikenal atau nilai
+dengan tipe yang salah dengan `422` dan `validation_failed`, kecuali matriks
+menyatakan lain. Alias praktis seperti `project`, `trace`, dan `user` bukan
+kunci kueri. Jangan memindahkan filter dari satu rute ke rute lain.
+
+## Susun permintaan yang difilter
+
+Taruh string kueri setelah path. Gunakan `--data-urlencode` agar karakter
+khusus tetap aman. Permintaan ini membaca log kritis untuk satu proyek dari 24
+jam terakhir:
+
+```bash
+curl --get "https://api.logbrew.co/api/logs" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "severity=critical" \
+  --data-urlencode "since=24h"
+```
+
+Tambahkan filter dengan urutan ini:
+
+1. Pilih proyek dengan `project_id` atau `project_ids`.
+2. Tambahkan rentang waktu dengan `since`, dan jika perlu `until`.
+3. Tambahkan filter layanan, rilis, lingkungan, status, atau filter khusus sinyal.
+4. Tetapkan `limit` untuk halaman yang lebih kecil.
+5. Tambahkan kolom kursor hanya setelah respons kursor mengembalikannya.
+
+Setiap baris yang dikembalikan cocok dengan semua filter dalam permintaan.
+Filter yang tidak disertakan memakai default rute. Misalnya, `GET /api/logs`
+memakai `status=active` jika Anda tidak menyertakan `status`.
+
+## <span id="filter-matrix">Matriks filter</span>
+
+Kunci di kolom “Wajib” harus ada dalam permintaan. Semua kunci lain bersifat
+opsional.
+
+| Rute | Wajib | Kunci kueri opsional |
+| --- | --- | --- |
+| `GET /api/logs` | Tidak ada | `project_id` atau `project_ids`, `severity`, `level` (alias kompatibilitas), `status`, `search`, `trace_id`, `service_name`, `release`, `environment`, `since`, `until`, `attribute_filters`, `pagination`, `cursor_time`, `cursor_id`, `limit` |
+| `GET /api/logs/attributes` | `since` | `project_id` atau `project_ids`, `type`, `search`, `severity`, `level`, `service_name`, `release`, `environment`, `until`, `cursor_count`, `cursor_path`, `cursor_type`, `limit` |
+| `GET /api/telemetry/issues` | Tidak ada | `project_id` atau `project_ids`, `status`, `severity`, `priority`, `assignee`, `service_name`, `release`, `environment`, `since`, `until`, `pagination`, `cursor_time`, `cursor_id`, `limit`, `response_version` |
+| `GET /api/telemetry/issues/{issue_id}` | Tidak ada | `response_version`. Rute ini mengabaikan kunci lain. |
+| `GET /api/telemetry/issues/{issue_id}/events` | Tidak ada | `pagination`, `cursor_time`, `cursor_id`, `limit` |
+| `GET /api/telemetry/issues/assignees` | `project_id` | Tidak ada |
+| `GET /api/telemetry/actions` | Tidak ada | `project_id` atau `project_ids`, `name`, `distinct_id`, `service_name`, `release`, `environment`, `since`, `until`, `pagination`, `cursor_time`, `cursor_id`, `limit` |
+| `GET /api/telemetry/metrics` | Tidak ada | `project_id` atau `project_ids`, `name`, `service_name`, `release`, `environment`, `since`, `until`, `pagination`, `cursor_time`, `cursor_id`, `limit` |
+| `GET /api/telemetry/metrics/series` | `project_id`, `name`, `since` | `until`, `interval`, `group_by`, `service_name`, `release`, `environment`, `series_limit` |
+| `GET /api/telemetry/releases` | Tidak ada | `project_id` atau `project_ids`, `service_name`, `release`, `environment`, `since`, `until`, `pagination`, `cursor_time`, `cursor_project_id`, `cursor_release`, `cursor_environment`, `cursor_service_name`, `limit` |
+| `GET /api/telemetry/traces` | Tidak ada | `project_id` atau `project_ids`, `service_name`, `release`, `environment`, `status`, `since`, `until`, `min_duration_ms`, `pagination`, `cursor_time`, `cursor_trace_id`, `limit` |
+| `GET /api/telemetry/traces/{trace_id}` dan `.../summary` | Tidak ada | `project_id`, `release`, `environment` |
+| `GET /api/telemetry/summary/volume` | `project_id`, `since` | `until`, `interval`, `service_name`, `release`, `environment`, `response_version` |
+| `GET /api/telemetry/deployments` | `project_id` | `release`, `environment`, `service_name`, `status`, `since`, `until`, `pagination`, `cursor_time`, `cursor_id`, `limit` |
+| `GET /api/telemetry/deployments/{deployment_id}` | `project_id` | Tidak ada |
+| `GET /api/telemetry/traces/{trace_id}/investigation` | Tidak ada | `project_id`, `release`, `environment`, `response_version` |
+| `GET /api/telemetry/traces/{trace_id}/spans/{span_id}/investigation` | `project_id`, `release`, `environment` | Tidak ada |
+| `GET /api/telemetry/issues/{issue_id}/investigation` | Tidak ada | `response_version`, serta `selection` atau `occurrence_id` |
+| `GET /api/telemetry/issues/{issue_id}/correction-verification` | `baseline_occurrence_id`, `candidate_deployment_id` | Tidak ada |
+| `GET /api/telemetry/releases/investigation` | `project_id`, `release`, `environment`, `service_name` | `response_version` |
+| `GET /api/telemetry/metrics/investigation` | `project_id`, `name`, `since` | `until`, `interval`, `group_by`, `service_name`, `release`, `environment`, `series_limit`, `response_version` |
+| `GET /api/telemetry/analytics/overview` | `project_id`, `since` | `until`, `interval`, `top_limit`, `service_name`, `release`, `environment`, `response_version` |
+| `GET /api/telemetry/analytics/properties` | `project_id`, `since` | `until`, `limit`, `service_name`, `release`, `environment`, `response_version` |
+
+Untuk investigasi masalah, `selection` bernilai `first`, `latest`, atau
+`recommended`. Kirim `selection` atau `occurrence_id`, jangan keduanya.
+Keduanya butuh `response_version` dari 2 sampai 13. Dengan versi 2 atau yang
+lebih baru dan tanpa pemilih, LogBrew memakai `recommended`. Ambil
+`occurrence_id` dari `GET /api/telemetry/issues/{issue_id}/events`.
+
+Rute analitik `POST` menerima body JSON. Lihat
+[Analitik produk](/id/concepts/product-analytics).
+
+## Filter bersama dan filter khusus sinyal
+
+`service_name`, `release`, dan `environment` mempersempit setiap daftar
+telemetri. Gunakan nilai persis yang dikirim SDK Anda.
+
+Beberapa filter hanya untuk satu sinyal:
+
+- Log menerima `search`, `trace_id`, `severity`, dan `attribute_filters`.
+- Log menerima `status`: `active` (default), `ignored`, atau `all`. `ignored`
+  memilih log yang disembunyikan aturan log dari tampilan aktif.
+- Masalah menerima `status` masalah: `unresolved`, `resolved`, atau
+  `archived`. `ignored` adalah nama lama untuk `archived` dan memilih masalah
+  yang sama.
+- Masalah menerima `severity`: `info`, `warning`, `error`, atau `critical`.
+- Masalah menerima `priority`: `high`, `medium`, atau `low`.
+- Masalah menerima `assignee`: `me` untuk masalah yang ditugaskan ke akun yang
+  sedang masuk, `none` untuk masalah tanpa penanggung jawab, atau ID pengguna.
+- Aksi dan metrik menerima `name`.
+- Aksi menerima `distinct_id`.
+- Trace menerima `status` trace dan `min_duration_ms`.
+- Deployment menerima `status`: `succeeded` atau `failed`.
+
+Filter `severity` untuk log dan masalah membandingkan tingkat keparahan
+efektif. Jika sebuah aturan mengubah tingkat keparahan, filter memakai nilai
+dari aturan itu. Lihat
+[Nilai tingkat keparahan](/id/reference/telemetry-response-shapes#severity-values).
+
+## Rentang waktu
+
+`since` menerima bilangan bulat positif dalam jam atau hari, seperti `24h`
+atau `7d`, atau stempel waktu RFC3339. Durasi ringkas dihitung relatif
+terhadap waktu setiap permintaan.
+
+`until` hanya menerima stempel waktu RFC3339. Nilai ini adalah waktu akhir
+eksklusif: baris yang tepat berada di `until` tidak masuk ke hasil. `since`
+bersifat inklusif. Misalnya, `since=2026-10-01T00:00:00Z` dan
+`until=2026-10-02T00:00:00Z` memilih 1 hari penuh. LogBrew membandingkan waktu
+hingga milidetik.
+
+`until` harus lebih akhir dari `since`. Jika tidak, atau jika `until` bukan
+stempel waktu RFC3339, permintaan gagal dengan `422` dan `validation_failed`.
+
+Untuk pembacaan beberapa halaman, pilih satu waktu mulai RFC3339 dan gunakan
+di setiap halaman. Gunakan juga `until` yang sama di setiap halaman.
+
+Permintaan ini membaca log error dari 1 hari:
+
+```bash
+curl --get "https://api.logbrew.co/api/logs" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "severity=error" \
+  --data-urlencode "since=2026-10-01T00:00:00Z" \
+  --data-urlencode "until=2026-10-02T00:00:00Z"
+```
+
+<Note>
+  Daftar deployment memakai aturan waktu yang berbeda. `since` dan `until`
+  di daftar ini hanya menerima stempel waktu RFC3339, dan keduanya
+  inklusif. Keduanya membandingkan waktu saat deployment selesai.
+</Note>
+
+## Versi respons masalah
+
+Daftar masalah dan detail masalah menerima `response_version=1`,
+`response_version=2`, atau `response_version=3`. Versi 1 adalah default.
+Nilai lain gagal dengan `422` dan `validation_failed`.
+
+- Versi 1 menampilkan status diarsipkan sebagai `ignored`. Versi ini tidak
+  menampilkan prioritas.
+- Versi 2 menampilkan status diarsipkan sebagai `archived`. Versi ini
+  menambahkan `priority` dan `priority_source`.
+- Versi 3 punya semua kolom versi 2. Versi ini menambahkan `assignee`.
+
+Setiap versi menerima `status=archived`, `priority`, dan `assignee`. Lihat
+[Respons masalah](/id/reference/telemetry-response-shapes#issue-response).
+
+## Filter tingkat keparahan
+
+Gunakan `severity=info|warning|error|critical` di `GET /api/logs`. Kunci
+`level` yang lebih lama adalah alias kompatibilitas. Kedua kunci menerima
+nilai kanonis dan alias `trace`, `debug`, `warn`, dan `fatal`. LogBrew
+mengubah alias menjadi nilai kanonisnya sebelum membandingkan.
+
+Jika permintaan mengirim `severity` dan `level` sekaligus, LogBrew
+menormalkan keduanya terlebih dahulu. Nilai yang bertentangan ditolak dengan:
+
+```text
+log severity and level filters conflict; use one value
+```
+
+## <span id="trace-filters">Filter trace</span>
+
+Untuk pencarian trace, `status` bernilai `error` atau `ok`. Hilangkan filter
+ini untuk mencakup keduanya. `min_duration_ms` harus nol atau lebih besar.
+Filter ini hanya berlaku untuk pencarian trace.
+
+Permintaan ini mencari trace error yang berlangsung setidaknya 500 milidetik:
+
+```bash
+curl --get "https://api.logbrew.co/api/telemetry/traces" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "status=error" \
+  --data-urlencode "min_duration_ms=500" \
+  --data-urlencode "since=7d"
+```
+
+Untuk detail dan ringkasan trace, kirim `trace_id` sebagai segmen path dengan
+percent-encoding. Jangan kirim sebagai kunci kueri.
+
+## <span id="project-scope">Lingkup proyek</span>
+
+Gunakan `project_id=<project-uuid>` untuk membaca satu proyek. Di rute yang
+mencantumkan `project_ids` di matriks, gunakan `project_ids=<uuid>,<uuid>`
+untuk kumpulan proyek tertentu berisi 2 hingga 50 proyek. Di rute itu, jangan
+sertakan kedua kunci untuk membaca setiap proyek yang bisa dibaca akun. Rute yang
+mewajibkan `project_id` hanya menerima 1 proyek.
+
+```text
+project_id=00000000-0000-4000-8000-000000000001
+project_ids=00000000-0000-4000-8000-000000000001,00000000-0000-4000-8000-000000000002
+```
+
+LogBrew menolak pilihan berikut dengan `422` dan `validation_failed`:
+
+- Permintaan yang punya `project_id` dan `project_ids` sekaligus.
+- Nilai `project_ids` dengan kurang dari 2 atau lebih dari 50 ID.
+- ID ganda atau ID yang bukan UUID.
+
+Jika salah satu ID di `project_ids` adalah proyek yang tidak bisa dibaca akun,
+permintaan gagal dengan `404` dan `not_found`. Jangan hapus ID itu lalu
+melanjutkan. Minta pengguna memilih kumpulan baru.
+
+Pertahankan lingkup proyek yang sama di setiap halaman kursor. Jangan hapus
+filter proyek setelah hasil kosong, karena itu mengajukan pertanyaan yang
+berbeda.
+
+## Deret per interval waktu
+
+`GET /api/telemetry/metrics/series` mengembalikan satu metrik per interval
+waktu. `GET /api/telemetry/summary/volume` mengembalikan jumlah sinyal per
+interval waktu. Kedua rute memakai aturan berikut:
+
+- `since` wajib. `until` opsional dan default-nya waktu permintaan.
+- Rentang dari `since` hingga `until` paling lama 31 hari.
+- `interval` bernilai `auto`, `1m`, `5m`, `15m`, `1h`, `6h`, atau `1d`.
+  Default-nya `auto`. Interval yang menghasilkan lebih dari 500 interval
+  waktu akan gagal.
+- `service_name`, `release`, dan `environment` adalah filter persis.
+
+Untuk deret metrik, `name` adalah nama metrik persis dari
+`GET /api/telemetry/metrics`. `group_by` bernilai `none`, `service_name`,
+`release`, atau `environment`. `series_limit` bernilai 1 hingga 20.
+
+Untuk volume sinyal, `until` tidak boleh berada di masa depan, dan
+`response_version` hanya boleh `1`.
+
+## Filter atribut log
+
+Gunakan `GET /api/logs/attributes` untuk menemukan path dan tipe atribut yang
+bisa Anda cari. Lalu kirim `attribute_filters` ke `GET /api/logs`. Kedua
+permintaan butuh `since`.
+
+### Baca katalog atribut
+
+Permintaan ini mencari path numerik yang berisi `status` di satu proyek:
+
+```bash
+curl --get "https://api.logbrew.co/api/logs/attributes" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "since=2026-06-01T00:00:00Z" \
+  --data-urlencode "type=number" \
+  --data-urlencode "search=status" \
+  --data-urlencode "limit=2"
+```
+
+Responsnya berupa objek, bukan array polos. Contoh sintetis ini punya 2
+atribut dan satu halaman lagi:
+
+```json
+{
+  "attributes": [
+    { "path": "/http/status_code", "type": "number", "observed_count": 50, "last_seen_at": "2026-06-01T12:00:03.789Z" },
+    { "path": "/response/status", "type": "number", "observed_count": 42, "last_seen_at": "2026-06-01T12:00:02.456Z" }
+  ],
+  "coverage": {
+    "total_logs": 60,
+    "fully_indexed_logs": 50,
+    "partially_indexed_logs": 2,
+    "unindexed_logs": 8
+  },
+  "next_cursor": { "observed_count": 42, "path": "/response/status", "type": "number" }
+}
+```
+
+`type` bernilai `string`, `number`, atau `boolean`. `observed_count` adalah
+jumlah log dalam rentang yang punya path dan tipe itu. `last_seen_at` adalah
+waktu log terbaru di antaranya. Satu log bisa punya banyak path. Jangan
+menjumlahkan angka-angka ini untuk mendapatkan jumlah log.
+
+`coverage` memberi tahu log mana yang bisa dicari oleh filter atribut:
+
+| Kolom | Arti |
+| --- | --- |
+| `total_logs` | Log yang cocok dengan filter proyek, waktu, tingkat keparahan, layanan, rilis, dan lingkungan pada katalog. |
+| `fully_indexed_logs` | Log yang semua nilai atribut yang didukungnya bisa dicari. |
+| `partially_indexed_logs` | Log yang sebagian nilainya tidak masuk indeks. Filter bisa melewatkan nilai yang tidak masuk indeks. |
+| `unindexed_logs` | Log yang tidak bisa dicari oleh filter atribut bertipe. |
+
+Ketiga kelompok itu berjumlah sama dengan `total_logs`. `type`, `search`, dan
+kursor pada katalog tidak mengubah cakupan. Daftar `attributes` yang kosong
+tidak berarti `total_logs` bernilai nol.
+
+Katalog tidak punya kunci `status`. Filter tingkat keparahannya membandingkan
+tingkat keparahan yang terekam, bukan tingkat keparahan efektif.
+
+`search` adalah substring path sepanjang 1 hingga 128 byte tanpa karakter
+kontrol. `limit` menetapkan jumlah atribut di satu halaman.
+
+### Lanjutkan katalog
+
+Katalog tidak memakai `pagination=cursor`. Ulangi setiap filter, dan salin
+ketiga kolom dari `next_cursor`:
+
+| Kolom yang dikembalikan | Kunci permintaan berikutnya |
+| --- | --- |
+| `next_cursor.observed_count` | `cursor_count` |
+| `next_cursor.path` | `cursor_path` |
+| `next_cursor.type` | `cursor_type` |
+
+Berhenti jika `next_cursor` bernilai `null`.
+
+### Terapkan filter bertipe
+
+Salin path dan tipe dari katalog. Path memakai sintaksis JSON Pointer, bukan
+kunci bertitik. Biarkan escape `~0` atau `~1` di path apa adanya.
+
+Permintaan ini membaca log yang status respons numeriknya 500 atau lebih:
+
+```bash
+curl --get "https://api.logbrew.co/api/logs" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "since=2026-06-01T00:00:00Z" \
+  --data-urlencode 'attribute_filters=[{"path":"/response/status","type":"number","operator":"gte","value":500}]'
+```
+
+`attribute_filters` adalah array JSON berisi 1 hingga 4 filter. Log harus
+cocok dengan semua filter. Setiap filter punya `path`, `type`, `operator`, dan
+`value`. Tipe JSON dari `value` harus sesuai dengan `type`: angka `500` tidak
+sama dengan string `"500"`.
+
+| `type` | Nilai `operator` |
+| --- | --- |
+| `string` | `eq`, `ne`, `contains`, `starts_with` |
+| `number` | `eq`, `ne`, `gt`, `gte`, `lt`, `lte` |
+| `boolean` | `eq`, `ne` |
+
+`ne` hanya cocok dengan log yang punya path itu. Log tanpa path itu tidak
+cocok dengan `ne`. Untuk `string`, `case_sensitive` bersifat opsional dan
+default-nya `false`. LogBrew menolak `"case_sensitive": true` untuk `number`
+dan `boolean`.
+
+Batas berikut berlaku:
+
+- Array JSON paling besar 4.096 byte.
+- Nilai string paling besar 1.024 byte.
+- `contains` dan `starts_with` butuh string yang tidak kosong.
+- Angka harus berhingga dan berada di antara -9.007.199.254.740.992 dan
+  9.007.199.254.740.992.
+
+Log yang tidak bisa dicari oleh indeks tidak cocok dengan filter. Log itu
+tetap bisa muncul dalam permintaan tanpa `attribute_filters`. Untuk respons
+log, lihat [Respons log](/id/reference/telemetry-response-shapes#log-response).
+
+### Perbaiki error atribut
+
+Setiap error di bawah mengembalikan `422` dengan `validation_failed`:
+
+| `error` | Perbaikan |
+| --- | --- |
+| `log attribute queries require since` | Tambahkan `since` ke permintaan katalog, atau ke permintaan log yang memakai `attribute_filters`. |
+| `invalid log attribute filters` | Kirim array JSON berisi 1 hingga 4 filter dengan path, tipe, operator, dan nilai dari katalog. |
+| `invalid log attribute cursor` | Kirim `cursor_count`, `cursor_path`, dan `cursor_type` bersamaan dari `next_cursor`. |
+| `invalid log attribute search` | Kirim substring path yang tidak kosong, paling panjang 128 byte. |
+
+Perbaiki permintaan sebelum Anda mencoba lagi. Jangan hapus filter, karena
+itu mengubah hasilnya.
+
+## <span id="cursor-pagination">Paginasi berbasis kursor</span>
+
+Mode kursor harus diaktifkan secara eksplisit. Tanpa mode ini, rute daftar
+mengembalikan array polos. Kirim `pagination=cursor` tanpa kolom kursor untuk
+halaman pertama. Untuk setiap halaman berikutnya, ulangi setiap filter dan
+kirim set kolom kursor yang lengkap:
+
+| Rute | Kolom kursor lanjutan |
+| --- | --- |
+| Log, masalah, kemunculan masalah, aksi, metrik, dan deployment | `cursor_time` dan `cursor_id` |
+| Rilis | `cursor_time`, `cursor_project_id`, `cursor_release`, `cursor_environment`, dan `cursor_service_name` |
+| Pencarian trace | `cursor_time` dan `cursor_trace_id` |
+
+Petakan kolom `next_cursor` yang dikembalikan ke permintaan berikutnya:
+
+- `next_cursor.time` masuk ke `cursor_time`.
+- `next_cursor.id` masuk ke `cursor_id`.
+- Untuk trace, `next_cursor.trace_id` masuk ke `cursor_trace_id`.
+- Untuk rilis, tambahkan `cursor_` sebelum setiap nama kolom yang
+  dikembalikan, misalnya `next_cursor.release` masuk ke `cursor_release`.
+
+Berhenti jika `next_cursor` bernilai `null`. Jangan menghitung kursor dari
+baris terakhir. Kursor rilis tidak mengubah proyek yang dipilih. Pertahankan
+`project_id` atau `project_ids` yang asli.
+
+```bash
+curl --get "https://api.logbrew.co/api/logs" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "severity=error" \
+  --data-urlencode "since=2026-06-01T00:00:00Z" \
+  --data-urlencode "pagination=cursor" \
+  --data-urlencode "limit=50"
+```
+
+`limit` menetapkan ukuran halaman. Satu halaman bisa berisi lebih sedikit
+baris. Rute ini tidak menerima `page` atau `page_number`.
+
+| Rute | `limit` default | `limit` maksimum |
+| --- | ---: | ---: |
+| Log, atribut log, masalah, aksi, metrik, rilis, dan pencarian trace | 100 | 500 |
+| Kemunculan masalah | 25 | 100 |
+| Deployment | 50 | 100 |
+
+Di sebagian besar rute, LogBrew mengubah `limit` yang melebihi maksimum
+menjadi nilai maksimum. Daftar deployment menolak `limit` di luar 1 hingga 100
+dengan `422`. Daftar deployment selalu mengembalikan objek halaman dengan
+`next_cursor`, bahkan tanpa `pagination=cursor`.
+
+LogBrew menolak permintaan berikut dengan `422` dan `validation_failed`:
+
+- Nilai `pagination` selain `cursor`.
+- Kolom kursor tanpa `pagination=cursor`.
+- Set kolom kursor yang tidak lengkap.
+- `cursor_time` yang bukan stempel waktu RFC3339.
+
+Kursor menandai posisi; kursor tidak membekukan data. Mulai lagi dari halaman
+pertama jika Anda butuh tampilan terbaru.
+
+CLI memakai kolom yang sama:
+
+```bash
+logbrew read logs --severity error --pagination cursor --limit 50 --json
+logbrew read logs --severity error --pagination cursor --limit 50 \
+  --cursor-time <time> --cursor-id <id> --json
+```
+
+## Diagnosis hasil kosong
+
+Daftar kosong berarti tidak ada baris yang cocok dengan semua filter. Daftar
+kosong tidak memberi informasi tentang sinyal lain. Periksa permintaan dengan
+urutan ini:
+
+1. Pastikan ID proyek sudah benar.
+2. Hapus filter opsional satu per satu.
+3. Perluas `since` jika peristiwa yang diharapkan lebih lama. Hapus `until`
+   atau geser ke waktu yang lebih akhir jika peristiwa yang diharapkan
+   lebih baru.
+4. Bandingkan `service_name`, `release`, dan `environment` dengan nilai yang
+   dikirim SDK Anda.
+5. Untuk log, tambahkan `status=all` jika aturan log bisa menyembunyikan log
+   yang diharapkan.
+6. Pastikan rute menerima setiap filter.
+
+## Pulihkan dari kueri yang ditolak
+
+Kueri yang ditolak mengembalikan envelope error standar. Kunci yang tidak
+dikenal atau nilai dengan tipe yang salah mengembalikan `422`:
+
+```json
+{
+  "error": "invalid query parameters",
+  "code": "validation_failed",
+  "next": "check query parameter names and value types, then retry",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+Perbaikan umum:
+
+- Ganti alias praktis dengan kunci dari [matriks filter](#filter-matrix).
+- Kirim setiap kolom kursor lanjutan yang dibutuhkan rute.
+- Hapus kolom kursor dari permintaan halaman pertama.
+- Gunakan hanya satu pemilih proyek.
+- Ganti tingkat keparahan atau status trace yang tidak didukung dengan nilai
+  kanonis.
+
+Untuk kode error dan pemulihan, lihat [Error API](/id/reference/api-errors).
+Untuk body respons, lihat [Format respons](/id/reference/telemetry-response-shapes).

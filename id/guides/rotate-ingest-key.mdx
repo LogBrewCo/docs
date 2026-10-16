@@ -1,0 +1,178 @@
+---
+title: "Rotasi kunci API: rotasikan kunci ingest LogBrew"
+sidebarTitle: "Rotasikan kunci ingest"
+description: "Rotasikan kunci ingest LogBrew. Uji kunci pengganti sebelum pencabutan terencana. Pulihkan dari error tanpa membocorkan kredensial."
+---
+
+Rotasi mengganti kunci ingest proyek. Rotasi tidak mengubah proyek atau
+telemetri yang tersimpan. Kelola kunci dengan autentikasi akun. Kunci ingest
+hanya bisa mengirim telemetri. Kunci ingest tidak bisa mengelola kunci.
+
+Sebelum mulai, [instal CLI dan masuk](/id/guides/cli). Isi
+`LOGBREW_PROJECT_ID` dengan UUID proyek. Isi `LOGBREW_API_URL` dengan
+`https://api.logbrew.co`. Contoh di halaman ini memakai Bash, curl 7.76.0 atau
+yang lebih baru, dan jq.
+
+Untuk rotasi terencana, buat, deploy, dan uji kunci pengganti sebelum Anda
+mencabut kunci lama. Tetapkan interval rotasi di kebijakan keamanan Anda. Jika
+kunci punya tanggal kedaluwarsa, ganti kunci itu sebelum tanggal tersebut.
+
+<Warning>
+  Kunci yang bocor adalah insiden keamanan. Segera cabut kunci itu, bahkan
+  sebelum kunci pengganti di-deploy. Aplikasi yang masih memakai kunci yang
+  sudah dicabut tidak bisa mengirim telemetri.
+</Warning>
+
+<Steps>
+  <Step title="Buat kunci pengganti">
+    `POST /api/projects/{project_id}/ingest-keys` menerima `label` yang tidak
+    kosong, paling panjang 120 karakter. `kind` berisi `cli`, `sdk`,
+    `browser`, `server`, atau `artifact`. Kunci `artifact` tidak bisa mengirim
+    telemetri. `expires_at` bersifat opsional dan harus berupa waktu RFC3339
+    di masa depan.
+
+    Pakai `kind` yang sama dengan kunci lama. CLI memakai `sdk` jika Anda
+    tidak mengisi `--kind`, dan `CLI-created SDK key` jika Anda tidak mengisi
+    `--label`. CLI tidak punya flag untuk tanggal kedaluwarsa. Untuk mengisi
+    `expires_at`, gunakan API.
+
+    CLI menyimpan token sekali pakai ke file baru yang hanya bisa diakses
+    pemiliknya, di luar source control. CLI mencetak metadata, bukan token:
+
+    ```bash
+    : "${LOGBREW_PROJECT_ID:?set LOGBREW_PROJECT_ID}" &&
+    : "${LOGBREW_REPLACEMENT_KEY_FILE:?choose a new private key file}" &&
+    logbrew projects keys create "$LOGBREW_PROJECT_ID" \
+      --ingest-key-file "$LOGBREW_REPLACEMENT_KEY_FILE" \
+      --label "checkout production rotation" --kind server --json
+    ```
+
+    Lanjutkan hanya setelah perintah berhasil. Isi `NEW_KEY_ID` dengan
+    `ingest_key.id` yang dikembalikan.
+
+    Jika hasilnya tidak pasti, jalankan lagi perintah yang sama persis. CLI
+    memakai ulang kunci percobaan ulang yang masih tertunda. Jangan pakai
+    `--abandon-retry` untuk percobaan ulang ini.
+
+    Klien yang memanggil API secara langsung menerima token satu kali di
+    respons. Untuk mencoba lagi, kirim header `Idempotency-Key` yang sama
+    dengan body yang sama. Selama 24 jam, percobaan ulang itu mengembalikan
+    kunci yang sama. Jangan pernah mencetak, meng-commit, atau membagikan
+    token.
+  </Step>
+
+  <Step title="Deploy kunci baru selagi kunci lama tetap aktif">
+    Simpan token baru di pengaturan deployment yang terlindungi. Deploy
+    aplikasi. Biarkan kunci lama tetap aktif. Jauhkan kedua token dari kode
+    sumber, output build, dan log.
+  </Step>
+
+  <Step title="Kirim satu peristiwa sintetis">
+    Muat token baru ke variabel shell `new_ingest_key`. Jangan cetak token
+    itu. Kirim satu log sintetis dengan kunci baru, lalu baca kembali log
+    tersebut:
+
+    ```bash
+    occurred_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+
+    curl --fail-with-body -sS "$LOGBREW_API_URL/api/telemetry/ingest" \
+      -H "Authorization: Bearer $new_ingest_key" \
+      -H "Content-Type: application/json" \
+      --data @- <<JSON &&
+    {
+      "project_id": "$LOGBREW_PROJECT_ID",
+      "environment": "production",
+      "release": "ingest-key-rotation@1",
+      "service_name": "checkout-api",
+      "sdk_name": "native-api",
+      "sdk_version": "0.1.0",
+      "items": [
+        {
+          "type": "log",
+          "data": {
+            "level": "info",
+            "message": "ingest key rotation check",
+            "source": "setup",
+            "attributes": {},
+            "occurred_at": "$occurred_at"
+          }
+        }
+      ]
+    }
+    JSON
+
+    logbrew read logs --project "$LOGBREW_PROJECT_ID" \
+      --release ingest-key-rotation@1 \
+      --environment production \
+      --since "$occurred_at" \
+      --json
+    ```
+
+    Lanjutkan hanya jika pembacaan mengembalikan log ini dengan `occurred_at`
+    yang sama. Log pemeriksaan rotasi yang lebih lama tidak membuktikan bahwa
+    kunci baru berfungsi. Pastikan juga aplikasi yang sudah di-deploy
+    mengirim telemetri. Jika perintah gagal, berhenti dan baca responsnya.
+    Biarkan kunci lama tetap aktif, kecuali kunci itu bocor.
+  </Step>
+
+  <Step title="Tampilkan metadata kunci tanpa rahasia">
+    Isi `LOGBREW_ACCOUNT_BEARER` dari autentikasi akun Anda. Cari ID kunci
+    lama. Pastikan `NEW_KEY_ID` berstatus `active`:
+
+    ```bash
+    (
+      set -o pipefail
+      curl --fail-with-body -sS "$LOGBREW_API_URL/api/projects/$LOGBREW_PROJECT_ID/ingest-keys" \
+        -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+        | jq -e 'select(type == "array") | map({id, label, kind, token_prefix, status, created_at, expires_at, revoked_at})'
+    )
+    ```
+
+    Responsnya berupa array metadata kunci tanpa token. Statusnya `active`,
+    `expired`, atau `revoked`. Kunci menjadi `expired` setelah waktu
+    `expires_at` lewat.
+  </Step>
+
+  <Step title="Cabut hanya kunci lama">
+    Isi `OLD_KEY_ID` dari daftar. Perintah ini mencabut kunci lama hanya jika
+    kedua ID berbeda:
+
+    ```bash
+    if [ -n "${OLD_KEY_ID:-}" ] && [ -n "${NEW_KEY_ID:-}" ] \
+      && [ "$OLD_KEY_ID" != "$NEW_KEY_ID" ]; then
+      (
+        set -o pipefail
+        curl --fail-with-body -sS -X DELETE \
+          "$LOGBREW_API_URL/api/projects/$LOGBREW_PROJECT_ID/ingest-keys/$OLD_KEY_ID" \
+          -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+          | jq -e --arg id "$OLD_KEY_ID" \
+            'select(.id == $id and .status == "revoked") | {id, label, kind, token_prefix, status, created_at, expires_at, revoked_at}'
+      )
+    else
+      printf '%s\n' 'Set different old and replacement key IDs before revocation.' >&2
+      false
+    fi
+    ```
+
+    `DELETE` bersifat idempoten. Permintaan ini mengembalikan metadata kunci
+    dengan `status: "revoked"` dan `revoked_at` yang sudah terisi. Anda bisa
+    mengulanginya dengan aman setelah respons yang tidak pasti.
+
+    Jalankan `unset new_ingest_key`. Tangani file kunci sesuai kebijakan
+    pengelolaan rahasia Anda.
+  </Step>
+</Steps>
+
+## Pulihkan dengan aman
+
+| Respons | Langkah berikutnya |
+| --- | --- |
+| `404`, `code: "not_found"` | Pastikan proyek dan kunci dengan ID tersebut milik akun Anda. Ikuti `next_action.code: "check_resource"`. Jangan mencoba ID lain. |
+| `code: "validation_failed"` | Perbaiki kolom, nilai, atau stempel waktu yang disebutkan. Ikuti `next` dan `next_action`. |
+| `401` atau `403` saat mengelola kunci | Gunakan autentikasi akun, bukan kunci ingest. |
+| `401`, `code: "ingest_key_invalid"` pada permintaan ingest | Kunci sudah dicabut, kedaluwarsa, atau tidak valid untuk telemetri. Gunakan kunci aktif yang baru untuk proyek yang dipilih. Ikuti `next_action.code: "configure_ingest_key"`. |
+| `401` atau `403` pada permintaan ingest | Gunakan kunci ingest baru untuk proyek yang dipilih. Jangan gunakan kredensial akun. |
+
+Jika rotasi masih gagal, [laporkan masalah](/id/guides/report-a-problem).
+Bagikan metadata kunci saja. Jangan sertakan kredensial, header, telemetri
+mentah, data pelanggan, path lokal, atau kode sumber.

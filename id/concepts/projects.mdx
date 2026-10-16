@@ -1,0 +1,186 @@
+---
+title: "Penyiapan proyek LogBrew dan pemeriksaan sinyal"
+sidebarTitle: "Proyek dan penyiapan"
+description: "Siapkan proyek LogBrew. Pilih nama layanan dan lingkungan, baca status penyiapan, dan temukan peristiwa uji dari aplikasi Anda."
+---
+
+Proyek adalah batas akses untuk telemetri. Setiap sinyal yang diterima
+termasuk dalam satu proyek, dan setiap perintah baca dapat memfilter
+berdasarkan proyek.
+
+Gunakan proyek terpisah jika telemetri butuh batas kepemilikan atau batas
+akses tersendiri. Bagi sebagian besar tim, itu berarti satu aplikasi, layanan,
+atau area produk. Satu repositori tidak harus sama dengan satu proyek. Sebuah
+monorepo dapat mengirim beberapa layanan ke satu proyek. Gunakan nama layanan
+untuk membedakannya.
+
+## <span id="project-service-environment">Proyek, layanan, lingkungan</span>
+
+| Istilah | Contoh | Gunakan untuk |
+| --- | --- | --- |
+| Proyek | `checkout-platform` | Kepemilikan dan akses. |
+| Layanan | `checkout-api` | Aplikasi atau layanan yang mengirim sinyal. |
+| Lingkungan | `production` | Konteks runtime. |
+| Rilis | `api@1.2.3` | Versi kode. |
+
+## <span id="recommended-model">Siapkan proyek</span>
+
+[Instal CLI](/id/guides/cli). Jalankan `logbrew status --json` untuk membaca
+akses akun Anda. Jika akses tidak valid, manusia menjalankan `logbrew login`.
+Kunci ingest proyek tidak bisa dipakai untuk masuk.
+
+<Steps>
+  <Step title="Buat atau pilih proyek">
+    Tampilkan daftar proyek Anda terlebih dahulu. Buat proyek hanya jika
+    proyek itu belum ada.
+
+    ```bash
+    logbrew projects --json
+    install -d -m 700 "$HOME/.logbrew"
+
+    logbrew projects create checkout-api \
+      --runtime node \
+      --environment production \
+      --ingest-key-file "$HOME/.logbrew/checkout-api.ingest" \
+      --json
+    ```
+
+    CLI menulis kunci ingest ke file baru yang hanya bisa diakses pemiliknya.
+    CLI tidak pernah menampilkan kunci itu atau path file-nya. Jika hasilnya
+    tidak jelas, jalankan lagi perintah yang sama persis. Jangan ubah nama
+    proyek atau file kunci. CLI memakai ulang identitas permintaannya yang
+    tertunda. [Mulai cepat](/id/quickstart) menunjukkan cara membaca ID proyek
+    dari hasilnya.
+
+    Untuk proyek yang sudah ada, catat status penyiapannya:
+
+    ```bash
+    logbrew projects setup "<project_id>" --source cli --environment production --json
+    ```
+
+    Untuk membuat kunci ingest lain bagi proyek yang sudah ada, gunakan
+    `logbrew projects keys create`. Panduan
+    [Rotasikan kunci ingest](/id/guides/rotate-ingest-key) menunjukkan
+    perintahnya.
+
+    `logbrew setup --create-project` hanya menampilkan bantuan. Perintah itu
+    tidak membuat proyek.
+  </Step>
+
+  <Step title="Tetapkan nama layanan di SDK">
+    Gunakan nama dari repositori dan deployment Anda, seperti `api`, `worker`,
+    `web`, `ios`, atau `checkout-api`. Nama layanan adalah label, bukan
+    pemilih proyek. Kunci ingest yang memilih proyek. Mengganti nama layanan
+    tidak memindahkan peristiwa yang tersimpan. Jika Anda tidak menemukan
+    sebuah peristiwa, periksa proyek dan kunci ingest yang dipakai aplikasi
+    sebelum Anda membuat proyek lain.
+  </Step>
+
+  <Step title="Gunakan lingkungan standar">
+    Gunakan `production`, `staging`, `preview`, dan `local`. Jika deployment
+    Anda memakai nama lain, gunakan nama itu secara konsisten. Nama lingkungan
+    tidak boleh berisi spasi, `/`, atau garis miring terbalik.
+  </Step>
+
+  <Step title="Kirim peristiwa uji dan baca">
+    Konfigurasikan SDK dengan kunci ingest proyek, seperti yang dijelaskan
+    panduan [Integrasi SDK](/id/guides/sdk-ingestion). Membuat proyek tidak
+    menginstal SDK di aplikasi Anda. Jangan simpan kunci di source control.
+    Tetapkan layanan, lingkungan, dan rilis di aplikasi. Kirim satu peristiwa
+    yang aman, lalu baca:
+
+    ```bash
+    logbrew read logs --project "<project_id>" --json
+    ```
+
+    Setiap sinyal punya daftarnya sendiri. Daftar log yang kosong tidak
+    berarti proyek tidak punya masalah atau trace.
+
+    Di dasbor, pilih proyek yang sama dan rentang waktu yang mencakup
+    peristiwa uji. Pastikan filter layanan, lingkungan, dan rilis cocok dengan
+    peristiwa itu.
+  </Step>
+</Steps>
+
+## <span id="diagnose-project-setup">Diagnosis penyiapan proyek</span>
+
+Baca status penyiapan dengan doctor proyek. Jangan menyimpulkan status
+penyiapan dari file lokal atau kueri log yang kosong.
+
+```bash
+: "${LOGBREW_PROJECT_ID:?set a project UUID}"
+
+logbrew doctor --project "$LOGBREW_PROJECT_ID" --json
+```
+
+CLI mengembalikan laporan dengan `status`, `checks`, dan `next`. Kode keluar
+`0` tidak menunjukkan bahwa semua pemeriksaan lolos. Baca setiap item di
+`checks`. Lihat
+[Baca laporan doctor proyek](/id/reference/cli#read-a-project-doctor-report).
+
+### Respons API langsung
+
+Klien API memanggil `GET /api/projects/{project_id}/doctor` dengan
+autentikasi akun. Endpoint ini tidak punya parameter kueri atau body
+permintaan. Jangan pernah memakai kunci ingest proyek untuk pembacaan ini.
+
+Respons `200` berisi kolom berikut: `project_id`, `state`, `setup_status`,
+`setup_acknowledged`, `has_active_ingest_key`, `first_telemetry_seen_at`,
+`last_seen_at`, `last_signal`, `next`, dan `next_action`. Stempel waktu
+berformat RFC3339 atau `null`. `last_signal` adalah ringkasan yang aman untuk
+ditampilkan, bukan sinyal mentah.
+
+| `state` | `next_action.code` | `next_action.target` |
+| --- | --- | --- |
+| `needs_ingest_key` | `create_ingest_key` | `project_ingest_keys` |
+| `needs_setup` | `choose_setup_path` | `project_setup` |
+| `needs_telemetry` | `send_first_telemetry` | `telemetry_ingest` |
+| `ready` | `inspect_recent_telemetry` | `telemetry_reads` |
+
+Doctor memeriksa kunci ingest terlebih dahulu. Proyek tanpa kunci ingest yang
+aktif berstatus `needs_ingest_key`, apa pun status penyiapannya.
+
+`setup_status` bernilai `created`, `setup_started`, `sdk_seen`,
+`first_telemetry_seen`, atau `active`. `setup_acknowledged` bernilai `true`
+hanya untuk tiga nilai terakhir. `created` menghasilkan `needs_setup`.
+`setup_started` dan `sdk_seen` menghasilkan `needs_telemetry`.
+`first_telemetry_seen` dan `active` menghasilkan `ready`.
+
+| Respons | Langkah berikutnya |
+| --- | --- |
+| `404`, `code: "not_found"` | Proyek yang tidak ada, proyek yang diarsipkan, dan proyek yang tidak bisa dibaca akun Anda memberi hasil yang sama. Baca lagi ID proyek dari `logbrew projects`. Jangan mencoba ID lain. |
+| `405`, `code: "method_not_allowed"` | Gunakan `GET` tanpa body atau parameter kueri. |
+
+Jika pembacaan tetap gagal, [laporkan masalah](/id/guides/report-a-problem).
+Jangan sertakan kredensial, header, body sinyal, data pelanggan, path lokal,
+atau kode sumber.
+
+## <span id="archive-or-delete-a-project">Arsipkan atau hapus proyek</span>
+
+Arsipkan proyek untuk menghapusnya dari daftar proyek aktif:
+
+```bash
+logbrew projects archive "<project_id>" --yes --json
+```
+
+Perintah ini butuh `--yes`. Setelah diarsipkan, kunci ingest proyek berhenti
+menerima telemetri baru. Rute API-nya adalah
+`DELETE /api/projects/{project_id}`. Rute ini mengembalikan `204` tanpa body.
+Tampilkan daftar proyek yang diarsipkan dengan `GET /api/projects/archived`.
+Pulihkan proyek dengan `POST /api/projects/{project_id}/restore`, yang juga
+mengembalikan `204`.
+
+Hapus proyek secara permanen hanya jika Anda yakin:
+
+```bash
+logbrew projects delete "<project_id>" --confirm "<project_id>" --json
+```
+
+Ulangi ID proyek yang sama persis setelah `--confirm`. Permintaan yang
+diterima langsung membuat proyek tidak aktif dan menjadwalkan penghapusan
+permanen. Setelah itu, Anda tidak bisa memulihkan proyek.
+
+## <span id="rotate-an-ingest-key-without-telemetry-loss">Rotasikan kunci ingest</span>
+
+Panduan [Rotasikan kunci ingest](/id/guides/rotate-ingest-key) berisi prosedur
+penggantian, deployment, pengujian, dan pencabutan.

@@ -1,0 +1,268 @@
+---
+title: "Panduan menyiapkan pelacakan peristiwa di Node.js"
+sidebarTitle: "Perekaman peristiwa produk"
+description: "Kirim peristiwa produk terklasifikasi dengan pengguna dan sesi bertipe dari Node.js. Jalankan uji perekaman lokal, lalu baca hasilnya dengan CLI."
+---
+
+Gunakan peristiwa produk untuk merekam aksi pengguna yang diberi nama di
+aplikasi Anda, seperti membuka checkout atau menyelesaikan pembelian. SDK
+tidak memasang listener klik dan tidak mengumpulkan isi formulir. Kode Anda
+sendiri yang merekam setiap peristiwa.
+
+Untuk aturan penghitungan dan jenis laporan, lihat
+[Analitik produk](/id/concepts/product-analytics).
+
+## Siapkan pengujian
+
+Gunakan aplikasi Node.js 18 atau yang lebih baru dan proyek LogBrew yang bisa
+Anda baca. Jika Anda belum pernah mengirim telemetri, mulai dengan panduan
+[Mulai cepat](/id/quickstart). Pisahkan pengujian ini dari aktivitas
+pelanggan.
+
+Instal paket di direktori aplikasi:
+
+```bash
+npm install @logbrew/sdk@0.1.28 @logbrew/node@0.1.12
+```
+
+Gunakan kunci ingest server untuk proyek. Simpan kunci itu di
+`LOGBREW_SERVER_API_KEY`, di luar source control. Jangan pernah memasukkan
+kunci server ke bundle browser. Token akses akun dipakai untuk membaca hasil.
+Token itu tidak mengonfigurasi SDK.
+
+## Tentukan arti satu peristiwa
+
+Mulai dengan pertanyaan produk. Misalnya: apakah pengguna mengirim checkout
+setelah membukanya? Beri setiap peristiwa nama tetap, pemicu yang tepat, dan
+satu tempat di aplikasi yang merekamnya.
+
+| Nama peristiwa | Pemicu |
+| --- | --- |
+| `checkout.opened` | Aplikasi membuka checkout. Ini bukan pembelian. |
+| `checkout.submitted` | Aplikasi menerima aksi kirim. Ini bukan pembayaran yang berhasil. |
+| `checkout.completed` | Aplikasi mengonfirmasi penyelesaian. Jangan rekam peristiwa ini untuk setiap klik atau percobaan ulang jaringan. |
+
+Jaga agar nama peristiwa tetap stabil di semua rilis dan bahasa. Jangan
+membentuk nama dari alamat email, nomor pesanan, URL, atau teks yang
+dimasukkan pengguna.
+
+Gunakan properti kustom dengan sekumpulan kecil nilai yang disetujui. Misalnya,
+`checkout_mode` bisa bernilai `guest` atau `signed_in`. Jangan tambahkan nama
+peristiwa baru untuk setiap nilai. Jangan kirim isi formulir.
+
+Rekam setiap aksi bisnis di satu tempat saja. Jika browser dan server
+sama-sama merekam aksi yang sama, totalnya menjadi dua kali lipat.
+
+## Gunakan jenis aktivitas yang benar
+
+| Jenis | Arti | Jalur perekaman |
+| --- | --- | --- |
+| `interaction` | Aksi produk yang ditentukan aplikasi. | `createProductActionAttributes`, seperti contoh di bawah. |
+| `page_view` | Tayangan halaman di browser. | Perekaman tayangan halaman di SDK browser. |
+| `screen_view` | Tayangan layar di aplikasi. | Helper tayangan layar untuk aplikasi seluler. |
+
+`createProductActionAttributes` mengisi `analyticsSchemaVersion: 1` dan
+`analyticsKind: "interaction"` di metadata peristiwa. Template rute atau nama
+layarnya mengisi `analyticsSurface`. Gunakan template rute, seperti
+`/orders/:id`, bukan URL konkret.
+
+Nama peristiwa tidak menentukan jenis. Interaksi yang bernama `page_view`
+tetap interaksi. Log, masalah, dan span bukan peristiwa produk. Untuk runtime
+lain, lihat [Integrasi SDK](/id/guides/sdk-ingestion).
+
+## <span id="set-users-and-sessions-on-each-event">Tetapkan pengguna dan sesi di setiap peristiwa</span>
+
+- Untuk pengguna yang sudah masuk, isi `context.subject` dengan ID stabil dan
+  `kind: "user"`.
+- Untuk pengunjung anonim, gunakan ID terpisah dengan `kind: "anonymous"`.
+- Masukkan ID sesi aplikasi ke `context.session.id`. Pakai ulang ID itu
+  selama satu sesi penuh.
+
+Jangan pernah memakai nama, alamat email, alamat IP, atau token akses sebagai
+ID. ID stabil menghubungkan aksi dari satu pengguna. ID itu tidak membuat
+data menjadi anonim.
+
+Jangan tetapkan pengguna atau sesi default di klien server yang dipakai
+bersama. Teruskan subjek dan sesi dari permintaan yang menghasilkan setiap
+peristiwa. SDK tidak membuat ID ini dan tidak mendeteksi login, logout, atau
+pergantian akun. LogBrew tidak menggabungkan subjek anonim ke pengguna setelah
+login.
+
+## Jalankan contoh secara lokal
+
+Simpan contoh ini sebagai `product-events.mjs`. Contoh ini merekam lima aksi
+uji dari kunjungan anonim, login, dan dua pengguna. Klien hanya menyimpan
+konteks layanan dan deployment yang dipakai bersama. Pengiriman otomatis
+dimatikan untuk pengujian ini.
+
+```js
+import { randomUUID } from "node:crypto";
+import { createProductActionAttributes, SdkError } from "@logbrew/sdk";
+import { createLogBrewNodeClient } from "@logbrew/node";
+
+try {
+  const client = createLogBrewNodeClient({
+    automaticDelivery: false,
+    context: {
+      schemaVersion: 1,
+      resource: {
+        service: { name: "analytics-check", version: "analytics@1" },
+        deployment: { environment: "development", release: "analytics@1" }
+      }
+    }
+  });
+  const startedAt = new Date().toISOString();
+  client.release(randomUUID(), startedAt, { version: "analytics@1" });
+  client.environment(randomUUID(), startedAt, { name: "development" });
+
+  function record(name, subject, sessionId) {
+    client.action(randomUUID(), new Date().toISOString(), {
+      ...createProductActionAttributes({
+        name,
+        routeTemplate: "/checkout",
+        metadata: { checkout_mode: subject.kind === "user" ? "signed_in" : "guest" }
+      }),
+      context: { schemaVersion: 1, subject, session: { id: sessionId } }
+    });
+  }
+
+  record("checkout.opened", { id: "anon_demo_a", kind: "anonymous" }, randomUUID());
+  const userSession = randomUUID();
+  record("checkout.submitted", { id: "user_demo_a", kind: "user" }, userSession);
+  record("checkout.completed", { id: "user_demo_a", kind: "user" }, userSession);
+  record("checkout.opened", { id: "anon_demo_b", kind: "anonymous" }, randomUUID());
+  record("checkout.submitted", { id: "user_demo_b", kind: "user" }, randomUUID());
+
+  if (process.argv.includes("--send")) {
+    const response = await client.shutdown();
+    console.log(JSON.stringify({
+      mode: "sent",
+      status_code: response.statusCode,
+      attempts: response.attempts
+    }));
+  } else {
+    const batch = JSON.parse(client.previewJson());
+    const actions = batch.events.filter(event => event.type === "action");
+    console.log(JSON.stringify({
+      mode: "local_preview",
+      actions: actions.length,
+      kinds: [...new Set(actions.map(event => event.attributes.metadata.analyticsKind))],
+      dropped: client.droppedEvents()
+    }));
+  }
+} catch (error) {
+  console.error(JSON.stringify({
+    ok: false,
+    error: error instanceof SdkError ? error.code : "capture_failed"
+  }));
+  process.exitCode = 1;
+}
+```
+
+Jalankan skrip tanpa `--send`. Perintah ini tidak mengirim permintaan:
+
+```bash
+LOGBREW_SERVER_API_KEY=local-preview-only node product-events.mjs
+```
+
+Output yang diharapkan:
+
+```json
+{"mode":"local_preview","actions":5,"kinds":["interaction"],"dropped":0}
+```
+
+Penanda rilis dan lingkungan bukan aksi produk. Hasil ini hanya menunjukkan
+antrean lokal. Hasil ini tidak menunjukkan bahwa LogBrew sudah menerima
+peristiwa. Jangan cetak `previewJson()` di aplikasi yang berisi konteks
+pelanggan sungguhan.
+
+## Tangani login dan logout
+
+- Sebelum login, kirim subjek anonim saat ini bersama setiap peristiwa.
+- Setelah login, kirim ID stabil pengguna dengan jenis `user`.
+- Saat logout, berhenti memakai konteks pengguna itu. Buat subjek anonim baru
+  sesuai kebijakan privasi Anda.
+- Saat akun berganti, gunakan ID pengguna yang baru.
+
+Contoh ini memulai sesi baru saat identitas berubah. Pilih aturan sesi Anda
+sendiri dan terapkan ke setiap peristiwa. Konteks peristiwa menggantikan
+subjek dan sesi klien untuk peristiwa itu. Jika peristiwa tidak menyertakan
+salah satunya, peristiwa memakai nilai dari klien. Karena itu, contoh ini
+tidak menetapkan subjek atau sesi di klien. Untuk pekerjaan yang berjalan
+belakangan, pertahankan identitas pengguna yang memulainya.
+
+## Kirim sekali dan baca hasilnya
+
+Simpan kunci server proyek uji di variabel lingkungan proses. Jalankan
+perintah ini sekali:
+
+```bash
+node product-events.mjs --send
+```
+
+Setiap kali dijalankan, skrip membuat ID peristiwa baru, jadi menjalankannya
+lagi menambahkan lima peristiwa. Jika proses gagal, output berisi kode error SDK. Kunci
+yang ditolak menghasilkan:
+
+```json
+{"ok":false,"error":"unauthenticated"}
+```
+
+Pastikan kunci ingest aktif dan milik proyek uji. Masuk ke akun Anda tidak
+memperbaiki kunci SDK. Lihat [Error API](/id/reference/api-errors) dan
+[Mengatasi kendala](/id/guides/troubleshooting) untuk kegagalan lain.
+
+Setelah LogBrew menerima batch, temukan peristiwa di dasbor:
+
+1. Buka **Analitik**.
+2. Di **Proyek**, pilih proyek uji.
+3. Di **Rentang waktu**, pilih **24 jam**.
+4. Temukan 3 nama peristiwa di **Peristiwa teratas** dan `/checkout` di
+   **Halaman dan layar teratas**.
+
+Aktivitas lain di proyek mengubah total ini. Untuk pemeriksaan layanan,
+rilis, dan lingkungan yang tepat, baca ikhtisar dengan [CLI](/id/guides/cli)
+yang sudah masuk:
+
+```bash
+logbrew analytics overview --project "<project_id>" --since 1h \
+  --service analytics-check --release analytics@1 \
+  --environment development --json
+```
+
+Jika skrip dijalankan sekali dalam rentang waktu yang sebelumnya kosong,
+hasil yang diharapkan:
+
+- 5 interaksi, semuanya dengan konteks sesi, di halaman `/checkout`.
+- 3 peristiwa dari pengguna dan 2 dari subjek anonim.
+- 2 pengguna, 2 subjek anonim, dan 4 sesi.
+
+Jumlah pengguna, subjek, dan sesi yang unik adalah perkiraan. Total peristiwa
+dihitung persis dalam rentang waktu yang dipilih. Pengujian ini tidak mengukur konversi
+atau retensi.
+
+| Hasil | Pemeriksaan berikutnya |
+| --- | --- |
+| Tidak ada aktivitas produk | Periksa hasil pengiriman, proyek, rentang waktu, layanan, rilis, dan lingkungan. |
+| Aktivitas tidak terklasifikasi | Gunakan `createProductActionAttributes`. Nama peristiwa saja tidak menentukan jenis. |
+| Jumlah pengguna berbeda | Periksa `context.subject` di setiap peristiwa. Subjek anonim tidak dihitung sebagai pengguna. |
+| Jumlah sesi berbeda | Periksa `context.session.id` di setiap peristiwa dan aturan sesi Anda. |
+| Peristiwa lebih banyak dari perkiraan | Periksa apakah skrip dijalankan berulang kali dan apakah aksi direkam di dua tempat. |
+
+## Uji peristiwa di aplikasi Anda
+
+Pindahkan panggilan perekaman ke handler aplikasi. Pertahankan arti, jenis,
+dan aturan identitas setiap peristiwa. Uji dengan akun sintetis terlebih
+dahulu.
+
+| Uji aplikasi | Perekaman yang diharapkan |
+| --- | --- |
+| Buka checkout tanpa mengirimnya | Hanya `checkout.opened`. |
+| Kirim formulir yang gagal validasi | Tidak ada `checkout.submitted`. Jangan pernah mengirim isi formulir. |
+| Terima pengiriman, lalu buat pembayaran gagal | `checkout.submitted`, tanpa `checkout.completed`. |
+| Coba lagi permintaan setelah penyelesaian terkonfirmasi | Tidak ada `checkout.completed` kedua. |
+| Keluar, lalu gunakan akun lain | Peristiwa berikutnya memakai subjek dan sesi yang baru. |
+
+Pratinjau lokal menguji perekaman. Batch yang diterima menguji pengiriman.
+Keduanya tidak menunjukkan bahwa panggilan perekaman berjalan di titik yang
+benar di aplikasi Anda.
