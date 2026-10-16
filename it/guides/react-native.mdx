@@ -1,0 +1,268 @@
+---
+title: "Logging React Native con LogBrew"
+sidebarTitle: "React Native"
+description: "Installa l'SDK React Native, invia un log di test e trovalo nel progetto LogBrew corretto. Configura Expo in sicurezza e gestisci gli errori di consegna."
+---
+
+Invia a LogBrew i log di un'app React Native. Inizia con un log di test, poi
+usa la CLI per trovarlo nel progetto corretto. Questa guida usa Expo.
+Un'app React Native senza Expo carica la chiave tramite la propria
+configurazione.
+
+Prima di iniziare, ti servono:
+
+- Un'app React Native che puoi eseguire in locale.
+- Un progetto LogBrew. Consulta [Progetti](/it/concepts/projects).
+- Una CLI con accesso eseguito. Consulta
+  [Configurazione della CLI](/it/guides/cli).
+
+## Installa l'SDK
+
+Installa entrambi i pacchetti nella directory dell'app. Mantieni le
+dipendenze React e React Native dell'app:
+
+```bash
+npm install @logbrew/sdk@0.1.28 @logbrew/react-native@0.1.35
+```
+
+## Crea una chiave SDK del progetto
+
+Assegna all'app una chiave SDK limitata al progetto e di sola scrittura. Expo
+inserisce ogni valore `EXPO_PUBLIC_*` nel bundle dell'app. Non inserire mai
+una credenziale dell'account o del server in quella variabile.
+
+La CLI v0.1.32 o successiva crea una chiave per un progetto esistente. Non
+crea un nuovo progetto. Trova l'ID del progetto:
+
+```bash
+logbrew projects --json
+```
+
+Crea la chiave. Usa un nuovo percorso di file in una directory accessibile
+solo al proprietario:
+
+```bash
+install -d -m 700 "$HOME/.logbrew" &&
+logbrew projects keys create "<project_id>" \
+  --ingest-key-file "$HOME/.logbrew/my-mobile-app.ingest" \
+  --label "My mobile app" \
+  --kind sdk \
+  --json
+```
+
+Continua solo dopo che il comando è riuscito. Se il risultato non è chiaro,
+esegui di nuovo lo stesso comando con gli stessi argomenti. Non usare
+`--abandon-retry`.
+
+Tieni il file della chiave fuori dal controllo del codice sorgente. Non usare
+la credenziale dell'account che ha autorizzato la CLI. Per lo sviluppo locale
+con Expo, inserisci la chiave in un file `.env.local` ignorato, nella radice
+dell'app:
+
+```dotenv
+EXPO_PUBLIC_LOGBREW_CLIENT_KEY=<your_project_sdk_key>
+```
+
+Mantieni il riferimento diretto `process.env.EXPO_PUBLIC_LOGBREW_CLIENT_KEY`
+nel modulo di configurazione qui sotto. Ricarica completamente l'app dopo aver
+cambiato il valore. Consulta
+[Variabili d'ambiente di Expo](https://docs.expo.dev/guides/environment-variables/)
+per la configurazione in fase di build. Un'app React Native senza Expo carica
+invece la chiave tramite la propria configurazione.
+
+## Crea il client
+
+Inserisci questa configurazione in un solo modulo che l'app carica all'avvio.
+Non creare un client a ogni render. Inserisci servizio, ambiente e release in
+`context`:
+
+```js
+import { AppState } from "react-native";
+import {
+  createAppStateListener,
+  createLogBrewReactNativeClient,
+  createReactNativeFetchTransport
+} from "@logbrew/react-native";
+
+const clientKey = process.env.EXPO_PUBLIC_LOGBREW_CLIENT_KEY;
+if (!clientKey) {
+  throw new Error("Set EXPO_PUBLIC_LOGBREW_CLIENT_KEY");
+}
+
+const client = createLogBrewReactNativeClient({
+  clientKey,
+  context: {
+    schemaVersion: 1,
+    resource: {
+      service: { name: "my-mobile-app" },
+      deployment: {
+        environment: __DEV__ ? "development" : "production",
+        release: "mobile@1.0.0"
+      }
+    }
+  },
+  transport: createReactNativeFetchTransport()
+});
+
+const stopAppStateListener = createAppStateListener(client, AppState, {
+  flushOnBackground: true
+});
+
+export async function verifyLogBrewSetup() {
+  client.log(`evt_react_native_setup_${Date.now()}`, new Date().toISOString(), {
+    level: "info",
+    message: "React Native setup check"
+  });
+
+  const receipt = await client.flush();
+  if (receipt.statusCode < 200 || receipt.statusCode >= 300) {
+    throw new Error("LogBrew did not accept the setup event");
+  }
+  return {
+    status_code: receipt.statusCode,
+    attempts: receipt.attempts,
+    batches: receipt.batches
+  };
+}
+```
+
+Il trasporto fetch attiva la consegna automatica con una coda e un numero
+limitato di nuovi tentativi. Non aggiungere un secondo timer di flush. Il
+listener di AppState richiede un flush finale quando l'app diventa inattiva o
+passa in background. Chiama `stopAppStateListener()` alla chiusura dell'app.
+
+Con la coda nativa, un solo client attivo può usare una chiave. Un secondo
+client con la stessa chiave non riesce e restituisce `configuration_error`. È
+un motivo in più per creare il client una sola volta.
+
+## Invia e trova il log di test
+
+Chiama `verifyLogBrewSetup()` una volta da un'azione di test disponibile solo
+in sviluppo. Attendi il risultato e gestisci una promise rifiutata. Non
+stampare la chiave o il batch di eventi.
+
+Un risultato `2xx` con `batches` maggiore di 0 dimostra che LogBrew ha
+accettato il batch. Un flush vuoto restituisce `204` con 0 tentativi e 0
+batch, perché la consegna automatica può aver già inviato l'evento. In
+entrambi i casi, leggi il log salvato con la CLI:
+
+```bash
+logbrew read logs --project "<project_id>" \
+  --search "React Native setup check" --since 1h --json
+```
+
+Nel risultato, controlla l'orario e il servizio dell'evento. Un risultato
+vuoto non indica la causa. Controlla il progetto, la chiave e l'intervallo di
+tempo.
+
+`RecordingTransport.alwaysAccept()` serve solo per i test locali. Restituisce
+un `202` sintetico e non invia alcuna richiesta.
+
+## Consegna offline e dopo il riavvio
+
+Leggi `client.deliveryHealth().storage` nell'app in esecuzione:
+
+- `persistent`: il client usa la coda nativa. Dopo un riavvio dell'app, il
+  client ricarica gli eventi in sospeso.
+- `memory`: gli eventi in sospeso vanno persi quando il runtime JavaScript si
+  riavvia.
+
+Il valore predefinito `persistentQueue: "auto"` usa la coda nativa quando il
+binario dell'app contiene il modulo nativo di LogBrew. Expo Go e i binari
+meno recenti usano la memoria. Un aggiornamento solo JavaScript non può
+aggiungere il modulo nativo.
+
+Se un'app di produzione deve consegnare gli eventi anche dopo un riavvio,
+imposta `persistentQueue: "required"`. In questo caso, quando manca la coda
+nativa, la creazione del client non riesce con `configuration_error`.
+Ricompila l'app con il modulo nativo. Usa `persistentQueue: "disabled"` solo
+quando vuoi una coda in memoria.
+
+La coda nativa contiene al massimo 1.000 eventi e 4 MiB di dati degli eventi.
+Valgono anche i limiti del client, se più bassi. Gli eventi nella coda nativa
+mantengono i loro ID evento dopo un riavvio.
+
+La consegna avviene almeno una volta, quindi un nuovo tentativo può inviare un
+evento due volte. Quando l'ID e il contenuto dell'evento corrispondono a un
+evento che LogBrew ha già accettato, LogBrew non lo salva di nuovo. Un flush
+in background è un tentativo e non dimostra la consegna. Verifica
+l'acquisizione offline e il riavvio dell'app. Poi trova l'evento salvato nel progetto.
+
+### Leggi lo stato della consegna
+
+`client.deliveryHealth()` restituisce lo stato della coda e della consegna
+senza il contenuto degli eventi. Leggi prima questi campi:
+
+| Campo | Significato |
+| --- | --- |
+| `storage` | `persistent` o `memory`. |
+| `deliveryState` | Lo stato attuale della consegna automatica. |
+| `lastOutcome` | Il risultato dell'ultimo tentativo di consegna. |
+| `lastStatusClass` | La classe dell'ultimo stato della risposta, oppure un errore di rete. |
+| `pausedReason` | `authentication` dopo un `401`. `rate_limit` dopo un `429`. |
+| `queueEvents` | Il numero di eventi in attesa di consegna. |
+| `acceptedEvents` | Il numero di eventi che LogBrew ha accettato. |
+| `droppedByReason` | I conteggi degli eventi scartati dal client, per motivo. |
+
+## Scegli il contenuto dei log
+
+Mantieni ogni messaggio breve e specifico. Descrivi il risultato nell'app,
+come una richiesta non riuscita o un nuovo tentativo pianificato. Non includere
+nomi, indirizzi email, token di accesso, valori dei moduli o corpi delle
+richieste.
+
+Usa la gravità che corrisponde all'evento: `info`, `warning`, `error` o
+`critical`. Mantieni coerenti servizio, ambiente e release, così puoi trovare
+i record correlati.
+
+`npx react-native log-ios` e `npx react-native log-android` mostrano i log
+locali del dispositivo. Non interrogano LogBrew. Consulta
+[Debug del codice nativo in React Native](https://reactnative.dev/docs/debugging-native-code).
+
+## Risolvi un controllo non riuscito
+
+Un `flush()` non riuscito rifiuta la promise con un codice di errore
+dell'SDK. Tieni chiavi e corpi degli eventi fuori dai report degli errori.
+
+| Risultato | Passaggio successivo |
+| --- | --- |
+| Chiave client mancante | La configurazione si ferma prima dell'invio. Carica la chiave SDK del progetto tramite la configurazione dell'app. |
+| `401`, `unauthenticated` | LogBrew ha rifiutato la chiave. La consegna automatica si mette in pausa con `pausedReason: "authentication"`. Correggi o sostituisci la chiave SDK del progetto prima di creare un nuovo client. Non usare mai una credenziale dell'account. |
+| `429`, `rate_limited` | L'SDK conserva il batch e mette in pausa la consegna automatica con `pausedReason: "rate_limit"`. Non aggiungere un ciclo di nuovi tentativi. |
+| `400`, `transport_error` | LogBrew ha rifiutato la richiesta. Controlla i campi dell'evento e le versioni dei pacchetti. |
+| `network_failure` | L'SDK non ha un risultato di consegna. LogBrew potrebbe aver accettato l'evento. Controlla la connettività e `deliveryHealth()`. |
+| `5xx`, `transport_error` | L'SDK ha già eseguito nuovi tentativi. Leggi i log salvati prima di riprovare manualmente. |
+| Risultato vuoto nella CLI | Controlla il progetto, la chiave, l'orario dell'evento e i filtri. |
+
+Consulta [Risoluzione degli errori](/it/guides/troubleshooting) per altri
+controlli.
+
+## Mantieni i Debug ID di Expo nei bundle di release
+
+Crea la configurazione Metro di Expo tramite LogBrew. Così il bundle di
+runtime riceve lo stesso Debug ID della sua source map:
+
+```js
+// metro.config.js
+const { getLogBrewExpoConfig } = require("@logbrew/react-native/metro");
+
+module.exports = getLogBrewExpoConfig(__dirname);
+```
+
+Se l'app usa la modalità bundle di React Native Worklets, applica quella
+trasformazione dopo l'helper di LogBrew:
+
+```js
+// metro.config.js
+const { getLogBrewExpoConfig } = require("@logbrew/react-native/metro");
+const { getBundleModeMetroConfig } = require("react-native-worklets/bundleMode");
+
+module.exports = getBundleModeMetroConfig(getLogBrewExpoConfig(__dirname));
+```
+
+L'helper mantiene i plugin di pre-serializzazione di Expo già presenti.
+
+Un'app React Native senza Expo racchiude invece la sua configurazione Metro
+finale con `withLogBrewMetroConfig()`. Non usare questo wrapper con Expo. Se
+lo fai, la build di produzione si ferma con un messaggio che rimanda a
+`getLogBrewExpoConfig()`.

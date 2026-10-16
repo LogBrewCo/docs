@@ -1,0 +1,436 @@
+---
+title: "API dell'account e limiti di utilizzo dell'API"
+sidebarTitle: "API dell'account"
+description: "Leggi i limiti di utilizzo dell'account LogBrew, la cronologia della quota, lo stato dell'abbonamento e le risposte di disconnessione."
+---
+
+Usa l'API dell'account per leggere l'utilizzo, lo stato della quota, la
+cronologia dell'utilizzo e lo stato dell'abbonamento, e per disconnetterti. Le
+letture dell'account usano un token bearer dell'account o la sessione del
+browser. Non usare mai una chiave di ingestione del progetto per una richiesta
+dell'account. Non usare mai una credenziale dell'account nella configurazione
+dell'SDK o dell'ingestione.
+
+| Attività | Endpoint |
+| --- | --- |
+| Leggi l'utilizzo attuale e lo stato della quota | `GET /api/account/usage` |
+| Leggi l'utilizzo nel tempo | `GET /api/account/usage/history` |
+| Leggi lo stato dell'abbonamento e dell'organizzazione | `GET /api/account/subscription` |
+| Disconnetti un accesso dell'app o della CLI | `POST /api/auth/logout` |
+| Revoca ogni accesso a LogBrew | `POST /api/auth/logout-all` |
+| Cancella la sessione del browser | `POST /api/auth/web/logout` |
+
+Gli errori usano il [formato di errore standard dell'API](/it/reference/api-errors).
+Una lettura senza un'autenticazione valida dell'account restituisce `401` con
+`code: "unauthorized"`. Non mostrare questo errore come utilizzo zero, grafico
+vuoto o piano gratuito. Un metodo non supportato restituisce `405` con
+`code: "method_not_allowed"` e `next` indica la richiesta supportata.
+
+L'API dell'account riporta l'utilizzo della telemetria, non importi in denaro.
+Non riporta addebiti, fatture o stato dei pagamenti.
+
+## <span id="account-usage">Utilizzo dell'account</span>
+
+`GET /api/account/usage` è l'endpoint di riferimento per utilizzo e quota.
+Usalo per i totali di utilizzo, l'orario di azzeramento, lo stato della quota
+e le suddivisioni per progetto e per flusso di telemetria. Non calcolare
+l'utilizzo da file dell'SDK, file della CLI o contatori del client. Il comando
+CLI `logbrew usage` legge questo endpoint. Consulta il
+[riferimento della CLI](/it/reference/cli).
+
+```bash
+curl "https://api.logbrew.co/api/account/usage" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER"
+```
+
+Esempio di risposta con valori sintetici. Questo account gratuito ha 1
+progetto e nel periodo corrente ha inviato solo log:
+
+```json
+{
+  "period_start": "2026-06-01T00:00:00Z",
+  "period_end": "2026-07-01T00:00:00Z",
+  "reset_at": "2026-07-01T00:00:00Z",
+  "plan": { "tier": "free", "status": "free" },
+  "limits": { "events": null, "bytes": null, "projects": null, "retention_days": 30 },
+  "usage": { "events": 27000, "bytes": 10485760, "projects": 1 },
+  "state": "ok",
+  "warning_threshold": 0.8,
+  "percent_used": 0.2,
+  "warning": false,
+  "blocked": false,
+  "limit": null,
+  "next": "continue sending telemetry",
+  "next_action": {
+    "code": "continue_sending_telemetry",
+    "target": "telemetry_ingest",
+    "state": "ok",
+    "limit": null,
+    "reset_at": "2026-07-01T00:00:00Z"
+  },
+  "by_project": [
+    { "project_id": "00000000-0000-4000-8000-000000000001", "events": 27000, "bytes": 10485760 }
+  ],
+  "by_stream": [
+    { "kind": "logs", "events": 27000, "bytes": 10485760 }
+  ]
+}
+```
+
+| Campo | Significato |
+| --- | --- |
+| `period_start`, `period_end` | Il periodo di utilizzo corrente. La fine è esclusa. |
+| `reset_at` | Quando la quota di utilizzo si azzera. Coincide con `period_end`. |
+| `plan.tier` | Identificatore del piano: `free`, `pro` o `scale`. |
+| `plan.status` | `free`, `trial`, `active`, `past_due` o `disabled`. |
+| `limits.events`, `limits.bytes`, `limits.projects` | Campi di compatibilità. Valgono `null`. `null` non significa illimitato. Usa `state`, `limit` e `percent_used` per lo stato della quota. |
+| `limits.retention_days` | La conservazione dei dati del piano, in giorni, oppure `null`. |
+| `usage.events`, `usage.bytes` | I totali di tutti i flussi di telemetria nel periodo. |
+| `usage.projects` | Il numero di progetti di proprietà dell'account. |
+| `state` | `ok`, `warning` o `blocked`. |
+| `warning_threshold` | La parte di una quota che avvia lo stato `warning`, espressa come frazione. |
+| `percent_used` | La parte più alta tra tutte le quote, espressa come percentuale. Per esempio, `80` significa 80%. |
+| `warning`, `blocked` | Forme di compatibilità di `state`. |
+| `limit` | La quota che ha causato lo stato: `events`, `bytes` o `null`. |
+| `next`, `next_action` | Il testo di ripristino e l'azione tipizzata per lo stato corrente. |
+| `by_project` | L'utilizzo per progetto. C'è 1 riga per ogni progetto di proprietà, anche quando il suo utilizzo è zero. Abbina le righe per `project_id`, non per posizione nell'array. |
+| `by_stream` | L'utilizzo per `kind` di flusso di telemetria, come `logs`, `issues`, `actions` o `traces`. |
+
+### Stati della quota
+
+Usa `state` per la scelta principale. `limit` vale `null` solo quando `state`
+è `ok`.
+
+| `state` | `warning` | `blocked` | `limit` | `next_action.code` | `next_action.target` |
+| --- | --- | --- | --- | --- | --- |
+| `ok` | `false` | `false` | `null` | `continue_sending_telemetry` | `telemetry_ingest` |
+| `warning` | `true` | `false` | `events` o `bytes` | `reduce_usage_or_upgrade` | `pricing` |
+| `blocked` | `false` | `true` | `events` o `bytes` | `wait_until_reset_or_upgrade` | `pricing` |
+
+`next_action.state`, `next_action.limit` e `next_action.reset_at` ripetono i
+valori di primo livello. I valori di `next_action.code` includono anche
+`check_usage_limits` con il target `account_usage`. Se il tuo client riceve
+questa coppia, leggi di nuovo l'utilizzo e mostra `next`.
+
+LogBrew misura ogni tipo di telemetria rispetto alla sua quota. `limit` le
+raggruppa:
+
+- `events` comprende gli eventi dei problemi e gli span delle tracce.
+- `bytes` comprende i byte dei log e i byte delle metriche.
+
+Se una quota è bloccata e un'altra è in avviso, `limit` indica la quota
+bloccata. Lo stato `warning` inizia quando l'utilizzo raggiunge
+`warning_threshold` di una quota. Lo stato `blocked` inizia quando l'utilizzo
+raggiunge la quota.
+
+Il testo di `next` può cambiare, per esempio quando i piani non sono in
+vendita. I valori di `next_action` non cambiano. Localizza a partire da
+`next_action`. Non analizzare `next`.
+
+Un limite di utilizzo dell'account non è un limite di frequenza dell'API.
+Quando l'ingestione supera una quota, la richiesta di ingestione restituisce
+`429` con `usage_limit_exceeded` e il corpo aggiunge `limit` e `reset_at`. In
+questo errore, `limit` indica la quota esatta: `issue_events`, `log_bytes`,
+`metric_bytes` o `trace_spans`. LogBrew rifiuta l'intera richiesta. Non
+inviare di nuovo quel tipo di telemetria fino a `reset_at` o finché il piano
+non cambia. Quando un client invia troppe richieste, l'API restituisce
+`rate_limited`. Consulta [Errori API](/it/reference/api-errors#retry-rules).
+
+La risposta è un'istantanea. Leggila di nuovo dopo una modifica all'account.
+
+<Note>
+  `GET /api/logs/usage` è una risposta legacy di compatibilità per mobile, con
+  `bytes_used`, `limit_bytes` e `month`. Per le nuove integrazioni usa
+  `GET /api/account/usage`.
+</Note>
+
+## Cronologia dell'utilizzo
+
+`GET /api/account/usage/history` restituisce un numero limitato di fasce
+temporali (bucket) di utilizzo, riempite con zeri, per grafici e report.
+Imposta `interval` su un valore supportato. Se ometti `interval`, l'API usa
+`monthly`. La route non accetta altre chiavi di query.
+
+```bash
+curl --get "https://api.logbrew.co/api/account/usage/history" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "interval=daily"
+```
+
+| `interval` | Fasce | Inizio della fascia |
+| --- | ---: | --- |
+| `daily` | 30 | 00:00 UTC |
+| `weekly` | 12 | Lunedì, 00:00 UTC |
+| `monthly` | 12 | Primo giorno del mese, 00:00 UTC |
+| `yearly` | 5 | 1 gennaio, 00:00 UTC |
+
+| Campo | Significato |
+| --- | --- |
+| `interval` | La granularità richiesta. |
+| `period_start`, `period_end` | L'inizio e la fine esclusa dell'intervallo della cronologia. |
+| `current` | La risposta completa di `GET /api/account/usage` per il periodo corrente. |
+| `buckets` | Le fasce in ordine di tempo, dalla più vecchia. Ogni fascia ha `period_start`, `period_end`, `usage`, `by_project` e `by_stream`. |
+
+Questa risposta `yearly` usa dati sintetici per una richiesta di giugno 2026.
+Tutto l'utilizzo è avvenuto a giugno:
+
+```json
+{
+  "interval": "yearly",
+  "period_start": "2022-01-01T00:00:00Z",
+  "period_end": "2027-01-01T00:00:00Z",
+  "current": {
+    "period_start": "2026-06-01T00:00:00Z",
+    "period_end": "2026-07-01T00:00:00Z",
+    "reset_at": "2026-07-01T00:00:00Z",
+    "plan": { "tier": "free", "status": "free" },
+    "limits": { "events": null, "bytes": null, "projects": null, "retention_days": 30 },
+    "usage": { "events": 27000, "bytes": 10485760, "projects": 1 },
+    "state": "ok",
+    "warning_threshold": 0.8,
+    "percent_used": 0.2,
+    "warning": false,
+    "blocked": false,
+    "limit": null,
+    "next": "continue sending telemetry",
+    "next_action": {
+      "code": "continue_sending_telemetry",
+      "target": "telemetry_ingest",
+      "state": "ok",
+      "limit": null,
+      "reset_at": "2026-07-01T00:00:00Z"
+    },
+    "by_project": [
+      { "project_id": "00000000-0000-4000-8000-000000000001", "events": 27000, "bytes": 10485760 }
+    ],
+    "by_stream": [{ "kind": "logs", "events": 27000, "bytes": 10485760 }]
+  },
+  "buckets": [
+    { "period_start": "2022-01-01T00:00:00Z", "period_end": "2023-01-01T00:00:00Z", "usage": { "events": 0, "bytes": 0, "projects": 0 }, "by_project": [], "by_stream": [] },
+    { "period_start": "2023-01-01T00:00:00Z", "period_end": "2024-01-01T00:00:00Z", "usage": { "events": 0, "bytes": 0, "projects": 0 }, "by_project": [], "by_stream": [] },
+    { "period_start": "2024-01-01T00:00:00Z", "period_end": "2025-01-01T00:00:00Z", "usage": { "events": 0, "bytes": 0, "projects": 0 }, "by_project": [], "by_stream": [] },
+    { "period_start": "2025-01-01T00:00:00Z", "period_end": "2026-01-01T00:00:00Z", "usage": { "events": 0, "bytes": 0, "projects": 0 }, "by_project": [], "by_stream": [] },
+    {
+      "period_start": "2026-01-01T00:00:00Z",
+      "period_end": "2027-01-01T00:00:00Z",
+      "usage": { "events": 27000, "bytes": 10485760, "projects": 1 },
+      "by_project": [
+        { "project_id": "00000000-0000-4000-8000-000000000001", "events": 27000, "bytes": 10485760 }
+      ],
+      "by_stream": [{ "kind": "logs", "events": 27000, "bytes": 10485760 }]
+    }
+  ]
+}
+```
+
+Usa `current.reset_at` per l'azzeramento della quota. Non usare la fine
+dell'intervallo della cronologia. `current` non è la somma delle fasce e le
+sue date possono essere diverse da quelle dell'intervallo.
+
+L'ultima fascia contiene il periodo di calendario corrente, che non è
+completo. Il suo orario di fine futuro non significa che LogBrew abbia
+misurato un utilizzo futuro. Una fascia con zeri significa che LogBrew non ha
+contato alcun utilizzo in quella fascia.
+
+In una fascia, `usage.projects` conta i progetti che hanno un utilizzo in
+quella fascia. Non sommare questi conteggi per ottenere il numero di progetti.
+Usa `current.usage.projects` per il numero di progetti di proprietà.
+
+Rappresenta eventi e byte come serie separate, perché usano unità diverse. Le
+fasce contengono l'utilizzo, non i costi. Non etichettare il grafico come
+spesa, fatture o richieste API.
+
+Un valore di `interval` non supportato restituisce `422`:
+
+```json
+{
+  "error": "Unsupported usage history interval",
+  "code": "validation_failed",
+  "next": "use interval=daily, weekly, monthly, or yearly",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+Anche una chiave di query sconosciuta restituisce `422` con
+`validation_failed`.
+
+## Stato dell'abbonamento
+
+`GET /api/account/subscription` è di sola lettura. Usalo per decidere se
+attivare i controlli dei piani a pagamento o delle organizzazioni. Per lo
+stato della quota usa l'endpoint dell'utilizzo.
+
+```bash
+curl "https://api.logbrew.co/api/account/subscription" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER"
+```
+
+Un account gratuito restituisce questa risposta. L'`account_id` è sintetico:
+
+```json
+{
+  "account_id": "00000000-0000-4000-8000-0000000000aa",
+  "tier": "free",
+  "billing_interval": "none",
+  "state": "free",
+  "access_state": "active",
+  "current_period_start": null,
+  "current_period_end": null,
+  "renews_at": null,
+  "cancels_at": null,
+  "organization_creation_allowed": false,
+  "organization_creation_blocker": "subscription_required",
+  "limits": {
+    "organizations": 0,
+    "members_per_organization": 0,
+    "projects_per_organization": 0,
+    "invitations_per_day": 0
+  },
+  "next": "<display text>",
+  "next_action": {
+    "code": "choose_plan",
+    "target": "pricing"
+  }
+}
+```
+
+`next` è un testo da mostrare. Cambia quando i piani a pagamento sono o non
+sono in vendita. Mostra il testo restituito oppure localizza a partire da
+`next_action`. Non inserire nel codice il nome di un piano preso da `next`.
+
+Valori enum:
+
+| Campo | Valori |
+| --- | --- |
+| `tier` | `free`, `pro`, `scale` |
+| `billing_interval` | `none`, `monthly`, `yearly` |
+| `state` | `free`, `trialing`, `active`, `past_due`, `paused`, `canceled` |
+| `access_state` | `active` per `free`, `trialing` e `active`. `paused` per `past_due`, `paused` e `canceled`. |
+| `organization_creation_blocker` | `subscription_required`, `subscription_inactive`, `organization_limit_exceeded` o `null` |
+
+Ogni motivo di blocco ha una sola coppia `next_action`:
+
+| `organization_creation_blocker` | `next_action.code` | `next_action.target` |
+| --- | --- | --- |
+| `null` | `create_or_manage_organization` | `organization` |
+| `subscription_required` | `choose_plan` | `pricing` |
+| `subscription_inactive` | `resume_subscription` | `billing` |
+| `organization_limit_exceeded` | `manage_organization_limit` | `organization` |
+
+I valori del tier sono identificatori, non nomi da mostrare. Mantienili
+invariati in un client localizzato. Un account a pagamento può comunque essere
+bloccato. Controlla `organization_creation_allowed` prima di attivare la
+creazione di organizzazioni.
+
+Questo endpoint non crea organizzazioni, non invia inviti, non cambia ruoli e
+non modifica la fatturazione.
+
+## Disconnessione
+
+Scegli l'ambito più piccolo adatto all'attività. Questi endpoint non eliminano
+l'account o i suoi progetti, non ruotano le chiavi di ingestione e non
+revocano l'autorizzazione concessa a un provider di accesso di terze parti.
+
+| Ambito | Endpoint | Credenziale |
+| --- | --- | --- |
+| Un accesso dell'app o della CLI | `POST /api/auth/logout` | Il token di aggiornamento di quel client nel corpo JSON. Nessun token bearer. |
+| Ogni accesso a LogBrew | `POST /api/auth/logout-all` | Token bearer dell'account o sessione del browser. Nessun corpo. |
+| La sessione corrente del browser | `POST /api/auth/web/logout` | Nessuna. La risposta cancella il cookie del browser. |
+
+### Un accesso dell'app o della CLI
+
+Invia la richiesta dal client che possiede il token di aggiornamento. Imposta
+`Content-Type: application/json`:
+
+```json
+{
+  "refresh_token": "<current refresh token>"
+}
+```
+
+Non chiedere mai a una persona o a un agente di stampare o incollare un token
+di aggiornamento. Una risposta riuscita è `200`:
+
+```json
+{
+  "revoked": true,
+  "next_action": {
+    "code": "clear_local_session",
+    "target": "local_credentials"
+  }
+}
+```
+
+Questa richiesta revoca una famiglia di token di aggiornamento. LogBrew
+rifiuta i successivi aggiornamenti per quell'accesso. Gli altri accessi
+dell'account non cambiano. Un token di accesso che il client possiede già
+resta valido fino alla scadenza. Se le credenziali dell'account potrebbero
+essere esposte, usa [Ogni accesso a LogBrew](#every-logbrew-login).
+
+Dopo la risposta, il client rimuove le sue credenziali locali. Se invii di
+nuovo lo stesso token di aggiornamento valido, la risposta è lo stesso `200`.
+Se il token non è valido, è scaduto o è un token di accesso, la risposta è
+`401` con `code: "unauthorized"` e `next_action.code: "authorize_request"`.
+Anche in questo caso, rimuovi le credenziali locali. `logbrew logout` usa
+questo endpoint.
+
+### <span id="every-logbrew-login">Ogni accesso a LogBrew</span>
+
+<Warning>
+  Questa richiesta disconnette ogni client dell'account. Ottieni
+  l'approvazione del proprietario dell'account prima che un agente la invii.
+</Warning>
+
+Una risposta riuscita è `200`:
+
+```json
+{
+  "revoked": true,
+  "revoked_before": "2026-09-07T12:00:00.123Z",
+  "next_action": {
+    "code": "clear_local_session",
+    "target": "local_credentials"
+  }
+}
+```
+
+`revoked_before` è incluso e ha una precisione al millisecondo. LogBrew
+rifiuta token di accesso, sessioni del browser e token di aggiornamento
+provenienti da un accesso eseguito in quell'istante o prima. Rifiuta anche un
+token aggiornato in seguito a partire da un accesso di questo tipo. Le
+sessioni attive del flusso in tempo reale terminano e la risposta cancella il
+cookie di sessione del browser. Un accesso eseguito dopo quell'istante resta
+valido. Ogni client deve rimuovere le proprie credenziali LogBrew locali ed
+eseguire di nuovo l'accesso.
+
+Non eseguire di nuovo l'accesso per poi ripetere questa richiesta in
+automatico. Una nuova richiesta revoca anche il nuovo accesso.
+
+Se la risposta va persa, non dichiarare che tutti gli accessi sono stati
+revocati. Un successivo `401` da una vecchia credenziale non sostituisce la
+risposta di successo. Per altri passaggi di ripristino, leggi
+[Proteggi un account compromesso](/it/guides/troubleshooting#secure-a-compromised-account).
+
+### Sessione del browser
+
+`POST /api/auth/web/logout` cancella il cookie `logbrew_session` del browser e
+restituisce `204 No Content` senza corpo. Chiamalo dal browser. Non copiare il
+cookie di sessione in un comando. Questa richiesta non disconnette gli altri
+client e non revoca una copia del valore del cookie. Per revocare ogni
+sessione, usa [Ogni accesso a LogBrew](#every-logbrew-login).
+
+### Risolvi un errore di disconnessione
+
+| Risultato | Ripristino |
+| --- | --- |
+| `401` da `POST /api/auth/logout` | Rimuovi le credenziali locali del client. Non inviare un altro tipo di credenziale. |
+| `401` da `POST /api/auth/logout-all` | Se l'utente vuole ancora l'accesso, esegui l'accesso da un client attendibile. Ottieni di nuovo l'approvazione prima di ripetere la richiesta. |
+| `405` | Usa il metodo indicato da `next`, e solo per l'ambito che l'utente ha approvato. |
+| `invalid_json` da `POST /api/auth/logout` | Invia un oggetto JSON con una stringa `refresh_token` e `Content-Type: application/json`. Non stampare il token. |
+| Un timeout o uno stato `5xx` | Non dichiarare il successo. Non avviare un ciclo automatico di accesso e disconnessione. Segui le [regole per i nuovi tentativi di scrittura](/it/reference/api-errors#writes). |
+
+Per le route, i filtri e la paginazione della telemetria, leggi
+[API di telemetria](/it/reference/telemetry-api).

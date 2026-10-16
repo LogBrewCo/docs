@@ -1,0 +1,186 @@
+---
+title: "Configurazione del progetto LogBrew e controlli dei segnali"
+sidebarTitle: "Progetti e configurazione"
+description: "Configura un progetto LogBrew. Scegli i nomi di servizio e ambiente, leggi lo stato della configurazione e trova gli eventi di test della tua app."
+---
+
+Un progetto è il confine di accesso della telemetria. Ogni segnale accettato
+appartiene a un progetto, e ogni comando di lettura può filtrare per progetto.
+
+Usa un progetto separato quando la telemetria richiede un confine di proprietà
+o di accesso separato. Per la maggior parte dei team corrisponde a un'app, un
+servizio o un'area di prodotto. Un repository non deve per forza corrispondere
+a un progetto. Un monorepo può inviare più servizi a un solo progetto. Usa i
+nomi dei servizi per distinguerli.
+
+## <span id="project-service-environment">Progetto, servizio, ambiente</span>
+
+| Termine | Esempio | Usalo per |
+| --- | --- | --- |
+| Progetto | `checkout-platform` | Proprietà e accesso. |
+| Servizio | `checkout-api` | L'app o il servizio che ha inviato il segnale. |
+| Ambiente | `production` | Contesto di esecuzione. |
+| Release | `api@1.2.3` | Versione del codice. |
+
+## <span id="recommended-model">Configura un progetto</span>
+
+[Installa la CLI](/it/guides/cli). Esegui `logbrew status --json` per leggere
+l'accesso del tuo account. Se l'accesso non è valido, una persona esegue
+`logbrew login`. Una chiave di ingestione del progetto non può farti accedere.
+
+<Steps>
+  <Step title="Crea o seleziona un progetto">
+    Prima elenca i tuoi progetti. Crea un progetto solo se non esiste.
+
+    ```bash
+    logbrew projects --json
+    install -d -m 700 "$HOME/.logbrew"
+
+    logbrew projects create checkout-api \
+      --runtime node \
+      --environment production \
+      --ingest-key-file "$HOME/.logbrew/checkout-api.ingest" \
+      --json
+    ```
+
+    La CLI scrive la chiave di ingestione in un nuovo file leggibile solo dal
+    proprietario. Non stampa mai la chiave né il percorso del file. Se il
+    risultato non è chiaro, esegui di nuovo esattamente lo stesso comando. Non
+    cambiare il nome del progetto né il file della chiave. La CLI riusa
+    l'identità della richiesta in sospeso. La [guida rapida](/it/quickstart)
+    mostra come leggere l'ID del progetto dal risultato.
+
+    Per un progetto esistente, registra lo stato della configurazione:
+
+    ```bash
+    logbrew projects setup "<project_id>" --source cli --environment production --json
+    ```
+
+    Per creare un'altra chiave di ingestione per un progetto esistente, usa
+    `logbrew projects keys create`. La
+    [guida alla rotazione della chiave di ingestione](/it/guides/rotate-ingest-key)
+    mostra il comando.
+
+    `logbrew setup --create-project` mostra solo l'aiuto. Non crea un
+    progetto.
+  </Step>
+
+  <Step title="Imposta i nomi dei servizi nell'SDK">
+    Usa nomi presi dal tuo repository e dal tuo deploy, come `api`, `worker`,
+    `web`, `ios` o `checkout-api`. Il nome di un servizio è un'etichetta, non
+    seleziona il progetto. È la chiave di ingestione a selezionare il
+    progetto. Rinominare un servizio non sposta gli eventi memorizzati. Se non
+    trovi un evento, controlla il progetto e la chiave di ingestione che
+    l'applicazione usa prima di creare un altro progetto.
+  </Step>
+
+  <Step title="Usa ambienti standard">
+    Usa `production`, `staging`, `preview` e `local`. Se il tuo deploy usa
+    altri nomi, usali in modo coerente. Il nome di un ambiente non può
+    contenere spazi, `/` o una barra rovesciata.
+  </Step>
+
+  <Step title="Invia un evento di test e leggilo">
+    Configura l'SDK con la chiave di ingestione del progetto, come descrive la
+    [guida all'integrazione SDK](/it/guides/sdk-ingestion). Creare un
+    progetto non installa un SDK nella tua applicazione. Tieni la chiave fuori
+    dal controllo di versione. Imposta servizio, ambiente e release
+    nell'applicazione. Invia un evento sicuro, poi leggilo:
+
+    ```bash
+    logbrew read logs --project "<project_id>" --json
+    ```
+
+    Ogni segnale ha un proprio elenco. Un elenco di log vuoto non significa che
+    il progetto non abbia problemi o tracce.
+
+    Nella dashboard, seleziona lo stesso progetto e un intervallo di tempo che
+    includa l'evento di test. Verifica che i filtri per servizio, ambiente e
+    release corrispondano all'evento.
+  </Step>
+</Steps>
+
+## <span id="diagnose-project-setup">Diagnostica la configurazione del progetto</span>
+
+Leggi lo stato della configurazione con la diagnostica del progetto. Non
+dedurre lo stato della configurazione da file locali o da una query sui log
+vuota.
+
+```bash
+: "${LOGBREW_PROJECT_ID:?set a project UUID}"
+
+logbrew doctor --project "$LOGBREW_PROJECT_ID" --json
+```
+
+La CLI restituisce un report con `status`, `checks` e `next`. Il codice di
+uscita `0` non indica che tutti i controlli siano riusciti. Leggi ogni
+elemento di `checks`. Consulta
+[Leggi il report di diagnostica di un progetto](/it/reference/cli#read-a-project-doctor-report).
+
+### Risposta diretta dell'API
+
+I client API chiamano `GET /api/projects/{project_id}/doctor` con
+l'autenticazione dell'account. L'endpoint non ha parametri di query né corpo
+della richiesta. Non usare mai una chiave di ingestione del progetto per
+questa lettura.
+
+Una risposta `200` ha queste chiavi: `project_id`, `state`, `setup_status`,
+`setup_acknowledged`, `has_active_ingest_key`, `first_telemetry_seen_at`,
+`last_seen_at`, `last_signal`, `next` e `next_action`. I timestamp sono in
+formato RFC3339 oppure `null`. `last_signal` è un riepilogo sicuro da
+mostrare, non un segnale grezzo.
+
+| `state` | `next_action.code` | `next_action.target` |
+| --- | --- | --- |
+| `needs_ingest_key` | `create_ingest_key` | `project_ingest_keys` |
+| `needs_setup` | `choose_setup_path` | `project_setup` |
+| `needs_telemetry` | `send_first_telemetry` | `telemetry_ingest` |
+| `ready` | `inspect_recent_telemetry` | `telemetry_reads` |
+
+La diagnostica controlla prima la chiave di ingestione. Un progetto senza una
+chiave di ingestione attiva è `needs_ingest_key`, qualunque sia lo stato della
+configurazione.
+
+`setup_status` vale `created`, `setup_started`, `sdk_seen`,
+`first_telemetry_seen` o `active`. `setup_acknowledged` è `true` solo per gli
+ultimi tre valori. `created` dà `needs_setup`. `setup_started` e `sdk_seen`
+danno `needs_telemetry`. `first_telemetry_seen` e `active` danno `ready`.
+
+| Risposta | Passo successivo |
+| --- | --- |
+| `404`, `code: "not_found"` | Un progetto inesistente, un progetto archiviato e un progetto che il tuo account non può leggere danno lo stesso risultato. Rileggi l'ID del progetto da `logbrew projects`. Non provare altri ID. |
+| `405`, `code: "method_not_allowed"` | Usa `GET` senza corpo né parametri di query. |
+
+Se la lettura continua a non riuscire,
+[invia una segnalazione](/it/guides/report-a-problem). Non includere
+credenziali, header, corpi dei segnali, dati dei clienti, percorsi locali o
+codice sorgente.
+
+## <span id="archive-or-delete-a-project">Archivia o elimina un progetto</span>
+
+Archivia un progetto per toglierlo dall'elenco dei progetti attivi:
+
+```bash
+logbrew projects archive "<project_id>" --yes --json
+```
+
+Il comando richiede `--yes`. Dopo l'archiviazione, le chiavi di ingestione del
+progetto smettono di accettare nuova telemetria. La route dell'API è
+`DELETE /api/projects/{project_id}`. Restituisce `204` senza corpo. Elenca i
+progetti archiviati con `GET /api/projects/archived`. Ripristinane uno con
+`POST /api/projects/{project_id}/restore`, che restituisce anch'esso `204`.
+
+Elimina un progetto in modo definitivo solo se ne hai la certezza:
+
+```bash
+logbrew projects delete "<project_id>" --confirm "<project_id>" --json
+```
+
+Ripeti l'ID esatto del progetto dopo `--confirm`. Una richiesta accettata
+rende subito inattivo il progetto e pianifica l'eliminazione definitiva. Dopo,
+non puoi più ripristinare il progetto.
+
+## <span id="rotate-an-ingest-key-without-telemetry-loss">Ruota una chiave di ingestione</span>
+
+La [guida alla rotazione della chiave di ingestione](/it/guides/rotate-ingest-key)
+descrive la procedura di sostituzione, deploy, test e revoca.
