@@ -1,0 +1,256 @@
+---
+title: "プロダクト分析とは？指標と再訪するユーザー"
+sidebarTitle: "プロダクト分析"
+description: "プロジェクトと日付を選び、アクティビティ、ファネル、再訪、ライフサイクルの変化を確認します。結果をもとに動く前に、データのカバレッジを確認します。"
+---
+
+プロダクト分析は、ユーザーがアプリをどう使っているかを示します。LogBrew は、アプリが送信するプロダクトアクションを読み取ります。これにはページビュー、スクリーンビュー、インタラクションが含まれます。ユーザーとセッションのコンテキスト付きでこれらのイベントを送信するには、[プロダクトイベントの取得](/ja/guides/product-events)を使います。
+
+結果はすべて、1つのプロジェクトと1つの期間に対するものです。サービス名ではプロジェクトを選べません。ログと課題は別のシグナルです。ログや課題があっても、同じ期間に分析データがあるとは限りません。
+
+## イベント、ユーザー、セッション
+
+| 単位 | 意味 |
+| --- | --- |
+| イベント | 記録された1つのアクション。1人が多くのイベントを送信することがあります。 |
+| 識別済みユーザー | アプリが渡す、種類が `user` の安定した不透明なサブジェクト ID。 |
+| 匿名サブジェクト | ユーザーではない、種類付きのサブジェクト ID。ユーザーとして数えることはありません。 |
+| セッション | アプリが明示的に渡すセッション ID。1人が複数のセッションを持つことがあります。 |
+
+たとえば、20件のセッションで200件のアクションがあっても、20人がアプリを使ったことにはなりません。イベントの合計は、選んだ期間について正確な値です。ユニークユーザー数、セッション数、匿名サブジェクト数は概算です。
+
+不透明な ID を使ってください。氏名、メールアドレス、その他の個人データを ID に使わないでください。分析のレスポンスが生のユーザー ID やセッション ID を返すことはありません。
+
+## ダッシュボードの概要を開く
+
+1. LogBrew ダッシュボードで **分析** を開きます。
+2. プロジェクトを1つ選びます。
+3. **24時間**、**7日間**、**14日間**、**30日間**、**カスタム** のいずれかを選びます。
+4. アクティビティのチャートを読み、続いて **上位イベント** と **上位サーフェス** を読みます。
+5. ユーザー数を読む前に **カバレッジと制限** を開きます。
+
+**カスタム** では、最初の日と最後の日を選び、**適用** を選びます。両方の日が期間に含まれます。たとえば、4月12日から4月16日までは5日間です。ダッシュボードは UTC の日付を使います。カスタム期間は最大31日で、未来の日付は含められません。
+
+ダッシュボードには、同じプロジェクトと日付に対するユーザーの傾向も2つ表示されます。**ユーザーは戻ってきていますか？** は再訪を示します。**ユーザー構成はどう変化していますか？** はライフサイクルのグループを示します。どちらも、識別済みユーザーの分類済みアクティビティすべてを使います。イベントを選ぶ必要はありません。
+
+## <span id="use-the-analytics-api">プロジェクトの概要を読む</span>
+
+```bash
+logbrew analytics overview --project "<project_id>" --since 7d --json
+```
+
+終了時刻（その時刻自体は含まない）を指定するには `--until <RFC3339>` を追加します。`--interval` には `auto`、`1m`、`5m`、`15m`、`1h`、`6h`、`1d` を指定できます。`--top-limit` は各上位リストの行数で、`1` から `20` まで指定できます。デフォルトは `10` です。正確なコンテキストで絞り込むには `--service`、`--release`、`--environment` を追加します。API エンドポイントは `GET /api/telemetry/analytics/overview` です。
+
+概要には、アクティビティの合計、時系列、上位アクション、分類済みアクティビティが含まれます。次の抜粋は、合計とそのカバレッジを示します。
+
+```json
+{
+  "schema_version": 3,
+  "analysis_level": "user_and_session",
+  "summary": {
+    "actions": 120,
+    "active_identified_users": 18,
+    "active_anonymous_subjects": 7,
+    "sessions": 24
+  },
+  "coverage": {
+    "identified_actions": 100,
+    "anonymous_actions": 20,
+    "subject_coverage": {
+      "index_version": 1,
+      "identified_user_events": 100,
+      "anonymous_subject_events": 8,
+      "legacy_unknown_kind_events": 4,
+      "missing_subject_events": 6,
+      "historical_unindexed_events": 2
+    },
+    "sessionized_actions": 90,
+    "traced_actions": 60,
+    "top_actions_truncated": true
+  },
+  "next_action": { "code": "build_product_funnel" }
+}
+```
+
+5つの `subject_coverage` の件数を足すと `summary.actions` になります。ユーザー数に数えるのは `identified_user_events` だけです。`anonymous_actions` には残りの4つの状態が含まれます。この例では、8件の匿名サブジェクトのイベントが、約7個の異なる匿名サブジェクトから来ています。どちらの数もユーザー数ではありません。上位リストが一部省略されていても、件数の少ないイベントがないとは限りません。
+
+`analysis_level` は `no_data`、`event_only`、`user_level`、`user_and_session` のいずれかです。データでどの問いに答えられるかを示します。このレベルは、`summary` と `classified_activity` のどちらかが対応する最も高いレベルです。両方のグループにユーザーやセッションがあるという意味ではありません。
+
+### 2つのアクティビティグループを分けて扱う
+
+| レスポンスのフィールド | 数えるイベント |
+| --- | --- |
+| `summary`、`coverage`、`series`、`top_actions` | プロダクトアクションのイベント。対応する分類がないアクションも含みます。 |
+| `classified_activity` | ページビュー、スクリーンビュー、インタラクション。ページビューはアクションではありません。 |
+
+分類済みのスクリーンビューとインタラクションはアクションでもあります。`summary.actions` と `classified_activity.summary.events` を足さないでください。使うグループのカバレッジを読みます。`classified_activity.coverage.subject_coverage` のサブジェクトの件数を足すと `classified_activity.summary.events` になります。
+
+分類済みのページビューがユーザー数とセッション数を提供していても、`summary.actions` が `0` になることがあります。プロダクトのアクティビティがないと判断する前に、`classified_activity` を確認してください。
+
+### 次のアクションに従う
+
+`next_action` には `code`、`target`、`reason` があります。最も重要な取得漏れ、または分析の次のステップを示します。
+
+| `next_action.code` | 意味 |
+| --- | --- |
+| `capture_product_activity` | スコープに一致するプロダクトイベントがありません。 |
+| `classify_product_activity` | イベントはありますが、ページビュー、スクリーンビュー、インタラクションのどれでもありません。 |
+| `identify_product_users` | 種類が `user` のサブジェクトを持つイベントがありません。 |
+| `sessionize_product_activity` | セッション ID を持つイベントがありません。 |
+| `capture_funnel_steps` | 名前付きの分類済みイベントが2つ未満です。 |
+| `build_product_funnel` | このデータでファネルを作れます。 |
+
+アプリで取得方法を変更したら、新しいイベントを確認します。古いイベントでは、変更が機能しているか確認できません。
+
+### API を直接呼び出す
+
+アカウントの Bearer トークンを送信します。CLI が読むのと同じレスポンスを受け取るには `response_version=3` を送信します。`response_version` を省略すると、API はバージョン `1` を返します。このバージョンには匿名サブジェクトの件数も `subject_coverage` もありません。
+
+```bash
+curl -sS -G "https://api.logbrew.co/api/telemetry/analytics/overview" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project_id>" \
+  --data-urlencode "since=7d" \
+  --data-urlencode "response_version=3"
+```
+
+`since` は `24h`、`7d`、`30d` などの正の期間、または RFC3339 タイムスタンプです。`until` は省略可能な RFC3339 タイムスタンプです。期間には `since` が含まれ、`until` は含まれません。`until` を省略すると、期間はリクエストの時刻で終わります。期間は31日より長くできません。
+
+2026年4月12日から4月16日までにするには、`since` に `2026-04-12T00:00:00Z`、`until` に `2026-04-17T00:00:00Z` を送信します。
+
+31日より長い期間は HTTP `422` を返します。
+
+```json
+{
+  "error": "product analytics range must not exceed 31 days",
+  "code": "validation_failed",
+  "next": "use a shorter range or query consecutive bounded windows",
+  "next_action": { "code": "fix_request", "target": "request" }
+}
+```
+
+プログラムのロジックでは `code` と `next_action` を読みます。人には `error` と `next` を表示します。その他のエラーレスポンスは [API エラー](/ja/reference/api-errors)にあります。
+
+次の `POST` の分析ルートは、同じ `project_id`、`since`、`until`、`service_name`、`release`、`environment` フィールドを持つ JSON ボディを受け取ります。不明なボディフィールドは拒否されます。
+
+## <span id="measure-a-funnel">ファネルを測定する</span>
+
+ファネルは、順序のある2〜8個のステップを通したコンバージョンを測定します。
+
+```bash
+logbrew analytics funnel --project "<project_id>" --since 7d \
+  --step page-view /pricing \
+  --step interaction checkout_started \
+  --step interaction checkout_completed \
+  --json
+```
+
+後のステップは、直前のステップより後のタイムスタンプを持つ必要があります。1つのイベントで2つのステップを完了することはできません。デフォルトの単位はセッションです。セッションをまたいでユーザーを数えるには `--unit identified-user` を使います。イベント名は概要からコピーします。関係のない2つの合計の比率はコンバージョン率ではありません。
+
+最後のステップは、最初のステップから始まるコンバージョン期間の中で発生する必要があります。この期間は `--conversion-window` で設定します。たとえば `30m` や `1h` です。デフォルトは24時間で、全体の期間がそれより短い場合は全体の期間です。コンバージョン期間は全体の期間より長くできません。
+
+API ルートは `POST /api/telemetry/analytics/funnel` です。[順序付きファネルのレスポンス](/ja/reference/telemetry-response-shapes#ordered-funnel-response)に、リクエストボディとレスポンスがあります。
+
+## 1つのイベントの前後のパスを調べる
+
+パスは、1つの基準イベントの後または前にある名前付きイベントの、よくある並びを示します。
+
+```bash
+logbrew analytics paths following --project "<project_id>" --since 24h \
+  --anchor-kind page-view --anchor-event /pricing \
+  --json
+```
+
+基準イベントより前のイベントには、`following` の代わりに `preceding` を使います。`--depth` はその側のイベント数で、`1` から `8` まで指定できます。デフォルトは `4` です。`--path-limit` はパスの数で、`1` から `20` まで指定できます。デフォルトは `10` です。連続する同一のイベントは1つとして数えます。それぞれを残すには `--keep-repeated` を追加します。
+
+パスはセッション ID を使います。基準イベントの後に続くパスは、各セッションで最初の基準イベントから始まります。基準イベントの前のパスは、最後の基準イベントで終わります。パスはユーザーを数えず、アクションが失敗した理由も示しません。API ルートは `POST /api/telemetry/analytics/paths` です。
+
+## 再訪を読む
+
+再訪は、識別済みユーザーが開始イベントの後に戻ってきたかを示します。
+
+```bash
+logbrew analytics retention --project "<project_id>" --since 30d \
+  --start-kind page-view --start-event /signup \
+  --return-kind interaction --return-event report_opened \
+  --json
+```
+
+`--interval` は `hour`、`day`、`week`、`thirty-day` のいずれかです。`thirty-day` は30日間で、暦の1か月ではありません。`--interval-count` は `1` から `31` までです。デフォルトは `10` です。`--mode return-on` は、ちょうどその期間の再訪を数えます。`return-on-or-after` は、その期間以降の再訪を数えます。
+
+再訪は、ユーザーの開始イベントより後に発生する必要があります。各ユーザーの開始は1回だけで、期間内で最初の開始イベントです。そのイベントが、そのユーザーの最初のイベントとは限りません。1つの期間に2回以上戻ったユーザーは、その期間で1人と数えます。
+
+各期間の再訪数は、対象ユーザー数とあわせて読みます。期間がまだ終わっていないユーザーは対象外です。そのユーザーは離脱とは数えません。たとえば、対象ユーザー100人のうち40人が戻った場合、再訪率は40%です。再訪率が下がっても、ユーザーが離れた理由はわかりません。
+
+### すべてのアクティビティで再訪をリクエストする
+
+API ルートは `POST /api/telemetry/analytics/retention` です。イベント名を使わずに再訪を測定するには、`response_version` に `2` を送信し、`start_event` と `return_event` を省略します。
+
+```bash
+curl -sS "https://api.logbrew.co/api/telemetry/analytics/retention" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "project_id": "<project_id>",
+    "since": "14d",
+    "response_version": 2,
+    "interval": "day",
+    "interval_count": 10,
+    "mode": "return_on",
+    "cohort_mode": "first_in_range"
+  }'
+```
+
+レスポンスでは `query.activity_scope` が `all_classified_activity` になります。後で発生したページビュー、スクリーンビュー、インタラクションはすべて再訪として数えます。イベントを選ぶ場合は、`response_version` を省略し、`start_event` と `return_event` の両方を `{ "kind": "page_view", "event_name": "/signup" }` の形で送信します。
+
+全体の期間を間隔で割り、`interval_count` を掛けた値は500以下にする必要があります。たとえば、14日間を `day` で `10` 期間にすると140です。`interval` を省略すると、API は48時間までの期間には `hour` を、それより長い期間には `day` を使います。
+
+## ライフサイクルを読む
+
+ライフサイクルは、1つのイベントを行った識別済みユーザーを、期間ごとに1つのグループに分けます。
+
+```bash
+logbrew analytics lifecycle --project "<project_id>" --since 30d \
+  --event-kind interaction --event report_opened \
+  --json
+```
+
+| グループ | 意味 |
+| --- | --- |
+| 観測履歴内で新規 | 現在アクティブで、履歴の期間内にそれより前のイベントがない。 |
+| 継続 | 現在と前の期間の両方でアクティブ。 |
+| 再アクティブ化 | 間隔が空いた後、現在アクティブ。 |
+| 休眠 | 前の期間はアクティブだったが、現在はアクティブでない。 |
+
+観測履歴内で新規は、初めて利用した顧客という意味ではありません。それより前のアクティビティが、`--history-periods` で設定した履歴の期間の外にあることがあります。期間ごとの合計を足して、全体の期間のユニークユーザー数を数えないでください。
+
+`--history-periods` は、`since` より前の `2` から `31` 期間です。デフォルトは `2` です。履歴は62日より長くできません。全体の期間は最大100期間です。各期間には `fully_observed` があり、期間が終わっていない場合は `false` です。休眠は現在の期間にアクティブでないという意味で、完全に離脱したという意味ではありません。
+
+API ルートは `POST /api/telemetry/analytics/lifecycle` です。1つのイベントではなく分類済みアクティビティすべてを使うには、`response_version` に `2` を送信し、`event` を省略します。
+
+```json
+{
+  "project_id": "<project_id>",
+  "since": "30d",
+  "response_version": 2,
+  "interval": "day",
+  "history_period_count": 7
+}
+```
+
+## 2つの期間を比較する
+
+期間ごとに別々にリクエストします。プロジェクト、長さ、イベント名、フィルターは同じものを使います。ユーザー数を比べる前に、アクティビティ、イベントの構成、ID とセッションのカバレッジを比べます。終わっていない期間は、終わった期間よりアクティビティが少なく見えることがあります。
+
+| 観測結果 | 次に確認すること | 限界 |
+| --- | --- | --- |
+| 1つのイベントが増えた | そのイベントのセッションとカバレッジを確認します。 | イベントが増えても、人が増えたことにはなりません。 |
+| コンバージョン率が変わった | 両方の期間で同じファネルのステップと単位を使います。 | 定義の異なるファネルを比較しないでください。 |
+| 継続ユーザーが減った | 対象ユーザーと終わった期間を確認します。 | 最近のコホートは、古いコホートより悪く見えることがあります。 |
+| ユーザーが1つのステップで止まる | そのステップの課題とログを読みます。 | 期間が同じでも、それが原因とはわかりません。 |
+
+結果が障害を指している場合は、同じプロジェクトと時刻の関連する課題とログを読みます。トレースは、イベントに正確なトレースリンクがある場合だけ開きます。期間が同じでも、エラーが減少の原因だとはわかりません。
+
+比較を繰り返すには、プロジェクト ID、両方の UTC の期間、間隔、フィルター、単位、カバレッジ、一部省略の状態を記録します。生のユーザー ID は記録しないでください。
+
+レスポンスのフィールドとエラーについては、[テレメトリ API](/ja/reference/telemetry-api) と [API エラー](/ja/reference/api-errors)を参照してください。

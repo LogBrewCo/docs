@@ -1,0 +1,204 @@
+---
+title: "LogBrew で React Native のログを送信する"
+sidebarTitle: "React Native"
+description: "React Native SDK をインストールし、テストログを送信して、正しい LogBrew プロジェクトで見つけます。Expo を安全に設定し、送信エラーに対処します。"
+---
+
+React Native アプリから LogBrew にログを送信します。まず1件のテストログを送り、CLI を使って正しいプロジェクトで見つけます。このガイドでは Expo を使います。Expo を使わない React Native アプリでは、アプリ独自の設定でキーを読み込みます。
+
+始める前に、次のものが必要です。
+
+- ローカルで実行できる React Native アプリ。
+- LogBrew のプロジェクト。[プロジェクトと設定](/ja/concepts/projects)を参照してください。
+- サインイン済みの CLI。[CLI を使う](/ja/guides/cli)を参照してください。
+
+## SDK をインストールする
+
+アプリのディレクトリで両方のパッケージをインストールします。アプリの React と React Native の依存関係はそのままにします。
+
+```bash
+npm install @logbrew/sdk@0.1.28 @logbrew/react-native@0.1.35
+```
+
+## プロジェクトの SDK キーを作成する
+
+アプリには、プロジェクト単位の書き込み専用 SDK キーを渡します。Expo は `EXPO_PUBLIC_*` の値をすべてアプリのバンドルに含めます。この変数にアカウントやサーバーの認証情報を入れないでください。
+
+CLI v0.1.32 以降では、既存のプロジェクトにキーを作成できます。新しいプロジェクトは作成しません。プロジェクト ID を確認します。
+
+```bash
+logbrew projects --json
+```
+
+キーを作成します。所有者だけがアクセスできるディレクトリの、新しいファイルパスを使います。
+
+```bash
+install -d -m 700 "$HOME/.logbrew" &&
+logbrew projects keys create "<project_id>" \
+  --ingest-key-file "$HOME/.logbrew/my-mobile-app.ingest" \
+  --label "My mobile app" \
+  --kind sdk \
+  --json
+```
+
+コマンドが成功してから先に進みます。結果がはっきりしない場合は、同じ引数で同じコマンドをもう一度実行します。`--abandon-retry` は使わないでください。
+
+キーのファイルはソース管理に含めないでください。CLI を認可したアカウントの認証情報は使わないでください。Expo のローカル開発では、アプリのルートにある、無視対象の `.env.local` ファイルにキーを入れます。
+
+```dotenv
+EXPO_PUBLIC_LOGBREW_CLIENT_KEY=<your_project_sdk_key>
+```
+
+下の設定モジュールでは、`process.env.EXPO_PUBLIC_LOGBREW_CLIENT_KEY` を直接参照する形のままにします。値を変えた後は、アプリを完全に再読み込みします。ビルド時の設定については [Expo の環境変数](https://docs.expo.dev/guides/environment-variables/)を参照してください。Expo を使わない React Native アプリでは、代わりにアプリ独自の設定でキーを読み込みます。
+
+## クライアントを作成する
+
+この設定は、アプリが起動時に読み込む1つのモジュールに置きます。レンダリングのたびにクライアントを作らないでください。サービス、環境、リリースは `context` に入れます。
+
+```js
+import { AppState } from "react-native";
+import {
+  createAppStateListener,
+  createLogBrewReactNativeClient,
+  createReactNativeFetchTransport
+} from "@logbrew/react-native";
+
+const clientKey = process.env.EXPO_PUBLIC_LOGBREW_CLIENT_KEY;
+if (!clientKey) {
+  throw new Error("Set EXPO_PUBLIC_LOGBREW_CLIENT_KEY");
+}
+
+const client = createLogBrewReactNativeClient({
+  clientKey,
+  context: {
+    schemaVersion: 1,
+    resource: {
+      service: { name: "my-mobile-app" },
+      deployment: {
+        environment: __DEV__ ? "development" : "production",
+        release: "mobile@1.0.0"
+      }
+    }
+  },
+  transport: createReactNativeFetchTransport()
+});
+
+const stopAppStateListener = createAppStateListener(client, AppState, {
+  flushOnBackground: true
+});
+
+export async function verifyLogBrewSetup() {
+  client.log(`evt_react_native_setup_${Date.now()}`, new Date().toISOString(), {
+    level: "info",
+    message: "React Native setup check"
+  });
+
+  const receipt = await client.flush();
+  if (receipt.statusCode < 200 || receipt.statusCode >= 300) {
+    throw new Error("LogBrew did not accept the setup event");
+  }
+  return {
+    status_code: receipt.statusCode,
+    attempts: receipt.attempts,
+    batches: receipt.batches
+  };
+}
+```
+
+fetch のトランスポートは、回数に上限のある再試行とキューを使った自動送信を有効にします。フラッシュ用のタイマーを別に追加しないでください。AppState のリスナーは、アプリが非アクティブになったときやバックグラウンドに移ったときに、最後のフラッシュを要求します。アプリを終了処理するときは `stopAppStateListener()` を呼び出します。
+
+ネイティブのキューでは、1つのキーを使える有効なクライアントは1つだけです。同じキーで2つ目のクライアントを作ると、`configuration_error` で失敗します。これも、クライアントを1回だけ作る理由の1つです。
+
+## テストログを送信して見つける
+
+開発時だけのテスト操作から、`verifyLogBrewSetup()` を1回呼び出します。結果を await し、拒否された Promise を処理します。キーやイベントのバッチを出力しないでください。
+
+結果が `2xx` で `batches` が0より大きければ、LogBrew がバッチを受け付けたことを示します。自動送信が先にイベントを送ることがあるため、空のフラッシュは試行0回、バッチ0件で `204` を返します。どちらの場合も、保存されたログを CLI で読みます。
+
+```bash
+logbrew read logs --project "<project_id>" \
+  --search "React Native setup check" --since 1h --json
+```
+
+結果のイベント時刻とサービスを確認します。結果が空でも、その原因はわかりません。プロジェクト、キー、期間を確認してください。
+
+`RecordingTransport.alwaysAccept()` はローカルのテスト専用です。合成の `202` を返し、リクエストは送信しません。
+
+## オフライン時と再起動後の送信
+
+実行中のアプリで `client.deliveryHealth().storage` を読みます。
+
+- `persistent`：クライアントはネイティブのキューを使っています。保留中のイベントは、アプリを再起動した後に再び読み込まれます。
+- `memory`：JavaScript ランタイムが再起動すると、保留中のイベントは失われます。
+
+デフォルトの `persistentQueue: "auto"` は、アプリのバイナリに LogBrew のネイティブモジュールが含まれている場合にネイティブのキューを使います。Expo Go と古いバイナリはメモリを使います。JavaScript だけの更新では、ネイティブモジュールを追加できません。
+
+本番環境のアプリで再起動後の送信が必要な場合は、`persistentQueue: "required"` を設定します。この場合、ネイティブのキューがないとクライアントの作成が `configuration_error` で失敗します。ネイティブモジュールを含めてアプリをビルドし直してください。`persistentQueue: "disabled"` は、メモリのキューを使いたい場合だけ使います。
+
+ネイティブのキューに保持できるのは、最大1,000件のイベントと4 MiB のイベントデータです。クライアント側の上限がそれより小さい場合は、そちらも適用されます。ネイティブのキューにあるイベントは、再起動後もイベント ID を保持します。
+
+送信は少なくとも1回（at-least-once）なので、再試行でイベントが2回送られることがあります。イベント ID と内容が、LogBrew がすでに受け付けたイベントと一致する場合、LogBrew はそれを再び保存しません。バックグラウンドのフラッシュは試行であり、送信できたことの証明ではありません。オフライン時の取得とアプリの再起動をテストしてください。そのうえで、保存されたイベントをプロジェクトで探します。
+
+### 送信の状態を読む
+
+`client.deliveryHealth()` は、イベントの内容を含めずに、キューと送信の状態を返します。まず次のフィールドを読みます。
+
+| フィールド | 意味 |
+| --- | --- |
+| `storage` | `persistent` または `memory`。 |
+| `deliveryState` | 自動送信の現在の状態。 |
+| `lastOutcome` | 最後の送信の試行の結果。 |
+| `lastStatusClass` | 最後のレスポンスのステータスの分類、またはネットワークエラー。 |
+| `pausedReason` | `401` の後は `authentication`。`429` の後は `rate_limit`。 |
+| `queueEvents` | 送信を待っているイベントの数。 |
+| `acceptedEvents` | LogBrew が受け付けたイベントの数。 |
+| `droppedByReason` | クライアントが破棄したイベントの、理由ごとの件数。 |
+
+## ログの内容を決める
+
+各メッセージは短く具体的にします。リクエストの失敗や再試行の予定など、アプリで起きた結果を書きます。氏名、メールアドレス、アクセストークン、フォームの値、リクエストボディを含めないでください。
+
+イベントに合った重大度を使います。`info`、`warning`、`error`、`critical` のいずれかです。関連する記録を見つけられるように、サービス、環境、リリースは一貫させます。
+
+`npx react-native log-ios` と `npx react-native log-android` は、ローカルのデバイスのログを表示します。LogBrew には問い合わせません。[React Native のネイティブのデバッグ](https://reactnative.dev/docs/debugging-native-code)を参照してください。
+
+## 確認が失敗したときに回復する
+
+`flush()` が失敗すると、SDK のエラーコードで拒否されます。キーやイベントの本文をエラーレポートに含めないでください。
+
+| 結果 | 次のステップ |
+| --- | --- |
+| クライアントのキーがない | 送信前に設定が止まります。アプリの設定からプロジェクトの SDK キーを読み込みます。 |
+| `401`、`unauthenticated` | LogBrew がキーを拒否しました。自動送信は `pausedReason: "authentication"` で一時停止します。新しいクライアントを作る前に、プロジェクトの SDK キーを直すか置き換えます。アカウントの認証情報は使わないでください。 |
+| `429`、`rate_limited` | SDK はバッチを保持し、`pausedReason: "rate_limit"` で自動送信を一時停止します。再試行のループを追加しないでください。 |
+| `400`、`transport_error` | LogBrew がリクエストを拒否しました。イベントのフィールドとパッケージのバージョンを確認します。 |
+| `network_failure` | SDK に送信結果がありません。LogBrew がイベントを受け付けている可能性があります。接続状況と `deliveryHealth()` を確認します。 |
+| `5xx`、`transport_error` | SDK はすでに再試行しています。手動で再試行する前に、保存されたログを読みます。 |
+| CLI の結果が空 | プロジェクト、キー、イベントの時刻、フィルターを確認します。 |
+
+その他の確認については [トラブルシューティング](/ja/guides/troubleshooting)を参照してください。
+
+## リリース用バンドルで Expo の Debug ID を保持する
+
+Expo の Metro の設定を LogBrew 経由で作成します。これで、実行時のバンドルにソースマップと同じ Debug ID が付きます。
+
+```js
+// metro.config.js
+const { getLogBrewExpoConfig } = require("@logbrew/react-native/metro");
+
+module.exports = getLogBrewExpoConfig(__dirname);
+```
+
+アプリで React Native Worklets のバンドルモードを使っている場合は、LogBrew のヘルパーの後にその変換を適用します。
+
+```js
+// metro.config.js
+const { getLogBrewExpoConfig } = require("@logbrew/react-native/metro");
+const { getBundleModeMetroConfig } = require("react-native-worklets/bundleMode");
+
+module.exports = getBundleModeMetroConfig(getLogBrewExpoConfig(__dirname));
+```
+
+このヘルパーは、Expo の既存のシリアライズ前プラグインを保持します。
+
+Expo を使わない React Native アプリでは、代わりに完成した Metro の設定を `withLogBrewMetroConfig()` で囲みます。このラッパーを Expo で使わないでください。使うと、本番環境のビルドが `getLogBrewExpoConfig()` を案内するメッセージで止まります。

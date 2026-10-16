@@ -1,0 +1,129 @@
+---
+title: "LogBrew のプロジェクト設定とシグナルの確認"
+sidebarTitle: "プロジェクトと設定"
+description: "LogBrew のプロジェクトを設定します。サービス名と環境名を選び、設定状況を読み、アプリケーションのテストイベントを見つけます。"
+---
+
+プロジェクトは、テレメトリへのアクセスの境界です。受け付けたシグナルはすべて1つのプロジェクトに属し、読み取りコマンドはどれもプロジェクトで絞り込めます。
+
+テレメトリの所有者やアクセスの境界を分ける必要がある場合は、プロジェクトを分けます。多くのチームでは、1つのアプリ、サービス、プロダクト領域が1つのプロジェクトになります。リポジトリとプロジェクトを1対1にする必要はありません。モノレポから複数のサービスを1つのプロジェクトに送信することもできます。それらはサービス名で区別します。
+
+## <span id="project-service-environment">プロジェクト、サービス、環境</span>
+
+| 用語 | 例 | 用途 |
+| --- | --- | --- |
+| プロジェクト | `checkout-platform` | 所有者とアクセス。 |
+| サービス | `checkout-api` | シグナルを送信したアプリやサービス。 |
+| 環境 | `production` | 実行時のコンテキスト。 |
+| リリース | `api@1.2.3` | コードのバージョン。 |
+
+## <span id="recommended-model">プロジェクトを設定する</span>
+
+[CLI をインストールします](/ja/guides/cli)。`logbrew status --json` を実行して、アカウントのアクセス権を確認します。アクセス権が有効でない場合は、人が `logbrew login` を実行します。プロジェクトの取り込みキーではサインインできません。
+
+<Steps>
+  <Step title="プロジェクトを作成または選択する">
+    まずプロジェクトの一覧を表示します。プロジェクトは、まだ存在しない場合にだけ作成します。
+
+    ```bash
+    logbrew projects --json
+    install -d -m 700 "$HOME/.logbrew"
+
+    logbrew projects create checkout-api \
+      --runtime node \
+      --environment production \
+      --ingest-key-file "$HOME/.logbrew/checkout-api.ingest" \
+      --json
+    ```
+
+    CLI は、取り込みキーを所有者だけが読める新しいファイルに書き込みます。キーやファイルのパスは表示しません。結果がはっきりしない場合は、同じコマンドをそのままもう一度実行します。プロジェクト名やキーのファイルは変更しないでください。CLI は保留中のリクエストの識別情報を再利用します。結果からプロジェクト ID を読む方法は、[クイックスタート](/ja/quickstart)で説明しています。
+
+    既存のプロジェクトの場合は、設定状況を記録します。
+
+    ```bash
+    logbrew projects setup "<project_id>" --source cli --environment production --json
+    ```
+
+    既存のプロジェクトに別の取り込みキーを作成するには、`logbrew projects keys create` を使います。コマンドは[取り込みキーのローテーション](/ja/guides/rotate-ingest-key)にあります。
+
+    `logbrew setup --create-project` はヘルプを表示するだけです。プロジェクトは作成しません。
+  </Step>
+
+  <Step title="SDK でサービス名を設定する">
+    `api`、`worker`、`web`、`ios`、`checkout-api` など、リポジトリやデプロイで使っている名前を使います。サービス名はラベルであり、プロジェクトを選ぶものではありません。プロジェクトは取り込みキーで決まります。サービス名を変えても、保存済みのイベントは移動しません。イベントが見つからない場合は、別のプロジェクトを作成する前に、アプリケーションが使っているプロジェクトと取り込みキーを確認してください。
+  </Step>
+
+  <Step title="標準の環境名を使う">
+    `production`、`staging`、`preview`、`local` を使います。デプロイで別の名前を使っている場合は、その名前を一貫して使います。環境名には、スペース、`/`、バックスラッシュを含められません。
+  </Step>
+
+  <Step title="テストイベントを送信して読む">
+    [SDK 連携](/ja/guides/sdk-ingestion)の説明に従い、プロジェクトの取り込みキーで SDK を設定します。プロジェクトを作成しても、アプリケーションに SDK はインストールされません。キーはソース管理に含めないでください。サービス、環境、リリースはアプリケーションで設定します。安全なイベントを1件送信し、読み取ります。
+
+    ```bash
+    logbrew read logs --project "<project_id>" --json
+    ```
+
+    シグナルごとに一覧は別です。ログの一覧が空でも、プロジェクトに課題やトレースがないとは限りません。
+
+    ダッシュボードでは、同じプロジェクトと、テストイベントを含む期間を選択します。サービス、環境、リリースのフィルターがイベントと一致していることを確認してください。
+  </Step>
+</Steps>
+
+## <span id="diagnose-project-setup">プロジェクトの設定を診断する</span>
+
+設定状況はプロジェクトの doctor で読みます。ローカルのファイルや、空のログクエリから設定状況を推測しないでください。
+
+```bash
+: "${LOGBREW_PROJECT_ID:?set a project UUID}"
+
+logbrew doctor --project "$LOGBREW_PROJECT_ID" --json
+```
+
+CLI は、`status`、`checks`、`next` を含むレポートを返します。終了コード `0` は、すべてのチェックに合格したことを示すものではありません。`checks` の各項目を読んでください。[プロジェクトの doctor レポートを読む](/ja/reference/cli#read-a-project-doctor-report)を参照してください。
+
+### API を直接呼び出したときのレスポンス
+
+API クライアントは、アカウントの認証で `GET /api/projects/{project_id}/doctor` を呼び出します。このエンドポイントには、クエリパラメーターもリクエストボディもありません。この読み取りには、プロジェクトの取り込みキーを決して使わないでください。
+
+`200` のレスポンスには、`project_id`、`state`、`setup_status`、`setup_acknowledged`、`has_active_ingest_key`、`first_telemetry_seen_at`、`last_seen_at`、`last_signal`、`next`、`next_action` のキーがあります。タイムスタンプは RFC3339 または `null` です。`last_signal` は表示しても安全な要約で、生のシグナルではありません。
+
+| `state` | `next_action.code` | `next_action.target` |
+| --- | --- | --- |
+| `needs_ingest_key` | `create_ingest_key` | `project_ingest_keys` |
+| `needs_setup` | `choose_setup_path` | `project_setup` |
+| `needs_telemetry` | `send_first_telemetry` | `telemetry_ingest` |
+| `ready` | `inspect_recent_telemetry` | `telemetry_reads` |
+
+doctor は最初に取り込みキーを確認します。有効な取り込みキーがないプロジェクトは、設定状況にかかわらず `needs_ingest_key` になります。
+
+`setup_status` は `created`、`setup_started`、`sdk_seen`、`first_telemetry_seen`、`active` のいずれかです。`setup_acknowledged` が `true` になるのは、最後の3つの値の場合だけです。`created` は `needs_setup` になります。`setup_started` と `sdk_seen` は `needs_telemetry` になります。`first_telemetry_seen` と `active` は `ready` になります。
+
+| レスポンス | 次の手順 |
+| --- | --- |
+| `404`、`code: "not_found"` | 存在しないプロジェクト、アーカイブ済みのプロジェクト、アカウントで読み取れないプロジェクトは、どれも同じ結果になります。`logbrew projects` でプロジェクト ID をもう一度確認してください。ほかの ID を試さないでください。 |
+| `405`、`code: "method_not_allowed"` | ボディやクエリパラメーターを付けずに `GET` を使ってください。 |
+
+それでも読み取りに失敗する場合は、[問題を報告](/ja/guides/report-a-problem)してください。認証情報、ヘッダー、シグナルの本文、顧客データ、ローカルのパス、ソースコードは含めないでください。
+
+## <span id="archive-or-delete-a-project">プロジェクトをアーカイブまたは削除する</span>
+
+プロジェクトをアーカイブすると、有効なプロジェクトの一覧から外れます。
+
+```bash
+logbrew projects archive "<project_id>" --yes --json
+```
+
+このコマンドには `--yes` が必要です。アーカイブ後、そのプロジェクトの取り込みキーは新しいテレメトリを受け付けなくなります。API のルートは `DELETE /api/projects/{project_id}` です。ボディなしで `204` を返します。アーカイブ済みのプロジェクトは `GET /api/projects/archived` で一覧表示できます。復元するには `POST /api/projects/{project_id}/restore` を使います。これも `204` を返します。
+
+プロジェクトを完全に削除するのは、確信がある場合だけにしてください。
+
+```bash
+logbrew projects delete "<project_id>" --confirm "<project_id>" --json
+```
+
+`--confirm` の後に、同じプロジェクト ID をもう一度指定します。リクエストが受け付けられると、プロジェクトはすぐに無効になり、完全な削除が予定されます。その後はプロジェクトを復元できません。
+
+## <span id="rotate-an-ingest-key-without-telemetry-loss">取り込みキーをローテーションする</span>
+
+置き換え、デプロイ、テスト、無効化の手順は、[取り込みキーのローテーション](/ja/guides/rotate-ingest-key)にあります。

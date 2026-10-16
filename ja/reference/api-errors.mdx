@@ -1,0 +1,479 @@
+---
+title: "API のエラー処理とエラーコード"
+sidebarTitle: "API エラー"
+description: "LogBrew API のエラーコード、HTTP ステータス、JSON の例を確認します。返された復旧の指示に従ってリクエストを修正し、安全に再試行します。"
+---
+
+LogBrew API のエラーは、1つの JSON エンベロープを使います。プログラムの動作には `code` と `next_action` を使います。`error` と `next` はプレーンテキストとして表示します。`error` や `next` の文言で照合しないでください。
+
+```json
+{
+  "error": "invalid since value",
+  "code": "validation_failed",
+  "next": "use since=24h, since=7d, or an RFC3339 timestamp",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+| フィールド | 意味 |
+| --- | --- |
+| `error` | 人が読むための短い問題の説明。 |
+| `code` | 変わらないエラーコード。クライアントの分岐を選ぶときに使います。 |
+| `next` | 人が読むための復旧の手順。テキストはルートごとに異なります。 |
+| `next_action.code` | プログラムの分岐に使う、変わらない復旧アクション。 |
+| `next_action.target` | 復旧アクションの対象。たとえば `auth` や `request` です。 |
+
+レスポンスによっては、`limit`、`reset_at`、`retry_after_seconds` などのフィールドが追加されます。[エラーコード](#error-codes)の表に記載しています。
+
+## エラーレスポンスを処理する
+
+1. HTTP ステータスを読みます。
+2. `code` を読む前に、本文が JSON であることを確認します。
+3. ステータスと `code` を組み合わせて、クライアントの分岐を選びます。
+4. `error` と `next` はプレーンテキストとして表示します。HTML としてレンダリングしたり、コマンドとして実行したりしないでください。
+5. 自動の復旧には `next_action` を使います。クライアントがそのアクションを認識できない場合は、処理を止めてエラーを表示します。
+6. 返された `limit`、`reset_at`、`retry_after_seconds` の値を、失敗したリクエストと一緒に保持します。
+7. 再試行する前に、[再試行のルール](#retry-rules)を確認します。
+
+レスポンスに JSON エンベロープがない場合は、HTTP ステータスを保持し、コードは利用不可として記録します。LogBrew の `code` を作り出さないでください。プロキシやネットワークの障害で、このような結果になることがあります。
+
+LogBrew の `code` を HTTP ステータスの名前で置き換えないでください。たとえば、`400` のレスポンスには `invalid_json` や `invalid_path` が含まれることがあります。コードごとに必要な修正は異なります。
+
+ログには、HTTP ステータスと `code` を記録します。本文全体、認証情報、復旧用のトークンはログに残さないでください。
+
+## <span id="error-codes">エラーコード</span>
+
+同じ `code` が複数のルートで返ることがあります。`next` のテキストと `next_action` の値は、ルートによって変わることがあります。返された値を使ってください。エンドポイントが返すのは、その認証、メソッド、本文、上限に該当するコードだけです。
+
+| HTTP | `code` | 意味 | クライアントの対応 |
+| --- | --- | --- | --- |
+| `400`、`413`、`415`、`422` | `invalid_json` | 本文が有効な JSON でない、大きすぎる、コンテンツタイプが間違っている、またはルートの JSON の形に合っていません。 | `Content-Type: application/json` を付け、ルートに必要なフィールドを含む有効な JSON を送信します。 |
+| `400`、`413`、`500` | `invalid_multipart` | サーバーが `multipart/form-data` のアップロードを読み取れません。 | `400` または `413` の場合は、フォームまたはそのサイズを修正します。`500` の場合は、[再試行のルール](#retry-rules)に従います。 |
+| `400`、`500` | `invalid_path` | サーバーが、プロジェクト ID や課題 ID など、URL パスの値を読み取れません。 | `400` の場合は、ID とその型を修正します。`500` の場合は、[再試行のルール](#retry-rules)に従います。 |
+| `400`、`405`、`426` | `invalid_websocket_upgrade` | ライブフィードの接続が、有効な WebSocket のアップグレードではありません。 | `GET` と WebSocket のアップグレードヘッダーで接続します。[ライブイベントの形式](/ja/reference/telemetry-response-shapes#live-event-response-format)を参照してください。 |
+| `401` | `unauthorized` | アカウントの認証がない、無効である、または期限切れです。 | もう一度サインインします。CLI では `logbrew login` を実行します。 |
+| `401` | `ingest_key_invalid` | テレメトリの取り込みに、有効なプロジェクト単位の取り込みキーがありません。 | そのプロジェクトの現在の取り込みキーを設定します。 |
+| `402` | `subscription_required` | この操作には有料プランが必要です。 | `next` に従います。プランの手順か、サポートへの連絡が示されます。 |
+| `403` | `forbidden` | アカウントはそのリソースや操作にアクセスできません。 | アクセス権のあるアカウントを使います。他の ID を試さないでください。 |
+| `403` | `role_forbidden` | アカウントは、この組織のロールの変更を行えません。 | 組織のオーナーまたは管理者に変更を依頼します。 |
+| `404` | `not_found` | リソースまたは API ルートを、このアカウントでは利用できません。 | 自分が所有する一覧をもう一度読みます。次に、ID、パス、フィルターを確認します。 |
+| `405` | `method_not_allowed` | ルートは存在しますが、その HTTP メソッドには対応していません。 | `next` が示すメソッドを使います。 |
+| `408` | `request_timeout` | リクエストが時間内に完了しませんでした。 | 範囲を絞るか、待ってからリクエストをもう一度送信します。 |
+| `409` | `idempotency_conflict` | `Idempotency-Key` または `deployment_id` が、別のリクエストで再び使われました。 | 元のリクエストを変更せずに再試行するか、新しい処理には新しいキーを使います。 |
+| `409` | `account_link_conflict` | サインインに使った ID は、別のアカウントに属しています。 | アカウント設定でアカウントの連携を解決します。同じ ID で2つ目のアカウントを作成しないでください。 |
+| `409` | `account_recovery_available` | アカウントは復旧期間中です。 | 返された復旧アクションに従います。復旧用のトークンは非公開にしてください。 |
+| `410` | `account_recovery_expired` | アカウントの復旧期間が終了しました。 | サインインして新しいアカウントを作成します。 |
+| `422` | `validation_failed` | クエリの値、フィールド、フィルター、カーソル、ヘッダー、または期間が有効ではありません。 | 示された値を修正します。その後、リクエストをもう一度送信します。 |
+| `422` | `invite_invalid` | 組織への招待のメールアドレスまたはロールが無効です。 | 招待を修正します。その後、もう一度送信します。 |
+| `422` | `member_limit_exceeded` | 組織のメンバー数が上限に達しています。 | 組織のオーナーに、メンバーの削除またはプランの変更を依頼します。 |
+| `422` | `organization_limit_exceeded` | アカウントの組織数が上限に達しています。 | 組織を削除するか、プランを変更するか、サポートに連絡します。 |
+| `423` | `organization_paused` | 有料のサブスクリプションが有効でないため、組織が一時停止されています。 | 有料のサブスクリプションを再開して有効にします。 |
+| `429` | `rate_limited` | リクエストの送信回数が多すぎます。`retry_after_seconds` が追加されます。 | `retry_after_seconds` だけ待ちます。その後、バックオフしながら再試行します。 |
+| `429` | `usage_limit_exceeded` | 取り込みが、請求期間のアカウントの許容量に達しました。`limit` と `reset_at` が追加されます。 | `reset_at` まで取り込みを止めるか、プランを変更します。 |
+| `429` | `artifact_storage_limit_exceeded` | リリースのビルド成果物またはデバッグファイルのアップロードが、ストレージの上限に達しました。`limit` が追加されます。 | 待ってからもう一度アップロードします。上限が解除されない場合は、サポートに連絡します。 |
+| `429` | `invitation_limit_exceeded` | 組織が1日の招待の許容量に達しました。`limit` と `reset_at` が追加されます。 | `reset_at` まで待つか、プランを変更します。 |
+| `500` | `storage_error`、`json_error`、`internal_error` | サーバーはリクエストを完了しませんでした。 | [再試行のルール](#retry-rules)に従います。失敗が続く場合は、[問題を報告](/ja/guides/report-a-problem)してください。 |
+| `503` | `service_unavailable` | API は現在リクエストを受け付けられません。 | 待ちます。その後、リクエストをもう一度送信します。 |
+| `503` | `artifact_storage_unavailable` | リリースのビルド成果物とデバッグファイルのアップロードが、一時的に利用できません。 | 待ってからもう一度アップロードします。並行してアップロードを始めないでください。 |
+| `503` | `billing_unavailable` | 請求の支払い手続きまたはプランの管理が、一時的に利用できません。 | 待ちます。その後、請求の操作をもう一度試します。 |
+
+存在しない ID と、アクセスできない ID は、同じレスポンスを返すことがあります。エラーのテキストから、ID を所有するアカウントを探らないでください。存在しない API パスには、`404` と `not_found` が返ります。
+
+### 上限のフィールド
+
+| `code` | `limit` の値 | その他のフィールド |
+| --- | --- | --- |
+| `usage_limit_exceeded` | `issue_events`、`log_bytes`、`metric_bytes`、`trace_spans` のいずれか | `reset_at`: 請求期間の終了日時（RFC3339）。 |
+| `invitation_limit_exceeded` | `invitations_per_day` | `reset_at`: 次の UTC の日の開始日時（RFC3339）。 |
+| `artifact_storage_limit_exceeded` | `artifact_completed_project_bytes` のようなストレージの境界の名前 | なし。 |
+| `rate_limited` | なし | `retry_after_seconds`: 待つ秒数（整数）。最小値は `1` です。 |
+
+現在の許容量と使用量は、[アカウント API](/ja/reference/account-api#account-usage)で確認します。
+
+## <span id="retry-rules">再試行のルール</span>
+
+再試行するかどうかは、コードと操作をもとに判断します。ステータスだけでは判断できません。
+
+| レスポンス | 再試行のルール |
+| --- | --- |
+| `validation_failed`、`invalid_json`、`invalid_path`（`400`）、`invalid_multipart`（`400` または `413`）、`invalid_websocket_upgrade` | 先に、示されたリクエストの値を修正します。同じリクエストをもう一度送信しないでください。 |
+| `unauthorized` または `ingest_key_invalid` | 先に、正しい認証情報に置き換えるか、更新します。 |
+| `forbidden`、`role_forbidden`、`not_found` | 他の ID で再試行しないでください。自分が所有する一覧をもう一度読むか、所有者からアクセス権を得ます。 |
+| `method_not_allowed` | `next` のメソッドを使います。拒否されたメソッドで再送信しないでください。 |
+| `idempotency_conflict` | 元のリクエストを変更せずに再試行するか、新しい処理には新しいキーを使います。 |
+| `rate_limited` | `retry_after_seconds` だけ待ちます。その後、ジッターを加えた指数バックオフを使います。 |
+| `usage_limit_exceeded` または `invitation_limit_exceeded` | `reset_at` まで待つか、プランを変更します。 |
+| `artifact_storage_limit_exceeded` | 待ってからもう一度アップロードします。上限が解除されない場合は、サポートに連絡します。 |
+| `subscription_required`、`organization_paused`、`member_limit_exceeded`、`organization_limit_exceeded` | `next` に従います。プランやメンバー構成を変えずに再試行しても、また失敗します。 |
+| `request_timeout`、`service_unavailable`、`artifact_storage_unavailable`、`billing_unavailable` | 待ちます。その後、読み取りは同じ範囲でもう一度送信します。書き込みは、[書き込みのルール](#writes)に従います。 |
+| `storage_error`、`json_error`、`internal_error`、その他の `5xx` | 待ちます。その後、読み取りをもう一度送信します。書き込みは、[書き込みのルール](#writes)に従います。失敗が続く場合は、[問題を報告](/ja/guides/report-a-problem)してください。 |
+
+- 1件の失敗したリクエストについて、並行して再試行を始めないでください。
+- `rate_limited` のレスポンスには、`Retry-After` ヘッダーと `X-RateLimit-After` ヘッダーもあります。どちらも `retry_after_seconds` と同じ秒数です。
+- タイムアウトは、結果が空であることの証明にはなりません。
+
+レート制限は、リクエストの頻度を制御します。使用量の上限は、請求期間ごとのアカウントの許容量を制御します。どちらも `429` を使います。それぞれのフィールドは区別して扱います。どちらの上限に達している間も、データの収集や読み取りが遅れていることを表示します。古いデータを、新しい読み取りの結果として表示しないでください。
+
+### <span id="writes">書き込み</span>
+
+タイムアウト、`5xx` のレスポンス、ネットワークの障害は、書き込みが失敗したことの証明にはなりません。書き込みをもう一度送信する前に、次を行います。
+
+1. ルートがべき等キーに対応している場合は、同じキーと同じ本文をもう一度送信します。新しいキーは、新しい処理の場合だけ使います。
+2. ルートにべき等キーがない場合は、先にリソースを読みます。変更が反映されていない場合だけ、書き込みをもう一度送信します。
+3. 結果を確認できない場合は、自動の再試行を止めて、ユーザーに伝えます。
+
+次のルートは再試行キーを受け付けます。
+
+| ルート | 再試行キー |
+| --- | --- |
+| `POST /api/projects` | 任意の `Idempotency-Key` ヘッダー。 |
+| `POST /api/projects/{project_id}/ingest-keys` | 任意の `Idempotency-Key` ヘッダー。 |
+| `POST /api/support/tickets` | 任意の `Idempotency-Key` ヘッダー。 |
+| `POST /api/support/tickets/{ticket_id}/context` | 必須の `Idempotency-Key` ヘッダー。 |
+| `PUT /api/telemetry/deployments/{deployment_id}` | パスの `deployment_id`。 |
+
+`Idempotency-Key` の値は、表示可能な ASCII 文字 1〜128文字です。それ以外の値には、`422` と `validation_failed` が返ります。
+
+`idempotency_conflict` は、そのキーが別のリクエストに属していることを示します。元のキーを使う再試行では、本文を変更しないでください。
+
+## リクエストの形のエラー
+
+`invalid_json` は、サーバーが本文をルートの JSON の形として受け付けられないことを示します。コンテンツタイプ、本文のサイズ、JSON の構文、必須のフィールド、フィールドの型を確認します。どの部分が失敗したかは、HTTP ステータスでわかります。
+
+| HTTP | 原因 |
+| --- | --- |
+| `400` | 本文が有効な JSON ではありません。 |
+| `413` | 本文が大きすぎます。 |
+| `415` | `Content-Type` ヘッダーが `application/json` ではありません。 |
+| `422` | JSON は有効ですが、フィールドが欠けているか、型が間違っています。 |
+
+エラー `invalid query parameters` を伴う `validation_failed` は、サーバーがクエリ文字列を読み取れないことを示します。パラメーターの名前と値の型を確認します。不明なクエリパラメーターを送信しないでください。各ルートのパラメーターは、[クエリフィルター](/ja/reference/telemetry-api-filters)に記載しています。
+
+ステータス `400` の `invalid_path` は、プロジェクト ID などのパスの値の形式が間違っていることを示します。パスの値をクエリパラメーターに移さないでください。
+
+`invalid_path` や `invalid_multipart` を伴う `500` のレスポンスは、リクエストが間違っていたことの証明にはなりません。[再試行のルール](#retry-rules)に従います。
+
+## 認証とアクセスのエラー
+
+- `unauthorized` は、アカウントの認証がない、無効である、または期限切れであることを示します。`Authorization: Bearer <token>` を送信するか、もう一度サインインします。一部のルートでは、有効なチケットのないライブフィードの接続など、`next_action.code` が `authorize_request` で、ルートごとの `next` が返ります。
+- `ingest_key_invalid` は、テレメトリの取り込みだけに適用されます。対象のプロジェクトの現在のキーを設定します。
+- `forbidden` は、アカウントがその操作を行えないことを示します。他のリソース ID で再試行しないでください。
+- `not_found` は、このアカウントではそのリソースを利用できないことを示します。
+
+アカウントの Bearer トークンの代わりに取り込みキーを使わないでください。取り込みキーの代わりにアカウントの Bearer トークンを使わないでください。
+
+## エラーの詳細を安全に扱う
+
+- `account_recovery_available` のレスポンスには、有効期間の短い `recovery_token` が含まれます。保護されたクライアントの状態に保管します。ログ、URL、スクリーンショット、サポートの報告、エージェントのプロンプトには入れないでください。
+- `500` のコードでは、メッセージは常に `Internal error` です。レスポンスには、失敗したコンポーネントの名前は含まれません。原因を推測しないでください。
+- 表示するエラーに、認証情報、非公開の診断情報、顧客データを加えないでください。
+- API のレスポンスは、購入、削除、その他のアカウントの変更を許可するものではありません。これらの操作の前に、ユーザーの承認を得てください。
+
+## 例
+
+次の例はエンベロープの形を示します。`error` と `next` のテキストは、ルートごとに異なることがあります。
+
+### 検証の失敗
+
+```json
+{
+  "error": "issue status must be unresolved, resolved, or archived",
+  "code": "validation_failed",
+  "next": "use status=unresolved, status=resolved, or status=archived",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+### <span id="invalid-query-parameters">無効なクエリパラメーター</span>
+
+```json
+{
+  "error": "invalid query parameters",
+  "code": "validation_failed",
+  "next": "check query parameter names and value types, then retry",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+### <span id="invalid-json">無効な JSON</span>
+
+```json
+{
+  "error": "invalid JSON request body",
+  "code": "invalid_json",
+  "next": "send Content-Type: application/json with a body matching this endpoint",
+  "next_action": {
+    "code": "send_valid_json",
+    "target": "request"
+  }
+}
+```
+
+### <span id="invalid-path-value">無効なパスの値</span>
+
+```json
+{
+  "error": "invalid URL path parameters",
+  "code": "invalid_path",
+  "next": "check path resource IDs and value types, then retry",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+### 無効なマルチパートのアップロード
+
+```json
+{
+  "error": "invalid multipart form-data request",
+  "code": "invalid_multipart",
+  "next": "send multipart/form-data with a valid boundary and expected parts",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+### 無効な WebSocket のアップグレード
+
+```json
+{
+  "error": "invalid WebSocket upgrade request",
+  "code": "invalid_websocket_upgrade",
+  "next": "connect with GET /api/feed/live?ticket=<ticket> using WebSocket upgrade headers",
+  "next_action": {
+    "code": "connect_live_feed",
+    "target": "live_feed"
+  }
+}
+```
+
+### <span id="authentication-failure">認証の失敗</span>
+
+```json
+{
+  "error": "Invalid or expired token",
+  "code": "unauthorized",
+  "next": "send Authorization: Bearer <token>, include the logbrew_session cookie, or sign in again",
+  "next_action": {
+    "code": "sign_in",
+    "target": "auth"
+  }
+}
+```
+
+### 無効な取り込みキー
+
+このレスポンスは、アカウントの読み取りではなく、テレメトリの取り込みに適用されます。キーは、リクエストのプロジェクトに属している必要があります。
+
+```json
+{
+  "error": "Invalid ingest key",
+  "code": "ingest_key_invalid",
+  "next": "create a project-scoped ingest key, then retry ingestion with that key",
+  "next_action": {
+    "code": "configure_ingest_key",
+    "target": "project_ingest_key"
+  }
+}
+```
+
+### <span id="resource-not-found">リソースが見つからない</span>
+
+```json
+{
+  "error": "issue not found",
+  "code": "not_found",
+  "next": "check the resource id or filters and retry",
+  "next_action": {
+    "code": "check_resource",
+    "target": "resource"
+  }
+}
+```
+
+### アクセスの拒否
+
+```json
+{
+  "error": "Insufficient permissions",
+  "code": "forbidden",
+  "next": "use an account with access to this resource",
+  "next_action": {
+    "code": "request_access",
+    "target": "auth"
+  }
+}
+```
+
+### <span id="unsupported-method">対応していないメソッド</span>
+
+```json
+{
+  "error": "Method not allowed",
+  "code": "method_not_allowed",
+  "next": "send GET /api/account/usage with Authorization or the logbrew_session cookie",
+  "next_action": {
+    "code": "use_supported_method",
+    "target": "api_method"
+  }
+}
+```
+
+### リクエストのタイムアウト
+
+```json
+{
+  "error": "Request timed out",
+  "code": "request_timeout",
+  "next": "retry read-only requests later or narrow the request scope. Before repeating a write, check whether it succeeded and follow this endpoint's idempotency guidance",
+  "next_action": {
+    "code": "retry_or_narrow_scope",
+    "target": "request"
+  }
+}
+```
+
+### べき等性の競合
+
+```json
+{
+  "error": "Idempotency key was already used",
+  "code": "idempotency_conflict",
+  "next": "retry the original support request or use a new Idempotency-Key",
+  "next_action": {
+    "code": "use_new_idempotency_key",
+    "target": "request"
+  }
+}
+```
+
+### レート制限
+
+```json
+{
+  "error": "Rate limit exceeded",
+  "code": "rate_limited",
+  "next": "wait for retry_after_seconds, then retry with exponential backoff and jitter",
+  "next_action": {
+    "code": "retry_with_backoff",
+    "target": "request"
+  },
+  "retry_after_seconds": 1
+}
+```
+
+### 使用量の上限
+
+`next` のテキストと `next_action` は、プランを変更できるかどうかによって変わります。変更できない場合、`next_action.code` は `wait_or_contact_support` で、対象は `support` です。
+
+```json
+{
+  "error": "Usage limit exceeded",
+  "code": "usage_limit_exceeded",
+  "next": "wait until reset_at or upgrade your plan before retrying ingestion",
+  "next_action": {
+    "code": "wait_or_upgrade",
+    "target": "billing"
+  },
+  "limit": "log_bytes",
+  "reset_at": "2026-11-01T00:00:00+00:00"
+}
+```
+
+### ビルド成果物のストレージの上限
+
+```json
+{
+  "error": "Release artifact storage limit exceeded",
+  "code": "artifact_storage_limit_exceeded",
+  "next": "wait before retrying the upload, or contact LogBrew support if the limit persists",
+  "next_action": {
+    "code": "wait_or_contact_support",
+    "target": "support"
+  },
+  "limit": "artifact_completed_project_bytes"
+}
+```
+
+### アカウントの復旧が可能
+
+このレスポンスには、`deleted_at` と、有効期間の短い `recovery_token` が追加されます。トークンは、保護されたクライアントの状態に保管します。
+
+```json
+{
+  "error": "Account recovery available",
+  "code": "account_recovery_available",
+  "next": "restore account with POST /api/auth/restore",
+  "next_action": {
+    "code": "restore_account",
+    "target": "account_recovery"
+  },
+  "deleted_at": "2026-09-04T09:00:00Z",
+  "recovery_token": "<recovery token>"
+}
+```
+
+### アカウントの復旧期間の終了
+
+```json
+{
+  "error": "Account recovery window expired",
+  "code": "account_recovery_expired",
+  "next": "create a new account after deletion completes",
+  "next_action": {
+    "code": "create_account",
+    "target": "auth"
+  }
+}
+```
+
+### 組織の一時停止
+
+```json
+{
+  "error": "Organization paused",
+  "code": "organization_paused",
+  "next": "resume an active paid subscription before using this organization",
+  "next_action": {
+    "code": "resume_subscription",
+    "target": "billing"
+  }
+}
+```
+
+### サーバーのエラー
+
+`storage_error`、`json_error`、`internal_error` は、同じ `error` のメッセージを使います。`code`、`next`、`next_action` の値は異なります。
+
+```json
+{
+  "error": "Internal error",
+  "code": "internal_error",
+  "next": "retry read-only requests later. Before repeating a write, check whether it succeeded and follow this endpoint's idempotency guidance. Contact LogBrew support if the problem persists",
+  "next_action": {
+    "code": "retry_or_contact_support",
+    "target": "support"
+  }
+}
+```
+
+| `code` | `next_action.code` | `next_action.target` |
+| --- | --- | --- |
+| `storage_error` | `retry_or_check_storage` | `backend_status` |
+| `json_error` | `send_valid_json` | `request` |
+| `internal_error` | `retry_or_contact_support` | `support` |
+
+エンドポイント、認証、フィルターについては、[テレメトリ API](/ja/reference/telemetry-api)を参照してください。

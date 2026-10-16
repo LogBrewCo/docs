@@ -1,0 +1,214 @@
+---
+title: "テレメトリ API のリクエスト、レスポンス、エラーコード"
+sidebarTitle: "テレメトリ API"
+description: "LogBrew の Observability API で、テレメトリの取り込み、スコープを絞った読み取り、分析、課題の更新、機械可読なエラーを扱います。"
+---
+
+テレメトリ API は、`https://api.logbrew.co` で提供される、HTTP 上の JSON API です。公開 SDK は、管理するバッチを `POST /v1/events` に送信します。独自のネイティブクライアントは、ネイティブのエンベロープを `POST /api/telemetry/ingest` に送信します。どちらの取り込みルートにも、プロジェクト単位の取り込み用の Bearer トークンが必要です。
+
+読み取りとアカウントが所有するデータの変更には、アカウントの Bearer トークンを使います。アカウントの Bearer トークンやブラウザーのセッションを、SDK や取り込みの設定に使わないでください。取り込み用の Bearer トークンを読み取りのルートに送信しないでください。
+
+## 範囲を絞ったリクエストを送信する
+
+クライアントがリクエストを送信する前に、次のチェックリストを使います。
+
+1. エンドポイントの表から、ルートと HTTP メソッドを選びます。
+2. 正しい Bearer トークンを使います。取り込みには取り込み用の Bearer トークン、それ以外にはすべてアカウントの Bearer トークンを使います。
+3. ルートが対応しているプロジェクトのスコープを選びます。レスポンスが空でも、スコープを広げないでください。
+4. ルートが受け付けるクエリキーだけを追加します。[クエリフィルター](/ja/reference/telemetry-api-filters)を参照してください。
+5. ルートに JSON ボディがある場合は、`Content-Type: application/json` を送信します。
+6. 再試行する前に、HTTP ステータスとレスポンスボディを読みます。
+7. Bearer トークン、フィードのチケット、レスポンスボディ全体を、ログやエージェントのプロンプトに含めないでください。
+
+## エンドポイント
+
+### 取り込み
+
+| メソッド | パス | 用途 |
+| --- | --- | --- |
+| `POST` | `/v1/events` | LogBrew の公開 SDK が作成して送信するバッチを取り込みます。 |
+| `POST` | `/api/telemetry/ingest` | 独自のクライアントから、ネイティブのテレメトリのエンベロープを取り込みます。 |
+
+`/v1/events` のバッチは SDK に作らせます。手で組み立てないでください。ネイティブのエンベロープについては、[SDK 連携](/ja/guides/sdk-ingestion)を参照してください。
+
+### テレメトリの読み取り
+
+| メソッド | パス | 用途 |
+| --- | --- | --- |
+| `GET` | `/api/logs` | 構造化ログを一覧表示します。 |
+| `GET` | `/api/logs/{log_id}` | 1件のログを読みます。 |
+| `GET` | `/api/logs/attributes` | フィルターで検索できるログの属性のパスと型を一覧表示します。 |
+| `GET` | `/api/telemetry/issues` | グループ化された課題を一覧表示します。 |
+| `GET` | `/api/telemetry/issues/{issue_id}` | グループ化された1件の課題を読みます。 |
+| `GET` | `/api/telemetry/issues/{issue_id}/events` | グループ化された1件の課題の発生事象を一覧表示します。 |
+| `PATCH` | `/api/telemetry/issues/{issue_id}` | 1件の課題のステータス、優先度、担当者を更新します。 |
+| `POST` | `/api/telemetry/issues/bulk` | 1つのプロジェクトの1〜100件の課題のステータス、優先度、担当者を更新します。 |
+| `GET` | `/api/telemetry/issues/assignees` | 1つのプロジェクトで課題を割り当てられるアカウントを一覧表示します。 |
+| `PUT` | `/api/telemetry/issues/{issue_id}/triage-rule` | 課題の重大度のルールを設定します。 |
+| `PUT` | `/api/logs/{log_id}/triage-rule` | あるログに一致するログについて、重大度のルールと無視の状態を設定します。 |
+| `GET` | `/api/telemetry/traces` | プロジェクトのスコープ内のトレースを探します。 |
+| `GET` | `/api/telemetry/traces/{trace_id}` | 1件のトレースのスパンを一覧表示します。 |
+| `GET` | `/api/telemetry/traces/{trace_id}/summary` | 1件のトレースの、範囲を絞った概要を読みます。 |
+| `GET` | `/api/telemetry/actions` | プロダクトアクションを一覧表示します。 |
+| `GET` | `/api/telemetry/metrics` | メトリクスのサンプルを一覧表示します。 |
+| `GET` | `/api/telemetry/metrics/series` | 1つのメトリクスを時間バケットごとに読みます。 |
+| `GET` | `/api/telemetry/releases` | リリースの概要を一覧表示します。 |
+| `GET` | `/api/telemetry/summary/volume` | 1つのプロジェクトのシグナルの件数を時間バケットごとに読みます。 |
+
+### デプロイ
+
+| メソッド | パス | CLI コマンド |
+| --- | --- | --- |
+| `PUT` | `/api/telemetry/deployments/{deployment_id}` | `logbrew deploy` |
+| `GET` | `/api/telemetry/deployments/{deployment_id}?project_id=<project-uuid>` | なし |
+| `GET` | `/api/telemetry/deployments?project_id=<project-uuid>` | なし |
+
+デプロイが成功または失敗した後に、リリースの自動化からデプロイを記録します。`PUT` のボディには、`project_id`、`release`、`environment`、`service_name`、`status`（`succeeded` または `failed`）、`started_at`、`finished_at`、省略可能な `commit_sha` があります。`release`、`environment`、`service_name` には、SDK が送信するのと同じ値を使います。アカウントがそのプロジェクトを所有している必要があります。
+
+`deployment_id` は、デプロイに対して自分で付ける ID です。同じ ID と同じボディで再試行すると、保存済みのデプロイが返ります。同じ ID で異なるボディを送ると、`409` と `idempotency_conflict` で失敗します。別のデプロイには新しい ID を使ってください。
+
+### 調査
+
+各調査ルートは、1つの対象について、範囲を絞った証拠のまとまりを返します。[CLI](/ja/reference/cli) の `logbrew explain` コマンドは、これらのルートを読み、レスポンスを検証します。
+
+| メソッド | パス | CLI コマンド |
+| --- | --- | --- |
+| `GET` | `/api/logs/{log_id}/investigation` | `logbrew explain log` |
+| `GET` | `/api/telemetry/issues/{issue_id}/investigation` | `logbrew explain issue` |
+| `GET` | `/api/telemetry/issues/{issue_id}/correction-verification` | `logbrew investigate issue <issue_id> verify` |
+| `GET` | `/api/telemetry/traces/{trace_id}/investigation` | `logbrew explain trace` |
+| `GET` | `/api/telemetry/traces/{trace_id}/spans/{span_id}/investigation` | `logbrew explain span` |
+| `GET` | `/api/telemetry/actions/{action_id}/investigation` | `logbrew explain action` |
+| `GET` | `/api/telemetry/metrics/investigation` | `logbrew explain metric` |
+| `GET` | `/api/telemetry/releases/investigation` | `logbrew explain release` |
+
+### プロダクト分析
+
+| メソッド | パス | CLI コマンド |
+| --- | --- | --- |
+| `GET` | `/api/telemetry/analytics/overview` | `logbrew analytics overview` |
+| `GET` | `/api/telemetry/analytics/properties` | `logbrew analytics properties` |
+| `POST` | `/api/telemetry/analytics/funnel` | `logbrew analytics funnel` |
+| `POST` | `/api/telemetry/analytics/retention` | `logbrew analytics retention` |
+| `POST` | `/api/telemetry/analytics/lifecycle` | `logbrew analytics lifecycle` |
+| `POST` | `/api/telemetry/analytics/paths` | `logbrew analytics paths` |
+| `POST` | `/api/telemetry/analytics/segments/compare` | `logbrew analytics compare` |
+
+`POST` の分析ルートは、クエリキーではなく JSON ボディを受け取ります。[プロダクト分析](/ja/concepts/product-analytics)を参照してください。
+
+### ライブフィード
+
+| メソッド | パス | 用途 |
+| --- | --- | --- |
+| `POST` | `/api/feed/ticket` | アカウントの Bearer トークンで、有効期間の短いライブフィードのチケットを作成します。 |
+| `GET` | `/api/feed/live?ticket=<ticket>` | そのチケットで WebSocket 接続を開きます。 |
+
+### アカウントとサインイン
+
+使用量、クォータ、サブスクリプション、ログアウトのルートは [アカウント API](/ja/reference/account-api)にあります。
+
+## 成功時のステータスコード
+
+| 操作 | 成功時のステータス |
+| --- | --- |
+| 取り込み、読み取り、課題の更新、ルール、デプロイ、分析、フィードのチケット | `200 OK` |
+| ライブフィードの接続 | `101 Switching Protocols`、その後に WebSocket のメッセージ |
+
+`200` のレスポンスは、証拠が完全であることを証明するものではありません。レスポンスのカバレッジ、一部省略、ステータスのフィールドを読んでください。
+
+## クエリフィルターとページネーション
+
+各読み取りルートは、それぞれ独自のクエリキーを受け付けます。`project`、`trace`、`user` のようなわかりやすい別名は、クエリキーではありません。一覧のルートは、デフォルトでは配列だけを返し、`pagination=cursor` を付けるとカーソルのエンベロープを返します。デプロイの一覧は常にページのオブジェクトを返します。[クエリフィルター](/ja/reference/telemetry-api-filters)を参照してください。
+
+## レスポンスとエラー
+
+- [レスポンス形式](/ja/reference/telemetry-response-shapes)に、レスポンスの系統ごとの例があります。
+- [API エラー](/ja/reference/api-errors)に、エラーコードと回復のためのアクションの一覧があります。
+
+人向けのメッセージより先に `code` を読みます。プログラムの動作には `next_action` を、人への案内には `next` を使います。`error` や `next` の文言を解析しないでください。
+
+## 課題を更新する
+
+これらのリクエストでは、アカウントの Bearer トークンを使います。これは意図的に `LOGBREW_INGEST_BEARER` とは別のものにしています。アカウントには、課題のプロジェクトで課題を管理する権限が必要です。権限がないと、リクエストは `403` と `forbidden` で失敗します。同じ権限で、ステータス、優先度、担当者の変更と、課題とログのルールを扱えます。
+
+各リクエストでは、次のフィールドを1つ以上設定します。
+
+| フィールド | 値 |
+| --- | --- |
+| `status` | `unresolved`、`resolved`、`archived` のいずれか。`ignored` は `archived` の古い名前です。 |
+| `priority` | `high`、`medium`、`low` のいずれか。 |
+| `assignee` | ユーザー ID、サインイン中のアカウントを示す `me`、または担当者を解除する `none`。 |
+
+これらのフィールドが1つもないリクエストは、`422` と `validation_failed` で失敗します。
+
+課題の担当者は0人または1人です。担当者は、そのプロジェクトを読み取れる必要があります。読み取れない場合、リクエストは `422` と `validation_failed` で失敗し、LogBrew は何も変更しません。割り当てられるアカウントは [担当者を一覧表示する](#list-assignees)で取得します。`assignee` にそれ以外の値を指定した場合も、`422` と `validation_failed` で失敗します。
+
+設定した優先度は固定されます。優先度を設定していない場合、優先度は課題の重大度に従います。`error` と `critical` は `high`、`warning` は `medium`、`info` は `low` です。
+
+フィールドがすでに指定した値になっている場合は変わりません。タイムアウトの後は、同じリクエストをもう一度送信できます。タイムアウトしても、変更が行われなかったとは限りません。別の変更を送信する前に、課題をもう一度読んでください。
+
+### <span id="update-one-issue">1件の課題を更新する</span>
+
+レスポンスで `archived`、優先度、担当者を受け取るには、`response_version=3` を追加します。
+
+```bash
+curl -X PATCH "$LOGBREW_API_URL/api/telemetry/issues/$ISSUE_ID?response_version=3" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  -H "Content-Type: application/json" \
+  --data '{ "status": "archived", "priority": "low", "assignee": "me" }'
+```
+
+レスポンスは更新後の課題です。[課題のステータスのレスポンス例](/ja/reference/telemetry-response-shapes#issue-status-response-examples)を参照してください。
+
+### <span id="update-issues-in-bulk">課題を一括で更新する</span>
+
+`project_id` と、そのプロジェクトの重複しない1〜100件の課題 ID を送信します。
+
+```bash
+curl -X POST "$LOGBREW_API_URL/api/telemetry/issues/bulk" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  -H "Content-Type: application/json" \
+  --data '{
+    "project_id": "<project-uuid>",
+    "issue_ids": ["<issue-uuid-1>", "<issue-uuid-2>"],
+    "assignee": "<user-uuid>"
+  }'
+```
+
+リクエストは、すべての課題に同じ変更を適用します。レスポンスには `project_id` と `results` があり、`results` には課題 ID ごとに1つの結果がリクエストの順に入ります。各結果には `issue_id`、`outcome`、`issue` があります。`issue` は、レスポンスのバージョン3では現在の課題で、`not_found` の場合は `null` です。
+
+| `outcome` | 意味 |
+| --- | --- |
+| `updated` | LogBrew が変更を適用しました。 |
+| `unchanged` | 課題はすでに指定した値になっていました。 |
+| `not_found` | プロジェクトにこの ID の課題がありません。LogBrew はこの課題について何も変更していません。 |
+
+リストが空の場合、ID が100件を超える場合、ID が重複している場合は、`422` と `validation_failed` で失敗します。それより多い課題は、複数のリクエストに分けてください。アカウントがプロジェクトを読み取れない場合、リクエストは `404` と `not_found` で失敗します。
+
+### <span id="list-assignees">担当者を一覧表示する</span>
+
+プロジェクト ID を送信すると、そのプロジェクトで課題を割り当てられるすべてのアカウントを取得できます。
+
+```bash
+curl "$LOGBREW_API_URL/api/telemetry/issues/assignees?project_id=$PROJECT_ID" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER"
+```
+
+一覧には、そのプロジェクトを読み取れるすべてのアカウントが含まれます。各項目には `user_id`、`name`、`email` があります。アカウントに名前がない場合、`name` は `null` です。[担当者の一覧のレスポンス](/ja/reference/telemetry-response-shapes#assignee-list-response)を参照してください。プロジェクトを読み取れるアカウントであれば、この一覧を取得できます。アカウントがプロジェクトを読み取れない場合、リクエストは `404` と `not_found` で失敗します。
+
+メンバーがプロジェクトへのアクセスを失うと、そのメンバーに割り当てられた課題には担当者が表示されなくなります。メンバーが再びアクセスできるようになると、その間に誰かが担当者を変更または解除していない限り、課題には再びそのメンバーが表示されます。
+
+### 課題とログのルールを設定する
+
+ルールは、一致するシグナルを LogBrew がどう表示するかを変えます。データは削除しません。取得した `severity` は変わらず、レスポンスの `triage` にルールが表示されます。
+
+| リクエスト | JSON ボディ |
+| --- | --- |
+| `PUT /api/telemetry/issues/{issue_id}/triage-rule` | `{ "severity": "<value>" }` |
+| `PUT /api/logs/{log_id}/triage-rule` | `{ "severity": "<value>", "ignored": true }` |
+
+`severity` は `info`、`warning`、`error`、`critical`、`source` のいずれかです。`source` は上書きを解除し、取得した重大度を再び表示します。ログのルールでは、`ignored: true` を指定すると、一致するログがデフォルトのログの一覧に表示されなくなります。それらのログは `status=ignored` または `status=all` で読みます。ルールは、保持済みのシグナルとこれから届くシグナルのうち、一致するものに適用されます。それ以外の値は `422` と `validation_failed` で失敗します。
+
+<Warning>
+  空のリリースを送信しないでください。リリースの追跡を信頼できるものに保つため、LogBrew は空のリリースを拒否します。
+</Warning>

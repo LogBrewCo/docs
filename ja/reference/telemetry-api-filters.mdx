@@ -1,0 +1,380 @@
+---
+title: "API のクエリパラメーターとカーソルベースのページネーション"
+sidebarTitle: "クエリフィルター"
+description: "LogBrew のテレメトリを、プロジェクト、サービス、リリース、環境、重大度、トレース、課題のステータス、優先度、担当者、時刻で絞り込みます。結果の続きはカーソルで読みます。"
+---
+
+読み取りのルートごとに、受け付けるクエリキーが決まっています。[フィルターの一覧表](#filter-matrix)にあるルートは、一覧表に別の記載がない限り、不明なキーや型の違う値を `422` と `validation_failed` で拒否します。`project`、`trace`、`user` などのわかりやすい別名は、クエリキーではありません。あるルートのフィルターを、別のルートにそのまま移さないでください。
+
+## 絞り込んだリクエストを作る
+
+クエリ文字列はパスの後に付けます。予約文字を安全に扱うため、`--data-urlencode` を使います。次のリクエストは、1つのプロジェクトの直近24時間の重大のログを読みます。
+
+```bash
+curl --get "https://api.logbrew.co/api/logs" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "severity=critical" \
+  --data-urlencode "since=24h"
+```
+
+フィルターは次の順序で追加します。
+
+1. `project_id` または `project_ids` でプロジェクトを選びます。
+2. `since` と、必要に応じて `until` で期間を追加します。
+3. サービス、リリース、環境、ステータス、またはシグナル固有のフィルターを追加します。
+4. ページを小さくするには `limit` を設定します。
+5. カーソルのフィールドは、カーソルのレスポンスが返した後にだけ追加します。
+
+返される行は、リクエストのすべてのフィルターに一致します。省略したフィルターには、ルートのデフォルト値が使われます。たとえば `GET /api/logs` では、`status` を省略すると `status=active` が使われます。
+
+## <span id="filter-matrix">フィルターの一覧表</span>
+
+「必須」列のキーは、リクエストに必ず含めます。それ以外のキーはすべて任意です。
+
+| ルート | 必須 | 任意のクエリキー |
+| --- | --- | --- |
+| `GET /api/logs` | なし | `project_id` または `project_ids`、`severity`、`level`（互換性のための別名）、`status`、`search`、`trace_id`、`service_name`、`release`、`environment`、`since`、`until`、`attribute_filters`、`pagination`、`cursor_time`、`cursor_id`、`limit` |
+| `GET /api/logs/attributes` | `since` | `project_id` または `project_ids`、`type`、`search`、`severity`、`level`、`service_name`、`release`、`environment`、`until`、`cursor_count`、`cursor_path`、`cursor_type`、`limit` |
+| `GET /api/telemetry/issues` | なし | `project_id` または `project_ids`、`status`、`severity`、`priority`、`assignee`、`service_name`、`release`、`environment`、`since`、`until`、`pagination`、`cursor_time`、`cursor_id`、`limit`、`response_version` |
+| `GET /api/telemetry/issues/{issue_id}` | なし | `response_version`。このルートはその他のキーを無視します。 |
+| `GET /api/telemetry/issues/{issue_id}/events` | なし | `pagination`、`cursor_time`、`cursor_id`、`limit` |
+| `GET /api/telemetry/issues/assignees` | `project_id` | なし |
+| `GET /api/telemetry/actions` | なし | `project_id` または `project_ids`、`name`、`distinct_id`、`service_name`、`release`、`environment`、`since`、`until`、`pagination`、`cursor_time`、`cursor_id`、`limit` |
+| `GET /api/telemetry/metrics` | なし | `project_id` または `project_ids`、`name`、`service_name`、`release`、`environment`、`since`、`until`、`pagination`、`cursor_time`、`cursor_id`、`limit` |
+| `GET /api/telemetry/metrics/series` | `project_id`、`name`、`since` | `until`、`interval`、`group_by`、`service_name`、`release`、`environment`、`series_limit` |
+| `GET /api/telemetry/releases` | なし | `project_id` または `project_ids`、`service_name`、`release`、`environment`、`since`、`until`、`pagination`、`cursor_time`、`cursor_project_id`、`cursor_release`、`cursor_environment`、`cursor_service_name`、`limit` |
+| `GET /api/telemetry/traces` | なし | `project_id` または `project_ids`、`service_name`、`release`、`environment`、`status`、`since`、`until`、`min_duration_ms`、`pagination`、`cursor_time`、`cursor_trace_id`、`limit` |
+| `GET /api/telemetry/traces/{trace_id}`、`.../summary` | なし | `project_id`、`release`、`environment` |
+| `GET /api/telemetry/summary/volume` | `project_id`、`since` | `until`、`interval`、`service_name`、`release`、`environment`、`response_version` |
+| `GET /api/telemetry/deployments` | `project_id` | `release`、`environment`、`service_name`、`status`、`since`、`until`、`pagination`、`cursor_time`、`cursor_id`、`limit` |
+| `GET /api/telemetry/deployments/{deployment_id}` | `project_id` | なし |
+| `GET /api/telemetry/traces/{trace_id}/investigation` | なし | `project_id`、`release`、`environment`、`response_version` |
+| `GET /api/telemetry/traces/{trace_id}/spans/{span_id}/investigation` | `project_id`、`release`、`environment` | なし |
+| `GET /api/telemetry/issues/{issue_id}/investigation` | なし | `response_version`、および `selection` または `occurrence_id` |
+| `GET /api/telemetry/issues/{issue_id}/correction-verification` | `baseline_occurrence_id`、`candidate_deployment_id` | なし |
+| `GET /api/telemetry/releases/investigation` | `project_id`、`release`、`environment`、`service_name` | `response_version` |
+| `GET /api/telemetry/metrics/investigation` | `project_id`、`name`、`since` | `until`、`interval`、`group_by`、`service_name`、`release`、`environment`、`series_limit`、`response_version` |
+| `GET /api/telemetry/analytics/overview` | `project_id`、`since` | `until`、`interval`、`top_limit`、`service_name`、`release`、`environment`、`response_version` |
+| `GET /api/telemetry/analytics/properties` | `project_id`、`since` | `until`、`limit`、`service_name`、`release`、`environment`、`response_version` |
+
+課題の調査では、`selection` は `first`、`latest`、`recommended` のいずれかです。`selection` と `occurrence_id` は、どちらか一方だけを送信します。どちらも、2から13までの `response_version` が必要です。バージョン2以降でどちらも指定しない場合、LogBrew は `recommended` を使います。`occurrence_id` は `GET /api/telemetry/issues/{issue_id}/events` で取得します。
+
+`POST` の分析用ルートは JSON のボディを受け取ります。[プロダクト分析](/ja/concepts/product-analytics)を参照してください。
+
+## 共通のフィルターとシグナル固有のフィルター
+
+`service_name`、`release`、`environment` は、どのテレメトリの一覧でも結果を絞り込みます。SDK が送信する値をそのまま使ってください。
+
+一部のフィルターは、1つのシグナル専用です。
+
+- ログは `search`、`trace_id`、`severity`、`attribute_filters` を受け付けます。
+- ログは `status` として `active`（デフォルト）、`ignored`、`all` を受け付けます。`ignored` は、ログのルールによって有効なビューから非表示になっているログを選びます。
+- 課題は、課題の `status` として `unresolved`、`resolved`、`archived` を受け付けます。`ignored` は `archived` の古い名前で、同じ課題を選びます。
+- 課題は `severity` として `info`、`warning`、`error`、`critical` を受け付けます。
+- 課題は `priority` として `high`、`medium`、`low` を受け付けます。
+- 課題は `assignee` として、サインインしているアカウントに割り当てられた課題を表す `me`、担当者のいない課題を表す `none`、またはユーザー ID を受け付けます。
+- アクションとメトリクスは `name` を受け付けます。
+- アクションは `distinct_id` を受け付けます。
+- トレースは、トレースの `status` と `min_duration_ms` を受け付けます。
+- デプロイは `status` として `succeeded` または `failed` を受け付けます。
+
+ログと課題の `severity` フィルターは、実際に適用された重大度を比較します。ルールで重大度が変更されている場合、フィルターはルールの値を使います。[重大度の値](/ja/reference/telemetry-response-shapes#severity-values)を参照してください。
+
+## 期間
+
+`since` には、`24h` や `7d` のような正の整数の時間数か日数、または RFC3339 のタイムスタンプを指定できます。短い形式の期間は、各リクエストの時刻を基準にします。
+
+`until` には RFC3339 のタイムスタンプだけを指定できます。これは終了時刻を含みません。ちょうど `until` の時刻の行は結果に入りません。`since` は開始時刻を含みます。たとえば、`since=2026-10-01T00:00:00Z` と `until=2026-10-02T00:00:00Z` は、ちょうど1日を選びます。LogBrew はミリ秒単位で時刻を比較します。
+
+`until` は `since` より後でなければなりません。そうでない場合や、`until` が RFC3339 のタイムスタンプでない場合、リクエストは `422` と `validation_failed` で失敗します。
+
+複数ページを読むときは、RFC3339 の開始時刻を1つ決め、すべてのページで同じ値を使います。`until` も、すべてのページで同じ値にします。
+
+次のリクエストは、1日分のエラーログを読みます。
+
+```bash
+curl --get "https://api.logbrew.co/api/logs" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "severity=error" \
+  --data-urlencode "since=2026-10-01T00:00:00Z" \
+  --data-urlencode "until=2026-10-02T00:00:00Z"
+```
+
+<Note>
+  デプロイの一覧では、時刻のルールが異なります。`since` と `until` には RFC3339 のタイムスタンプだけを指定でき、どちらも指定した時刻を含みます。比較の対象は、デプロイが完了した時刻です。
+</Note>
+
+## 課題のレスポンスのバージョン
+
+課題の一覧と課題の詳細は、`response_version=1`、`response_version=2`、`response_version=3` を受け付けます。デフォルトはバージョン1です。それ以外の値は `422` と `validation_failed` で失敗します。
+
+- バージョン1は、アーカイブ済みの状態を `ignored` と表示します。優先度は表示しません。
+- バージョン2は、アーカイブ済みの状態を `archived` と表示します。`priority` と `priority_source` が加わります。
+- バージョン3は、バージョン2のすべてのフィールドを持ちます。`assignee` が加わります。
+
+どのバージョンでも、`status=archived`、`priority`、`assignee` を受け付けます。[課題のレスポンス](/ja/reference/telemetry-response-shapes#issue-response)を参照してください。
+
+## 重大度のフィルター
+
+`GET /api/logs` では `severity=info|warning|error|critical` を使います。古い `level` キーは互換性のための別名です。どちらのキーも、正規の値と、別名の `trace`、`debug`、`warn`、`fatal` を受け付けます。LogBrew は、比較する前に別名を正規の値に変換します。
+
+リクエストが `severity` と `level` の両方を送信した場合、LogBrew はまず両方を正規化します。値が食い違う場合は、次のエラーで拒否します。
+
+```text
+log severity and level filters conflict; use one value
+```
+
+## <span id="trace-filters">トレースのフィルター</span>
+
+トレースの検索では、`status` は `error` または `ok` です。両方を含めるには省略します。`min_duration_ms` は0以上でなければなりません。これはトレースの検索にだけ適用されます。
+
+次のリクエストは、500ミリ秒以上かかったエラーのトレースを探します。
+
+```bash
+curl --get "https://api.logbrew.co/api/telemetry/traces" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "status=error" \
+  --data-urlencode "min_duration_ms=500" \
+  --data-urlencode "since=7d"
+```
+
+トレースの詳細と要約では、`trace_id` をパーセントエンコードしてパスのセグメントにします。クエリキーとして送信しないでください。
+
+## <span id="project-scope">プロジェクトの範囲</span>
+
+1つのプロジェクトを読むには、`project_id=<project-uuid>` を使います。一覧表で `project_ids` が記載されているルートでは、`project_ids=<uuid>,<uuid>` で2〜50件のプロジェクトを正確に指定できます。これらのルートでは、両方のキーを省略すると、アカウントが読み取れるすべてのプロジェクトを読みます。`project_id` が必須のルートは、1つのプロジェクトしか受け付けません。
+
+```text
+project_id=00000000-0000-4000-8000-000000000001
+project_ids=00000000-0000-4000-8000-000000000001,00000000-0000-4000-8000-000000000002
+```
+
+LogBrew は、次の指定を `422` と `validation_failed` で拒否します。
+
+- `project_id` と `project_ids` の両方を含むリクエスト。
+- ID が2件未満、または50件を超える `project_ids` の値。
+- 重複した ID や、UUID ではない ID。
+
+`project_ids` の中に、アカウントが読み取れないプロジェクトの ID が1つでもあると、リクエストは `404` と `not_found` で失敗します。その ID を外して続けないでください。新しい組み合わせを選ぶよう、ユーザーに依頼してください。
+
+カーソルのどのページでも、同じプロジェクトの範囲を使います。結果が空だったからといって、プロジェクトのフィルターを外さないでください。それは別の質問をすることになります。
+
+## 時間バケットごとの系列
+
+`GET /api/telemetry/metrics/series` は、1つのメトリクスを時間バケット（1つの集計区間）ごとに返します。`GET /api/telemetry/summary/volume` は、シグナルの件数を時間バケットごとに返します。どちらのルートにも、次のルールがあります。
+
+- `since` は必須です。`until` は任意で、デフォルト値はリクエストの時刻です。
+- `since` から `until` までの範囲は最大31日です。
+- `interval` は `auto`、`1m`、`5m`、`15m`、`1h`、`6h`、`1d` のいずれかです。デフォルト値は `auto` です。バケットが500個を超える間隔は失敗します。
+- `service_name`、`release`、`environment` は完全一致のフィルターです。
+
+メトリクスの系列では、`name` は `GET /api/telemetry/metrics` で得た正確なメトリクス名です。`group_by` は `none`、`service_name`、`release`、`environment` のいずれかです。`series_limit` は1〜20です。
+
+シグナルの量では、`until` を未来の時刻にできません。`response_version` は `1` だけです。
+
+## ログの属性で絞り込む
+
+検索できる属性のパスと型を見つけるには、`GET /api/logs/attributes` を使います。次に、`GET /api/logs` に `attribute_filters` を送信します。どちらのリクエストにも `since` が必要です。
+
+### 属性のカタログを読む
+
+次のリクエストは、1つのプロジェクトで `status` を含む数値型のパスを探します。
+
+```bash
+curl --get "https://api.logbrew.co/api/logs/attributes" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "since=2026-06-01T00:00:00Z" \
+  --data-urlencode "type=number" \
+  --data-urlencode "search=status" \
+  --data-urlencode "limit=2"
+```
+
+レスポンスはオブジェクトで、配列だけが返るわけではありません。次の架空の例には、2つの属性と次のページがあります。
+
+```json
+{
+  "attributes": [
+    { "path": "/http/status_code", "type": "number", "observed_count": 50, "last_seen_at": "2026-06-01T12:00:03.789Z" },
+    { "path": "/response/status", "type": "number", "observed_count": 42, "last_seen_at": "2026-06-01T12:00:02.456Z" }
+  ],
+  "coverage": {
+    "total_logs": 60,
+    "fully_indexed_logs": 50,
+    "partially_indexed_logs": 2,
+    "unindexed_logs": 8
+  },
+  "next_cursor": { "observed_count": 42, "path": "/response/status", "type": "number" }
+}
+```
+
+`type` は `string`、`number`、`boolean` のいずれかです。`observed_count` は、範囲内で、そのパスと型を持つログの件数です。`last_seen_at` は、そのうち最新のログの時刻です。1件のログが多くのパスを持つことがあります。件数を足し合わせてログの件数としないでください。
+
+`coverage` は、属性のフィルターで検索できるログを示します。
+
+| フィールド | 意味 |
+| --- | --- |
+| `total_logs` | カタログのプロジェクト、時刻、重大度、サービス、リリース、環境のフィルターに一致するログ。 |
+| `fully_indexed_logs` | 対応しているすべての属性の値を検索できるログ。 |
+| `partially_indexed_logs` | 一部の値がインデックスから除外されているログ。除外された値は、フィルターで見つからないことがあります。 |
+| `unindexed_logs` | 型付きの属性フィルターでは検索できないログ。 |
+
+3つのグループを合計すると `total_logs` になります。カタログの `type`、`search`、カーソルは、カバレッジを変えません。`attributes` の一覧が空でも、`total_logs` がゼロとは限りません。
+
+カタログには `status` キーがありません。カタログの重大度フィルターは、実際に適用された重大度ではなく、取得された重大度を比較します。
+
+`search` は、制御文字を含まない1〜128バイトの、パスの部分文字列です。`limit` は、1ページの属性の数を設定します。
+
+### カタログの続きを読む
+
+カタログでは `pagination=cursor` を使いません。すべてのフィルターを繰り返し、`next_cursor` の3つのフィールドをすべてコピーします。
+
+| 返されるフィールド | 次のリクエストのキー |
+| --- | --- |
+| `next_cursor.observed_count` | `cursor_count` |
+| `next_cursor.path` | `cursor_path` |
+| `next_cursor.type` | `cursor_type` |
+
+`next_cursor` が `null` になったら止めます。
+
+### 型付きのフィルターを適用する
+
+パスと型はカタログからコピーします。パスには、ドット区切りのキーではなく JSON Pointer の構文を使います。パスの中の `~0` や `~1` のエスケープは、そのままにしてください。
+
+次のリクエストは、数値のレスポンスステータスが500以上のログを読みます。
+
+```bash
+curl --get "https://api.logbrew.co/api/logs" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "since=2026-06-01T00:00:00Z" \
+  --data-urlencode 'attribute_filters=[{"path":"/response/status","type":"number","operator":"gte","value":500}]'
+```
+
+`attribute_filters` は、1〜4個のフィルターを持つ JSON 配列です。ログは、すべてのフィルターに一致する必要があります。各フィルターには `path`、`type`、`operator`、`value` があります。`value` の JSON の型は `type` と一致する必要があります。数値の `500` は、文字列の `"500"` とは違います。
+
+| `type` | `operator` の値 |
+| --- | --- |
+| `string` | `eq`、`ne`、`contains`、`starts_with` |
+| `number` | `eq`、`ne`、`gt`、`gte`、`lt`、`lte` |
+| `boolean` | `eq`、`ne` |
+
+`ne` に一致するのは、そのパスを持つログだけです。パスを持たないログは `ne` に一致しません。`string` では、`case_sensitive` は任意で、デフォルト値は `false` です。LogBrew は、`number` と `boolean` に対する `"case_sensitive": true` を拒否します。
+
+次の上限があります。
+
+- JSON 配列は最大4,096バイトです。
+- 文字列の値は最大1,024バイトです。
+- `contains` と `starts_with` には、空でない文字列が必要です。
+- 数値は有限で、-9,007,199,254,740,992 から 9,007,199,254,740,992 までの範囲でなければなりません。
+
+インデックスで検索できないログは、フィルターに一致しません。ただし、`attribute_filters` を付けないリクエストでは表示されることがあります。ログのレスポンスについては、[ログのレスポンス](/ja/reference/telemetry-response-shapes#log-response)を参照してください。
+
+### 属性のエラーを修正する
+
+次のエラーは、どれも `422` と `validation_failed` を返します。
+
+| `error` | 修正方法 |
+| --- | --- |
+| `log attribute queries require since` | カタログのリクエスト、または `attribute_filters` を付けたログのリクエストに `since` を追加します。 |
+| `invalid log attribute filters` | カタログにあるパス、型、演算子、値を持つ、1〜4個のフィルターの JSON 配列を送信します。 |
+| `invalid log attribute cursor` | `next_cursor` から得た `cursor_count`、`cursor_path`、`cursor_type` をまとめて送信します。 |
+| `invalid log attribute search` | 128バイト以下の、空でないパスの部分文字列を送信します。 |
+
+再試行する前に、リクエストを修正してください。フィルターを外すと結果が変わるため、外さないでください。
+
+## <span id="cursor-pagination">カーソルベースのページネーション</span>
+
+カーソルモードは、指定した場合にだけ有効になります。指定しない場合、一覧のルートは配列だけを返します。最初のページでは、カーソルのフィールドを付けずに `pagination=cursor` を送信します。次のページからは、すべてのフィルターを繰り返し、カーソルのフィールドをすべてそろえて送信します。
+
+| ルート | 続きを読むためのカーソルのフィールド |
+| --- | --- |
+| ログ、課題、課題の発生事象、アクション、メトリクス、デプロイ | `cursor_time` と `cursor_id` |
+| リリース | `cursor_time`、`cursor_project_id`、`cursor_release`、`cursor_environment`、`cursor_service_name` |
+| トレースの検索 | `cursor_time` と `cursor_trace_id` |
+
+返された `next_cursor` のフィールドを、次のリクエストに対応付けます。
+
+- `next_cursor.time` は `cursor_time` に入れます。
+- `next_cursor.id` は `cursor_id` に入れます。
+- トレースでは、`next_cursor.trace_id` を `cursor_trace_id` に入れます。
+- リリースでは、返された各フィールド名の前に `cursor_` を付けます。たとえば、`next_cursor.release` は `cursor_release` に入れます。
+
+`next_cursor` が `null` になったら止めます。最後の行からカーソルを計算しないでください。リリースのカーソルは、選択したプロジェクトを変えません。元の `project_id` または `project_ids` をそのまま使ってください。
+
+```bash
+curl --get "https://api.logbrew.co/api/logs" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project-uuid>" \
+  --data-urlencode "severity=error" \
+  --data-urlencode "since=2026-06-01T00:00:00Z" \
+  --data-urlencode "pagination=cursor" \
+  --data-urlencode "limit=50"
+```
+
+`limit` はページのサイズを設定します。1ページの行数がそれより少ないこともあります。これらのルートは `page` や `page_number` を受け付けません。
+
+| ルート | デフォルトの `limit` | 最大の `limit` |
+| --- | ---: | ---: |
+| ログ、ログの属性、課題、アクション、メトリクス、リリース、トレースの検索 | 100 | 500 |
+| 課題の発生事象 | 25 | 100 |
+| デプロイ | 50 | 100 |
+
+ほとんどのルートでは、最大値を超える `limit` を LogBrew が最大値に置き換えます。デプロイの一覧は、1〜100の範囲外の `limit` を `422` で拒否します。デプロイの一覧は、`pagination=cursor` がなくても、常に `next_cursor` を含むページのオブジェクトを返します。
+
+LogBrew は、次のリクエストを `422` と `validation_failed` で拒否します。
+
+- `cursor` 以外の `pagination` の値。
+- `pagination=cursor` のないカーソルのフィールド。
+- そろっていないカーソルのフィールド。
+- RFC3339 のタイムスタンプではない `cursor_time`。
+
+カーソルは位置を示すだけで、データを固定するものではありません。最新の状態を見る必要があるときは、新しく最初のページから読み始めてください。
+
+CLI も同じフィールドを使います。
+
+```bash
+logbrew read logs --severity error --pagination cursor --limit 50 --json
+logbrew read logs --severity error --pagination cursor --limit 50 \
+  --cursor-time <time> --cursor-id <id> --json
+```
+
+## 結果が空のときの診断
+
+一覧が空の場合、すべてのフィルターに一致する行がなかったことを意味します。他のシグナルについては何もわかりません。リクエストを次の順序で確認します。
+
+1. プロジェクト ID を確認します。
+2. 任意のフィルターを1つずつ外します。
+3. 期待するイベントがより古い場合は、`since` を広げます。期待するイベントがより新しい場合は、`until` を外すか、より後の時刻にします。
+4. `service_name`、`release`、`environment` を、SDK が送信する値と比較します。
+5. ログの場合、ログのルールが期待するログを非表示にしている可能性があれば、`status=all` を追加します。
+6. ルートが各フィルターを受け付けることを確認します。
+
+## 拒否されたクエリから復旧する
+
+拒否されたクエリは、標準のエラーエンベロープを返します。不明なキーや型の違う値は、`422` を返します。
+
+```json
+{
+  "error": "invalid query parameters",
+  "code": "validation_failed",
+  "next": "check query parameter names and value types, then retry",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+よくある修正方法：
+
+- わかりやすい別名を、[フィルターの一覧表](#filter-matrix)にあるキーに置き換えます。
+- ルートが必要とする、続きを読むためのカーソルのフィールドをすべて送信します。
+- 最初のページのリクエストから、カーソルのフィールドを外します。
+- プロジェクトの指定方法は1つだけにします。
+- 対応していない重大度やトレースのステータスを、正規の値に置き換えます。
+
+エラーコードと復旧方法については、[API エラー](/ja/reference/api-errors)を参照してください。レスポンスのボディについては、[レスポンス形式](/ja/reference/telemetry-response-shapes)を参照してください。

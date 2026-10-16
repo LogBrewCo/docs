@@ -1,0 +1,363 @@
+---
+title: "アプリケーションのテレメトリのための SDK 連携"
+sidebarTitle: "SDK 連携"
+description: "ランタイムに合った LogBrew SDK を選び、取り込みキーを設定します。アプリケーションのテレメトリを送信し、プロジェクトでテストイベントを見つけます。"
+---
+
+ランタイムに合った LogBrew SDK のパッケージをインストールします。SDK はイベントを整形して送信します。イベントの種類、上限、再試行の動作は、各パッケージのガイドに記載されています。
+
+連携ごとに次の手順を行います。
+
+1. ランタイムに合った SDK のパッケージをインストールします。
+2. プロジェクト単位の取り込みキーは、ソース管理の外に保管します。
+3. サービス、環境、リリースに変わらない値を設定します。
+4. アプリケーションから安全なテストイベントを1件送信します。
+5. 送信結果を確認します。次に、LogBrew でイベントを見つけます。
+
+受け付けられたバッチは LogBrew API に届いています。それでも、フィルターによってそのイベントが表示されないことがあります。正しいプロジェクトと期間を選びます。次に、サービス、環境、リリース、シグナルの種類を合わせます。
+
+取得を有効にする前に、[承認したフィールドを選んでテストします](/ja/guides/safe-capture)。分析にデータを入れるには、[プロダクトイベントの取得](/ja/guides/product-events)の手順に従います。
+
+## <span id="item-types">シグナルと共通のコンテキスト</span>
+
+最初の5枚のカードはシグナルです。リリースと環境は、それらのシグナルのコンテキストです。独立したイベントの種類ではありません。
+
+<CardGroup cols={2}>
+  <Card title="log" icon="file-text">
+    重大度、ソース、時刻、安全なコンテキストを持つ構造化メッセージ。
+  </Card>
+
+  <Card title="trace_span" icon="route">
+    時間を計測した1つの処理。トレース ID とスパン ID でトレースに結び付きます。
+  </Card>
+
+  <Card title="issue" icon="bug">
+    取得した障害と、その重大度、アプリが送信したエラーの詳細。
+  </Card>
+
+  <Card title="action" icon="mouse-pointer-click">
+    アプリ内のアクション。サブジェクト、セッション、安全なプロパティを任意で付けられます。
+  </Card>
+
+  <Card title="metric" icon="chart-line">
+    名前、種類、値、単位、temporality を持つ1つの数値の測定値。
+  </Card>
+
+  <Card title="リリースと環境" icon="tags">
+    同じ SDK のスコープ内で、後に続くイベントに付けられるコードバージョンと環境。
+  </Card>
+</CardGroup>
+
+## 重大度の値
+
+ログと課題には、`info`、`warning`、`error`、`critical` を使います。SDK やランタイムは、`trace`、`debug`、`warn`、`fatal` などの別名を送信することがあります。LogBrew は、受け付けた別名を正式な値に正規化します。
+
+## パッケージマネージャーでのインストール
+
+テレメトリを送信するランタイムに合った SDK のパッケージをインストールします。LogBrew が発行した、プロジェクト単位の SDK または取り込みの設定を使います。アカウントのログイン情報を SDK の設定に使わないでください。
+
+| ランタイム | インストール |
+| --- | --- |
+| JavaScript | `npm install @logbrew/sdk` |
+| ブラウザー | `npm install @logbrew/sdk @logbrew/browser` |
+| Node.js | `npm install @logbrew/sdk @logbrew/node` |
+| Express | `npm install @logbrew/sdk @logbrew/node @logbrew/express` |
+| Fastify | `npm install @logbrew/sdk @logbrew/node @logbrew/fastify` |
+| NestJS | `npm install @logbrew/sdk @logbrew/node @logbrew/nestjs` |
+| React | `npm install @logbrew/sdk @logbrew/browser @logbrew/react` |
+| Next.js | `npm install @logbrew/sdk @logbrew/node @logbrew/next` |
+| Angular | `npm install @logbrew/sdk @logbrew/angular` |
+| Vue | `npm install @logbrew/sdk @logbrew/vue` |
+| Svelte | `npm install @logbrew/sdk @logbrew/browser @logbrew/svelte` |
+| [React Native](/ja/guides/react-native) | `npm install @logbrew/sdk @logbrew/react-native` |
+| Python | `python3 -m pip install logbrew-sdk` |
+| FastAPI | `python3 -m pip install logbrew-fastapi` |
+| Flask | `python3 -m pip install "logbrew-flask>=0.1.5,<0.2"` |
+| Django | `python3 -m pip install logbrew-django` |
+| Swift / Apple | SwiftPM で `https://github.com/LogBrewCo/sdk.git` を追加します。 |
+| PHP | `composer require logbrew/sdk:^0.1.1` |
+| Ruby | `gem install logbrew-sdk` |
+| Go | `go get github.com/LogBrewCo/sdk/go/logbrew@latest` |
+| Rust | `cargo add logbrew` |
+| Java / Spring | Maven Central から `co.logbrew:logbrew-sdk:0.1.9` を追加します。 |
+| .NET | `dotnet add package LogBrew --version 0.1.7` |
+| ASP.NET Core | `dotnet add package LogBrew.AspNetCore --version 0.1.2` |
+| C++ / CMake | CMake の `FetchContent` で `cpp/logbrew-cpp/v0.2.3` に固定します。 |
+
+### Node.js のリクエストのトレース
+
+リクエストをルートとするトレースの相関には、`@logbrew/sdk` 0.1.16 以降と `@logbrew/node` 0.1.11 以降を使います。
+
+Express には `@logbrew/express` 0.1.5 以降が必要です。Fastify と NestJS には、それぞれの LogBrew パッケージの 0.1.6 以降が必要です。
+
+これらの連携は、リクエストのスパンを1つ作成するか、既存のスパンを引き継ぎます。スパン名には、一致したルートのテンプレートが使われます。リクエスト内のログ、課題、アクション、メトリクスは、そのトレースとスパンのコンテキストを引き継ぎます。パッケージを新しくしても、アップグレード前に送信したイベントにコンテキストは追加されません。
+
+デフォルトのリクエスト連携は、リクエストやレスポンスの本文、クエリ文字列、任意のヘッダー、加工していない `traceparent` の値を取得しません。
+
+### ASP.NET Core
+
+CLI v0.1.55 以降は、`Microsoft.NET.Sdk.Web` を使う .NET 10 のプロジェクトを検出します。プロジェクトのルートでセットアップのプランをプレビューします。このコマンドはファイルを変更しません。
+
+```bash
+logbrew setup --json
+```
+
+リリース済みのプランは、ホストの連携をインストールします。
+
+```bash
+dotnet add package LogBrew.AspNetCore --version 0.1.2
+```
+
+`LOGBREW_SERVER_API_KEY`、`LOGBREW_SERVICE_NAME`、`LOGBREW_ENVIRONMENT`、`LOGBREW_RELEASE` は、ソース管理の外で設定します。LogBrew をホストに登録し、そのミドルウェアをルーティングの後に配置します。
+
+```csharp
+using LogBrew;
+
+var builder = WebApplication.CreateBuilder(args);
+builder.AddLogBrew();
+
+var app = builder.Build();
+app.UseRouting();
+app.UseLogBrew();
+app.MapGet("/", () => "ok");
+app.Run();
+```
+
+`LOGBREW_SERVER_API_KEY` がない場合、どちらの登録呼び出しも何もせず、安全に終わります。リリース済みのホスト連携は [ASP.NET Core の NuGet パッケージ](https://www.nuget.org/packages/LogBrew.AspNetCore/0.1.2)で確認できます。公開されているパッケージのガイドでは、ホストのライフサイクル、リクエストの取得、課題の取得、プライバシーの制限、復旧方法を説明しています。
+
+### Maven または Gradle での Java
+
+CLI v0.1.54 以降は、`pom.xml`、`build.gradle`、`build.gradle.kts` を検出します。プロジェクトのルートでセットアップのプランをプレビューします。このコマンドはファイルを変更しません。
+
+```bash
+logbrew setup --json
+```
+
+Maven では、リリース済みのパッケージを追加します。
+
+```xml
+<dependency>
+  <groupId>co.logbrew</groupId>
+  <artifactId>logbrew-sdk</artifactId>
+  <version>0.1.9</version>
+</dependency>
+```
+
+Gradle Kotlin DSL では、同じ Maven Central のアーティファクトを追加します。
+
+```kotlin
+implementation("co.logbrew:logbrew-sdk:0.1.9")
+```
+
+Java 11 以降を使います。
+
+Spring Boot 3 と 4 のアプリケーションでは、アプリが所有する `LogBrewClient` Bean を公開できます。この Bean により、リクエスト、例外、HTTP クライアント、JDBC、キャッシュの連携を任意で有効にできます。
+
+Spring Kafka の取得は、`logbrew.kafka.enabled=true` で明示的に有効にした場合だけ動作します。アプリケーションにすでにある Spring Kafka の依存関係とクライアントの Bean を使います。
+
+リリース済みのパッケージは [Maven Central の Java SDK アーティファクト](https://central.sonatype.com/artifact/co.logbrew/logbrew-sdk/0.1.9)で確認できます。公開されているガイドでは、上限のある HTTP 送信、シャットダウン、ロギング、Spring の設定、Kafka の相関、プライバシーの制限を説明しています。
+
+### CMake での C++
+
+C++ SDK には C++17 と CMake 3.16 以降が必要です。CLI v0.1.39 以降は、ルートの `CMakeLists.txt` を検出します。ファイルを変更せずにこのセットアップのプランをプレビューするには、`logbrew setup --json` を実行します。
+
+```cmake
+include(FetchContent)
+FetchContent_Declare(
+  logbrew
+  GIT_REPOSITORY https://github.com/LogBrewCo/sdk.git
+  GIT_TAG cpp/logbrew-cpp/v0.2.3
+  GIT_SHALLOW TRUE
+  SOURCE_SUBDIR cpp/logbrew-cpp
+)
+FetchContent_MakeAvailable(logbrew)
+
+target_link_libraries(your_app PRIVATE LogBrew::LogBrew)
+```
+
+コアのターゲットは依存関係を持ちません。任意の libcurl トランスポートでバッチを送信するには、上の最後の `FetchContent_MakeAvailable` の呼び出しとターゲットのリンクを次のように置き換えます。
+
+```cmake
+set(LOGBREW_BUILD_HTTP_TRANSPORT ON CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(logbrew)
+target_link_libraries(your_app PRIVATE LogBrew::HttpTransport)
+```
+
+アプリケーションを設定します。次に、ビルドして、選んだ SDK のバージョンをテストします。
+
+```bash
+cmake -S . -B build &&
+cmake --build build
+```
+
+SDK のモノレポを取得できないビルドでは、[C++ 0.2.3 のリリース](https://github.com/LogBrewCo/sdk/releases/tag/cpp/logbrew-cpp/v0.2.3)にある `logbrew-cpp-0.2.3.tar.gz` を使います。展開したパッケージは `cmake --install` と `find_package(LogBrew 0.2.3 CONFIG REQUIRED)` に対応しています。パッケージのガイドでは、型付きのコンテキスト、課題の証拠、スパンイベント、メトリクス、アクション、HTTP 送信を説明しています。
+
+### JavaScript のソースマップ
+
+Vite のビルドでは、[JavaScript ソースマップ](/ja/guides/source-maps)の手順に従います。プラグイン、ビルド成果物キー、アップロードの確認、元のソースの位置を持つ新しい課題について説明しています。
+
+### Apple、Flask、React Native
+
+テレメトリには、Swift の `LogBrew` プロダクトを使います。`LogBrewCrash` は、Apple のクラッシュやハングを取得する場合だけ追加します。dSYM のアップロードとホスト型のシンボル化については、[Apple のクラッシュとハング](/ja/guides/apple-crashes-and-hangs)の手順に従います。
+
+Flask では、[Flask をセットアップする](/ja/guides/flask)の手順に従います。
+
+React Native と Expo では、[React Native](/ja/guides/react-native) の手順に従います。プロジェクトのキー、安全なテストログ、送信エラー、本番用のソースマップのための Expo Metro の設定を説明しています。
+
+## <span id="javascript-queue-tracing">JavaScript のキューのトレース</span>
+
+Node のキュー連携は、独立した npm パッケージです。LogBrew の基本の JavaScript パッケージ、連携パッケージ、アプリですでに使っているキューまたはブローカーのクライアントをインストールします。
+
+| キューまたはブローカー | インストール |
+| --- | --- |
+| BullMQ | `npm install @logbrew/sdk @logbrew/node @logbrew/bullmq bullmq` |
+| KafkaJS | `npm install @logbrew/sdk @logbrew/node @logbrew/kafkajs kafkajs` |
+| RabbitMQ / amqplib | `npm install @logbrew/sdk @logbrew/node @logbrew/amqplib amqplib` |
+| Amazon SQS | `npm install @logbrew/sdk @logbrew/node @logbrew/aws-sqs @aws-sdk/client-sqs` |
+
+これらのパッケージは、選んだキューの呼び出しについて、アプリが明示的に管理するトレースの相関に使います。LogBrew は、ブローカーへの接続を所有したり、キューを作成したりしません。デフォルトでは、すべてのクライアントにグローバルなパッチも適用しません。
+
+<Warning>
+  キューのペイロード、任意のメッセージヘッダー、ブローカーの URL、セッションの値やアカウントの Bearer トークンは、SDK の設定に入れないでください。LogBrew が発行した、プロジェクト単位のサーバー用の取り込み設定を使います。
+</Warning>
+
+## <span id="required-envelope-fields">ネイティブエンベロープを直接送信する</span>
+
+`POST /api/telemetry/ingest` は、公開されている LogBrew SDK が対応していないカスタムクライアントの場合だけ使います。公開 SDK は独自のバッチ形式を使います。このエンドポイントは、その形式を受け付けません。
+
+1つのネイティブエンベロープでは、1〜512件の項目を送信します。1つのエンベロープ内のすべての項目は、プロジェクト、サービス、リリース、環境、任意のトレースコンテキストを共有します。
+
+| フィールド | 必須 | 備考 |
+| --- | --- | --- |
+| `project_id` | はい | LogBrew プロジェクトの UUID。取り込みキーのプロジェクトと一致する必要があります。 |
+| `environment` | はい | デプロイ先の環境。64文字以下で、空白文字、`/`、`\` を含められません。`None` という値は拒否されます。 |
+| `release` | はい | コードバージョン。200文字以下で、`/`、`\`、タブ、改行を含められません。`.` や `..` は使えません。 |
+| `service_name` | はい | `checkout-api` のような論理的なサービス名。空にはできません。 |
+| `sdk_name` | はい | SDK またはカスタムクライアントの識別子。 |
+| `sdk_version` | はい | SDK またはカスタムクライアントのバージョン。 |
+| `items` | はい | 1〜512件の `log`、`trace_span`、`issue`、`action` の項目。 |
+| `trace_id` | いいえ | 関連するエンベロープの項目が共有するトレース ID。項目に `span_id` がある場合は必須です。 |
+
+### 項目のフィールド
+
+各項目には `type` と `data` オブジェクトがあります。ログの項目は `level` を使います。課題の項目は `severity` を使います。どちらも [重大度の値](/ja/concepts/telemetry#severity-values)にある値を受け付けます。
+
+| 項目のフィールド | 対象 | 備考 |
+| --- | --- | --- |
+| `id` | すべての項目 | 任意のクライアントイベント ID。1〜200文字で、エンベロープ内で一意にします。 |
+| `span_id` | `log`、`issue`、`action` | 任意。16文字の 16進数で、すべてゼロにはできません。エンベロープに `trace_id` が必要です。 |
+| `name` | `action` | 必須。UTF-8 で 64バイト以下。`$` で始めることはできません。先頭や末尾を空白文字にすることも、制御文字や見えない書式文字を含めることもできません。 |
+
+クライアントが再試行する可能性がある場合は、各項目に `id` を付けて送信します。受け付けられた項目が、同じ `id` と内容で再試行によりもう一度送信されても、LogBrew は再び保存しません。レスポンスでは、その項目は `already_accepted` に数えられます。
+
+### リクエストの例
+
+次の JSON を `telemetry-envelope.json` として保存します。例のプロジェクト ID は、取り込みキーのプロジェクト ID に置き換えます。タイムスタンプは、テストイベントの現在の UTC 時刻に設定します。サービスとリリースには自分の値を使います。
+
+```json telemetry-envelope.json
+{
+  "project_id": "11111111-1111-4111-8111-111111111111",
+  "environment": "production",
+  "release": "api@1.2.3",
+  "service_name": "checkout-api",
+  "sdk_name": "custom-native-client",
+  "sdk_version": "1.0.0",
+  "items": [
+    {
+      "type": "log",
+      "data": {
+        "id": "evt_example_log_0001",
+        "level": "warning",
+        "message": "checkout retry scheduled",
+        "source": "runtime",
+        "attributes": { "route": "/checkout" },
+        "occurred_at": "2026-06-01T12:00:00Z"
+      }
+    },
+    {
+      "type": "action",
+      "data": {
+        "id": "evt_example_action_0001",
+        "name": "checkout_failed",
+        "distinct_id": "user_123",
+        "session_id": "session_456",
+        "occurred_at": "2026-06-01T12:00:00Z",
+        "properties": { "cart_total": 4200 }
+      }
+    }
+  ]
+}
+```
+
+保護された設定を通じて、プロジェクト単位の取り込みの値を `LOGBREW_INGEST_BEARER` に読み込みます。この値を表示したり、アカウントの認証情報を使ったりしないでください。次のコマンドは、ファイルを1回送信します。curl 7.76.0 以降が必要です。
+
+```bash
+: "${LOGBREW_INGEST_BEARER:?load the project-scoped ingest key}" &&
+curl --fail-with-body --silent --show-error \
+  "https://api.logbrew.co/api/telemetry/ingest" \
+  -H "Authorization: Bearer $LOGBREW_INGEST_BEARER" \
+  -H "Content-Type: application/json" \
+  --data-binary @telemetry-envelope.json \
+  --write-out '\nHTTP %{http_code}\n'
+```
+
+HTTP ステータスと本文を確認します。`--fail-with-body` はエラーの本文を残し、HTTP エラーの場合に 0 以外の終了ステータスを返します。ネットワークの障害やタイムアウトからは、LogBrew がリクエストを受け付けたかどうかはわかりません。同じファイルをもう一度送信するのは、項目に `id` の値がある場合だけにしてください。`id` の値がないと、2回目の送信で項目が2回保存されることがあります。
+
+### レスポンス
+
+リクエストが成功すると、`200` とともに、ストリームごとの新しい項目の件数が返ります。`already_accepted` は、以前のリクエストですでに届いていた項目の件数です。
+
+```json
+{
+  "issues": 0,
+  "logs": 1,
+  "trace_spans": 0,
+  "actions": 1,
+  "already_accepted": 0,
+  "next": "review accepted telemetry in logs, issues, traces, actions, or live feed",
+  "next_action": {
+    "code": "review_ingested_telemetry",
+    "target": "telemetry_reads"
+  }
+}
+```
+
+### エラー
+
+取り込みキーが無効または無効化済みの場合は、`401` が返ります。別のプロジェクトのキーでも `401` が返ります。
+
+```json
+{
+  "error": "Invalid ingest key",
+  "code": "ingest_key_invalid",
+  "next": "create a project-scoped ingest key, then retry ingestion with that key",
+  "next_action": {
+    "code": "configure_ingest_key",
+    "target": "project_ingest_key"
+  }
+}
+```
+
+プロジェクト単位の取り込みキーを使います。アカウントの認証情報で置き換えないでください。ビルド成果物キーではテレメトリを送信できません。
+
+フィールドのルールに違反するエンベロープには、`422` とコード `validation_failed` が返ります。`error` フィールドは、違反したルールを示します。`next` フィールドは、リクエストの直し方を示します。たとえば、`"items": []` では次の結果が返ります。
+
+```json
+{
+  "error": "native telemetry envelope cannot be empty",
+  "code": "validation_failed",
+  "next": "send at least one native telemetry item",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+イベントがないときは、エンベロープを送信しないでください。項目が 512件を超えるエンベロープには、`422` とエラー `native telemetry envelope exceeds the item limit` が返ります。512件以下のバッチに分けてください。各バッチで、プロジェクトと共通のコンテキストを同じにします。
+
+使用量の上限、レート制限、サービスの障害については、返された `code` を [API エラー](/ja/reference/api-errors)で確認し、その指示に従います。
+
+<Tip>
+  リリースと環境は SDK のセットアップで設定します。処理ごとにトレースコンテキストを作成するか、引き継ぎます。関係のない処理に同じトレース ID を使い回さないでください。
+</Tip>

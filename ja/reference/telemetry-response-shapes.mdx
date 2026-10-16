@@ -1,0 +1,4464 @@
+---
+title: "API のレスポンス形式と JSON レスポンスの例"
+sidebarTitle: "レスポンス形式"
+description: "テレメトリの一覧、カーソルのページ、ライブイベント、変更操作、成功と失敗の各状態について、LogBrew API のレスポンスの読み方を説明します。"
+---
+
+このページでは、[テレメトリ API](/ja/reference/telemetry-api) のレスポンスの種類ごとに例を1つずつ示します。値はすべて架空のものです。エラーコードと対処方法は、[API エラー](/ja/reference/api-errors)を参照してください。
+
+## レスポンスを読む
+
+どのレスポンスも、次の順に読みます。
+
+1. HTTP ステータスを確認します。
+2. 本文が、そのルートが定める形になっていることを確認します。
+3. 各 `project_id` が、リクエストしたプロジェクトの範囲内にあることを確認します。
+4. 正規の列挙値と識別子は、変更せずにそのまま使います。
+5. `next_action` には、クライアントがその `code` と `target` に対応している場合にだけ従います。
+6. `null`、省略されたフィールド、空のリストは、それぞれ別の状態として扱います。
+
+`200 OK` でも、空のリストを返すことがあります。ログの一覧が空なら、リクエストに一致したログがなかったという意味です。課題、トレース、アクションも空だという意味ではありません。タイムスタンプが近いという理由だけで、シグナル同士を結び付けないでください。トレースをたどるのは、レスポンスにそのトレースの `trace_id` が正確に含まれている場合だけにしてください。
+
+`404` と空のリストは、別の結果です。一覧のルートは、一致するレコードがないと `[]` を返します。詳細のルートは、読み取れるレコードが見つからないと、`code: not_found` 付きの `404` を返します。どちらの結果も、取り込みが失敗したことの証明にはなりません。
+
+## 送信する値
+
+レスポンスが役に立つかどうかは、送信するテレメトリ次第です。どのエンベロープや SDK の設定でも、次の値を送信してください。
+
+- `release` と `environment`。
+- サービス、アクション、メトリクスの、変わらない名前。
+- ログ、スパン、アクション、課題が同じリクエストに属する場合は、トレースコンテキスト。
+- 正規の重大度の値：`info`、`warning`、`error`、`critical`。
+- デバッグに役立つ属性。ただし、シークレットや不要な個人データは含めないでください。
+
+[SDK 連携](/ja/guides/sdk-ingestion)と[取得するデータを管理する](/ja/guides/safe-capture)を参照してください。
+
+## 取り込みのレスポンス
+
+公開 SDK は、`POST /v1/events` のレスポンスを自動で読み取ります。アプリケーションのコードで処理する必要はありません。
+
+### SDK バッチのレスポンス
+
+SDK のバッチが成功すると、ストリームごとの受け付け件数とともに `200 OK` が返ります。
+
+```json
+{
+  "issues": 1,
+  "logs": 2,
+  "trace_spans": 3,
+  "actions": 1,
+  "metrics": 1,
+  "already_accepted": 0,
+  "context_updated": true,
+  "next": "review accepted telemetry in logs, issues, traces, actions, metrics, or live feed",
+  "next_action": {
+    "code": "review_ingested_telemetry",
+    "target": "telemetry_reads"
+  }
+}
+```
+
+| フィールド | 意味 |
+| --- | --- |
+| `issues`, `logs`, `trace_spans`, `actions`, `metrics` | このバッチのうち、LogBrew が受け付けたイベント。 |
+| `already_accepted` | 同じ ID のイベントを LogBrew が以前に受け付けていたもの。LogBrew はこれらを再び保存しません。 |
+| `context_updated` | バッチがリリースまたは環境のコンテキストを更新した場合は `true`。 |
+
+件数は、このバッチの分だけです。LogBrew がすでに受け付けたバッチを再試行すると、各ストリームは `0` を返し、`already_accepted` にイベントの件数が入ります。再試行するときは、元のイベント ID をそのまま使ってください。
+
+### ネイティブエンベロープのレスポンス
+
+`POST /api/telemetry/ingest` は、ストリームごとの受け付けた項目の件数とともに `200 OK` を返します。
+
+```json
+{
+  "issues": 0,
+  "logs": 1,
+  "trace_spans": 0,
+  "actions": 1,
+  "already_accepted": 0,
+  "next": "review accepted telemetry in logs, issues, traces, actions, or live feed",
+  "next_action": {
+    "code": "review_ingested_telemetry",
+    "target": "telemetry_reads"
+  }
+}
+```
+
+ネイティブのレスポンスには、`metrics` フィールドも `context_updated` フィールドもありません。これらを追加しないでください。`already_accepted` は、そのプロジェクトで同じ `id` の項目を LogBrew が以前に受け付けていた件数です。[ネイティブエンベロープを直接送信する方法](/ja/guides/sdk-ingestion#required-envelope-fields)を参照してください。
+
+### 取り込みのエラー
+
+`code: ingest_key_invalid` 付きの `401` は、取り込み用の Bearer トークンが無効化されたか、期限切れか、そのプロジェクトで有効でないことを示します。`POST /v1/events` では、Bearer トークンがない場合や、取り込みキーではない Bearer トークンを使った場合に、`code: unauthorized` 付きの `401` が返ります。現在の、プロジェクト単位の取り込み用 Bearer トークンを使ってください。アカウントの Bearer トークンで再試行しないでください。
+
+SDK のバッチが拒否されると、`code: validation_failed` 付きの `422` が返ります。
+
+```json
+{
+  "error": "SDK event ids must be unique within a batch",
+  "code": "validation_failed",
+  "next": "send release/environment context plus issue, log, span, action, or metric events from a current LogBrew SDK",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+`error` の値には、ほかに `SDK event batch requires at least one event` と `SDK event type is not supported by this ingest route` があります。SDK のバージョンとトランスポートの設定を確認してください。空のバッチは送信しないでください。検証を通すためだけに、イベントの種類や ID を変更しないでください。
+
+`POST` 以外のメソッドのリクエストには、`code: method_not_allowed` 付きの `405` が返ります。読み取れない JSON 本文には、`code: invalid_json` が返ります。
+
+## テレメトリ一覧のレスポンス形式
+
+一覧のルートは、デフォルトでは JSON 配列をそのまま返します。成功して結果が空の場合は `[]` です。
+
+`pagination=cursor` を指定すると、ルートはエンベロープを返します。コレクションのキーはシグナルに対応します。
+
+| ルート | コレクションのキー |
+| --- | --- |
+| `/api/logs` | `logs` |
+| `/api/telemetry/issues` | `issues` |
+| `/api/telemetry/issues/{issue_id}/events` | `events`。最上位に `issue_id` も入ります |
+| `/api/telemetry/actions` | `actions` |
+| `/api/telemetry/metrics` | `metrics` |
+| `/api/telemetry/releases` | `releases` |
+| `/api/telemetry/traces` | `traces`。最上位に `naming_quality` も入ります |
+
+`next_cursor` は、続きを読むためのフィールドを持つオブジェクトです。最後のページでは `null` になります。行は新しい順に並びます。[カーソルベースのページネーション](/ja/reference/telemetry-api-filters#cursor-pagination)を参照してください。
+
+### <span id="log-response">ログのレスポンス</span>
+
+`limit=1` を指定した、ログのカーソルページの例です。
+
+```json
+{
+  "logs": [
+    {
+      "id": "150d1288-bec2-49ec-a036-3f7ac55f1b2d",
+      "project_id": "123e4567-e89b-12d3-a456-426614174000",
+      "level": "warning",
+      "severity": "warning",
+      "triage": {
+        "effective_severity": "warning",
+        "ignored": false,
+        "rule_applied": false
+      },
+      "source": "runtime",
+      "message": "checkout retry scheduled",
+      "attributes": { "route": "/checkout" },
+      "occurred_at": "2026-06-01T12:00:00Z",
+      "environment": "production",
+      "release": "api@1.2.3",
+      "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+      "span_id": "00f067aa0ba902b7",
+      "service_name": "checkout-api",
+      "sdk_name": "@logbrew/node",
+      "sdk_version": "0.1.8",
+      "next_action": {
+        "code": "inspect_trace",
+        "target": "trace_summary"
+      }
+    }
+  ],
+  "next_cursor": {
+    "time": "2026-06-01T12:00:00Z",
+    "id": "150d1288-bec2-49ec-a036-3f7ac55f1b2d"
+  }
+}
+```
+
+ログには、互換性のための `level` と、表示用の `severity` が含まれます。どちらにも正規の値が入ります。`triage` には、重大度ルールを適用した結果が入ります。[重大度ルールのレスポンス](#severity-rule-responses)を参照してください。
+
+ログにトレースへのリンクがない場合、`trace_id` と `span_id` は `null` です。このとき `next_action` は `inspect_related_logs` で、ターゲットは `telemetry_logs` です。ログ、課題、アクションは、同じ2組の `next_action` を使います。
+
+`GET /api/logs/{log_id}` は、1件のログを同じ形で返します。
+
+### <span id="issue-response">課題のレスポンス</span>
+
+`GET /api/telemetry/issues/{issue_id}` は、グループ化された課題を1件返します。一覧も同じオブジェクトを返します。この例では、デフォルトのレスポンスバージョン1を使います。
+
+```json
+{
+  "id": "9b2b4b3a-bd4e-4f85-a0f6-48118f037c17",
+  "project_id": "123e4567-e89b-12d3-a456-426614174000",
+  "fingerprint": "payment-error",
+  "severity": "error",
+  "triage": {
+    "effective_severity": "error",
+    "ignored": false,
+    "rule_applied": false
+  },
+  "title": "PaymentError",
+  "message": "payment provider timed out",
+  "stack_trace": null,
+  "attributes": {},
+  "environment": "production",
+  "release": "checkout@1.2.3",
+  "service_name": "checkout-api",
+  "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+  "span_id": "00f067aa0ba902b7",
+  "next_action": {
+    "code": "inspect_trace",
+    "target": "trace_summary"
+  },
+  "status": "unresolved",
+  "occurrence_count": 2,
+  "first_seen_at": "2026-07-13T07:00:00Z",
+  "last_seen_at": "2026-07-13T08:00:00Z"
+}
+```
+
+バージョン1では、`status` は `unresolved`、`resolved`、`ignored` のいずれかです。アーカイブ済みの課題では、`triage.ignored` が `true` になります。`next_action` の組み合わせと、それに続けて行う読み取りについては、[課題を調査する](/ja/guides/investigate-an-issue)を参照してください。
+
+`first_seen_at` と `last_seen_at` は、最初の発生事象と最新の発生事象の時刻です。ステータスが変わっても、これらは変わりません。
+
+一部のフィールドは、LogBrew がそのデータを持っている場合にだけ含まれます。
+
+| フィールド | 含まれる条件 |
+| --- | --- |
+| `span_id` | 課題にスパンへのリンクがある場合。ない場合、このフィールドは省略されます。 |
+| `diagnostics` | 最新の発生事象に、例外の型または直前の手順がある場合。[課題の発生事象の履歴](#issue-occurrence-history)を参照してください。 |
+| `symbolication` | `GET /api/telemetry/issues/{issue_id}` だけで、課題にリリースのビルド成果物の識別情報がある場合。[JavaScript ソースマップ](/ja/guides/source-maps)を参照してください。 |
+
+`symbolication.status` は、`resolved`、`invalid_metadata`、`artifact_not_found`、`source_not_resolved`、`unavailable` のいずれかです。一覧、ステータスの変更、ルールの変更では、`symbolication` は返りません。
+
+`response_version=2` を指定すると、課題は同じフィールドを持ち、次の点が変わります。
+
+| フィールド | バージョン2の値 |
+| --- | --- |
+| `status` | `unresolved`、`resolved`、`archived` のいずれか。バージョン1では、`archived` は `ignored` と表示されます。 |
+| `priority` | `high`、`medium`、`low` のいずれか。 |
+| `priority_source` | 人が優先度を設定した場合は `manual`。優先度が実際に適用された重大度に従う場合は `derived`。 |
+
+```json
+{
+  "id": "9b2b4b3a-bd4e-4f85-a0f6-48118f037c17",
+  "status": "archived",
+  "severity": "error",
+  "priority": "low",
+  "priority_source": "manual"
+}
+```
+
+この例は、一部のフィールドだけを示しています。導出された優先度は、`error` と `critical` では `high`、`warning` では `medium`、`info` では `low` になります。この優先度は `triage.effective_severity` に基づくため、課題の重大度ルールで変わることがあります。
+
+`response_version=3` を指定すると、課題はバージョン2のすべてのフィールドに加えて、`assignee` を持ちます。課題に担当者がいない場合、`assignee` は `null` です。
+
+```json
+{
+  "id": "9b2b4b3a-bd4e-4f85-a0f6-48118f037c17",
+  "status": "unresolved",
+  "priority": "high",
+  "priority_source": "derived",
+  "assignee": {
+    "user_id": "5d6e7f80-1a2b-4c3d-8e4f-5a6b7c8d9e0f",
+    "name": "Ada Example",
+    "email": "ada@example.com"
+  }
+}
+```
+
+| フィールド | 意味 |
+| --- | --- |
+| `assignee.user_id` | 担当者のユーザー ID。フィルターや変更では、これを `assignee` として送信します。 |
+| `assignee.name` | 担当者の名前。アカウントに名前がない場合は `null`。 |
+| `assignee.email` | 担当者のメールアドレス。 |
+
+割り当てられたメンバーがプロジェクトを読み取れなくなると、その課題は担当者なしとして表示されます。CLI はバージョン3をリクエストします。
+
+それ以外の `response_version` では、`code: validation_failed` 付きの `422` が返ります。カーソルページでは、`issues` 内のすべての課題に同じバージョンが使われます。
+
+### <span id="assignee-list-response">担当者の一覧のレスポンス</span>
+
+`GET /api/telemetry/issues/assignees?project_id=<project_id>` は、そのプロジェクトで課題を割り当てられるすべてのアカウントを返します。
+
+```json
+{
+  "project_id": "123e4567-e89b-12d3-a456-426614174000",
+  "assignees": [
+    {
+      "user_id": "5d6e7f80-1a2b-4c3d-8e4f-5a6b7c8d9e0f",
+      "name": "Ada Example",
+      "email": "ada@example.com"
+    },
+    {
+      "user_id": "0f1e2d3c-4b5a-4968-8776-655443322110",
+      "name": null,
+      "email": "sam@example.com"
+    }
+  ]
+}
+```
+
+アカウントがプロジェクトを読み取れない場合、このルートは `code: not_found` 付きの `404` を返します。
+
+### <span id="action-response">アクションのレスポンス</span>
+
+```json
+{
+  "id": "d8ee3a6f-3918-440b-96cb-14166419399a",
+  "project_id": "123e4567-e89b-12d3-a456-426614174000",
+  "name": "checkout_failed",
+  "distinct_id": "user_123",
+  "session_id": "session_456",
+  "occurred_at": "2026-06-01T12:00:00Z",
+  "properties": { "surface": "checkout" },
+  "environment": "production",
+  "release": "checkout@1.2.3",
+  "service_name": "checkout-api",
+  "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+  "span_id": "00f067aa0ba902b7",
+  "next_action": {
+    "code": "inspect_trace",
+    "target": "trace_summary"
+  }
+}
+```
+
+`distinct_id` は、1人のアクターまたは1つのセッションを追跡します。`distinct_id` と `session_id` は、不透明な識別子として扱ってください。`session_id` と `trace_id` は、値がない場合は `null` です。`span_id` は、値がない場合は省略されます。アクションには重大度がありません。[プロダクトイベントの取得](/ja/guides/product-events)を参照してください。
+
+### メトリクスのレスポンス
+
+```json
+{
+  "id": "6f1c2d3e-4a5b-4c6d-8e7f-901234567890",
+  "event_id": "metric-1",
+  "project_id": "123e4567-e89b-12d3-a456-426614174000",
+  "name": "http.server.duration",
+  "kind": "histogram",
+  "value": 12.5,
+  "unit": "ms",
+  "temporality": "delta",
+  "attributes": {},
+  "occurred_at": "2026-07-13T08:00:00Z",
+  "environment": "production",
+  "release": "checkout@1.2.3",
+  "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+  "span_id": "00f067aa0ba902b7",
+  "service_name": "checkout-api",
+  "sdk_name": "@logbrew/node",
+  "sdk_version": "0.1.8"
+}
+```
+
+各項目は1つのサンプルです。サンプルの数を、イベント数やユーザー数として使わないでください。`unit`、`temporality`、`trace_id`、`span_id` は、値がない場合は `null` です。`null` はゼロではありません。
+
+### リリースのレスポンス
+
+```json
+{
+  "project_id": "123e4567-e89b-12d3-a456-426614174000",
+  "release": "api@1.2.3",
+  "environment": "production",
+  "service_name": "checkout-api",
+  "issue_count": 3,
+  "log_count": 824,
+  "trace_span_count": 421,
+  "action_count": 19,
+  "metric_count": 87,
+  "first_seen_at": "2026-06-01T12:00:00Z",
+  "last_seen_at": "2026-06-01T12:15:00Z",
+  "trace_health": {
+    "status": "errors_observed",
+    "trace_count": 42,
+    "error_trace_count": 3,
+    "error_rate_basis_points": 714
+  },
+  "next_action": {
+    "code": "inspect_release_issues",
+    "target": "telemetry_issues"
+  }
+}
+```
+
+1行は、1つのプロジェクト、リリース、環境、サービスの組み合わせに対応します。その件数は、その行だけを表します。
+
+`trace_health.status` は、行にトレースがない場合は `unknown`、それ以外は `no_errors_observed` または `errors_observed` です。`error_rate_basis_points` は、エラーのスパンを含むトレースの割合で、`0` から `10000` までの値です。すべてのリクエストのエラー率ではありません。
+
+`next_action` は、データがある最初のシグナルの種類を、次の順で指します。
+
+| `code` | `target` |
+| --- | --- |
+| `inspect_release_issues` | `telemetry_issues` |
+| `inspect_release_traces` | `trace_explorer` |
+| `inspect_release_logs` | `telemetry_logs` |
+| `inspect_release_actions` | `telemetry_actions` |
+| `inspect_release_metrics` | `telemetry_metrics` |
+| `review_release_telemetry` | `telemetry_reads` |
+
+[リリース](/ja/concepts/releases)を参照してください。
+
+### トレースの検索のレスポンス
+
+`GET /api/telemetry/traces?pagination=cursor` は、トレースごとに1行を返し、返したページについての `naming_quality` の集計も返します。
+
+```json
+{
+  "traces": [
+    {
+      "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+      "project_ids": ["123e4567-e89b-12d3-a456-426614174000"],
+      "root_span_name": "POST /checkout",
+      "root_service_name": "checkout-api",
+      "root_operation": "http.server",
+      "span_count": 3,
+      "error_span_count": 1,
+      "service_count": 1,
+      "started_at": "2026-06-01T12:00:00Z",
+      "duration_ms": 45,
+      "services": ["checkout-api"],
+      "releases": ["checkout@1.2.3"],
+      "environments": ["production"],
+      "next_action": {
+        "code": "inspect_trace",
+        "target": "trace_summary"
+      }
+    }
+  ],
+  "next_cursor": null,
+  "naming_quality": {
+    "evaluated_traces": 1,
+    "meaningful_name_traces": 1,
+    "generic_name_traces": 0,
+    "unmatched_route_traces": 0,
+    "generic_operation_traces": 0,
+    "truncated": false,
+    "next_action": null
+  }
+}
+```
+
+`naming_quality` は、返したページだけを対象にします。アカウント全体のスコアではありません。`truncated: true` は、次のページがあることを示します。ページに汎用的な名前、一致しないルート、汎用的な処理の種類がある場合、`next_action` は `improve_trace_naming` で、ターゲットは `sdk_configuration` です。`pagination=cursor` を指定しない場合、このルートはトレースの配列をそのまま返し、`naming_quality` は返しません。
+
+`next_cursor` には `time` と `trace_id` が入ります。これらを `cursor_time` と `cursor_trace_id` として送信します。
+
+`GET /api/telemetry/traces/{trace_id}` は、1つのトレースのスパンを返します。`GET /api/telemetry/traces/{trace_id}/summary` は、ルートスパン、エラーのスパン、サービス、所要時間、最も遅い経路を返します。スパンの生の属性は返しません。概要の `404` は、指定した範囲全体に一致するトレースがなかったことを示します。フィルターを外して再試行しないでください。[トレースのスパンと概要のレスポンス](#trace-spans-and-summary-responses)を参照してください。
+
+### 空の一覧と存在しないレコード
+
+一覧の読み取りでは、一致するものがないことがあります。詳細の読み取りは、別の決まりに従います。
+
+| リクエスト | 成功 | 読み取れるレコードがない場合 |
+| --- | --- | --- |
+| `GET /api/logs/{log_id}` | 1件の[ログ](#log-response)とともに `200` | `code: not_found` 付きの `404` |
+| `GET /api/telemetry/issues/{issue_id}` | 1件の[課題](#issue-response)とともに `200` | `code: not_found` 付きの `404` |
+| `GET /api/telemetry/issues/{issue_id}/events` | 発生事象とともに `200` | 最初のページで `code: not_found` 付きの `404` |
+| `GET /api/telemetry/traces/{trace_id}` | スパンとともに `200` | `[]` とともに `200` |
+| `GET /api/telemetry/traces/{trace_id}/summary` | 1件の概要とともに `200` | `code: not_found` 付きの `404` |
+
+ログが存在しない場合は、次の `404` が返ります。
+
+```json
+{
+  "error": "log not found",
+  "code": "not_found",
+  "next": "check the resource id or filters and retry",
+  "next_action": {
+    "code": "check_resource",
+    "target": "resource"
+  }
+}
+```
+
+課題が存在しない場合は `"error": "issue not found"`、トレースの概要が存在しない場合は `"error": "trace not found"` が返ります。存在しない ID と、アカウントが読み取れない ID には、同じレスポンスが返ります。
+
+アカウントが読み取れない `project_id` を1つ指定した一覧は、空の一覧とともに `200` を返します。データがないと報告する前に、プロジェクト ID を確認してください。
+
+### 拒否されるプロジェクトの指定
+
+ログ、課題、アクション、メトリクス、リリース、トレースの一覧では、`project_id` で1つのプロジェクトを指定するか、`project_ids` で2〜50個のプロジェクトを指定できます。ログの属性カタログも、同じ指定方法を受け付けます。課題の発生事象の履歴は、これらを受け付けません。
+
+`project_id` と `project_ids` の両方を指定したリクエストには、`422` が返ります。
+
+```json
+{
+  "error": "project_id and project_ids are mutually exclusive",
+  "code": "validation_failed",
+  "next": "use project_id for one project, project_ids=uuid,uuid for two to fifty projects, or omit both for all readable projects",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+`project_ids` に無効な UUID や重複した ID が含まれる場合や、ID の数が2個未満または50個を超える場合も、`code: validation_failed` 付きの `422` が返ります。
+
+`project_ids` の中にアカウントが読み取れないプロジェクトが1つでもあると、リクエスト全体が `404` を返します。ほかのプロジェクトの結果を一部だけ返すことはありません。
+
+```json
+{
+  "error": "project selection not found",
+  "code": "not_found",
+  "next": "refresh readable projects and retry with only project IDs you can read",
+  "next_action": {
+    "code": "check_resource",
+    "target": "resource"
+  }
+}
+```
+
+空の一覧やゼロ件ではなく、このエラーを表示してください。プロジェクトの一覧を読み直してください。プロジェクトを黙って除外したり、すべてのプロジェクトに広げて再試行したりしないでください。MCP の接続のような委任された認証情報では、その許可の範囲外のプロジェクトに対して `code: forbidden` 付きの `403` が返ります。[プロジェクトの範囲](/ja/reference/telemetry-api-filters#project-scope)を参照してください。
+
+### <span id="cursor-errors">カーソルのエラー</span>
+
+ログ、課題、アクション、メトリクス、課題の発生事象では、`cursor_time` と `cursor_id` を使います。拒否されたカーソルには、`code: validation_failed` 付きの `422` が返ります。これらのエラーは、一覧が空だという意味ではありません。
+
+| リクエスト | `error` |
+| --- | --- |
+| `pagination=cursor` で、2つのカーソルフィールドのうち1つだけを送信した | `cursor_time and cursor_id must be sent together` |
+| `cursor_time` が RFC3339 形式のタイムスタンプではない | `cursor_time must be an RFC3339 timestamp` |
+| `pagination=cursor` なしでカーソルフィールドを送信した、または `pagination` に別の値を指定した | `pagination must be cursor when cursor pagination is requested` |
+
+例：
+
+```json
+{
+  "error": "cursor_time and cursor_id must be sent together",
+  "code": "validation_failed",
+  "next": "send pagination=cursor alone for the first page, then send cursor_time and cursor_id together from next_cursor",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+前のページの `next_cursor` を、そのまま全部コピーしてください。`cursor_time` を現在時刻に置き換えないでください。カーソルを失った場合は、`pagination=cursor` と元のフィルターで最初から読み直してください。不明なクエリキーや、型の違う値を送信すると、`"error": "invalid query parameters"` 付きの `422` が返ります。
+
+### リリースのカーソルのレスポンス
+
+リリースのカーソルには5つのフィールドがあります。リクエストが成功して一致するものがない場合は、`200` が返ります。
+
+```json
+{
+  "releases": [],
+  "next_cursor": null
+}
+```
+
+`next_cursor` が `null` でない場合は、次のリクエストで5つの値をすべて送信します。
+
+| `next_cursor` のフィールド | クエリパラメーター |
+| --- | --- |
+| `time` | `cursor_time` |
+| `project_id` | `cursor_project_id` |
+| `release` | `cursor_release` |
+| `environment` | `cursor_environment` |
+| `service_name` | `cursor_service_name` |
+
+`cursor_project_id` は位置を示す値です。`project_id` や `project_ids` の代わりにはなりません。元のプロジェクトとフィルターのパラメーターは、そのまま使ってください。それぞれの値は URL エンコードしてください。
+
+`pagination=cursor` で、カーソルの一部だけを送信した場合や、リリース、環境、サービスの値が空の場合は、`"error": "all release cursor fields must be sent together"` 付きの `422` が返ります。無効な `cursor_time` と、`pagination=cursor` がない場合には、[ほかのカーソル](#cursor-errors)と同じエラーが返ります。
+
+### トレースの検索のエラー
+
+これらのエラーは `GET /api/telemetry/traces` に適用されます。どれも `code: validation_failed` 付きの `422` を返します。拒否されたリクエストは、空の結果ではありません。
+
+| リクエスト | `error` |
+| --- | --- |
+| `status` が `error` でも `ok` でもない | `trace status must be error or ok` |
+| `min_duration_ms` が `0` 未満 | `minimum trace duration must not be negative` |
+| カーソルフィールドが1つだけ、または `cursor_trace_id` が空 | `cursor_time and cursor_trace_id must be sent together` |
+| `cursor_time` が RFC3339 形式のタイムスタンプではない | `cursor_time must be an RFC3339 timestamp` |
+| `pagination=cursor` なしでカーソルフィールドを送信した | `pagination must be cursor when cursor pagination is requested` |
+
+トレースの両方の状態を含めるには、`status` を省略します。次のページを読むには、`next_cursor.time` を `cursor_time` に、`next_cursor.trace_id` を `cursor_trace_id` にコピーします。トレースのページでは `cursor_id` を送信しないでください。[トレースのフィルター](/ja/reference/telemetry-api-filters#trace-filters)を参照してください。
+
+### <span id="issue-occurrence-history">課題の発生事象の履歴</span>
+
+`GET /api/telemetry/issues/{issue_id}/events` は、グループ化された1つの課題の発生事象を読み取ります。アカウントの Bearer トークンと、グループ化された課題の ID を使ってください。このルートが受け付けるのは、`pagination`、`cursor_time`、`cursor_id`、`limit` だけです。プロジェクト、時刻、リリース、環境、重大度のフィルターは受け付けません。
+
+```bash
+curl --get "https://api.logbrew.co/api/telemetry/issues/$ISSUE_ID/events" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "pagination=cursor" \
+  --data-urlencode "limit=1"
+```
+
+発生事象が1件あり、続きを読むためのカーソルがある、最初のページの例です。
+
+```json
+{
+  "issue_id": "d1776d70-763c-47b5-a8f1-76f593221e2b",
+  "events": [
+    {
+      "id": "db619770-1f7c-4bd5-8310-9f171df8af47",
+      "issue_id": "d1776d70-763c-47b5-a8f1-76f593221e2b",
+      "project_id": "123e4567-e89b-12d3-a456-426614174000",
+      "severity": "error",
+      "title": "Checkout failed",
+      "message": "Checkout could not complete",
+      "stack_trace": null,
+      "attributes": {
+        "exception": {
+          "type": "CheckoutError",
+          "mechanism": { "type": "javascript.error", "handled": false }
+        },
+        "breadcrumbs": [
+          {
+            "timestamp": "2026-06-01T11:54:59Z",
+            "category": "checkout",
+            "message": "Checkout started"
+          }
+        ]
+      },
+      "diagnostics": {
+        "schema_version": 1,
+        "exception": {
+          "type": "CheckoutError",
+          "mechanism": { "type": "javascript.error", "handled": false }
+        },
+        "breadcrumbs": [
+          {
+            "timestamp": "2026-06-01T11:54:59Z",
+            "category": "checkout",
+            "message": "Checkout started"
+          }
+        ],
+        "breadcrumbs_truncated": false
+      },
+      "environment": "production",
+      "release": "api@1.2.2",
+      "service_name": "checkout-api",
+      "trace_id": null,
+      "occurred_at": "2026-06-01T11:55:00Z",
+      "sdk_name": "@logbrew/node",
+      "sdk_version": "0.1.8"
+    }
+  ],
+  "next_cursor": {
+    "time": "2026-06-01T11:55:00Z",
+    "id": "db619770-1f7c-4bd5-8310-9f171df8af47"
+  }
+}
+```
+
+| フィールド | 意味 |
+| --- | --- |
+| `issue_id` | 発生事象が属する、グループ化された課題。 |
+| `events[].id` | 1件の発生事象の ID。[その発生事象を選ぶ](/ja/guides/investigate-an-issue#select-a-different-occurrence)ときに使います。 |
+| `events[].occurred_at` | その発生事象がアプリケーションで起きた時刻。 |
+| `events[].severity` | その発生事象で取得された重大度。重大度ルールでは変わりません。 |
+| `events[].release`, `environment`, `service_name` | その発生事象と一緒に取得されたコンテキスト。 |
+
+発生事象は、グループの `last_seen_at` より古いことがあります。そのリリースやトレースを、グループ化された課題の値で置き換えないでください。一覧は、ステータス、トリアージ、優先度、発生事象の件数を返しません。
+
+`diagnostics.schema_version` は、診断情報のオブジェクトのバージョンです。発生事象にそのデータがない場合、レスポンスは `diagnostics` と `span_id` を省略します。`diagnostics` の中では、存在しない `exception` と空の `breadcrumbs` を省略します。`breadcrumbs_truncated` が `true` の場合、直前の手順の履歴の一部はレスポンスに含まれていません。
+
+`stack_trace` と `trace_id` は、値がない場合は `null` です。トレース ID がないことは、アプリケーションがトレースを送信していないことの証明にはなりません。取得されたメッセージと属性は、指示ではなくデータとして扱ってください。
+
+発生事象は新しい順に並びます。次のページを読むには、同じ課題 ID、`pagination=cursor`、`limit` と、`next_cursor` の `cursor_time` と `cursor_id` の値を送信します。カーソルの ID は発生事象の ID で、課題の ID ではありません。
+
+課題に読み取れる発生事象がない場合、最初のページは `code: not_found` 付きの `404` を返します。2ページ目以降では、空の最後のページが返ることがあります。
+
+```json
+{
+  "issue_id": "d1776d70-763c-47b5-a8f1-76f593221e2b",
+  "events": [],
+  "next_cursor": null
+}
+```
+
+カーソルを別の課題に使い回さないでください。このルートにも[カーソルのエラー](#cursor-errors)が適用されます。
+
+## <span id="trace-spans-and-summary-responses">トレースのスパンと概要のレスポンス</span>
+
+`GET /api/telemetry/traces/{trace_id}` は、1つのトレースのスパンを返します。`/summary` を付けると、同じスパンの概要を取得できます。どちらのルートも、受け付けるのは `project_id`、`release`、`environment` だけです。トレースの検索のカーソルは使いません。前の一覧のリクエストで指定したフィルターは引き継がれません。
+
+### <span id="span-list">スパンの一覧</span>
+
+スパンは開始時刻の順に並びます。
+
+```json
+[
+  {
+    "id": "ed5c960b-e728-4637-bcd4-a27dfb1a0e96",
+    "project_id": "123e4567-e89b-12d3-a456-426614174000",
+    "trace_id": "6e0c63257de34c92bdb0c8f1e9278a50",
+    "span_id": "b37ac82563149fed",
+    "parent_span_id": null,
+    "name": "POST /checkout",
+    "operation": "http.server",
+    "status": "error",
+    "started_at": "2026-06-01T12:00:00Z",
+    "duration_ms": 823,
+    "attributes": {},
+    "environment": "production",
+    "release": "api@1.2.3",
+    "service_name": "checkout-api",
+    "sdk_name": "@logbrew/node",
+    "sdk_version": "0.1.8"
+  },
+  {
+    "id": "0c2f7a51-4e8d-4b6a-9f13-2d7e5c8b1a90",
+    "project_id": "123e4567-e89b-12d3-a456-426614174000",
+    "trace_id": "6e0c63257de34c92bdb0c8f1e9278a50",
+    "span_id": "7a085853722dc6d2",
+    "parent_span_id": "b37ac82563149fed",
+    "name": "POST /v1/charges",
+    "operation": "http.client",
+    "status": "error",
+    "started_at": "2026-06-01T12:00:00.100Z",
+    "duration_ms": 640,
+    "attributes": {},
+    "environment": "production",
+    "release": "api@1.2.3",
+    "service_name": "checkout-api",
+    "sdk_name": "@logbrew/node",
+    "sdk_version": "0.1.8"
+  }
+]
+```
+
+`status: "error"` は、取得された処理の状態を表します。API の読み取りの結果ではありません。`parent_span_id: null` は、そのスパンに親の ID がないことを示します。`status: null` は、そのスパンがステータスを報告しなかったことを示します。
+
+### トレースの概要
+
+同じ2つのスパンの概要です。
+
+```json
+{
+  "trace_id": "6e0c63257de34c92bdb0c8f1e9278a50",
+  "span_count": 2,
+  "error_span_count": 2,
+  "service_count": 1,
+  "project_count": 1,
+  "started_at": "2026-06-01T12:00:00Z",
+  "duration_ms": 823,
+  "root_span": {
+    "span_id": "b37ac82563149fed",
+    "parent_span_id": null,
+    "name": "POST /checkout",
+    "operation": "http.server",
+    "status": "error",
+    "started_at": "2026-06-01T12:00:00Z",
+    "duration_ms": 823,
+    "service_name": "checkout-api"
+  },
+  "slowest_child_span": {
+    "span_id": "7a085853722dc6d2",
+    "parent_span_id": "b37ac82563149fed",
+    "name": "POST /v1/charges",
+    "operation": "http.client",
+    "status": "error",
+    "started_at": "2026-06-01T12:00:00.100Z",
+    "duration_ms": 640,
+    "service_name": "checkout-api"
+  },
+  "slowest_path": [
+    {
+      "span_id": "b37ac82563149fed",
+      "parent_span_id": null,
+      "name": "POST /checkout",
+      "operation": "http.server",
+      "status": "error",
+      "started_at": "2026-06-01T12:00:00Z",
+      "duration_ms": 823,
+      "service_name": "checkout-api"
+    },
+    {
+      "span_id": "7a085853722dc6d2",
+      "parent_span_id": "b37ac82563149fed",
+      "name": "POST /v1/charges",
+      "operation": "http.client",
+      "status": "error",
+      "started_at": "2026-06-01T12:00:00.100Z",
+      "duration_ms": 640,
+      "service_name": "checkout-api"
+    }
+  ],
+  "error_spans": [
+    {
+      "span_id": "b37ac82563149fed",
+      "parent_span_id": null,
+      "name": "POST /checkout",
+      "operation": "http.server",
+      "status": "error",
+      "started_at": "2026-06-01T12:00:00Z",
+      "duration_ms": 823,
+      "service_name": "checkout-api"
+    },
+    {
+      "span_id": "7a085853722dc6d2",
+      "parent_span_id": "b37ac82563149fed",
+      "name": "POST /v1/charges",
+      "operation": "http.client",
+      "status": "error",
+      "started_at": "2026-06-01T12:00:00.100Z",
+      "duration_ms": 640,
+      "service_name": "checkout-api"
+    }
+  ],
+  "services": [
+    {
+      "service_name": "checkout-api",
+      "span_count": 2,
+      "error_span_count": 2,
+      "max_duration_ms": 823
+    }
+  ],
+  "releases": ["api@1.2.3"],
+  "environments": ["production"]
+}
+```
+
+| フィールド | 意味 |
+| --- | --- |
+| `duration_ms` | 最も早いスパンの開始から、最も遅いスパンの終了までの時間。スパンの所要時間の合計ではありません。 |
+| `root_span` | 親がトレース内にないスパンのうち、最も早いもの。調査の出発点であり、原因と証明されたものではありません。 |
+| `slowest_child_span` | 親の ID を持つスパンのうち、最も長いもの。ない場合は `null`。 |
+| `slowest_path` | ルートスパンから `slowest_child_span` までの、わかっている親子のつながり。`slowest_child_span` が `null` の場合は `[]`。 |
+| `error_spans` | エラーのスパンのうち、長いものから最大5件。`error_span_count` はこれより大きいことがあります。 |
+
+どちらのルートも、カーソルや省略を示すフィールドを返しません。レスポンスに含まれない `truncated` の値を追加しないでください。
+
+### 一致するスパンがない場合
+
+トレース ID と範囲に一致するスパンがない場合、スパンの一覧は `[]` とともに `200` を返します。概要は、`"error": "trace not found"` と `code: not_found` 付きの `404` を返します。トレース ID と範囲を確認してください。結果を表示させるためにフィルターを外さないでください。どちらの結果も、アプリケーションがテレメトリを送信しなかったことの証明にはなりません。
+
+## <span id="live-event-response-format">ライブイベントのレスポンス形式</span>
+
+ライブフィードは新しいイベントを送信します。接続が切れている間にクライアントが受け取れなかったイベントは、再送しません。既存のレコードを読むには、一覧のルートを使ってください。
+
+### チケットを作成する
+
+アカウントの Bearer トークンを付けて、`POST /api/feed/ticket` を送信します。リクエストに本文はありません。
+
+```bash
+curl --request POST "https://api.logbrew.co/api/feed/ticket" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER"
+```
+
+`200 OK` のレスポンスでは、`ticket` フィールドにチケットが入ります。
+
+```json
+{
+  "ticket": "<feed-ticket>",
+  "expires_in_seconds": 60,
+  "next": "connect with GET /api/feed/live?ticket=<ticket> before the ticket expires",
+  "next_action": {
+    "code": "connect_live_feed",
+    "target": "live_feed"
+  }
+}
+```
+
+チケットは有効期間の短い認証情報です。ログに記録したり、エージェントのプロンプトに入れたりしないでください。`expires_in_seconds` が過ぎる前に接続を開いてください。この有効期限は、接続を開始できる期限です。接続を開いていられる時間ではありません。
+
+`401` は、アカウントのサインインが有効でないことを示します。チケットをリクエストする前に、もう一度サインインしてください。`POST` 以外のメソッドには、`code: method_not_allowed` 付きの `405` が返ります。
+
+### 接続を開く
+
+WebSocket クライアントを `wss://api.logbrew.co/api/feed/live?ticket=<feed-ticket>` に接続します。チケットは URL エンコードしてください。アカウントの Bearer トークンや取り込み用の Bearer トークンを URL に入れないでください。`401` は、チケットまたはアカウントのサインインが有効でないことを示します。もう一度サインインしてから、新しいチケットを作成してください。
+
+| レスポンス | 原因 | 次の手順 |
+| --- | --- | --- |
+| `"error": "feed ticket is required"` 付きの `422` | クエリの `ticket` の値がないか、空です。 | チケットを作成し、それを使って接続します。 |
+| `code: unauthorized` 付きの `401` | チケットが期限切れか、有効ではありません。 | 新しいチケットを作成します。同じチケットで再試行しないでください。 |
+| `code: invalid_websocket_upgrade` | リクエストが有効な WebSocket のアップグレードではありません。 | WebSocket クライアントを使います。 |
+| `code: method_not_allowed` 付きの `405` | リクエストが `GET` を使っていません。 | 接続には `GET` を使います。 |
+
+エラーのあとは、少し待ってから再接続してください。間を空けずに再接続を繰り返さないでください。
+
+### メッセージを読む
+
+各メッセージは `{ "type": "...", "data": ... }` 形式のエンベロープです。`data` を解析する前に `type` を読んでください。クライアントが対応していない種類は読み飛ばしてください。
+
+| イベントの種類 | データのペイロード |
+| --- | --- |
+| `native_log` | ログのデータ。[ログのレスポンス](#log-response)と同じ形です。 |
+| `native_issue` | グループ化された課題のデータ。バージョン1の[課題のレスポンス](#issue-response)と同じ形です。 |
+| `native_trace_span` | 1つのスパン。[スパンの一覧](#span-list)の項目と同じ形です。 |
+| `native_action` | プロダクトアクションのデータ。[アクションのレスポンス](#action-response)と同じ形です。 |
+| `project_created`, `project_updated`, `project_catalog_changed` | プロジェクトのデータ。変更があったら、プロジェクトの一覧を読み直してください。 |
+| `usage_updated`, `usage_limit_warning`, `usage_limit_blocked` | アカウントの使用量。[アカウントの使用量](/ja/reference/account-api#account-usage)と同じ形です。 |
+
+```json
+{
+  "type": "native_log",
+  "data": {
+    "id": "150d1288-bec2-49ec-a036-3f7ac55f1b2d",
+    "project_id": "123e4567-e89b-12d3-a456-426614174000",
+    "level": "warning",
+    "severity": "warning",
+    "triage": {
+      "effective_severity": "warning",
+      "ignored": false,
+      "rule_applied": false
+    },
+    "source": "runtime",
+    "message": "checkout retry scheduled",
+    "attributes": { "route": "/checkout" },
+    "occurred_at": "2026-06-01T12:00:00Z",
+    "environment": "production",
+    "release": "api@1.2.3",
+    "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+    "span_id": "00f067aa0ba902b7",
+    "service_name": "checkout-api",
+    "sdk_name": "@logbrew/node",
+    "sdk_version": "0.1.8",
+    "next_action": {
+      "code": "inspect_trace",
+      "target": "trace_summary"
+    }
+  }
+}
+```
+
+`native_issue` イベントは、課題のレスポンスのバージョン1を使います。アーカイブ済みの課題は `ignored` と表示され、イベントには優先度がありません。メトリクスとリリースは、ライブイベントの種類にはありません。それぞれの一覧のルートで読んでください。チケットはプロジェクトを選びません。プロジェクトのビューに表示する前に、各イベントの `project_id` を確認してください。`logbrew watch --json` はこのフィードを使います。[CLI リファレンス](/ja/reference/cli)を参照してください。
+
+### 切断された接続を処理する
+
+| クローズコード | 理由 | 次の手順 |
+| --- | --- | --- |
+| `1013` | `live feed fell behind; reconnect to resync` | 少し待ってから、新しいチケットで再接続します。受け取れなかったレコードを取得するため、一覧のルートを読み直します。 |
+| `1008` | `live feed access changed; sign in again` | 再接続をやめます。もう一度サインインしてから、新しいチケットを作成します。 |
+
+LogBrew の理由がないまま切断されることもあります。再接続したら、一覧のルートを読み直し、ID でレコードを照合してください。
+
+## <span id="issue-status-response-examples">課題のステータスのレスポンス例</span>
+
+`{ "status": "resolved" }` を付けて `PATCH /api/telemetry/issues/{issue_id}` を送信すると、更新されたグループ化された課題とともに `200 OK` が返ります。形は[課題のレスポンス](#issue-response)と同じです。バージョンは、クエリキーの `response_version` で選びます。成功を示すフラグは返りません。
+
+本文では、`status`、`priority`、`assignee` のうち1つ以上を設定します。`status` には `unresolved`、`resolved`、`archived` を指定できます。`ignored` は `archived` の古い名前です。[1件の課題を更新する](/ja/reference/telemetry-api#update-one-issue)を参照してください。
+
+成功を表示する前に、返された `id`、`status`、`priority` を確認してください。送信した値から結果を組み立てないでください。ステータスを変更しても、発生事象は削除されず、`first_seen_at` と `last_seen_at` も変わりません。`severity` や重大度ルールも変わりません。
+
+変更が拒否されると、`code: validation_failed` 付きの `422` が返ります。
+
+```json
+{
+  "error": "issue status must be unresolved, resolved, or archived",
+  "code": "validation_failed",
+  "next": "use status=unresolved, status=resolved, or status=archived",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+| 結果 | 原因 |
+| --- | --- |
+| `422`、`issue update requires status, priority, or assignee` | 本文に3つのフィールドのどれもありません。 |
+| `422`、`issue priority must be high, medium, or low` | 優先度の値に対応していません。 |
+| `422`、`issue assignee must be me, none, or a user ID` | 担当者の値に対応していません。 |
+| `422`、`issue assignee cannot read this project` | 担当者にプロジェクトへのアクセス権がありません。LogBrew は何も変更しません。 |
+| `code: forbidden` 付きの `403` | アカウントが、そのプロジェクトの課題を管理できません。 |
+| `code: not_found` 付きの `404` | アカウントが課題を読み取れないか、課題が存在しません。 |
+
+すでにリクエストした値になっているフィールドは変わりません。タイムアウトした場合やレスポンスを受け取れなかった場合は、同じリクエストをもう一度送信するか、先に課題を読み取ってください。現在の状態を読み取る前に、別の変更を送信しないでください。[書き込み](/ja/reference/api-errors#writes)を参照してください。
+
+`POST /api/telemetry/issues/bulk` は、リクエストした課題 ID ごとに1件の結果を、リクエストの順で `200 OK` とともに返します。見つかった課題は、どれもバージョン3の形です。`not_found` の結果では `issue: null` になります。
+
+```json
+{
+  "project_id": "123e4567-e89b-12d3-a456-426614174000",
+  "results": [
+    {
+      "issue_id": "9b2b4b3a-bd4e-4f85-a0f6-48118f037c17",
+      "outcome": "updated",
+      "issue": {
+        "id": "9b2b4b3a-bd4e-4f85-a0f6-48118f037c17",
+        "status": "archived",
+        "priority": "high",
+        "priority_source": "derived",
+        "assignee": null
+      }
+    },
+    {
+      "issue_id": "3f1c2d4e-5a6b-4c7d-8e9f-0a1b2c3d4e5f",
+      "outcome": "not_found",
+      "issue": null
+    }
+  ]
+}
+```
+
+この例は、課題のフィールドの一部だけを示しています。`outcome` は `updated`、`unchanged`、`not_found` のいずれかです。同じリクエストを繰り返すと `unchanged` が返り、何も変わりません。[課題を一括で更新する](/ja/reference/telemetry-api#update-issues-in-bulk)を参照してください。
+
+次の場合、一括リクエストは全体が失敗します。
+
+| 結果 | 原因 |
+| --- | --- |
+| `422`、`issue_ids must name 1 to 100 issues` | 一覧が空か、ID が100個を超えています。 |
+| `422`、`issue_ids must not contain duplicates` | 同じ ID が2回以上含まれています。 |
+| `code: invalid_json` 付きの `422` | 本文に不明なフィールドがあります。 |
+| `code: forbidden` 付きの `403` | アカウントが、そのプロジェクトの課題を管理できません。 |
+| `404`、`project not found` | アカウントがプロジェクトを読み取れません。 |
+
+## 分析のリクエストの範囲
+
+分析のルート、メトリクスの系列のルート、シグナル量のルートは、1つのプロジェクトと1つの期間を読み取ります。どのリクエストにも `project_id` と `since` が必要です。`since` には、`24h` や `7d` のような短い形式の時間か、RFC3339 形式のタイムスタンプを指定します。`until` には RFC3339 形式のタイムスタンプを指定します。省略すると、リクエストの時刻になります。期間には `since` が含まれ、`until` は含まれません。期間は31日を超えられません。
+
+`service_name`、`release`、`environment` は、完全一致で絞り込む任意のフィルターです。それぞれの値は、LogBrew が前後の空白を取り除いたあとで1〜256文字でなければなりません。セグメント比較のルートでは、これらのフィルターを最上位ではなく、各セグメントの中に入れます。
+
+アカウントがプロジェクトを読み取れない場合、これらのルートは件数ゼロで `200 OK` を返します。`404` は返しません。結果が空でも、プロジェクトにアクセスできることの確認にはなりません。`project_id` を、アカウントが読み取れるプロジェクトと照らし合わせてください。そのプロジェクトを含まない MCP の接続を通したリクエストには、`403` と `forbidden` が返ります。
+
+| ルート | `response_version` の値 | デフォルト |
+| --- | --- | --- |
+| `GET /api/telemetry/analytics/overview` | `1`、`2`、`3` のいずれか | `1` |
+| `GET /api/telemetry/analytics/properties` | `1` または `2` | `1` |
+| `POST /api/telemetry/analytics/segments/compare` | `1` または `2` | `1` |
+| `POST /api/telemetry/analytics/retention` | `1` または `2` | `1` |
+| `POST /api/telemetry/analytics/lifecycle` | `1` または `2` | `1` |
+| `POST /api/telemetry/analytics/funnel` | 受け付けません | スキーマ `1` |
+| `POST /api/telemetry/analytics/paths` | 受け付けません | スキーマ `1` |
+| `GET /api/telemetry/metrics/series` | 受け付けません | スキーマ `1` |
+| `GET /api/telemetry/summary/volume` | `1` | `1` |
+
+どのレスポンスも、`schema_version`、`query`、`purpose` で始まります。`query` は、実際に適用された範囲をそのまま返します。送信しなかったフィルターは省略されます。`purpose` は、そのルートが何に答えるかを説明するプレーンテキストです。
+
+分母がゼロの場合、率は省略されます。省略された率は `0` でも `null` でもありません。率を信頼する前に `coverage` を読んでください。
+
+### <span id="shared-scope-errors">共通の範囲のエラー</span>
+
+これらのエラーは、HTTP `422` と `validation_failed` を使います。
+
+| 原因 | `error` |
+| --- | --- |
+| `project_id` がない | `product analytics project_id is required` |
+| `since` がない | `product analytics since is required` |
+| `since` が時間の形式でも RFC3339 形式のタイムスタンプでもない | `invalid since value` |
+| `until` が RFC3339 形式のタイムスタンプではない | `product analytics until must be an RFC3339 timestamp` |
+| `since` が `until` より前ではない | `product analytics since must be earlier than until` |
+| 期間が31日を超えている | `product analytics range must not exceed 31 days` |
+| フィルターが空か、256文字を超えている | `product analytics context filters must be non-empty and at most 256 characters` |
+
+たとえば、`project_id` のないリクエストは次を返します。
+
+```json
+{
+  "error": "product analytics project_id is required",
+  "code": "validation_failed",
+  "next": "choose one owned project and send its project_id",
+  "next_action": { "code": "fix_request", "target": "request" }
+}
+```
+
+メトリクスの系列とシグナル量のルートも同じ範囲のルールを使いますが、`error` の文言はそれぞれ異なります。それらのエラーは、以下の各セクションに記載しています。
+
+不明なクエリキーには、[無効なクエリパラメーター](/ja/reference/api-errors#invalid-query-parameters)のレスポンスとともに `422` が返ります。不明な JSON フィールド、必須の JSON フィールドの欠落、対応していない列挙値には `invalid_json` が返ります。[無効な JSON](/ja/reference/api-errors#invalid-json)を参照してください。HTTP メソッドが正しくないリクエストには、`405` と `method_not_allowed` が返ります。その `next` の文言には、対応しているメソッドとフィールドが示されます。[対応していないメソッド](/ja/reference/api-errors#unsupported-method)を参照してください。
+
+## プロダクト分析の概要のレスポンス
+
+`GET /api/telemetry/analytics/overview` は、1つのプロジェクトのアクティビティを示します。アクションの量、ユーザー、セッション、時系列、上位アクション、分類済みのページビュー、スクリーンビュー、インタラクションが含まれます。ほかの分析のルートで使う正確なイベント名を探すときに使います。
+
+`response_version=3` を送信してください。バージョン1と2も同じ件数を返しますが、`estimation.method` の値は古いトークンです。バージョン1は、識別済みユーザーを数えるときにサブジェクトの種類を確認しません。バージョン2と3は、種類が `user` のサブジェクトだけを数え、匿名サブジェクトの件数と `subject_coverage` を追加します。
+
+次のリクエストは、1時間を5分ごとの時間バケットで読み取り、各上位リストで2行を返します。
+
+```bash
+curl --get "https://api.logbrew.co/api/telemetry/analytics/overview" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project_id>" \
+  --data-urlencode "since=2026-06-01T11:00:00Z" \
+  --data-urlencode "until=2026-06-01T12:00:00Z" \
+  --data-urlencode "interval=5m" \
+  --data-urlencode "top_limit=2" \
+  --data-urlencode "response_version=3"
+```
+
+### 概要の成功
+
+この架空の結果では、プロジェクトに120件のアクションがあり、12個の時間バケットのうち2個に入っています。20件のアクションは匿名サブジェクトによるものです。すべてのアクションにセッション ID があります。アクションの半分にはトレース ID があります。
+
+```json
+{
+  "schema_version": 3,
+  "query": {
+    "project_id": "11111111-1111-4111-8111-111111111111",
+    "since": "2026-06-01T11:00:00Z",
+    "until": "2026-06-01T12:00:00Z",
+    "interval": "5m",
+    "interval_seconds": 300,
+    "top_limit": 2
+  },
+  "purpose": "Shows what people do in one project through action volume, active identified users, separately labeled anonymous subjects, explicit sessions, activity over time, top actions, and versioned page-view, screen-view, interaction, surface, and exact event-name breakdowns. Exact classified event names can be used as ordered funnel steps. It never infers people from anonymous events or relabels arbitrary unclassified telemetry as product behavior.",
+  "analysis_level": "user_and_session",
+  "summary": {
+    "actions": 120,
+    "active_identified_users": 18,
+    "active_anonymous_subjects": 7,
+    "sessions": 24,
+    "distinct_action_names": 3,
+    "actions_per_identified_user": 5.555555555555555,
+    "actions_per_session": 5.0
+  },
+  "coverage": {
+    "identified_actions": 100,
+    "anonymous_actions": 20,
+    "subject_coverage": {
+      "index_version": 1,
+      "identified_user_events": 100,
+      "anonymous_subject_events": 20,
+      "legacy_unknown_kind_events": 0,
+      "missing_subject_events": 0,
+      "historical_unindexed_events": 0
+    },
+    "sessionized_actions": 120,
+    "traced_actions": 60,
+    "identification_rate": 0.8333333333333334,
+    "sessionization_rate": 1.0,
+    "trace_link_rate": 0.5,
+    "expected_buckets": 12,
+    "returned_points": 2,
+    "returned_top_actions": 2,
+    "top_actions_truncated": true,
+    "first_seen_at": "2026-06-01T11:00:10Z",
+    "last_seen_at": "2026-06-01T11:09:50Z",
+    "limitations": [
+      "Typed anonymous subjects are counted separately and never contribute to active identified-user counts.",
+      "Actions without a trace ID cannot link product behavior directly to trace investigation."
+    ]
+  },
+  "estimation": {
+    "unique_counts_are_approximate": true,
+    "method": "approximate_distinct",
+    "description": "Active identified-user, anonymous-subject, session, distinct action-name, distinct surface, and distinct exact event-name counts are approximate distinct counts. Event totals and capture-coverage counts are exact within the selected, fully evaluated query window."
+  },
+  "series": [
+    {
+      "bucket_start": "2026-06-01T11:00:00Z",
+      "bucket_end": "2026-06-01T11:05:00Z",
+      "actions": 50,
+      "active_identified_users": 8,
+      "sessions": 10,
+      "identified_actions": 40,
+      "sessionized_actions": 50,
+      "traced_actions": 25
+    },
+    {
+      "bucket_start": "2026-06-01T11:05:00Z",
+      "bucket_end": "2026-06-01T11:10:00Z",
+      "actions": 70,
+      "active_identified_users": 12,
+      "sessions": 14,
+      "identified_actions": 60,
+      "sessionized_actions": 70,
+      "traced_actions": 35
+    }
+  ],
+  "top_actions": [
+    {
+      "name": "checkout_started",
+      "actions": 50,
+      "active_identified_users": 12,
+      "sessions": 14,
+      "share_of_actions": 0.4166666666666667
+    },
+    {
+      "name": "purchase_completed",
+      "actions": 40,
+      "active_identified_users": 9,
+      "sessions": 10,
+      "share_of_actions": 0.3333333333333333
+    }
+  ],
+  "classified_activity": {
+    "summary": {
+      "events": 110,
+      "page_views": 50,
+      "screen_views": 20,
+      "interactions": 40,
+      "distinct_surfaces": 4,
+      "distinct_event_names": 5,
+      "active_identified_users": 17,
+      "active_anonymous_subjects": 6,
+      "sessions": 23
+    },
+    "coverage": {
+      "classified_actions": 60,
+      "unclassified_actions": 60,
+      "action_classification_rate": 0.5,
+      "surfaced_events": 110,
+      "named_events": 110,
+      "identified_events": 90,
+      "subject_coverage": {
+        "index_version": 1,
+        "identified_user_events": 90,
+        "anonymous_subject_events": 20,
+        "legacy_unknown_kind_events": 0,
+        "missing_subject_events": 0,
+        "historical_unindexed_events": 0
+      },
+      "sessionized_events": 110,
+      "traced_events": 55,
+      "surface_rate": 1.0,
+      "event_name_rate": 1.0,
+      "identification_rate": 0.8181818181818182,
+      "sessionization_rate": 1.0,
+      "trace_link_rate": 0.5,
+      "expected_buckets": 12,
+      "returned_points": 2,
+      "returned_top_surfaces": 2,
+      "returned_top_events": 2,
+      "top_surfaces_truncated": true,
+      "top_events_truncated": true,
+      "first_seen_at": "2026-06-01T11:00:20Z",
+      "last_seen_at": "2026-06-01T11:09:40Z",
+      "limitations": [
+        "Only events carrying supported version-1 analytics annotations appear in classified activity; arbitrary actions and technical spans are not relabeled.",
+        "Historical or unannotated actions contribute to the action summary but not to classified screen-view or interaction breakdowns.",
+        "Classified events with typed anonymous subjects are counted separately and never contribute to identified-user counts.",
+        "Classified events without a trace ID cannot link product behavior directly to trace investigation."
+      ]
+    },
+    "series": [
+      {
+        "bucket_start": "2026-06-01T11:00:00Z",
+        "bucket_end": "2026-06-01T11:05:00Z",
+        "events": 45,
+        "page_views": 20,
+        "screen_views": 10,
+        "interactions": 15
+      },
+      {
+        "bucket_start": "2026-06-01T11:05:00Z",
+        "bucket_end": "2026-06-01T11:10:00Z",
+        "events": 65,
+        "page_views": 30,
+        "screen_views": 10,
+        "interactions": 25
+      }
+    ],
+    "top_surfaces": [
+      {
+        "kind": "page_view",
+        "surface": "/checkout/:step",
+        "events": 40,
+        "active_identified_users": 12,
+        "sessions": 14,
+        "share_of_classified_events": 0.36363636363636365
+      },
+      {
+        "kind": "screen_view",
+        "surface": "Checkout",
+        "events": 20,
+        "active_identified_users": 9,
+        "sessions": 10,
+        "share_of_classified_events": 0.18181818181818182
+      }
+    ],
+    "top_events": [
+      {
+        "kind": "page_view",
+        "event_name": "/checkout/:step",
+        "events": 40,
+        "active_identified_users": 12,
+        "sessions": 14,
+        "share_of_classified_events": 0.36363636363636365
+      },
+      {
+        "kind": "interaction",
+        "event_name": "checkout_started",
+        "events": 30,
+        "active_identified_users": 10,
+        "sessions": 12,
+        "share_of_classified_events": 0.2727272727272727
+      }
+    ]
+  },
+  "next_action": {
+    "code": "build_product_funnel",
+    "target": "/api/telemetry/analytics/funnel",
+    "reason": "Use two through eight exact keys from classified_activity.top_events to measure ordered conversion and drop-off for explicit sessions or opaque identified users."
+  }
+}
+```
+
+### 概要を読む
+
+`subject_coverage` の5つの件数を足すと、そのセクションのイベントの合計になります。ユーザーとして数えるのは `identified_user_events` だけです。`anonymous_actions` は、`summary.actions` から `identified_actions` を引いた値です。
+
+`series` には、アクティビティのある時間バケットだけが入ります。`expected_buckets` は、期間内にありうる時間バケットの数です。グラフにそのルールを明記しない限り、欠けている時間バケットを、測定されたゼロとして描かないでください。時間バケットは UTC の区切りにそろえられます。期間が時間バケットの途中から始まる場合、その一部だけの時間バケットも含まれます。
+
+`classified_activity` は、ページビュー、スクリーンビュー、インタラクションを数えます。スクリーンビューとインタラクションはアクションでもあります。ページビューはアクションではありません。`summary.actions` を `classified_activity.summary.events` に足さないでください。
+
+`classified_activity.top_events` の `kind` と `event_name` を、ファネルのステップ、再訪のセレクター、ライフサイクルのセレクター、パスの基準、セグメントの対象にコピーしてください。`top_events_truncated` が `true` の場合は、件数がもっと少ない名前もあることを示します。もっと見るには、`top_limit` を最大20まで増やします。
+
+`analysis_level` は、`no_data`、`event_only`、`user_level`、`user_and_session` のいずれかです。プロジェクトにアクションも分類済みのイベントもない場合、`next_action.code` は `capture_product_activity` です。[プロダクト分析](/ja/concepts/product-analytics#use-the-analytics-api)を参照してください。
+
+### <span id="overview-errors">概要のエラー</span>
+
+[共通の範囲のエラー](#shared-scope-errors)に加えて、概要は次の値に対して `422` と `validation_failed` を返します。
+
+| 値 | `error` |
+| --- | --- |
+| `response_version` が `1`、`2`、`3` のいずれでもない | `product analytics response_version must be 1, 2, or 3` |
+| `top_limit` が `1` から `20` の範囲外 | `product analytics top_limit must be between 1 and 20` |
+| `interval` が `auto`、`1m`、`5m`、`15m`、`1h`、`6h`、`1d` のいずれでもない | `product analytics interval is not supported` |
+| 明示した `interval` で、500個を超える時間バケットが必要になる | `product analytics interval would exceed 500 buckets` |
+
+`interval` のデフォルトは `auto` です。`auto` は、時間バケットが300個以下で済む最小の間隔を選びます。`top_limit` のデフォルトは `10` です。
+
+## <span id="ordered-funnel-response">順序付きファネルのレスポンス</span>
+
+`POST /api/telemetry/analytics/funnel` は、2〜8個のステップを順に完了したかを測定します。概要の `classified_activity.top_events` から、正確な `kind` と `event_name` をそれぞれコピーしてください。似た名前のアクションは一致とみなされません。次のリクエスト本文は、`/pricing` を表示してから1時間以内にサインアップを完了したセッションを数えます。
+
+```json
+{
+  "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  "since": "2026-08-01T00:00:00Z",
+  "until": "2026-08-02T00:00:00Z",
+  "environment": "production",
+  "analysis_unit": "session",
+  "conversion_window_seconds": 3600,
+  "steps": [
+    { "kind": "page_view", "event_name": "/pricing" },
+    { "kind": "interaction", "event_name": "signup_completed" }
+  ]
+}
+```
+
+`analysis_unit` は `session` または `identified_user` です。デフォルトは `session` です。ステップの `kind` は、`page_view`、`screen_view`、`interaction` のいずれかです。ファネルのルートは `response_version` を受け付けません。
+
+### ファネルの成功
+
+`200 OK` のレスポンスの例です。
+
+```json
+{
+  "schema_version": 1,
+  "query": {
+    "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    "since": "2026-08-01T00:00:00Z",
+    "until": "2026-08-02T00:00:00Z",
+    "environment": "production",
+    "analysis_unit": "session",
+    "conversion_window_seconds": 3600
+  },
+  "purpose": "Shows where explicit sessions or typed opaque user subjects enter, progress, and drop off across two through eight versioned page-view, screen-view, or interaction events. Steps must occur in order with strictly increasing timestamps inside the selected conversion window; raw session and subject identifiers are never returned.",
+  "summary": {
+    "candidate_units": 60,
+    "entered_units": 50,
+    "completed_units": 15,
+    "entry_rate": 0.8333333333333334,
+    "overall_conversion_rate": 0.3
+  },
+  "coverage": {
+    "classified_events": 200,
+    "named_events": 180,
+    "unnamed_events": 20,
+    "unit_identified_events": 160,
+    "selected_step_events": 120,
+    "usable_selected_step_events": 100,
+    "excluded_selected_step_events": 20,
+    "event_name_rate": 0.9,
+    "selected_unit_coverage_rate": 0.8333333333333334,
+    "limitations": [
+      "Only supported version-1 classified events with exact derived names participate; arbitrary actions and technical spans are never relabeled.",
+      "A unit reaches later steps only when timestamps strictly increase and the final match remains inside conversion_window_seconds from its first match.",
+      "Historical or surface-less classified events without a derived event name cannot match exact funnel steps.",
+      "Requested-step events without an explicit session ID are excluded from ordered unit counts.",
+      "Session funnels count visits or app sessions, not unique people; use analysis_unit=identified_user only when typed user-subject coverage is sufficient."
+    ]
+  },
+  "steps": [
+    {
+      "position": 1,
+      "kind": "page_view",
+      "event_name": "/pricing",
+      "units": 50,
+      "conversion_from_first": 1.0,
+      "drop_off_to_next_units": 35,
+      "drop_off_to_next_rate": 0.7
+    },
+    {
+      "position": 2,
+      "kind": "interaction",
+      "event_name": "signup_completed",
+      "units": 15,
+      "conversion_from_previous": 0.3,
+      "conversion_from_first": 0.3
+    }
+  ],
+  "next_action": {
+    "code": "compare_funnel_contexts",
+    "target": "/api/telemetry/analytics/funnel",
+    "reason": "Compare the same exact steps across bounded releases, environments, or services to locate material conversion changes."
+  }
+}
+```
+
+率は0から1までの小数です。率を信頼する前に `coverage` を読んでください。`selected_unit_coverage_rate` は、選択したステップのイベントのうち、LogBrew が使えたものの割合です。レスポンスは生の識別情報を返しません。[プロダクト分析](/ja/concepts/product-analytics#measure-a-funnel)を参照してください。
+
+### コンバージョンとカバレッジを読む
+
+`entry_rate` は、`entered_units` を `candidate_units` で割った値です。この例では60のうち50です。`overall_conversion_rate` は、`completed_units` を `entered_units` で割った値です。この例では50のうち15で、30%です。15をすべての候補の数で割った値ではありません。これらの件数は、単位が途中で止まった理由を説明しません。
+
+カバレッジは、セッションではなくイベントを数えます。この例では、120件のイベントがステップに一致し、そのうち20件にはセッション ID がありません。結果では、この20件のイベントをセッションの件数から除外します。これを、失敗した20件のセッションとして扱わないでください。
+
+最初のステップには `conversion_from_previous` がありません。最後のステップには、`drop_off_to_next_units` も `drop_off_to_next_rate` もありません。
+
+単位が後のステップに到達したとみなされるのは、ステップの時刻が厳密に増えている場合だけです。タイムスタンプが同じイベントで、連続する2つのステップを満たすことはできません。最後のステップは、最初のステップから `conversion_window_seconds` 以内に発生する必要があります。
+
+セッションのモードは、人ではなくセッションを数えます。`identified_user` は、種類が `user` の不透明なサブジェクト ID を持つイベントにだけ使ってください。このモードでは、コンバージョン期間内であれば、別々のセッションのイベントを結び付けることがあります。結果を比較するときは、同じ単位と同じステップを使ってください。
+
+`conversion_window_seconds` のデフォルトは、24時間と期間の長さのうち短いほうです。最大値は期間の長さを秒単位で切り上げた値です。
+
+### 空のファネルの結果
+
+成功した空のレスポンスにも、リクエストしたステップが `units` ゼロで一覧表示されます。候補の単位がない場合、`summary` は `entry_rate` と `overall_conversion_rate` を省略します。一致するイベントがなくても、このルートは `404` を返しません。
+
+原因を見つけるには、`coverage` と `next_action` を読みます。
+
+| `next_action.code` | 原因 |
+| --- | --- |
+| `capture_product_activity` | 範囲内に分類済みのイベントがありません。 |
+| `choose_captured_funnel_steps` | リクエストしたステップに一致するイベントがありません。 |
+| `sessionize_product_activity` | ステップのイベントはありますが、セッション ID を持つものがありません。 |
+| `identify_product_users` | ステップのイベントはありますが、種類が `user` のサブジェクトを持つものがありません。 |
+| `verify_funnel_entry` | ステップ1に入った単位がありません。 |
+| `investigate_funnel_drop_off` | 単位は入りましたが、すべてのステップを完了した単位がありません。 |
+| `compare_funnel_contexts` | 少なくとも1つの単位がファネルを完了しました。 |
+
+### 拒否されるファネルのリクエスト
+
+[共通の範囲のエラー](#shared-scope-errors)に加えて、次のリクエストは `422` と `validation_failed` を返します。ステップが2個未満、または8個を超える場合：
+
+```json
+{
+  "error": "product analytics funnel requires two through eight ordered steps",
+  "code": "validation_failed",
+  "next": "send a steps array containing 2 through 8 exact classified event selectors",
+  "next_action": { "code": "fix_request", "target": "request" }
+}
+```
+
+`conversion_window_seconds` が `0` の場合、または期間の長さを超える値の場合：
+
+```json
+{
+  "error": "product analytics funnel conversion window must fit inside the query range",
+  "code": "validation_failed",
+  "next": "use conversion_window_seconds from 1 through the selected range length",
+  "next_action": { "code": "fix_request", "target": "request" }
+}
+```
+
+`event_name` が空の場合、256文字を超える場合、制御文字を含む場合は、`product analytics funnel event_name must be non-empty, control-free, and at most 256 characters` が返ります。`interaction` のステップは、有効なアクション名でもある必要があります。そうでない場合のエラーは `product analytics interaction event_name must be a bounded stable action name` です。
+
+リクエストを修正してから送信し直してください。空でない結果を得るためだけに、ステップを削除したり分析の単位を変えたりしないでください。
+
+## 特定イベントの分析と自動分析
+
+再訪とライフサイクルでは、2種類のリクエストの形を使えます。知りたいことに合う形を、`response_version` で選びます。
+
+| 分析 | `response_version` | イベントのセレクター |
+| --- | --- | --- |
+| 特定イベントの再訪 | `1`、または省略 | `start_event` と `return_event` の両方を送信します。 |
+| 1つの特定イベントのライフサイクル | `1`、または省略 | `event` を送信します。 |
+| 自動の再訪またはライフサイクル | `2` | イベントのセレクターを送信しません。 |
+
+特定イベントのセレクターには `kind` と `event_name` が入ります。`kind` は、`page_view`、`screen_view`、`interaction` のいずれかです。`event_name` は `classified_activity.top_events` からコピーしてください。ボタンのラベルからイベント名を推測しないでください。
+
+どちらの形でも、数えるのはユーザー、つまり種類が `user` の不透明なサブジェクト ID だけです。匿名サブジェクトと、使えるサブジェクト ID のないイベントは、ユーザーとして数えません。レスポンスがサブジェクト ID を返すことはありません。
+
+固定の間隔は、`hour`、`day`、`week`、`thirty_day` です。どれも決まった長さの時間です。`thirty_day` は30日間で、暦の1か月ではありません。`interval` を省略すると、API は期間が48時間以下なら `hour`、それより長ければ `day` を使います。
+
+### 特定イベントの再訪のリクエスト
+
+次の本文を `POST /api/telemetry/analytics/retention` に送信します。このリクエストは、期間内で最初のチェックアウトのあとに、ユーザーがもう一度チェックアウトを完了したかを調べます。
+
+```json
+{
+  "project_id": "11111111-1111-4111-8111-111111111111",
+  "since": "2026-06-01T00:00:00Z",
+  "until": "2026-06-03T00:00:00Z",
+  "response_version": 1,
+  "interval": "day",
+  "interval_count": 1,
+  "mode": "return_on",
+  "cohort_mode": "first_in_range",
+  "start_event": { "kind": "interaction", "event_name": "checkout_completed" },
+  "return_event": { "kind": "interaction", "event_name": "checkout_completed" }
+}
+```
+
+各ユーザーの基準は、期間内で最初に一致した開始イベントです。再訪は、その基準より厳密にあとで、かつ `until` より前に発生する必要があります。2つのセレクターに同じイベントを指定することもできます。
+
+| フィールド | 値 | デフォルト |
+| --- | --- | --- |
+| `interval_count` | `1`〜`31` 期間 | `10` |
+| `mode` | `return_on` は、それぞれの期間内ちょうどの再訪を数えます。`return_on_or_after` は、各期間の開始時点以降の再訪を数えます。 | `return_on` |
+| `cohort_mode` | `first_in_range` | `first_in_range` |
+
+### 特定イベントの再訪の成功
+
+この架空の例では、2人のユーザーがチェックアウトを完了します。1人目のユーザーは、6月1日の12:00にチェックアウトを完了し、13:00にもう一度完了します。2人目のユーザーは、6月2日の12:00にチェックアウトを完了します。6月2日の13:00に、2人目のユーザーはページを表示しますが、チェックアウトはもう一度完了しません。
+
+```json
+{
+  "schema_version": 1,
+  "query": {
+    "project_id": "11111111-1111-4111-8111-111111111111",
+    "since": "2026-06-01T00:00:00Z",
+    "until": "2026-06-03T00:00:00Z",
+    "start_event": { "kind": "interaction", "event_name": "checkout_completed" },
+    "return_event": { "kind": "interaction", "event_name": "checkout_completed" },
+    "interval": "day",
+    "interval_seconds": 86400,
+    "interval_count": 1,
+    "mode": "return_on",
+    "cohort_mode": "first_in_range"
+  },
+  "purpose": "Measures whether typed opaque user subjects return after their first matching start event inside the selected half-open query range. Returns must occur strictly after each subject's anchor. return_on measures one fixed subject-relative period; return_on_or_after measures from that period's threshold through the exclusive query upper bound. Eligibility-aware denominators prevent immature subjects from being reported as churned, cohorts are fixed buckets aligned to since, and raw subject identifiers are never returned.",
+  "summary": {
+    "cohort_subjects": 2,
+    "subjects_returned_after_start": 1,
+    "return_rate_after_start": 0.5,
+    "non_empty_cohorts": 2,
+    "periods_with_eligible_subjects": 1,
+    "fully_observed_periods": 0
+  },
+  "coverage": {
+    "classified_events": 4,
+    "named_events": 4,
+    "unnamed_events": 0,
+    "identified_events": 4,
+    "start_events": 3,
+    "usable_start_events": 3,
+    "excluded_start_events": 0,
+    "return_events": 3,
+    "usable_return_events": 3,
+    "excluded_return_events": 0,
+    "event_name_rate": 1.0,
+    "start_identity_coverage_rate": 1.0,
+    "return_identity_coverage_rate": 1.0,
+    "limitations": [
+      "Only application-supplied opaque subject IDs explicitly typed as users are counted. Anonymous, legacy-untyped, historical-unindexed, invalid, or absent subjects are excluded rather than inferred as people.",
+      "first_in_range anchors each subject at its first matching start inside the selected range; it does not prove that event was the subject's first-ever historical start.",
+      "Cohort buckets are fixed-width and aligned to the query's since value. hour, day, week, and thirty_day mean fixed elapsed durations; thirty_day is not a calendar month.",
+      "Returns must match the exact selected kind and derived event name, occur strictly after the subject anchor, and remain before the exclusive query upper bound.",
+      "This resource does not provide recurring-start cohorts, group retention, arbitrary property breakdowns, custom return ranges, or lifetime first-event lookup.",
+      "return_on includes only subjects whose complete exact period ends by until; later subjects are excluded from that period's denominator."
+    ]
+  },
+  "curve": [
+    {
+      "period": 0,
+      "threshold_seconds": 0,
+      "window_end_seconds": 86400,
+      "eligible_subjects": 1,
+      "retained_subjects": 1,
+      "weighted_retention_rate": 1.0,
+      "fully_observed_cohorts": 1,
+      "fully_observed_cohort_average_rate": 1.0,
+      "all_subjects_eligible": false
+    }
+  ],
+  "cohorts": [
+    {
+      "cohort": 0,
+      "started_at": "2026-06-01T00:00:00Z",
+      "ended_at": "2026-06-02T00:00:00Z",
+      "subjects": 1,
+      "subjects_returned_after_start": 1,
+      "periods": [
+        {
+          "period": 0,
+          "eligible_subjects": 1,
+          "retained_subjects": 1,
+          "retention_rate": 1.0,
+          "all_subjects_eligible": true
+        }
+      ]
+    },
+    {
+      "cohort": 1,
+      "started_at": "2026-06-02T00:00:00Z",
+      "ended_at": "2026-06-03T00:00:00Z",
+      "subjects": 1,
+      "subjects_returned_after_start": 0,
+      "periods": [
+        {
+          "period": 0,
+          "eligible_subjects": 0,
+          "retained_subjects": 0,
+          "all_subjects_eligible": false
+        }
+      ]
+    }
+  ],
+  "next_action": {
+    "code": "extend_retention_observation_window",
+    "target": "/api/telemetry/analytics/retention",
+    "reason": "Move since earlier, until later, or request fewer periods when a fully observed long-term comparison is required."
+  }
+}
+```
+
+### 再訪を読む
+
+カバレッジは4件の分類済みイベントすべてを数えますが、各チェックアウトのセレクターに一致するのは3件だけです。ページビューは再訪として数えません。2人のうち1人がチェックアウトを繰り返したので、`return_rate_after_start` は `0.5` です。
+
+基準のあとに丸1日分を観測できたのは、1人目のユーザーだけです。このユーザーは1日以内に戻ってきたので、曲線の率は `1.0` です。2人目のユーザーは12時間分しか観測できていません。このユーザーは期間0の対象にならないため、2つ目のコホートのセルでは `retention_rate` が省略されます。このユーザーを、離れたユーザーとして数えないでください。
+
+`weighted_retention_rate` は、再訪したユーザー全体を、対象ユーザー全体で割った値です。`fully_observed_cohort_average_rate` は、すべてのユーザーが対象になっているコホートの率の、単純な平均です。コホートは、`since` から始まる固定の時間バケットです。`cohorts` には、ユーザーがいるコホートだけが入ります。
+
+`mode: "return_on_or_after"` の場合、曲線では `window_end_seconds` が省略されます。
+
+### 自動の再訪
+
+`response_version: 2` を送信し、`start_event` と `return_event` は送信しません。対応しているページビュー、スクリーンビュー、インタラクションはすべて、開始としても再訪としても数えます。このバージョンで選ぶのはイベントの集合です。SDK の取得形式を選ぶものではありません。
+
+```json
+{
+  "project_id": "11111111-1111-4111-8111-111111111111",
+  "since": "2026-06-01T00:00:00Z",
+  "until": "2026-06-03T00:00:00Z",
+  "response_version": 2,
+  "interval": "day",
+  "interval_count": 1,
+  "mode": "return_on",
+  "cohort_mode": "first_in_range"
+}
+```
+
+レスポンスの `summary`、`curve`、`cohorts`、`next_action` の形は、特定イベントのレスポンスと同じです。この抜粋は、変わるフィールドを示しています。この例では、同じ2人のユーザーに3件のイベントがあり、ページビューはありません。
+
+```json
+{
+  "schema_version": 2,
+  "query": {
+    "project_id": "11111111-1111-4111-8111-111111111111",
+    "since": "2026-06-01T00:00:00Z",
+    "until": "2026-06-03T00:00:00Z",
+    "activity_scope": "all_classified_activity",
+    "interval": "day",
+    "interval_seconds": 86400,
+    "interval_count": 1,
+    "mode": "return_on",
+    "cohort_mode": "first_in_range"
+  },
+  "purpose": "Measures whether typed opaque user subjects perform any later supported classified product activity after their first such activity inside the selected half-open range. It does not choose or infer a top event. Returns must occur strictly after the anchor, anonymous and unidentified subjects remain excluded from user counts, eligibility-aware denominators prevent immature subjects from being reported as churned, and raw identifiers are never returned.",
+  "coverage": {
+    "classified_events": 3,
+    "named_events": 3,
+    "unnamed_events": 0,
+    "identified_events": 3,
+    "start_events": 3,
+    "usable_start_events": 3,
+    "excluded_start_events": 0,
+    "return_events": 3,
+    "usable_return_events": 3,
+    "excluded_return_events": 0,
+    "event_name_rate": 1.0,
+    "start_identity_coverage_rate": 1.0,
+    "return_identity_coverage_rate": 1.0,
+    "limitations": [
+      "Only application-supplied opaque subject IDs explicitly typed as users are counted. Anonymous, legacy-untyped, historical-unindexed, invalid, or absent subjects are excluded rather than inferred as people.",
+      "first_in_range anchors each subject at its first supported classified activity in the range; it does not prove that activity was the subject's first-ever product activity.",
+      "Cohort buckets are fixed-width and aligned to the query's since value. hour, day, week, and thirty_day mean fixed elapsed durations; thirty_day is not a calendar month.",
+      "Returns are any supported classified activity strictly after the subject anchor and before the exclusive query upper bound; no event is ranked, selected, or inferred.",
+      "This resource does not provide recurring-start cohorts, group retention, arbitrary property breakdowns, custom return ranges, or lifetime first-event lookup.",
+      "return_on includes only subjects whose complete exact period ends by until; later subjects are excluded from that period's denominator."
+    ]
+  }
+}
+```
+
+自動モードでは、`start_events` と `return_events` はどちらも `classified_events` と等しくなります。これらの件数は、ユーザーではなくイベントの数です。
+
+### 対象ユーザーがいない場合の再訪
+
+成功した結果でも、コホートにユーザーがいないことがあります。この抜粋は、コホートのない、リクエストした1つの期間を示しています。
+
+```json
+{
+  "schema_version": 2,
+  "summary": {
+    "cohort_subjects": 0,
+    "subjects_returned_after_start": 0,
+    "non_empty_cohorts": 0,
+    "periods_with_eligible_subjects": 0,
+    "fully_observed_periods": 0
+  },
+  "curve": [
+    {
+      "period": 0,
+      "threshold_seconds": 0,
+      "window_end_seconds": 86400,
+      "eligible_subjects": 0,
+      "retained_subjects": 0,
+      "fully_observed_cohorts": 0,
+      "all_subjects_eligible": false
+    }
+  ],
+  "cohorts": []
+}
+```
+
+`coverage` と `next_action` を読んでください。これらを見ると、範囲に分類済みのイベントがない場合（`capture_product_activity`）と、イベントはあってもユーザーがいない場合（`identify_product_users` または `identify_returning_users`）を区別できます。率がないことは、測定されたゼロではありません。
+
+### 再訪のエラー
+
+[共通の範囲のエラー](#shared-scope-errors)に加えて、次のリクエストは `422` と `validation_failed` を返します。
+
+| 原因 | `error` |
+| --- | --- |
+| バージョン1で両方のセレクターがそろっていない、バージョン2でセレクターがある、またはそれ以外のバージョン | `product analytics retention activity selection is contradictory` |
+| `interval_count` が `1` から `31` の範囲外 | `product analytics retention interval_count must be between 1 and 31` |
+| コホートの時間バケット数と `interval_count` の積が500を超える | `product analytics retention interval and interval_count would exceed 500 cohort matrix cells` |
+
+セルの上限は、ユーザー数ではなく、期間と期間数で決まります。`interval: "hour"` で30日間の期間を指定すると、コホートの時間バケットは720個になります。`interval_count: 1` でも720セルになり、500を超えます。
+
+```json
+{
+  "error": "product analytics retention interval and interval_count would exceed 500 cohort matrix cells",
+  "code": "validation_failed",
+  "next": "choose a wider interval, a shorter time range, or fewer retention periods",
+  "next_action": { "code": "fix_request", "target": "request" }
+}
+```
+
+自動の再訪を使うには、両方のセレクターを削除します。この読み取りのリクエストを直すために、SDK を変更しないでください。
+
+### 特定イベントのライフサイクルのリクエスト
+
+次の本文を `POST /api/telemetry/analytics/lifecycle` に送信します。このリクエストは、プロジェクト内のすべてのアクティビティではなく、1つのイベントでユーザーを分類します。
+
+```json
+{
+  "project_id": "11111111-1111-4111-8111-111111111111",
+  "since": "2026-06-01T00:00:00Z",
+  "until": "2026-06-03T00:00:00Z",
+  "response_version": 1,
+  "interval": "day",
+  "history_period_count": 2,
+  "event": { "kind": "interaction", "event_name": "checkout_completed" }
+}
+```
+
+`history_period_count` は、LogBrew が履歴として読み取る、`since` より前の完全な期間の数を設定します。`2` から `31` まで指定できます。デフォルトは `2` です。ユーザーがほかのアクティビティを行っていても、このイベントについては休眠と判定されることがあります。
+
+### 特定イベントのライフサイクルの成功
+
+この架空の例では、2日分の履歴と、2日分の分析期間を使います。アルファベットは例のユーザーを区別するためだけのものです。レスポンスはユーザー ID を返しません。
+
+| 日付（UTC） | チェックアウトを完了したユーザー |
+| --- | --- |
+| 5月30日、履歴 | B |
+| 5月31日、履歴 | A と D |
+| 6月1日、分析 | A、B、C |
+| 6月2日、分析 | A と B |
+
+C は6月2日にページも表示しています。このイベントは、チェックアウトのセレクターに一致しません。
+
+```json
+{
+  "schema_version": 1,
+  "query": {
+    "project_id": "11111111-1111-4111-8111-111111111111",
+    "since": "2026-06-01T00:00:00Z",
+    "until": "2026-06-03T00:00:00Z",
+    "history_since": "2026-05-30T00:00:00Z",
+    "event": { "kind": "interaction", "event_name": "checkout_completed" },
+    "interval": "day",
+    "interval_seconds": 86400,
+    "history_period_count": 2,
+    "expected_buckets": 2
+  },
+  "purpose": "Classifies typed opaque user subjects for one exact product event in each fixed analysis period. new_within_observed_history means active now with no earlier matching event inside the bounded history window; returning means active now and in the immediately previous period; resurrected means active now, inactive in the previous period, and active earlier in observed history; dormant means active in the previous period but not now. These states are disjoint, incomplete buckets are marked, and raw subject identifiers are never returned.",
+  "summary": {
+    "observed_subjects": 4,
+    "analysis_active_subjects": 3,
+    "history_only_subjects": 1,
+    "returned_buckets": 2,
+    "fully_observed_buckets": 2,
+    "latest_fully_observed_period": 1,
+    "buckets_with_resurrection": 1,
+    "buckets_with_dormancy": 2
+  },
+  "coverage": {
+    "analysis_classified_events": 6,
+    "analysis_named_events": 6,
+    "analysis_unnamed_events": 0,
+    "analysis_identified_events": 6,
+    "selected_events": 5,
+    "usable_selected_events": 5,
+    "usable_selected_sessionized_events": 5,
+    "usable_selected_trace_linked_events": 5,
+    "excluded_selected_events": 0,
+    "history_selected_events": 3,
+    "usable_history_selected_events": 3,
+    "excluded_history_selected_events": 0,
+    "event_name_rate": 1.0,
+    "selected_identity_coverage_rate": 1.0,
+    "selected_sessionization_rate": 1.0,
+    "selected_trace_link_rate": 1.0,
+    "history_identity_coverage_rate": 1.0,
+    "limitations": [
+      "Only application-supplied opaque subject IDs explicitly typed as users are counted. Anonymous, legacy-untyped, historical-unindexed, invalid, or absent subjects are excluded rather than inferred as people.",
+      "new_within_observed_history means no earlier selected event between history_since and the current bucket. It does not prove that a subject is a lifetime-new user.",
+      "Observed history contains exactly 2 complete fixed periods before since; activity before history_since is intentionally unknown.",
+      "Buckets are fixed-width and aligned to since. hour, day, week, and thirty_day mean fixed elapsed durations; thirty_day is not a calendar month.",
+      "Returning, resurrected, and dormant compare only the selected exact kind and derived event name. They do not infer intent, identity merges, or causality.",
+      "This resource does not provide arbitrary property breakdowns, reusable cohorts, group lifecycle, lifetime first-event lookup, or per-subject lists."
+    ]
+  },
+  "buckets": [
+    {
+      "period": 0,
+      "started_at": "2026-06-01T00:00:00Z",
+      "ended_at": "2026-06-02T00:00:00Z",
+      "fully_observed": true,
+      "active_subjects": 3,
+      "new_within_observed_history_subjects": 1,
+      "returning_subjects": 1,
+      "resurrected_subjects": 1,
+      "dormant_subjects": 1,
+      "previous_active_subjects": 2,
+      "new_share_of_active": 0.3333333333333333,
+      "returning_share_of_active": 0.3333333333333333,
+      "resurrected_share_of_active": 0.3333333333333333,
+      "dormant_share_of_previous_active": 0.5,
+      "net_active_change": 1
+    },
+    {
+      "period": 1,
+      "started_at": "2026-06-02T00:00:00Z",
+      "ended_at": "2026-06-03T00:00:00Z",
+      "fully_observed": true,
+      "active_subjects": 2,
+      "new_within_observed_history_subjects": 0,
+      "returning_subjects": 2,
+      "resurrected_subjects": 0,
+      "dormant_subjects": 1,
+      "previous_active_subjects": 3,
+      "new_share_of_active": 0.0,
+      "returning_share_of_active": 1.0,
+      "resurrected_share_of_active": 0.0,
+      "dormant_share_of_previous_active": 0.3333333333333333,
+      "net_active_change": -1
+    }
+  ],
+  "next_action": {
+    "code": "investigate_lifecycle_loss",
+    "target": "/api/telemetry/analytics/paths",
+    "reason": "The latest complete bucket lost more prior active subjects than it added through new-within-observed-history and resurrected activity; compare bounded journeys around the selected event."
+  }
+}
+```
+
+### ライフサイクルを読む
+
+6月1日では、A は継続、B は再アクティブ化、C は新規、D は休眠です。6月2日では、A と B は継続で、C はページビューがあってもチェックアウトについては休眠です。6月2日の純増減は `2 - 3 = -1` です。
+
+各時間バケットでは、新規、継続、再アクティブ化のユーザーを足すと `active_subjects` になります。`returning_subjects` と `dormant_subjects` を足すと、`previous_active_subjects` になります。`net_active_change` は、`active_subjects` から `previous_active_subjects` を引いた値です。
+
+日ごとのアクティブ数を足して、重複のないユーザー数を求めないでください。この例では、日ごとの件数を足すと5ですが、`analysis_active_subjects` は3です。履歴と分析期間を合わせると、重複のないユーザーは4人です。
+
+`until` よりあとに終わる最後の時間バケットでは、`fully_observed` が `false` になります。その件数は、期間全体を観測できるようになると変わることがあります。`next_action` は、調査の方向を提案するものです。原因を示すものではありません。
+
+### 自動のライフサイクル
+
+`response_version: 2` を送信し、`event` のセレクターは送信しません。対応しているページビュー、スクリーンビュー、インタラクションはすべて、アクティビティとして数えます。
+
+```json
+{
+  "project_id": "11111111-1111-4111-8111-111111111111",
+  "since": "2026-06-01T00:00:00Z",
+  "until": "2026-06-03T00:00:00Z",
+  "response_version": 2,
+  "interval": "day",
+  "history_period_count": 2
+}
+```
+
+レスポンスの `summary`、`buckets`、`next_action` の形は、特定イベントのレスポンスと同じです。この抜粋は、変わるフィールドを示しています。
+
+```json
+{
+  "schema_version": 2,
+  "query": {
+    "project_id": "11111111-1111-4111-8111-111111111111",
+    "since": "2026-06-01T00:00:00Z",
+    "until": "2026-06-03T00:00:00Z",
+    "history_since": "2026-05-30T00:00:00Z",
+    "activity_scope": "all_classified_activity",
+    "interval": "day",
+    "interval_seconds": 86400,
+    "history_period_count": 2,
+    "expected_buckets": 2
+  },
+  "purpose": "Classifies typed opaque user subjects by any supported classified product activity in each fixed period. It does not choose or infer a top event. new_within_observed_history, returning, resurrected, and dormant remain disjoint; anonymous and unidentified subjects are excluded from user counts, incomplete buckets are marked, and raw identifiers are never returned."
+}
+```
+
+自動モードでは、`coverage.selected_events` は `coverage.analysis_classified_events` と等しくなります。`limitations` の5番目の項目は `Returning, resurrected, and dormant compare any supported classified product activity; no event is ranked, selected, or inferred.` です。
+
+### ユーザーがいない場合のライフサイクル
+
+分析期間にも履歴にも使えるユーザーがいない場合、`buckets` は空になり、`summary` は `latest_fully_observed_period` を省略します。
+
+```json
+{
+  "schema_version": 2,
+  "summary": {
+    "observed_subjects": 0,
+    "analysis_active_subjects": 0,
+    "history_only_subjects": 0,
+    "returned_buckets": 0,
+    "fully_observed_buckets": 0,
+    "buckets_with_resurrection": 0,
+    "buckets_with_dormancy": 0
+  },
+  "buckets": []
+}
+```
+
+分析期間にアクティビティがなくても、履歴にだけ現れるユーザーがいれば、休眠ユーザーを含む時間バケットが作られることがあります。
+
+### ライフサイクルのエラー
+
+[共通の範囲のエラー](#shared-scope-errors)に加えて、次のリクエストは `422` と `validation_failed` を返します。
+
+| 原因 | `error` |
+| --- | --- |
+| バージョン1で `event` がない、バージョン2で `event` がある、またはそれ以外のバージョン | `product analytics lifecycle activity selection is contradictory` |
+| `history_period_count` が `2` から `31` の範囲外 | `product analytics lifecycle history_period_count must be between 2 and 31` |
+| 履歴の期間の合計が62日を超える | `product analytics lifecycle history must not exceed 62 days` |
+| 分析の時間バケットが100個を超える | `product analytics lifecycle interval would exceed 100 analysis buckets` |
+
+たとえば、`week` の履歴期間を10個指定すると、70日分が必要になります。
+
+```json
+{
+  "error": "product analytics lifecycle history must not exceed 62 days",
+  "code": "validation_failed",
+  "next": "use fewer history periods or a narrower fixed interval",
+  "next_action": { "code": "fix_request", "target": "request" }
+}
+```
+
+### 選択した分析の範囲を読む
+
+特定イベントのレスポンスは `schema_version: 1` です。その `query` はセレクターをそのまま返し、`activity_scope` を省略します。自動のレスポンスは `schema_version: 2` と `query.activity_scope: "all_classified_activity"` を持ち、セレクターを省略します。取得されたアクティビティが変わらなくても、セレクターが違えば結果が変わることがあります。
+
+## メトリクスの系列のレスポンス
+
+`GET /api/telemetry/metrics/series` は、1つのプロジェクトで、1つのメトリクス名に完全一致するものを読み取ります。名前は `GET /api/telemetry/metrics` からコピーしてください。次のリクエストは、delta のカウンターをサービスごとにまとめます。
+
+```bash
+curl --get "https://api.logbrew.co/api/telemetry/metrics/series" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project_id>" \
+  --data-urlencode "name=jobs.completed" \
+  --data-urlencode "since=2026-06-01T12:00:00Z" \
+  --data-urlencode "until=2026-06-01T12:15:00Z" \
+  --data-urlencode "interval=5m" \
+  --data-urlencode "group_by=service_name"
+```
+
+### メトリクスの系列の成功
+
+この架空のレスポンスには、delta のカウンターの系列が1つ入っています。最初の時間バケットには、値が `2`、`3`、`5` の3つのサンプルがあります。最後の時間バケットには、値が `1` と `4` の2つのサンプルがあります。真ん中の時間バケットにはサンプルがないため、レスポンスにはそのポイントがありません。
+
+```json
+{
+  "schema_version": 1,
+  "query": {
+    "project_id": "11111111-1111-4111-8111-111111111111",
+    "name": "jobs.completed",
+    "since": "2026-06-01T12:00:00Z",
+    "until": "2026-06-01T12:15:00Z",
+    "interval": "5m",
+    "interval_seconds": 300,
+    "group_by": "service_name",
+    "series_limit": 10
+  },
+  "purpose": "Shows how one metric changes over time without changing its meaning: gauges use sampled state, delta counters use change volume and rate, histograms use distributions, and cumulative streams stay raw when reset-safe change is ambiguous.",
+  "coverage": {
+    "samples": 5,
+    "series": 1,
+    "returned_series": 1,
+    "points": 2,
+    "expected_buckets_per_series": 3,
+    "first_seen_at": "2026-06-01T12:00:10Z",
+    "last_seen_at": "2026-06-01T12:14:50Z",
+    "truncated": false
+  },
+  "series": [
+    {
+      "identity": {
+        "kind": "counter",
+        "unit": "{job}",
+        "temporality": "delta",
+        "group_by": "service_name",
+        "group_value": "checkout-worker"
+      },
+      "status": "ready",
+      "aggregation": {
+        "code": "delta_sum",
+        "description": "Primary value is the sum of recorded changes in each bucket; rate_per_second normalizes that change by bucket width."
+      },
+      "sample_count": 5,
+      "points": [
+        {
+          "bucket_start": "2026-06-01T12:00:00Z",
+          "bucket_end": "2026-06-01T12:05:00Z",
+          "sample_count": 3,
+          "value": 10.0,
+          "last": 5.0,
+          "min": 2.0,
+          "max": 5.0,
+          "average": 3.3333333333333335,
+          "sum": 10.0,
+          "rate_per_second": 0.03333333333333333,
+          "trace_exemplars": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
+        },
+        {
+          "bucket_start": "2026-06-01T12:10:00Z",
+          "bucket_end": "2026-06-01T12:15:00Z",
+          "sample_count": 2,
+          "value": 5.0,
+          "last": 4.0,
+          "min": 1.0,
+          "max": 4.0,
+          "average": 2.5,
+          "sum": 5.0,
+          "rate_per_second": 0.016666666666666666,
+          "trace_exemplars": []
+        }
+      ]
+    }
+  ],
+  "next_action": {
+    "code": "inspect_metric_change",
+    "target": "trace_summary",
+    "reason": "Open a trace exemplar from an unusual bucket to connect the metric change to spans, errors, logs, and release context."
+  }
+}
+```
+
+### メトリクスの系列を読む
+
+最初のポイントは、完了したジョブが10件だったことを記録しています。サンプルが10個あったという意味ではありません。`rate_per_second` は、その変化量を300秒の時間バケットで割った値です。`last` は最後に記録された変化量で、合計ではありません。[メトリクスの集計の意味](/ja/concepts/telemetry#read-the-metric-value)を参照してください。
+
+系列の種類と temporality によって、`aggregation.code` と、各ポイントに入る統計値が決まります。当てはまらない統計値は、ポイントから省略されます。統計値がないことは、ゼロという意味ではありません。
+
+| 種類と temporality | `status` | `aggregation.code` | `value` | その他の統計値 |
+| --- | --- | --- | --- | --- |
+| `gauge`, `instant` | `ready` | `gauge_last` | 最後のサンプル | `last`, `min`, `max`, `average` |
+| `counter`, `delta` | `ready` | `delta_sum` | 変化量の合計 | `last`, `min`, `max`, `average`, `sum`, `rate_per_second` |
+| `histogram`, `delta` | `ready` | `distribution_p95` | p95 の概算値 | `min`, `max`, `average`, `sum`, `p50`, `p95`, `p99` |
+| 任意の種類、`cumulative` | `limited` | `raw_cumulative_last` | 最後の生のサンプル | `last`, `min`, `max` |
+| その他の組み合わせ | `limited` | `raw_last` | 最後の生のサンプル | `last`, `min`, `max` |
+
+`limited` は成功したレスポンスで、エラーではありません。`aggregation.limitation` が追加され、LogBrew が生の値だけを表示する理由を説明します。`ready` は、取得が完全であることの証明にはなりません。
+
+グラフを描く前に、`coverage` を読んでください。
+
+- `samples` は、一致したすべての系列のサンプルを数えます。レスポンスが返さない系列も含みます。
+- `series` は、一致した系列を数えます。`returned_series` と `points` は、返されたデータを数えます。
+- `series_limit` によって件数の少ない系列が除かれた場合、`truncated` は `true` になります。
+- `expected_buckets_per_series` は、期間内にありうる時間バケットの数です。
+
+サンプルのない時間バケットにポイントを追加しないでください。ゼロを入れたり、前の値をコピーしたりしないでください。各ポイントは、最大3つの `trace_exemplars` を返します。トレースの exemplar は、1つのサンプルを1つのトレースに結び付けます。時間バケット内のすべてのサンプルを説明するものではありません。トレースの exemplar を持つポイントがない場合、`next_action.target` は `metric_samples` です。
+
+### メトリクスの系列の範囲とエラー
+
+`project_id`、`name`、`since` は必須です。`name` は最大200文字です。`interval` は、`auto`、`1m`、`5m`、`15m`、`1h`、`6h`、`1d` のいずれかです。デフォルトは `auto` で、時間バケットが300個以下で済む最小の間隔を選びます。明示した間隔で、500個を超える時間バケットが必要になってはいけません。
+
+`group_by` は、`none`、`service_name`、`release`、`environment` のいずれかです。デフォルトは `none` です。まとめない場合でも、種類、単位、temporality が違うものは別の系列になります。`series_limit` には `1` から `20` を指定できます。デフォルトは `10` です。
+
+結果が空の場合は、`series: []` とゼロの `samples` とともに `200` が返ります。`coverage` オブジェクトでは `first_seen_at` と `last_seen_at` が省略されます。これは、アプリケーションがそのメトリクスを一度も送信していないことの証明にはなりません。プロジェクト、メトリクス名、期間を確認してください。
+
+`name` を省略すると、`422` が返ります。
+
+```json
+{
+  "error": "metric series name is required",
+  "code": "validation_failed",
+  "next": "send the exact metric name returned by /api/telemetry/metrics",
+  "next_action": { "code": "fix_request", "target": "request" }
+}
+```
+
+7日間を1分ごとの時間バケットで読み取ると、`422` が返ります。
+
+```json
+{
+  "error": "metric series interval would exceed 500 buckets",
+  "code": "validation_failed",
+  "next": "use interval=auto or select a wider interval",
+  "next_action": { "code": "fix_request", "target": "request" }
+}
+```
+
+ほかの `422` エラーには、`metric series group_by is not supported`、`metric series interval is not supported`、`metric series_limit must be between 1 and 20` があります。
+
+## パス分析のレスポンス
+
+`POST /api/telemetry/analytics/paths` は、同じセッション内で、選択した1つのイベントの前またはあとにある名前付きのイベントを見つけます。選択したイベントを基準イベントと呼びます。その `kind` と `event_name` は、`classified_activity.top_events` からコピーしてください。このルートは `schema_version: 1` を返します。`response_version` と `analysis_unit` は受け付けません。
+
+```json
+{
+  "project_id": "11111111-1111-4111-8111-111111111111",
+  "since": "2026-06-01T11:00:00Z",
+  "until": "2026-06-01T12:00:00Z",
+  "direction": "following",
+  "anchor": { "kind": "page_view", "event_name": "/checkout" },
+  "depth": 2,
+  "collapse_repeated": true,
+  "path_limit": 2
+}
+```
+
+`direction` と `anchor` は必須です。
+
+### パスの成功
+
+この架空の結果では、4つのセッションに基準イベントが含まれています。返された2つのパスは、そのうち3つのセッションを表しています。順位の低いパスが1つ、返されていません。
+
+```json
+{
+  "schema_version": 1,
+  "query": {
+    "project_id": "11111111-1111-4111-8111-111111111111",
+    "since": "2026-06-01T11:00:00Z",
+    "until": "2026-06-01T12:00:00Z",
+    "direction": "following",
+    "anchor": { "kind": "page_view", "event_name": "/checkout" },
+    "depth": 2,
+    "collapse_repeated": true,
+    "path_limit": 2
+  },
+  "purpose": "Shows the highest-volume named product-event sequences immediately before or after one exact version-1 page view, screen view, or interaction inside explicit sessions. Following paths use the earliest matching anchor in each session; preceding paths use the latest. Optional exact property predicates classify only the anchor, while surrounding events preserve the real session journey. Results aggregate exact bounded sequences and never return raw session or subject identifiers.",
+  "summary": {
+    "anchored_sessions": 4,
+    "represented_sessions": 3,
+    "unrepresented_sessions": 1,
+    "returned_paths": 2,
+    "paths_truncated": true
+  },
+  "coverage": {
+    "classified_events": 12,
+    "named_events": 12,
+    "unnamed_events": 0,
+    "sessionized_events": 10,
+    "unsessionized_events": 2,
+    "anchor_events": 5,
+    "usable_anchor_events": 4,
+    "excluded_anchor_events": 1,
+    "traced_anchor_events": 1,
+    "event_name_rate": 1.0,
+    "sessionization_rate": 0.8333333333333334,
+    "anchor_session_coverage_rate": 0.8,
+    "anchor_trace_link_rate": 0.2,
+    "ordered_event_cap_per_session": 1024,
+    "limitations": [
+      "Paths include only supported version-1 classified events with exact derived names; arbitrary actions, technical spans, and raw identity values are excluded.",
+      "Paths stay inside application-supplied session boundaries and the selected half-open time range; activity beyond either boundary is not inferred.",
+      "Each session retains at most 1024 direction-nearest named events before anchoring, so exceptionally noisy sessions can be omitted or truncated.",
+      "Classified events without an explicit opaque session ID cannot participate in session paths.",
+      "Trace exemplars prove only that a matching anchor carried the same trace ID. They do not prove root cause, and deeper investigation depends on retained spans for that trace.",
+      "Some matching anchors lack trace IDs, so trace-linked path evidence covers only the reported traced_anchor_events population."
+    ]
+  },
+  "paths": [
+    {
+      "rank": 1,
+      "sessions": 2,
+      "share_of_anchored_sessions": 0.5,
+      "traced_sessions": 1,
+      "trace_link_rate": 0.5,
+      "trace_exemplars": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+      "nodes": [
+        { "relative_position": 0, "kind": "page_view", "event_name": "/checkout" },
+        { "relative_position": 1, "kind": "interaction", "event_name": "checkout.submitted" },
+        { "relative_position": 2, "kind": "interaction", "event_name": "checkout.completed" }
+      ]
+    },
+    {
+      "rank": 2,
+      "sessions": 1,
+      "share_of_anchored_sessions": 0.25,
+      "traced_sessions": 0,
+      "trace_link_rate": 0.0,
+      "trace_exemplars": [],
+      "nodes": [
+        { "relative_position": 0, "kind": "page_view", "event_name": "/checkout" },
+        { "relative_position": 1, "kind": "interaction", "event_name": "checkout.failed" }
+      ]
+    }
+  ],
+  "next_action": {
+    "code": "inspect_path_trace",
+    "target": "/api/telemetry/traces/{trace_id}/investigation",
+    "reason": "Open an exemplar from the material path to connect the product journey to retained spans, issues, logs, actions, metrics, and release context as evidence rather than a root-cause claim."
+  }
+}
+```
+
+### パスを読む
+
+`share_of_anchored_sessions` は、パスのセッション数を、基準イベントを含む4つのセッションすべてで割った値です。割合は50%と25%で、67%と33%ではありません。`unrepresented_sessions` は、基準イベントを含むセッションのうち、返されたどのパスにも表されていないものの数です。`paths_truncated: true` は、結果が完全ではないことを示します。
+
+カバレッジは、セッションではなくイベントを数えます。この例では、5件のイベントが基準イベントに一致しますが、そのうち1件にはセッション ID がありません。そのイベントはパスに入れません。各パスは、最大3つのトレースの exemplar を返します。トレース ID は、自分が受け取ったレスポンスのものを使ってください。トレースへのリンクは、ユーザーのアクションや失敗の原因を示すものではありません。
+
+| フィールド | 意味 |
+| --- | --- |
+| `following` | 各セッションで、一致する最も早い基準イベントから始まります。基準イベントの位置は `0` です。あとのノードの位置は正の値です。 |
+| `preceding` | 各セッションで、一致する最も遅い基準イベントで終わります。前のノードの位置は負の値です。基準イベントの位置は `0` です。 |
+| `depth` | 基準イベントの隣に並ぶノードの数。基準イベント自体は数えません。`1`〜`8`。デフォルトは `4`。パスのノードはこれより少ないこともあります。 |
+| `collapse_repeated` | 種類と名前が同じ連続したノードを1つにまとめます。デフォルトは `true`。 |
+| `path_limit` | 返すパスの最大数。セッション数の順に並びます。`1`〜`20`。デフォルトは `10`。 |
+
+どちらの方向でも、ノードは時刻の順に並びます。パスは、セッション全体を再現したものではありません。LogBrew は、基準イベントを選ぶ前に、セッションごとに最大1024件の名前付きイベントを読み取ります。`following` では最も早いイベント、`preceding` では最も遅いイベントを読み取ります。この上限の外にある基準イベントは、省略されることがあります。
+
+### <span id="filter-the-anchor-by-property">プロパティで基準イベントを絞り込む</span>
+
+`property_filters` を最大4つ送信できます。それぞれに、完全一致の `key` と `value` を1つずつ指定します。キーは[プロパティカタログ](#analytics-property-catalog)からコピーしてください。フィルターは基準イベントにだけ適用され、その前後のイベントには適用されません。値は大文字と小文字を区別します。フィルターがある場合、`query` はそれをそのまま返し、`coverage.anchor_property_filters` に次の値が入ります。
+
+| フィールド | 意味 |
+| --- | --- |
+| `context_events` | プロパティのフィルターを適用する前の、範囲内の基準イベント。 |
+| `property_ready_events` | リクエストしたキーをすべて持つ基準イベント。 |
+| `missing_property_events` | リクエストしたキーのうち、1つ以上を持たない基準イベント。 |
+| `matching_events` | 値がすべてのフィルターに一致する基準イベント。 |
+| `nonmatching_value_events` | キーはすべて持っているが、値が違う基準イベント。 |
+| `property_ready_rate` | `property_ready_events` を `context_events` で割った値。 |
+| `match_rate` | `matching_events` を `property_ready_events` で割った値。 |
+
+キーがない場合と値が違う場合とでは、必要な対処が違います。この2つを足し合わせないでください。リクエストにプロパティのフィルターがない場合、このオブジェクトは省略されます。
+
+### 空のパスと拒否されるリクエスト
+
+空の `paths` 配列が、成功した `200` のレスポンスであることもあります。`summary`、`coverage`、`next_action` を読んでください。次のコードで原因を区別できます：`capture_product_activity`、`choose_captured_path_anchor`、`capture_anchor_properties`、`improve_anchor_property_coverage`、`verify_anchor_property_values`、`sessionize_product_activity`、`narrow_or_move_path_anchor`。
+
+[共通の範囲のエラー](#shared-scope-errors)に加えて、次のリクエストは `422` と `validation_failed` を返します。
+
+| 原因 | `error` |
+| --- | --- |
+| `depth` が `1` から `8` の範囲外 | `product analytics path depth must be between 1 and 8` |
+| `path_limit` が `1` から `20` の範囲外 | `product analytics path_limit must be between 1 and 20` |
+| プロパティのフィルターが5つ以上 | `product analytics paths accept at most four exact anchor property filters` |
+| プロパティカタログにないキー | `product analytics path property keys must be supported privacy-safe keys` |
+| 同じキーを2回指定した | `product analytics path property keys must be unique` |
+| 値が空、256文字を超える、または制御文字を含む | `product analytics path property values must be non-empty, control-free, and at most 256 characters` |
+
+たとえば、`depth: 0` は次を返します。
+
+```json
+{
+  "error": "product analytics path depth must be between 1 and 8",
+  "code": "validation_failed",
+  "next": "use depth from 1 through 8 adjacent named events",
+  "next_action": { "code": "fix_request", "target": "request" }
+}
+```
+
+## <span id="analytics-property-catalog">分析のプロパティカタログ</span>
+
+`GET /api/telemetry/analytics/properties` は、1つのプロジェクトで、分類済みのプロダクトイベントにあるプロパティのキーを一覧表示します。これらのキーは、[セグメント比較](#analytics-segment-comparison)とパスの基準イベントのフィルターで使います。カタログが返すのはキーと件数です。プロパティの値や識別情報を返すことはありません。
+
+### 使えるプロパティのキーを読む
+
+`project_id` と `since` を送信します。`until`、`service_name`、`release`、`environment`、`limit`、`response_version` も送信できます。`limit` には `1` から `50` 個のキーを指定できます。デフォルトは `20` です。公開用の `estimation.method` の値を取得するには、`response_version=2` を送信します。
+
+```bash
+curl --get "https://api.logbrew.co/api/telemetry/analytics/properties" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --data-urlencode "project_id=<project_id>" \
+  --data-urlencode "since=2026-06-01T00:00:00Z" \
+  --data-urlencode "until=2026-06-02T00:00:00Z" \
+  --data-urlencode "limit=20" \
+  --data-urlencode "response_version=2"
+```
+
+### プロパティカタログの成功
+
+この架空の結果では、分類済みのイベントが100件あります。そのうち5件は、現在のプロパティのインデックスより前に取得されたものです。
+
+```json
+{
+  "schema_version": 2,
+  "query": {
+    "project_id": "11111111-1111-4111-8111-111111111111",
+    "since": "2026-06-01T00:00:00Z",
+    "until": "2026-06-02T00:00:00Z",
+    "limit": 20
+  },
+  "purpose": "Discovers bounded privacy-safe runtime, framework, operating-system, device, application, and custom-tag keys captured on classified product events. It reports migration, capture, privacy-filtering, and per-key coverage without returning property values or identities, so humans and agents can build exact segment comparisons without guessing which dimensions exist.",
+  "summary": {
+    "classified_events": 100,
+    "available_property_keys": 3,
+    "returned_properties": 3
+  },
+  "coverage": {
+    "indexed_events": 95,
+    "unindexed_events": 5,
+    "complete_index_events": 95,
+    "incomplete_index_events": 0,
+    "privacy_filtered_events": 4,
+    "events_with_properties": 90,
+    "index_coverage_rate": 0.95,
+    "property_capture_rate": 0.9,
+    "properties_truncated": false,
+    "values_returned": false,
+    "limitations": [
+      "Property discovery returns keys and aggregate counts only; property values and identity columns are never returned.",
+      "Property filters use exact case-sensitive bounded string equality and combine with logical AND inside each segment.",
+      "Historical events written before the current property index are excluded from property descriptors and exact property filters.",
+      "Direct-identity, credential-like, and network-address custom tag keys were intentionally excluded from the analytics property index."
+    ]
+  },
+  "estimation": {
+    "count_accuracy": "approximate",
+    "method": "approximate_distinct",
+    "description": "Available property-key and per-key distinct-value counts are approximate distinct counts. Classified-event, index-coverage, privacy-filtering, and per-key event counts are exact within the selected fully evaluated window."
+  },
+  "properties": [
+    {
+      "key": "resource.runtime.name",
+      "source": "standard_context",
+      "value_type": "string",
+      "events": 90,
+      "coverage_rate": 0.9,
+      "distinct_values": 2
+    },
+    {
+      "key": "resource.application.version",
+      "source": "standard_context",
+      "value_type": "string",
+      "events": 70,
+      "coverage_rate": 0.7,
+      "distinct_values": 4
+    },
+    {
+      "key": "tag.plan",
+      "source": "custom_tag",
+      "value_type": "string",
+      "events": 60,
+      "coverage_rate": 0.6,
+      "distinct_values": 3
+    }
+  ],
+  "next_action": {
+    "code": "compare_property_segments",
+    "target": "/api/telemetry/analytics/segments/compare",
+    "reason": "Use exact returned keys with locally known values to compare behavior while preserving identity and property-value privacy."
+  }
+}
+```
+
+### カタログを解釈する
+
+`source` は、`resource.runtime.name` のような標準のコンテキストのキーでは `standard_context`、`tag.` で始まるキーでは `custom_tag` です。`value_type` は常に `string` です。`properties` は `events` の多い順に並びます。
+
+`tag.plan` は、分類済みの100件のイベントのうち60件にあります。値の種類は約3つです。説明の情報には、それらの値は含まれません。値は、アプリケーションでわかっているものを使ってください。件数から値を推測しないでください。1つのイベントが複数のキーを持つことがあるため、キーごとの `events` の件数を足さないでください。
+
+| フィールド | 意味 |
+| --- | --- |
+| `summary.classified_events` | 範囲内の分類済みのイベント。各 `coverage_rate` の分母です。 |
+| `summary.available_property_keys` | 重複のないキーの推定数。返された行の数ではありません。 |
+| `coverage.unindexed_events` | 現在のプロパティのインデックスより前に取得されたイベント。キーには反映されません。 |
+| `coverage.incomplete_index_events` | コンテキストの一部が不正な形式か一部省略されているイベント。有効なキーは数えます。 |
+| `coverage.privacy_filtered_events` | LogBrew が機密性の高いカスタムタグのキーを取り除いたイベント。キーの数ではありません。 |
+| `coverage.properties_truncated` | キーが `limit` より多い場合は `true`。範囲を絞り込むか、`limit` を最大50まで増やします。 |
+| `coverage.values_returned` | 常に `false`。 |
+
+`properties` 配列が空でも、プロジェクトにプロダクトイベントがないことの証明にはなりません。`summary`、`coverage`、`next_action` を読んでください。
+
+### プロパティカタログのエラー
+
+[共通の範囲のエラー](#shared-scope-errors)に加えて、`limit=0` または `limit=51` には `422` が返ります。
+
+```json
+{
+  "error": "product analytics property limit must be between 1 and 50",
+  "code": "validation_failed",
+  "next": "use limit=1 through limit=50",
+  "next_action": { "code": "fix_request", "target": "request" }
+}
+```
+
+`response_version` が `1` でも `2` でもない場合は、`product analytics response_version must be 1 or 2` が返ります。LogBrew は、ほかの値より先に `response_version` を確認します。
+
+`POST` リクエストには `405` が返ります。
+
+```json
+{
+  "error": "Method not allowed",
+  "code": "method_not_allowed",
+  "next": "send GET /api/telemetry/analytics/properties with required project_id and since plus optional until, service_name, release, environment, limit, or response_version query parameters",
+  "next_action": { "code": "use_supported_method", "target": "api_method" }
+}
+```
+
+## <span id="analytics-segment-comparison">分析のセグメント比較</span>
+
+`POST /api/telemetry/analytics/segments/compare` は、1つのプロジェクトの2〜4個のセグメントについて、セッションやユーザーが1つの特定イベントにどのくらい到達するかを比較します。セグメントは、サービス、リリース、環境、プロパティの値でイベントを選びます。最初のセグメントが比較の基準になります。
+
+### 比較を定義する
+
+アカウントの認証と `Content-Type: application/json` を付けて、次の JSON 本文を送信します。この例の `basic` と `premium` は、例のアプリケーションのプランの値です。LogBrew のプランではありません。
+
+```json
+{
+  "project_id": "11111111-1111-4111-8111-111111111111",
+  "since": "2026-06-01T11:00:00Z",
+  "until": "2026-06-01T12:00:00Z",
+  "interval": "1h",
+  "analysis_unit": "session",
+  "response_version": 2,
+  "target": { "kind": "interaction", "event_name": "checkout_completed" },
+  "segments": [
+    {
+      "key": "basic",
+      "label": "Basic plan",
+      "service_name": "checkout-api",
+      "environment": "production",
+      "property_filters": [{ "key": "tag.plan", "value": "basic" }]
+    },
+    {
+      "key": "premium",
+      "label": "Premium plan",
+      "service_name": "checkout-api",
+      "environment": "production",
+      "property_filters": [{ "key": "tag.plan", "value": "premium" }]
+    }
+  ]
+}
+```
+
+`target` と `segments` は必須です。`analysis_unit` は `session` または `identified_user` です。デフォルトは `session` で、人ではなくセッションを数えます。`interval` には概要と同じ値を指定できます。デフォルトは `auto` です。
+
+各セグメントには、重複しない `key`、`label`、ほかと異なるフィルターの組み合わせが必要です。
+
+- `key`：1〜32バイト。小文字の ASCII 英字か数字で始めます。使えるのは、小文字の ASCII 英字、数字、`_`、`-` だけです。
+- `label`：1〜80文字。制御文字は使えません。
+- `service_name`、`release`、`environment`：任意。それぞれの値は1〜256文字で、制御文字は使えません。
+- `property_filters`：0〜4個のフィルター。1つのセグメントで、同じキーは1回しか使えません。イベントは、セグメントのすべてのフィルターに一致する必要があります。値は大文字と小文字を区別し、1〜256文字です。LogBrew は前後の空白を取り除きます。
+
+フィルターのないセグメントは、そのプロジェクトと期間内の、分類済みのアクティビティすべてを選びます。セグメント同士が重なることもあります。ラベルやキーが違っても、フィルターの組み合わせが同じ2つのセグメントは有効になりません。
+
+### セグメント比較の成功
+
+この架空の結果では、基準のセグメントでは50セッションのうち10セッションがチェックアウトに到達しています。premium のセグメントでは、60セッションのうち18セッションが到達しています。
+
+```json
+{
+  "schema_version": 2,
+  "query": {
+    "project_id": "11111111-1111-4111-8111-111111111111",
+    "since": "2026-06-01T11:00:00Z",
+    "until": "2026-06-01T12:00:00Z",
+    "interval": "1h",
+    "interval_seconds": 3600,
+    "analysis_unit": "session",
+    "target": { "kind": "interaction", "event_name": "checkout_completed" },
+    "segments": [
+      {
+        "key": "basic",
+        "label": "Basic plan",
+        "service_name": "checkout-api",
+        "release": null,
+        "environment": "production",
+        "property_filters": [{ "key": "tag.plan", "value": "basic" }]
+      },
+      {
+        "key": "premium",
+        "label": "Premium plan",
+        "service_name": "checkout-api",
+        "release": null,
+        "environment": "production",
+        "property_filters": [{ "key": "tag.plan", "value": "premium" }]
+      }
+    ]
+  },
+  "purpose": "Compares how often explicit sessions or typed opaque user subjects reach one exact versioned page-view, screen-view, or interaction outcome across two through four named service, release, environment, and exact safe-property segments. It distinguishes missing property capture from nonmatching values, returns time trends and descriptive differences from the first segment, and never returns identities or claims causality or statistical significance.",
+  "summary": {
+    "segment_count": 2,
+    "baseline_segment_key": "basic",
+    "segments_with_eligible_units": 2,
+    "segments_with_target_events": 2,
+    "segments_with_reached_units": 2
+  },
+  "confidence": {
+    "interpretation": "descriptive_only",
+    "unique_count_accuracy": "approximate",
+    "estimation_method": "approximate_distinct",
+    "causal_inference": "not_established",
+    "statistical_significance": "not_tested",
+    "segment_overlap": "possible",
+    "limitations": [
+      "Unique session or typed user-subject counts use bounded cardinality estimates; event and capture-coverage totals are exact within the fully evaluated window.",
+      "Segments are evaluated independently and may overlap, so their totals must not be added or interpreted as a population partition.",
+      "Differences and relative lift are descriptive only. They do not control for exposure, assignment, seasonality, selection bias, or other confounders.",
+      "Bucket-level unique counts are recalculated inside each bucket and are not additive across the series.",
+      "Session analysis compares visits or app sessions, not unique people.",
+      "At least one segment has classified events without the selected unit ID; compare unit_coverage_rate before interpreting reach differences.",
+      "Property predicates are exact case-sensitive string matches. Events without the current property index or every requested key are excluded from segment results and reported separately as missing_property_events.",
+      "Direct-identity, credential-like, and network-address custom tag keys are excluded from the analytics property index and cannot be used for segmentation."
+    ]
+  },
+  "segments": [
+    {
+      "key": "basic",
+      "label": "Basic plan",
+      "eligible_units": 50,
+      "reached_units": 10,
+      "reach_rate": 0.2,
+      "usable_target_events_per_reached_unit": 1.8,
+      "coverage": {
+        "classified_events": 200,
+        "unit_identified_events": 190,
+        "excluded_events": 10,
+        "unit_coverage_rate": 0.95,
+        "target_events": 20,
+        "usable_target_events": 18,
+        "excluded_target_events": 2,
+        "target_unit_coverage_rate": 0.9,
+        "traced_target_events": 10,
+        "target_trace_link_rate": 0.5,
+        "property_filters": {
+          "context_events": 500,
+          "property_ready_events": 480,
+          "missing_property_events": 20,
+          "property_ready_rate": 0.96,
+          "matching_events": 200,
+          "nonmatching_value_events": 280,
+          "match_rate": 0.4166666666666667
+        }
+      },
+      "series": [
+        {
+          "bucket_start": "2026-06-01T11:00:00Z",
+          "bucket_end": "2026-06-01T12:00:00Z",
+          "classified_events": 200,
+          "eligible_units": 50,
+          "target_events": 20,
+          "usable_target_events": 18,
+          "reached_units": 10,
+          "reach_rate": 0.2
+        }
+      ]
+    },
+    {
+      "key": "premium",
+      "label": "Premium plan",
+      "eligible_units": 60,
+      "reached_units": 18,
+      "reach_rate": 0.3,
+      "usable_target_events_per_reached_unit": 1.8888888888888888,
+      "coverage": {
+        "classified_events": 240,
+        "unit_identified_events": 228,
+        "excluded_events": 12,
+        "unit_coverage_rate": 0.95,
+        "target_events": 36,
+        "usable_target_events": 34,
+        "excluded_target_events": 2,
+        "target_unit_coverage_rate": 0.9444444444444444,
+        "traced_target_events": 18,
+        "target_trace_link_rate": 0.5,
+        "property_filters": {
+          "context_events": 500,
+          "property_ready_events": 480,
+          "missing_property_events": 20,
+          "property_ready_rate": 0.96,
+          "matching_events": 240,
+          "nonmatching_value_events": 240,
+          "match_rate": 0.5
+        }
+      },
+      "series": [
+        {
+          "bucket_start": "2026-06-01T11:00:00Z",
+          "bucket_end": "2026-06-01T12:00:00Z",
+          "classified_events": 240,
+          "eligible_units": 60,
+          "target_events": 36,
+          "usable_target_events": 34,
+          "reached_units": 18,
+          "reach_rate": 0.3
+        }
+      ],
+      "comparison_to_baseline": {
+        "eligible_units_difference": 10,
+        "reached_units_difference": 8,
+        "target_events_difference": 16,
+        "reach_rate_difference": 0.09999999999999998,
+        "relative_reach_rate_lift": 0.4999999999999998
+      }
+    }
+  ],
+  "next_action": {
+    "code": "investigate_segment_paths",
+    "target": "/api/telemetry/analytics/paths",
+    "reason": "Inspect paths around the target in the weakest segment, then use correlated traces to explain a material behavioral difference."
+  }
+}
+```
+
+### 率と差を読む
+
+`eligible_units` は、セグメント内で分類済みのアクティビティがあるセッションまたはユーザーの推定数です。`reached_units` は、そのうち対象のイベントに到達した数の推定値です。`reach_rate` は、`reached_units` を `eligible_units` で割った値です。選択した単位の ID がないイベントは、これらの単位には数えません。
+
+基準の率は20%、premium の率は30%です。差は10ポイントです。相対的な上昇率は50%で、10%ではありません。小数の小さな誤差は、浮動小数点演算によるものです。表示するときは率を丸めますが、計算には返された値を使ってください。基準のセグメントには `comparison_to_baseline` がありません。基準の到達率がゼロの場合、相対的な上昇率は省略されます。
+
+`query` では、送信しなかったセグメントのフィルターは `null` になります。空の `property_filters` の一覧は省略されます。
+
+`coverage.property_filters` のフィールドは、[パスの基準イベントのフィルターのカバレッジ](#filter-the-anchor-by-property)と同じです。この例では、`matching_events` は `classified_events` と等しくなります。キーがない場合と値が違う場合は、分けて扱ってください。セグメント同士は重なることがあり、1つのセッションが複数の時間バケットに入ることもあります。セグメントや時間バケットをまたいで単位の件数を足さないでください。
+
+この比較は、状況を記述するものです。`confidence.causal_inference` は `not_established`、`confidence.statistical_significance` は `not_tested` です。30%と20%の差は、あるプランによってチェックアウトが増えたことを示すものではありません。
+
+### セグメント比較のエラー
+
+[共通の範囲のエラー](#shared-scope-errors)に加えて、次のリクエストは `422` と `validation_failed` を返します。
+
+| 原因 | `error` |
+| --- | --- |
+| セグメントが2個未満、または4個を超える | `product analytics segment comparison requires two through four segments` |
+| 2つのセグメントのキーが同じ | `product analytics segment keys must be unique` |
+| 2つのセグメントのフィルターが同じ | `product analytics segment filters must be unique` |
+| キーが、使える文字で1〜32バイトになっていない | `product analytics segment keys must be 1 through 32 machine-safe bytes` |
+| ラベルが空、長すぎる、または制御文字を含む | `product analytics segment labels must be non-empty, control-free, and at most 80 characters` |
+| フィルターの値が制御文字を含む | `product analytics segment filters must be control-free` |
+| 1つのセグメントにプロパティのフィルターが5つ以上 | `product analytics segments accept at most four exact property filters` |
+| プロパティカタログにないキー | `product analytics segment property keys must be supported privacy-safe keys` |
+| 1つのセグメントで同じプロパティのキーを2回指定した | `product analytics segment property keys must be unique within each segment` |
+| プロパティの値が空、長すぎる、または制御文字を含む | `product analytics segment property values must be non-empty, control-free, and at most 256 characters` |
+| `response_version` が `1` でも `2` でもない | `product analytics response_version must be 1 or 2` |
+
+`interval` のエラーは、[概要のエラー](#overview-errors)と同じです。
+
+たとえば、キーは違ってもフィルターが同じ2つのセグメントは、次を返します。
+
+```json
+{
+  "error": "product analytics segment filters must be unique",
+  "code": "validation_failed",
+  "next": "change at least one exact service_name, release, environment, or property filter",
+  "next_action": { "code": "fix_request", "target": "request" }
+}
+```
+
+ラベルやプロパティのフィルターの順序が違っても、選ばれるイベントは変わりません。検証に失敗したことは、一致するイベントがないことの証拠にはなりません。
+
+`GET` リクエストには `405` が返ります。
+
+```json
+{
+  "error": "Method not allowed",
+  "code": "method_not_allowed",
+  "next": "send POST /api/telemetry/analytics/segments/compare with project_id, since, one exact target, two through four named segments, and optional until, interval, analysis_unit, property_filters, or response_version JSON fields",
+  "next_action": { "code": "use_supported_method", "target": "api_method" }
+}
+```
+
+## シグナル量のレスポンス
+
+`GET /api/telemetry/summary/volume` は、1つのプロジェクトと期間について、保持済みのシグナルを数えます。`project_id` と `since` が必要です。`project_ids` は受け付けません。
+
+`until` に未来の時刻は指定できません。省略すると、リクエストの時刻が終了になります。`24h` のような短い形式の `since` は、`until` からさかのぼって数えます。`interval` は、`auto`、`1m`、`5m`、`15m`、`1h`、`6h`、`1d` のいずれかです。デフォルトの `auto` は、時間バケットが120個以下で済む最小の間隔を選びます。リクエストで500個を超える時間バケットが必要になってはいけません。`response_version` は `1` だけです。
+
+### シグナルの件数
+
+この架空のレスポンスは、1分ごとの時間バケット2つ分を対象にしています。リクエストは、`until` なしで UTC の12:02に実行されました。アカウントの保持ポリシーは30日間です。返されたポリシーと区切りの時刻を読んでください。これらの値が自分のアカウントにも当てはまると決めつけないでください。
+
+```json
+{
+  "schema_version": 1,
+  "query": {
+    "project_id": "11111111-1111-4111-8111-111111111111",
+    "requested_since": "2026-09-08T12:00:00Z",
+    "since": "2026-09-08T12:00:00Z",
+    "until": "2026-09-08T12:02:00Z",
+    "interval": "1m",
+    "interval_seconds": 60,
+    "bucket_alignment": "query_relative_utc_half_open",
+    "bucket_count": 2,
+    "service_name": "checkout-api",
+    "release": "api@1.2.3",
+    "environment": "production"
+  },
+  "purpose": "Compares retained issue occurrences, log events, unique traces, action events, and metric points over one exact project and time scope. Every lane is independently scalable, uses explicit zero-filled half-open buckets, returns no source telemetry rows, and qualifies retention and sampling so different signal volumes are not mistaken for equivalent impact.",
+  "series": [
+    {
+      "signal": "issues",
+      "count_unit": "issue_occurrences",
+      "total": 1,
+      "peak": 1,
+      "non_empty_buckets": 1,
+      "points": [
+        { "bucket_start": "2026-09-08T12:00:00Z", "bucket_end": "2026-09-08T12:01:00Z", "count": 1 },
+        { "bucket_start": "2026-09-08T12:01:00Z", "bucket_end": "2026-09-08T12:02:00Z", "count": 0 }
+      ]
+    },
+    {
+      "signal": "logs",
+      "count_unit": "log_events",
+      "total": 3,
+      "peak": 2,
+      "non_empty_buckets": 2,
+      "points": [
+        { "bucket_start": "2026-09-08T12:00:00Z", "bucket_end": "2026-09-08T12:01:00Z", "count": 2 },
+        { "bucket_start": "2026-09-08T12:01:00Z", "bucket_end": "2026-09-08T12:02:00Z", "count": 1 }
+      ]
+    },
+    {
+      "signal": "traces",
+      "count_unit": "unique_traces_by_first_observed_span",
+      "total": 1,
+      "peak": 1,
+      "non_empty_buckets": 1,
+      "points": [
+        { "bucket_start": "2026-09-08T12:00:00Z", "bucket_end": "2026-09-08T12:01:00Z", "count": 1 },
+        { "bucket_start": "2026-09-08T12:01:00Z", "bucket_end": "2026-09-08T12:02:00Z", "count": 0 }
+      ]
+    },
+    {
+      "signal": "actions",
+      "count_unit": "action_events",
+      "total": 1,
+      "peak": 1,
+      "non_empty_buckets": 1,
+      "points": [
+        { "bucket_start": "2026-09-08T12:00:00Z", "bucket_end": "2026-09-08T12:01:00Z", "count": 1 },
+        { "bucket_start": "2026-09-08T12:01:00Z", "bucket_end": "2026-09-08T12:02:00Z", "count": 0 }
+      ]
+    },
+    {
+      "signal": "metrics",
+      "count_unit": "metric_points",
+      "total": 2,
+      "peak": 2,
+      "non_empty_buckets": 1,
+      "points": [
+        { "bucket_start": "2026-09-08T12:00:00Z", "bucket_end": "2026-09-08T12:01:00Z", "count": 0 },
+        { "bucket_start": "2026-09-08T12:01:00Z", "bucket_end": "2026-09-08T12:02:00Z", "count": 2 }
+      ]
+    }
+  ],
+  "coverage": {
+    "storage_evaluation": "complete",
+    "output_truncation": "not_truncated",
+    "payload_shape": "aggregate_only",
+    "count_precision": "exact",
+    "integer_safety": "javascript_safe",
+    "javascript_safe_integer_max": 9007199254740991,
+    "returned_series": 5,
+    "returned_points": 10,
+    "max_buckets_per_series": 500,
+    "retention": {
+      "policy_days": 30,
+      "cutoff": "2026-08-09T12:02:00Z",
+      "window_clipped": false
+    },
+    "sampling": {
+      "server": "not_applied",
+      "upstream": "unknown"
+    },
+    "limitations": ["upstream_sampling_unknown", "release_volume_not_included"]
+  }
+}
+```
+
+### 各件数をそれぞれの単位で読む
+
+| シグナル | `total` が数えるもの | 誤って読まないこと |
+| --- | --- | --- |
+| `issues` | 保持済みの課題の発生事象 | グループ化された課題や、影響を受けたユーザー |
+| `logs` | 保持済みのログイベント | リクエスト |
+| `traces` | 一意のトレース ID。この期間内で、保持済みの最初のスパンの時点で数えます | スパンや、全期間でのトレースの開始数 |
+| `actions` | 保持済みのアクションのイベント | ユーザーやセッション |
+| `metrics` | 保持済みのメトリクスのポイント | メトリクスの値の合計 |
+
+`total` は、系列の時間バケットごとの件数の合計です。`peak` は、時間バケットの件数の最大値です。`non_empty_buckets` は、件数がゼロより大きい時間バケットの数です。5つの系列は、常にこの順で返ります。異なるシグナルの件数を組み合わせて、1つの影響度のスコアにしないでください。
+
+時間バケットは `query.since` から始まります。時間バケットには開始時刻が含まれ、終了時刻は含まれません。最後の時間バケットは、間隔より短いことがあります。レスポンスに、リリースの件数の系列はありません。`release_volume_not_included` を、リリースがゼロという意味に読まないでください。
+
+### 空の期間と短縮された期間
+
+一致するシグナルがない場合でも、5つの系列はすべて残り、各ポイントには明示的にゼロの件数が入ります。リクエストの失敗はこれとは違います。エラーを、ゼロで埋めたグラフに置き換えないでください。
+
+`query.requested_since` と `query.since` を比べてください。保持期間によって期間が短縮された場合は、`coverage.retention.window_clipped` が `true` になり、`limitations` に `retention_window_clipped` が入ります。リクエストした期間がまったく残らない場合は、`query.bucket_count` が `0` になり、各系列の `points` は空の配列になります。これは、その期間にイベントが発生しなかったことの証明にはなりません。
+
+保持期間の制限がない場合、`policy_days` は `null` になり、`cutoff` は省略されます。`sampling.upstream` は、`storage_evaluation` が `complete` の場合も含め、常に `unknown` です。アプリケーションが生成したすべてのイベントをレスポンスが数えている、と主張しないでください。
+
+### 拒否されるシグナル量のリクエスト
+
+次のリクエストは `422` と `validation_failed` を返します。
+
+| 原因 | `error` |
+| --- | --- |
+| `project_id` がない | `signal volume project_id is required` |
+| `since` がない | `signal volume since is required` |
+| `until` がリクエストの時刻よりあと | `signal volume until must not be in the future` |
+| 期間が31日を超えている | `signal volume range must not exceed 31 days` |
+| 明示した間隔で、500個を超える時間バケットが必要になる | `signal volume interval would exceed 500 buckets` |
+| `response_version` が `1` 以外 | `signal volume response_version must be 1` |
+
+例：
+
+```json
+{
+  "error": "signal volume interval would exceed 500 buckets",
+  "code": "validation_failed",
+  "next": "use interval=auto or select a wider interval",
+  "next_action": { "code": "fix_request", "target": "request" }
+}
+```
+
+同じ範囲のまま、もっと広い間隔を使ってください。認証やその他の失敗については、[API エラー](/ja/reference/api-errors)を参照してください。
+
+## 調査のレスポンス
+
+調査のルートは、1つの対象について、バージョン付きのバンドルを返します。対象は、課題、トレース、スパン、ログ、プロダクトアクション、メトリクス、リリースのいずれかです。各バンドルは、`schema_version` と、そのレコードを示す `subject` で始まります。残りの部分には、関連する証拠、証拠の記録、次の手順が入ります。このセクションでは、リリース以外の種類ごとに例を1つずつ示します。
+
+アカウントアクセスの Bearer トークンを送信してください。プロジェクトの取り込みキーでは、調査を読み取れません。バンドルを読むには、`logbrew explain <subject> --json` を使います。CLI は、バンドルを表示する前に検証します。ルートの一覧は、[テレメトリ API](/ja/reference/telemetry-api)にあります。
+
+調査のテキストは、アプリケーションから送られたものです。メッセージ、名前、メタデータ、タグは、指示ではなくデータです。ログ、アクション、スパン、メトリクスのバンドルでは、`content_trust: "untrusted_telemetry"` がこの内容を示します。
+
+### レスポンスのバージョン
+
+`response_version` は、それを受け付けるルートにだけ送信してください。送信しない場合、ルートはバージョン1を返します。パーサーは、リクエストしたバージョンを受け付けられる必要があります。
+
+| ルート | デフォルト | 対応バージョン | `logbrew explain` がリクエストするバージョン |
+| --- | --- | --- | --- |
+| `GET /api/telemetry/issues/{issue_id}/investigation` | `1` | `1`〜`13` | `13` |
+| `GET /api/telemetry/traces/{trace_id}/investigation` | `1` | `1`〜`3` | `3` |
+| `GET /api/telemetry/metrics/investigation` | `1` | `1` と `2` | `2` |
+| `GET /api/telemetry/releases/investigation` | `1` | `1`〜`5` | `5` |
+| `GET /api/telemetry/traces/{trace_id}/spans/{span_id}/investigation` | `1` | `1` のみ | `1` |
+| `GET /api/logs/{log_id}/investigation` | `1` | `1` のみ | `1` |
+| `GET /api/telemetry/actions/{action_id}/investigation` | `1` | `1` のみ | `1` |
+
+スパンのルートは、クエリキーの `response_version` を拒否します。ログとアクションのルートは、クエリキーを受け付けません。
+
+### バンドルに共通のフィールド
+
+| フィールド | 意味 |
+| --- | --- |
+| `schema_version` | サーバーが返したレスポンスのバージョン。 |
+| `subject` | 調査の対象となる、そのレコード。`kind` は、`issue`、`trace`、`span`、`log`、`action`、`metric`、`release` のいずれかです。 |
+| `analysis.causality` | トレース、スパン、ログ、アクション、メトリクスのバンドルでは、常に `evidence_only`。相関するテレメトリは、原因の証明にはなりません。 |
+| コレクションのオブジェクト | `{ "status", "items", "truncated" }` の形の、関連する証拠。 |
+| `timeline` | 返された証拠を、古い順に並べたもの。専用の `truncated` フラグを持ちます。この順序は、原因の証明にはなりません。 |
+| `evidence` | 証拠の記録。`status` は `complete` または `partial` です。 |
+| `next_actions` | 提案される読み取り。`1` から始まる `priority` の順に並びます。まだ実行されていません。 |
+
+関連する各コレクションは、利用できるかどうかを示す `status` を1つ報告します。
+
+| ステータス | 意味 | クライアントの動作 |
+| --- | --- | --- |
+| `available` | 読み取りが完了し、項目が返されました。 | 項目と `truncated` フラグを表示します。 |
+| `not_linked` | 対象に、このリンクのための識別子（トレース ID など）がありません。 | リンクがないことを説明します。タイムスタンプからリンクを作らないでください。 |
+| `not_found` | 読み取りは完了しましたが、保持済みの証拠は見つかりませんでした。 | 空の結果を表示します。 |
+| `unavailable` | 任意の読み取りが失敗しました。対象自体は有効です。 | 対象を表示したままにします。あとで再試行します。結果として0件を表示しないでください。 |
+
+証拠の記録には、変わらないフィールド名を並べた4つのリストがあります：`captured_fields`、`missing_fields`、`redacted_fields`、`truncated_fields`。`status` が `complete` になるのは、あとの3つのリストが空の場合だけです。秘匿済みのデータは、未取得のデータではありません。一部省略されたデータは、完全なデータではありません。秘匿済みの値や一部省略された値を補わないでください。
+
+### 調査の上限
+
+これらの上限は、1つのレスポンスの範囲を決めます。`truncated` フラグや `truncated_fields` の項目があれば、上限によってデータが省略されたことを示します。
+
+| 証拠 | 上限 |
+| --- | --- |
+| 1つのコレクション内の関連する項目 | 20 |
+| 1つのトレースについて読み取る保持済みのスパン | 1,000 |
+| タイムラインの項目 | ログ、アクション、スパンのバンドルでは50。トレースとメトリクスのバンドルでは100。 |
+| 構造化された属性、プロパティ、メタデータ | スカラー値64個、オブジェクトや配列の階層4段、各配列の項目16個、各文字列512文字 |
+| 相関を調べる時間の範囲 | ログ、アクション、選択した課題の発生事象の前後5分。トレースやスパンでは、開始の5分前から終了の5分後まで（最大24時間）。 |
+
+種類ごとの上限は、それぞれのセクションに記載しています。
+
+### 課題の調査のレスポンス
+
+グループ化された課題の1件の発生事象について証拠を読むには、`GET /api/telemetry/issues/{issue_id}/investigation` を使います。証拠を順に読む方法は、[課題を調査する](/ja/guides/investigate-an-issue)で説明しています。バージョン13をリクエストします。
+
+```bash
+curl --fail-with-body -sS -G \
+  "https://api.logbrew.co/api/telemetry/issues/$LOGBREW_ISSUE_ID/investigation" \
+  -H "Authorization: Bearer $LOGBREW_TOKEN" \
+  --data-urlencode "response_version=13" \
+  --data-urlencode "selection=recommended"
+```
+
+クエリキーは、`response_version`、`selection`、`occurrence_id` です。`selection` は、`recommended`、`first`、`latest` のいずれかです。値は大文字と小文字を区別します。バージョン2〜13では、セレクターを省略すると `recommended` が使われます。バージョン1は、保持済みの最新の発生事象を返し、セレクターを受け付けません。課題の一覧のフィルターは、この読み取りには適用されません。
+
+<Accordion title="バージョン13の課題の調査の例">
+
+この架空の `200 OK` のレスポンスには、処理済みの `TypeError` の発生事象が1件あり、トレースにリンクしています。リクエスト、直前の手順、関連するログ、デプロイの証拠がないため、`evidence.status` は `partial` です。
+
+```json
+{
+  "schema_version": 13,
+  "subject": {
+    "kind": "issue", "id": "11111111-1111-4111-8111-111111111111",
+    "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    "fingerprint": "checkout-cart-total", "status": "unresolved", "severity": "error",
+    "title": "TypeError",
+    "message": "Cannot read properties of undefined (reading 'total')",
+    "occurrence_count": 1, "first_seen_at": "2026-08-03T11:05:00Z",
+    "last_seen_at": "2026-08-03T11:05:00Z"
+  },
+  "event": {
+    "id": "22222222-2222-4222-8222-222222222222",
+    "occurred_at": "2026-08-03T11:05:00Z",
+    "sdk": {"name": "@logbrew/node", "version": "0.1.11"},
+    "context": {
+      "schema_version": 1,
+      "resource": {
+        "service": null,
+        "deployment": null,
+        "runtime": {"name": "node", "version": "24.4.0"},
+        "framework": null,
+        "operating_system": {"name": "Linux", "version": "6.8", "build": null},
+        "device": {"family": null, "model": null, "architecture": "arm64"},
+        "application": null
+      },
+      "trace": {
+        "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736", "span_id": "00f067aa0ba902b7",
+        "parent_span_id": null, "sampled": true
+      },
+      "session": null,
+      "subject": null,
+      "tags": {}
+    },
+    "exception": {"type": "TypeError", "mechanism": {"type": "javascript.error", "handled": true}},
+    "exception_chain": {
+      "status": "captured",
+      "entries": [
+        {
+          "id": 0,
+          "parent_id": null,
+          "relationship": "reported",
+          "type": "TypeError",
+          "message": null,
+          "message_state": "redacted",
+          "module": null,
+          "mechanism": {"type": "javascript.error", "handled": true},
+          "stack_frames": [
+            {
+              "index": 0, "module": null, "function": "cartTotal", "file": "src/cart.ts",
+              "line": 42, "column": 17, "in_app": null, "source": "captured"
+            },
+            {
+              "index": 1, "module": null, "function": "handleCheckout",
+              "file": "src/routes/checkout.ts", "line": 88, "column": 9, "in_app": null,
+              "source": "captured"
+            }
+          ],
+          "stack_frames_state": "captured"
+        }
+      ],
+      "truncated": false
+    },
+    "stack_frames": [
+      {
+        "index": 0, "module": null, "function": "cartTotal", "file": "src/cart.ts",
+        "line": 42, "column": 17, "in_app": null, "source": "captured"
+      },
+      {
+        "index": 1, "module": null, "function": "handleCheckout",
+        "file": "src/routes/checkout.ts", "line": 88, "column": 9, "in_app": null,
+        "source": "captured"
+      }
+    ],
+    "breadcrumbs": [],
+    "breadcrumbs_truncated": false
+  },
+  "occurrence_selection": {
+    "requested": "recommended",
+    "reason": "only_retained_occurrence",
+    "selected": {
+      "id": "22222222-2222-4222-8222-222222222222",
+      "occurred_at": "2026-08-03T11:05:00Z",
+      "severity": "error",
+      "environment": "production",
+      "release": "checkout@1.2.3",
+      "service_name": "checkout-api",
+      "sdk": {"name": "@logbrew/node", "version": "0.1.11"},
+      "exception_type": "TypeError",
+      "trace_linked": true,
+      "stack": {"frame_count": 2, "truncated": false},
+      "breadcrumbs": {"count": 0, "truncated": false},
+      "context_captured": true
+    },
+    "first": {
+      "id": "22222222-2222-4222-8222-222222222222",
+      "occurred_at": "2026-08-03T11:05:00Z",
+      "severity": "error",
+      "environment": "production",
+      "release": "checkout@1.2.3",
+      "service_name": "checkout-api",
+      "sdk": {"name": "@logbrew/node", "version": "0.1.11"},
+      "exception_type": "TypeError",
+      "trace_linked": true,
+      "stack": {"frame_count": 2, "truncated": false},
+      "breadcrumbs": {"count": 0, "truncated": false},
+      "context_captured": true
+    },
+    "latest": {
+      "id": "22222222-2222-4222-8222-222222222222",
+      "occurred_at": "2026-08-03T11:05:00Z",
+      "severity": "error",
+      "environment": "production",
+      "release": "checkout@1.2.3",
+      "service_name": "checkout-api",
+      "sdk": {"name": "@logbrew/node", "version": "0.1.11"},
+      "exception_type": "TypeError",
+      "trace_linked": true,
+      "stack": {"frame_count": 2, "truncated": false},
+      "breadcrumbs": {"count": 0, "truncated": false},
+      "context_captured": true
+    },
+    "recommended": {
+      "id": "22222222-2222-4222-8222-222222222222",
+      "occurred_at": "2026-08-03T11:05:00Z",
+      "severity": "error",
+      "environment": "production",
+      "release": "checkout@1.2.3",
+      "service_name": "checkout-api",
+      "sdk": {"name": "@logbrew/node", "version": "0.1.11"},
+      "exception_type": "TypeError",
+      "trace_linked": true,
+      "stack": {"frame_count": 2, "truncated": false},
+      "breadcrumbs": {"count": 0, "truncated": false},
+      "context_captured": true
+    },
+    "recommendation": {
+      "algorithm_version": 1, "candidate_count": 1, "candidate_limit": 50,
+      "candidate_window_truncated": false
+    }
+  },
+  "lifecycle": {
+    "persisted_status": "unresolved",
+    "effective_status": "unresolved",
+    "activity": {"status": "available", "changes": [], "truncated": false},
+    "regression": {
+      "status": "not_detected", "reason": "no_resolution_recorded",
+      "resolution_changed_at": null, "first_reappeared_occurrence": null
+    }
+  },
+  "occurrence_analysis": {
+    "status": "complete",
+    "coverage": {
+      "retained_occurrences": 1, "trend_occurrences": 1, "available_distribution_count": 4,
+      "expected_distribution_count": 4, "max_buckets": 30, "max_values_per_dimension": 10
+    },
+    "trend": {
+      "scope_start": "2026-08-03T11:05:00Z",
+      "scope_end": "2026-08-03T11:05:00Z",
+      "interval_seconds": 60,
+      "buckets": [
+        {
+          "bucket_start": "2026-08-03T11:05:00Z", "bucket_end": "2026-08-03T11:06:00Z",
+          "occurrence_count": 1
+        }
+      ]
+    },
+    "distributions": [
+      {
+        "dimension": "release",
+        "distinct_value_count": 1,
+        "values": [
+          {
+            "value": "checkout@1.2.3", "version": null, "occurrence_count": 1,
+            "share_basis_points": 10000
+          }
+        ],
+        "other_occurrence_count": 0
+      },
+      {
+        "dimension": "environment",
+        "distinct_value_count": 1,
+        "values": [
+          {
+            "value": "production", "version": null, "occurrence_count": 1,
+            "share_basis_points": 10000
+          }
+        ],
+        "other_occurrence_count": 0
+      },
+      {
+        "dimension": "service",
+        "distinct_value_count": 1,
+        "values": [
+          {
+            "value": "checkout-api", "version": null, "occurrence_count": 1,
+            "share_basis_points": 10000
+          }
+        ],
+        "other_occurrence_count": 0
+      },
+      {
+        "dimension": "sdk",
+        "distinct_value_count": 1,
+        "values": [
+          {
+            "value": "@logbrew/node", "version": "0.1.11", "occurrence_count": 1,
+            "share_basis_points": 10000
+          }
+        ],
+        "other_occurrence_count": 0
+      }
+    ],
+    "limitations": []
+  },
+  "grouping": {"strategy": "sdk_fingerprint", "components": ["sdk_fingerprint"], "stack": null},
+  "cause": {
+    "status": "evidence_only",
+    "summary": null,
+    "provenance": null,
+    "signals": ["handled_exception", "error_trace_span"]
+  },
+  "fix": {
+    "status": "observed_frame",
+    "location": {
+      "component": null, "module": null, "function": "cartTotal", "file": "src/cart.ts",
+      "line": 42, "column": 17, "in_app": null
+    },
+    "provenance": "backend_observed"
+  },
+  "source_locator": {
+    "status": "not_found",
+    "repository_provider": null,
+    "repository_full_name": null,
+    "component_path": null,
+    "revision": null,
+    "revision_source": null,
+    "repository_relative_file": null,
+    "evidence": {
+      "status": "partial",
+      "captured_fields": ["source.service"],
+      "missing_fields": ["source.component"],
+      "redacted_fields": [],
+      "truncated_fields": []
+    }
+  },
+  "reproduction": {
+    "status": "insufficient_evidence",
+    "baseline_occurrence_id": "22222222-2222-4222-8222-222222222222",
+    "evidence": {
+      "status": "partial",
+      "captured_fields": [
+        "reproduction.baseline_occurrence", "reproduction.code_location",
+        "reproduction.expected_failure"
+      ],
+      "missing_fields": ["reproduction.trigger"],
+      "redacted_fields": [],
+      "truncated_fields": []
+    }
+  },
+  "impact": {
+    "occurrence_count": 1,
+    "first_seen_at": "2026-08-03T11:05:00Z",
+    "last_seen_at": "2026-08-03T11:05:00Z",
+    "affected_users": null,
+    "user_impact": {
+      "status": "not_captured",
+      "known_affected_users": null,
+      "count_method": "unavailable",
+      "coverage": {
+        "retained_occurrences": 1, "indexed_occurrences": 1,
+        "historical_unindexed_occurrences": 0, "identified_user_occurrences": 0,
+        "anonymous_subject_occurrences": 0, "missing_subject_occurrences": 1,
+        "privacy_filtered_subject_occurrences": 0, "index_coverage_basis_points": 10000,
+        "identified_user_coverage_basis_points": 0
+      },
+      "limitations": ["missing_subject_context"]
+    },
+    "reported": null
+  },
+  "correlations": {
+    "trace": {
+      "status": "available",
+      "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+      "summary": {
+        "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+        "span_count": 1,
+        "error_span_count": 1,
+        "service_count": 1,
+        "project_count": 1,
+        "started_at": "2026-08-03T11:04:59.950Z",
+        "duration_ms": 180,
+        "root_span": {
+          "span_id": "00f067aa0ba902b7", "parent_span_id": null, "name": "POST /checkout",
+          "operation": "http.server", "status": "error",
+          "started_at": "2026-08-03T11:04:59.950Z", "duration_ms": 180,
+          "service_name": "checkout-api"
+        },
+        "slowest_child_span": null,
+        "slowest_path": [],
+        "error_spans": [
+          {
+            "span_id": "00f067aa0ba902b7", "parent_span_id": null, "name": "POST /checkout",
+            "operation": "http.server", "status": "error",
+            "started_at": "2026-08-03T11:04:59.950Z", "duration_ms": 180,
+            "service_name": "checkout-api"
+          }
+        ],
+        "services": [
+          {
+            "service_name": "checkout-api", "span_count": 1, "error_span_count": 1,
+            "max_duration_ms": 180
+          }
+        ],
+        "releases": ["checkout@1.2.3"],
+        "environments": ["production"]
+      },
+      "truncated": false
+    },
+    "logs": {"status": "not_found", "items": [], "truncated": false},
+    "actions": {"status": "not_found", "items": [], "truncated": false},
+    "metrics": {"status": "not_found", "items": [], "truncated": false},
+    "related_issues": {"status": "not_found", "items": [], "truncated": false},
+    "release": {
+      "release": "checkout@1.2.3", "environment": "production",
+      "service_name": "checkout-api", "deployment_status": "not_found"
+    }
+  },
+  "evidence": {
+    "status": "partial",
+    "captured_fields": [
+      "context", "deployment.lookup", "exception", "exception.mechanism", "exception_chain",
+      "exception_chain.stack_frames", "grouping", "grouping.components",
+      "grouping.strategy", "grouping.strategy_details", "lifecycle.regression",
+      "lifecycle.status_history", "likely_fix_area", "occurrence.boundaries",
+      "occurrence.distribution.environment", "occurrence.distribution.release",
+      "occurrence.distribution.sdk", "occurrence.distribution.service",
+      "occurrence.recommendation", "occurrence.selection", "occurrence.trend", "release",
+      "sdk", "source_locator", "stack_frames", "trace"
+    ],
+    "missing_fields": [
+      "affected_users", "breadcrumbs", "deployment", "impact", "likely_root_cause",
+      "related_actions", "related_issues", "related_logs", "related_metrics", "request",
+      "source_locator.complete"
+    ],
+    "redacted_fields": ["exception_chain.messages"],
+    "truncated_fields": []
+  },
+  "next_actions": [
+    {
+      "priority": 1, "code": "inspect_code_location", "target": "source_code",
+      "reason": "likely_fix_location_available"
+    },
+    {
+      "priority": 2, "code": "inspect_trace", "target": "trace_summary",
+      "reason": "linked_trace_available"
+    },
+    {
+      "priority": 3, "code": "compare_release", "target": "release_summary",
+      "reason": "release_identity_available"
+    },
+    {
+      "priority": 4, "code": "improve_capture", "target": "sdk_configuration",
+      "reason": "evidence_incomplete"
+    }
+  ]
+}
+```
+
+</Accordion>
+
+| フィールド | バージョン | 意味 |
+| --- | --- | --- |
+| `subject` | 1 | グループ化された課題。`first_seen_at`、`last_seen_at`、`occurrence_count` は、グループ全体を表します。 |
+| `event` | 1 | 選択した発生事象。SDK、`context`、`exception`、`stack_frames`、`breadcrumbs` が入ります。バージョン1では、最新の発生事象を読み取れない場合は `null`。 |
+| `cause` | 1 | `status` は、`reported_hypothesis`、`evidence_only`、`unknown` のいずれか。`signals` には、観測されたシグナルが入ります。 |
+| `fix` | 1 | コードの場所。`status` は、`reported_location`、`observed_application_frame`、`observed_frame`、`observed_underlying_exception_frame`、`unknown` のいずれか。 |
+| `impact` | 1 | 発生事象の件数と `user_impact`。`reported` には、アプリケーションが報告した影響か `null` が入ります。 |
+| `correlations` | 1 | `trace`、`logs`、`actions`、`metrics`、`release`。 |
+| `occurrence_selection` | 2 | リクエストしたセレクター、その理由、選択した発生事象・最初の発生事象・最新の発生事象・推奨する発生事象の概要。 |
+| `lifecycle` | 3 | `persisted_status`、`effective_status`、ステータスの変更履歴、`regression`。`effective_status` は `regressed` になることがあります。 |
+| `occurrence_analysis` | 4 | 発生事象の傾向と、リリース、環境、サービス、SDK ごとの分布。 |
+| `event.exception_chain` | 5 | リンクされた最大8件の例外。`relationship` は、`reported`、`cause`、`context`、`aggregate_member`、`suppressed` のいずれか。 |
+| `event.request` | 6 | `method`、`route_template`、`response_status_code`。リクエストが取得されていない場合、このキーはありません。 |
+| `grouping` | 7 | グループ化の `strategy`、その `components`、スタックフレームの使い方。 |
+| `correlations.release.deployment_status` | 8 | デプロイの検索の状態。`deployment`、`time_since_deployment_ms`、`deployment_causality` は、デプロイが見つかった場合にだけ含まれます。 |
+| `correlations.related_issues` | 9 | 同じトレース上のほかの課題。 |
+| `source_locator` | 10 | LogBrew がリンクできる場合の、リポジトリ、コンポーネント、リビジョン、リポジトリからの相対パスのファイル。 |
+| `reproduction` | 11 | `status` は、`ready`、`partial`、`insufficient_evidence` のいずれか。 |
+| `next_actions` のコード `verify_correction` | 12 | `reproduction.status` が `ready` の場合に含まれます。 |
+| `impact.user_impact.count_method` | 13 | 重複を除いた概算の件数を `approximate_distinct` として報告します。それより前のバージョンでは、古い値の名前を使います。`unavailable` は、件数がないことを示します。 |
+
+あとのバージョンで追加されたキーは、それより前のバージョンにはありません。キーがないことを `null` と読まないでください。
+
+`subject.status` と `lifecycle` のステータスでは、アーカイブ済みの課題は `ignored` と報告されます。課題の一覧と詳細のレスポンスでは、レスポンスバージョン2以降で `archived` を使います。
+
+課題の上限：推奨の判定で読み取る保持済みの発生事象は、最大50件です。傾向の時間バケットは最大30個です。各分布が返す値は最大10個です。1つのスタックのフレームは最大32個です。
+
+#### 課題の調査のリクエストのエラー
+
+`selection` か `occurrence_id` のどちらかを使います。同じ発生事象を選ぶ場合でも、両方を送信しないでください。
+
+```json
+{
+  "error": "selection and occurrence_id are mutually exclusive",
+  "code": "validation_failed",
+  "next": "use response_version=2 through 13 with at most one of selection=first|latest|recommended or an exact occurrence_id copied from GET /api/telemetry/issues/{issue_id}/events",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+| HTTP | `error` | 原因 | 対処 |
+| --- | --- | --- | --- |
+| `422` | `selection and occurrence_id are mutually exclusive` | リクエストに両方のセレクターがあります。 | セレクターを1つだけにします。 |
+| `422` | `issue occurrence selection requires response_version=2 through 13` | リクエストにセレクターがあり、バージョンが1か、バージョンの指定がありません。 | `response_version=13` を送信します。セレクターはそのままにします。 |
+| `422` | `issue investigation response_version must be 1 through 13` | バージョンが範囲外です。 | 対応しているバージョンを送信します。 |
+| `422` | `invalid query parameters` | 不明なキー、無効な UUID、整数でないバージョン、または不明な `selection` の値があります。 | [クエリ](/ja/reference/api-errors#invalid-query-parameters)を修正します。 |
+| `404` | `issue occurrence not found` | その発生事象が、このグループの保持済みの履歴にありません。 | この課題のイベントから、発生事象の ID をコピーします。承認なしに、代わりに `latest` や `recommended` を使わないでください。 |
+| `404` | `issue not found` | この課題を持つ、読み取れるプロジェクトがありません。 | アカウントと課題の UUID を確認します。発生事象の UUID を課題の ID として送信しないでください。 |
+
+発生事象が見つからなくても、課題が存在しないという意味ではありません。`404` は、別のアカウントがその課題を読み取れるかどうかを示しません。
+
+### トレースの調査のレスポンス
+
+1つのトレースを、その失敗の経路、最も遅い経路、関連するシグナルとともに読むには、`GET /api/telemetry/traces/{trace_id}/investigation` を使います。クエリキーは、`response_version`、`project_id`、`release`、`environment` です。どれも任意です。バージョン3をリクエストします。
+
+```bash
+curl --fail-with-body -sS -G \
+  "https://api.logbrew.co/api/telemetry/traces/$TRACE_ID/investigation" \
+  -H "Authorization: Bearer $LOGBREW_TOKEN" \
+  --data-urlencode "response_version=3"
+```
+
+バージョン2では、関連する各課題に `cause` と `fix` が追加されます。バージョン3では、関連する課題、アクション、メトリクスに、取得されていれば `span_id` が追加されます。
+
+<Accordion title="バージョン3のトレースの調査の例">
+
+この架空のレスポンスには、サーバーのルートスパンと、失敗したクライアントのスパンがあります。失敗したスパンは、最も遅い子スパンでもあります。スパンには構造化されたコンテキストがないため、`spans.context` は未取得です。
+
+```json
+{
+  "schema_version": 3,
+  "subject": {
+    "kind": "trace",
+    "trace_id": "0af7651916cd43dd8448eb211c80319c",
+    "analyzed_span_count": 2,
+    "error_span_count": 1,
+    "service_count": 1,
+    "project_count": 1,
+    "started_at": "2026-08-03T11:05:00Z",
+    "duration_ms": 1200,
+    "releases": ["checkout@1.2.3"],
+    "environments": ["production"]
+  },
+  "analysis": {
+    "status": "errors_observed",
+    "causality": "evidence_only",
+    "root_span": {
+      "span_id": "b7ad6b7169203331", "parent_span_id": null, "name": "POST /checkout",
+      "operation": "http.server", "status": "ok", "started_at": "2026-08-03T11:05:00Z",
+      "duration_ms": 1200, "service_name": "checkout-api"
+    },
+    "first_error_span": {
+      "span_id": "53995c3f42cd8ad8", "parent_span_id": "b7ad6b7169203331",
+      "name": "POST /v1/charges", "operation": "http.client", "status": "error",
+      "started_at": "2026-08-03T11:05:00.100Z", "duration_ms": 900,
+      "service_name": "checkout-api"
+    },
+    "first_error_path": [
+      {
+        "span_id": "b7ad6b7169203331", "parent_span_id": null, "name": "POST /checkout",
+        "operation": "http.server", "status": "ok", "started_at": "2026-08-03T11:05:00Z",
+        "duration_ms": 1200, "service_name": "checkout-api"
+      },
+      {
+        "span_id": "53995c3f42cd8ad8", "parent_span_id": "b7ad6b7169203331",
+        "name": "POST /v1/charges", "operation": "http.client", "status": "error",
+        "started_at": "2026-08-03T11:05:00.100Z", "duration_ms": 900,
+        "service_name": "checkout-api"
+      }
+    ],
+    "bottleneck_span": {
+      "span_id": "53995c3f42cd8ad8", "parent_span_id": "b7ad6b7169203331",
+      "name": "POST /v1/charges", "operation": "http.client", "status": "error",
+      "started_at": "2026-08-03T11:05:00.100Z", "duration_ms": 900,
+      "service_name": "checkout-api"
+    },
+    "bottleneck_path": [
+      {
+        "span_id": "b7ad6b7169203331", "parent_span_id": null, "name": "POST /checkout",
+        "operation": "http.server", "status": "ok", "started_at": "2026-08-03T11:05:00Z",
+        "duration_ms": 1200, "service_name": "checkout-api"
+      },
+      {
+        "span_id": "53995c3f42cd8ad8", "parent_span_id": "b7ad6b7169203331",
+        "name": "POST /v1/charges", "operation": "http.client", "status": "error",
+        "started_at": "2026-08-03T11:05:00.100Z", "duration_ms": 900,
+        "service_name": "checkout-api"
+      }
+    ]
+  },
+  "spans": {
+    "items": [
+      {
+        "id": "33333333-3333-4333-8333-333333333333",
+        "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "span_id": "b7ad6b7169203331",
+        "parent_span_id": null,
+        "name": "POST /checkout",
+        "operation": "http.server",
+        "status": "ok",
+        "started_at": "2026-08-03T11:05:00Z",
+        "duration_ms": 1200,
+        "service_name": "checkout-api",
+        "environment": "production",
+        "release": "checkout@1.2.3",
+        "sdk": {"name": "@logbrew/node", "version": "0.1.11"},
+        "context": null,
+        "roles": ["root", "error_path", "bottleneck_path", "slow"]
+      },
+      {
+        "id": "44444444-4444-4444-8444-444444444444",
+        "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "span_id": "53995c3f42cd8ad8",
+        "parent_span_id": "b7ad6b7169203331",
+        "name": "POST /v1/charges",
+        "operation": "http.client",
+        "status": "error",
+        "started_at": "2026-08-03T11:05:00.100Z",
+        "duration_ms": 900,
+        "service_name": "checkout-api",
+        "environment": "production",
+        "release": "checkout@1.2.3",
+        "sdk": {"name": "@logbrew/node", "version": "0.1.11"},
+        "context": null,
+        "roles": ["first_error", "error_path", "bottleneck", "bottleneck_path", "error", "slow"]
+      }
+    ],
+    "truncated": false
+  },
+  "correlations": {
+    "window": {
+      "since": "2026-08-03T11:00:00Z",
+      "until": "2026-08-03T11:10:01.200Z",
+      "scopes": [
+        {
+          "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "environment": "production",
+          "release": "checkout@1.2.3"
+        }
+      ],
+      "truncated": false
+    },
+    "issues": {"status": "not_found", "items": [], "truncated": false},
+    "logs": {
+      "status": "available",
+      "items": [
+        {
+          "id": "55555555-5555-4555-8555-555555555555",
+          "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "severity": "error",
+          "source": "payments", "message": "Charge request failed",
+          "occurred_at": "2026-08-03T11:05:01Z", "service_name": "checkout-api",
+          "span_id": "53995c3f42cd8ad8", "environment": "production",
+          "release": "checkout@1.2.3"
+        }
+      ],
+      "truncated": false
+    },
+    "actions": {"status": "not_found", "items": [], "truncated": false},
+    "metrics": {"status": "not_found", "items": [], "truncated": false}
+  },
+  "timeline": {
+    "items": [
+      {
+        "id": "b7ad6b7169203331", "kind": "span", "occurred_at": "2026-08-03T11:05:00Z",
+        "name": "POST /checkout", "service_name": "checkout-api",
+        "span_id": "b7ad6b7169203331", "severity": null, "status": "ok",
+        "duration_ms": 1200
+      },
+      {
+        "id": "53995c3f42cd8ad8", "kind": "span", "occurred_at": "2026-08-03T11:05:00.100Z",
+        "name": "POST /v1/charges", "service_name": "checkout-api",
+        "span_id": "53995c3f42cd8ad8", "severity": null, "status": "error",
+        "duration_ms": 900
+      },
+      {
+        "id": "55555555-5555-4555-8555-555555555555", "kind": "log",
+        "occurred_at": "2026-08-03T11:05:01Z", "name": "Charge request failed",
+        "service_name": "checkout-api", "span_id": "53995c3f42cd8ad8", "severity": "error",
+        "status": null, "duration_ms": null
+      }
+    ],
+    "truncated": false
+  },
+  "evidence": {
+    "status": "partial",
+    "captured_fields": [
+      "correlations.window", "related_actions", "related_issues", "related_logs",
+      "related_metrics", "spans.sdk", "timeline", "trace.parentage", "trace.root",
+      "trace.spans"
+    ],
+    "missing_fields": ["spans.context"],
+    "redacted_fields": [],
+    "truncated_fields": []
+  },
+  "next_actions": [
+    {
+      "priority": 1, "code": "inspect_first_error_span", "target": "trace_span",
+      "reason": "error_span_observed", "span_id": "53995c3f42cd8ad8", "issue_id": null
+    },
+    {
+      "priority": 2, "code": "review_related_logs", "target": "telemetry_logs",
+      "reason": "related_logs_available", "span_id": "53995c3f42cd8ad8", "issue_id": null
+    },
+    {
+      "priority": 3, "code": "compare_release", "target": "release_summary",
+      "reason": "release_identity_available", "span_id": null, "issue_id": null
+    },
+    {
+      "priority": 4, "code": "improve_capture", "target": "sdk_configuration",
+      "reason": "evidence_incomplete", "span_id": null, "issue_id": null
+    }
+  ]
+}
+```
+
+</Accordion>
+
+| フィールド | 意味 |
+| --- | --- |
+| `subject` | 分析したスパンから求めた、トレースの合計値。 |
+| `analysis.status` | `errors_observed`、`latency_focus`、`no_error_observed` のいずれか。 |
+| `analysis.first_error_path` | ルートスパンから、最も早いエラーのスパンまでの、わかっている親子のつながり。 |
+| `analysis.bottleneck_path` | 最も遅い子スパンまでの、わかっている親子のつながり。 |
+| `spans.items[].roles` | そのスパンがプレビューに含まれる理由：`root`、`first_error`、`error_path`、`bottleneck`、`bottleneck_path`、`error`、`slow` のいずれか。 |
+| `correlations.window` | 関連する読み取りに使った期間とデプロイの範囲。 |
+| `correlations.issues`, `logs`, `actions`, `metrics` | 時間の範囲内で、同じトレース ID を持つシグナル。 |
+
+スパンが、LogBrew が保持していない親を指している場合、`trace.parentage` は未取得になります。スパンのプレビューは最大64スパンです。分析の各経路も最大64スパンです。関連する読み取りでは、デプロイの範囲を最大8つ使います。
+
+ターゲットが `trace_span` の次の手順は、このバンドルにある `span_id` を指します。そのスパンを読むには、スパンの `project_id`、`environment`、`release` を付けて、スパンのルートを送信します。
+
+### スパンの調査のレスポンス
+
+トレース内の1つの処理を読むには、`GET /api/telemetry/traces/{trace_id}/spans/{span_id}/investigation` を使います。`project_id`、`environment`、`release` を送信します。3つとも必須です。これらは選択したスパンからコピーしてください。スパンの行の `id` を `span_id` として送信しないでください。
+
+```bash
+curl --fail-with-body -sS -G \
+  "https://api.logbrew.co/api/telemetry/traces/$TRACE_ID/spans/$SPAN_ID/investigation" \
+  -H "Authorization: Bearer $LOGBREW_TOKEN" \
+  --data-urlencode "project_id=$PROJECT_ID" \
+  --data-urlencode "environment=production" \
+  --data-urlencode "release=checkout@1.2.3"
+```
+
+<Accordion title="スパンの調査の例">
+
+この架空のレスポンスは、トレースの例にある、失敗したクライアントのスパンを説明しています。同じスパン ID を持つエラーのログが1件あります。このスパンにかかった時間は、保持済みの同種のスパンの、概算の95パーセンタイルより長くなっています。
+
+```json
+{
+  "schema_version": 1,
+  "subject": {
+    "kind": "span",
+    "id": "44444444-4444-4444-8444-444444444444",
+    "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    "trace_id": "0af7651916cd43dd8448eb211c80319c",
+    "span_id": "53995c3f42cd8ad8",
+    "parent_span_id": "b7ad6b7169203331",
+    "name": "POST /v1/charges",
+    "operation": "http.client",
+    "status": "error",
+    "started_at": "2026-08-03T11:05:00.100Z",
+    "duration_ms": 900,
+    "service_name": "checkout-api",
+    "environment": "production",
+    "release": "checkout@1.2.3",
+    "sdk": {"name": "@logbrew/node", "version": "0.1.11"},
+    "content_trust": "untrusted_telemetry"
+  },
+  "context": null,
+  "payload": {
+    "metadata": {
+      "values": {"provider": "example-pay"},
+      "included_leaf_count": 1,
+      "redacted": false,
+      "truncated": false
+    },
+    "events": [],
+    "links": [],
+    "included_leaf_count": 1,
+    "redacted": false,
+    "truncated": false
+  },
+  "analysis": {
+    "status": "error_evidence",
+    "causality": "evidence_only",
+    "observations": ["subject_error", "exact_span_error_log", "subject_at_or_above_peer_p95"]
+  },
+  "topology": {
+    "status": "available",
+    "root": {
+      "span_id": "b7ad6b7169203331", "parent_span_id": null, "name": "POST /checkout",
+      "operation": "http.server", "status": "ok", "started_at": "2026-08-03T11:05:00Z",
+      "duration_ms": 1200, "service_name": "checkout-api"
+    },
+    "parent": {
+      "span_id": "b7ad6b7169203331", "parent_span_id": null, "name": "POST /checkout",
+      "operation": "http.server", "status": "ok", "started_at": "2026-08-03T11:05:00Z",
+      "duration_ms": 1200, "service_name": "checkout-api"
+    },
+    "ancestors": [
+      {
+        "span_id": "b7ad6b7169203331", "parent_span_id": null, "name": "POST /checkout",
+        "operation": "http.server", "status": "ok", "started_at": "2026-08-03T11:05:00Z",
+        "duration_ms": 1200, "service_name": "checkout-api"
+      }
+    ],
+    "children": [],
+    "descendant_count": 0,
+    "cross_service_edges": [],
+    "parent_chain_status": "complete",
+    "truncated": false
+  },
+  "baseline": {
+    "status": "available",
+    "since": "2026-08-02T11:05:00.100Z",
+    "until": "2026-08-03T11:05:00.100Z",
+    "dimensions": {
+      "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "environment": "production",
+      "release": "checkout@1.2.3", "service_name": "checkout-api",
+      "operation": "http.client", "name": "POST /v1/charges"
+    },
+    "retained_peer_count": 40,
+    "error_peer_count": 2,
+    "error_rate_basis_points": 500,
+    "p50_duration_ms": 310.0,
+    "p95_duration_ms": 620.0,
+    "p99_duration_ms": 940.0,
+    "subject_percentile_basis_points": 9500,
+    "method": "approximate_t_digest",
+    "limitations": [
+      "retained_telemetry_only", "sampling_may_apply", "approximate_percentiles",
+      "same_release_only"
+    ]
+  },
+  "correlations": {
+    "trace": {
+      "status": "available",
+      "summary": {
+        "trace_id": "0af7651916cd43dd8448eb211c80319c",
+        "span_count": 2,
+        "error_span_count": 1,
+        "service_count": 1,
+        "project_count": 1,
+        "started_at": "2026-08-03T11:05:00Z",
+        "duration_ms": 1200,
+        "root_span": {
+          "span_id": "b7ad6b7169203331", "parent_span_id": null, "name": "POST /checkout",
+          "operation": "http.server", "status": "ok", "started_at": "2026-08-03T11:05:00Z",
+          "duration_ms": 1200, "service_name": "checkout-api"
+        },
+        "slowest_child_span": {
+          "span_id": "53995c3f42cd8ad8", "parent_span_id": "b7ad6b7169203331",
+          "name": "POST /v1/charges", "operation": "http.client", "status": "error",
+          "started_at": "2026-08-03T11:05:00.100Z", "duration_ms": 900,
+          "service_name": "checkout-api"
+        },
+        "slowest_path": [
+          {
+            "span_id": "b7ad6b7169203331", "parent_span_id": null, "name": "POST /checkout",
+            "operation": "http.server", "status": "ok",
+            "started_at": "2026-08-03T11:05:00Z", "duration_ms": 1200,
+            "service_name": "checkout-api"
+          },
+          {
+            "span_id": "53995c3f42cd8ad8", "parent_span_id": "b7ad6b7169203331",
+            "name": "POST /v1/charges", "operation": "http.client", "status": "error",
+            "started_at": "2026-08-03T11:05:00.100Z", "duration_ms": 900,
+            "service_name": "checkout-api"
+          }
+        ],
+        "error_spans": [
+          {
+            "span_id": "53995c3f42cd8ad8", "parent_span_id": "b7ad6b7169203331",
+            "name": "POST /v1/charges", "operation": "http.client", "status": "error",
+            "started_at": "2026-08-03T11:05:00.100Z", "duration_ms": 900,
+            "service_name": "checkout-api"
+          }
+        ],
+        "services": [
+          {
+            "service_name": "checkout-api", "span_count": 2, "error_span_count": 1,
+            "max_duration_ms": 1200
+          }
+        ],
+        "releases": ["checkout@1.2.3"],
+        "environments": ["production"]
+      },
+      "truncated": false
+    },
+    "issues": {"status": "not_found", "items": [], "truncated": false},
+    "logs": {
+      "status": "available",
+      "items": [
+        {
+          "id": "55555555-5555-4555-8555-555555555555",
+          "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "severity": "error",
+          "source": "payments", "message": "Charge request failed",
+          "occurred_at": "2026-08-03T11:05:01Z", "service_name": "checkout-api",
+          "span_id": "53995c3f42cd8ad8", "environment": "production",
+          "release": "checkout@1.2.3"
+        }
+      ],
+      "truncated": false
+    },
+    "actions": {"status": "not_found", "items": [], "truncated": false},
+    "metrics": {"status": "not_found", "items": [], "truncated": false},
+    "release": {
+      "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "release": "checkout@1.2.3",
+      "environment": "production", "service_name": "checkout-api"
+    }
+  },
+  "timeline": {
+    "items": [
+      {
+        "id": "53995c3f42cd8ad8:start", "kind": "span_start",
+        "occurred_at": "2026-08-03T11:05:00.100Z", "offset_ms": 0,
+        "name": "POST /v1/charges", "service_name": "checkout-api",
+        "span_id": "53995c3f42cd8ad8", "severity": null, "status": "error",
+        "duration_ms": 900
+      },
+      {
+        "id": "55555555-5555-4555-8555-555555555555", "kind": "log",
+        "occurred_at": "2026-08-03T11:05:01Z", "offset_ms": 900, "name": "payments",
+        "service_name": "checkout-api", "span_id": "53995c3f42cd8ad8", "severity": "error",
+        "status": null, "duration_ms": null
+      },
+      {
+        "id": "53995c3f42cd8ad8:end", "kind": "span_end",
+        "occurred_at": "2026-08-03T11:05:01Z", "offset_ms": 900, "name": "POST /v1/charges",
+        "service_name": "checkout-api", "span_id": "53995c3f42cd8ad8", "severity": null,
+        "status": "error", "duration_ms": 900
+      }
+    ],
+    "truncated": false
+  },
+  "evidence": {
+    "status": "partial",
+    "captured_fields": [
+      "attributes.metadata.provider", "baseline", "correlations.actions",
+      "correlations.issues", "correlations.logs", "correlations.metrics",
+      "correlations.trace", "subject.content_trust", "subject.deployment",
+      "subject.identity", "subject.sdk", "subject.timing", "topology"
+    ],
+    "missing_fields": ["context"],
+    "redacted_fields": [],
+    "truncated_fields": []
+  },
+  "next_actions": [
+    {
+      "priority": 1, "code": "inspect_parent_span", "target": "span_investigation",
+      "reason": "parent_context_available", "span_id": "b7ad6b7169203331", "issue_id": null
+    },
+    {
+      "priority": 2, "code": "review_exact_span_logs", "target": "telemetry_logs",
+      "reason": "exact_span_logs_available", "span_id": "53995c3f42cd8ad8",
+      "issue_id": null
+    },
+    {
+      "priority": 3, "code": "inspect_trace", "target": "trace_investigation",
+      "reason": "trace_context_available", "span_id": "53995c3f42cd8ad8", "issue_id": null
+    },
+    {
+      "priority": 4, "code": "compare_peer_baseline", "target": "peer_baseline",
+      "reason": "subject_latency_elevated", "span_id": "53995c3f42cd8ad8", "issue_id": null
+    },
+    {
+      "priority": 5, "code": "compare_release", "target": "release_investigation",
+      "reason": "exact_release_available", "span_id": null, "issue_id": null
+    },
+    {
+      "priority": 6, "code": "improve_capture", "target": "sdk_capture",
+      "reason": "capture_incomplete", "span_id": "53995c3f42cd8ad8", "issue_id": null
+    }
+  ]
+}
+```
+
+</Accordion>
+
+| フィールド | 意味 |
+| --- | --- |
+| `payload` | スパンの `metadata`、最大8件の `events`、最大8件の `links`。これらは合わせて64個の値の上限を共有します。 |
+| `analysis.observations` | `subject_error`、`child_error`、`exact_span_error_log`、`related_issue`、`subject_at_or_above_peer_p95`、`subject_at_or_above_peer_p99` のいずれか。 |
+| `topology` | `root`、`parent`、`ancestors`、直接の `children`、`descendant_count`、`cross_service_edges`。 |
+| `topology.parent_chain_status` | `root`、`complete`、`missing`、`cycle`、`truncated`、`unavailable` のいずれか。 |
+| `baseline` | プロジェクト、環境、リリース、サービス、処理の種類、名前が同じ、それより前のスパン。 |
+| `correlations.logs` | 同じトレース ID とスパン ID を持つログ。 |
+| `correlations.issues`, `actions`, `metrics` | 同じプロジェクト、環境、リリースで、同じトレース ID を持つシグナル。 |
+| `timeline[].offset_ms` | スパンの開始からのミリ秒数。負の値は、スパンより前であることを示します。 |
+
+ベースラインは、スパンの開始前の24時間を読み取ります。`since` はその時刻を含み、`until` はその時刻を含みません。`error_rate_basis_points: 500` は5%を意味します。`subject_percentile_basis_points: 9500` は、保持済みの同種のスパンの95%が、このスパン以下の時間で終わったことを意味します。パーセンタイルは概算です。値と一緒に `baseline.limitations` も残してください。`not_found` のベースラインには、保持済みの同種のスパンがありません。`unavailable` のベースラインは読み取りの失敗で、件数ゼロではありません。
+
+`parent_chain_status: "complete"` は、保持済みの親子のつながりがルートスパンまで届いていることを示します。LogBrew がリクエストのすべてのスパンを保持したことの証明にはなりません。トポロジーが返すのは、最大64個の祖先、50個の直接の子、50個のサービス間のつながりです。
+
+| HTTP | `error` | 対処 |
+| --- | --- | --- |
+| `422` | `trace_id must be a non-zero 32-character hexadecimal value` | LogBrew のトレースのレスポンスから `trace_id` をコピーします。 |
+| `422` | `span_id must be a non-zero 16-character hexadecimal value` | LogBrew のトレースのレスポンスから `span_id` をコピーします。 |
+| `422` | `environment and release must be non-empty exact span scope values` | 選択したスパンから範囲をコピーします。 |
+| `422` | `invalid query parameters` | `project_id`、`environment`、`release` を送信し、ほかのキーは送信しません。 |
+| `404` | `span not found` | ID、プロジェクト、環境、リリースを確認します。 |
+
+### ログの調査のレスポンス
+
+1件のログと、それに関連する証拠を読むには、`GET /api/logs/{log_id}/investigation` を使います。このルートにクエリキーはありません。ログの ID は、ログの一覧からコピーしてください。
+
+```bash
+curl --fail-with-body -sS \
+  "https://api.logbrew.co/api/logs/$LOG_ID/investigation" \
+  -H "Authorization: Bearer $LOGBREW_TOKEN"
+```
+
+この読み取りでは、ログの一覧のフィルターの範囲外の証拠が返ることもあります。関連する読み取りでは、そのログのプロジェクト、環境、リリースと、ログの前後5分を使います。近くのログは、同じサービスも条件にします。近くのログにトレース ID は必要ありません。トレースが完全に一致する読み取りには、そのログのトレース ID が必要で、ほかのサービスが含まれることもあります。トレースの概要は、同じトレース ID と範囲を使いますが、時間の範囲は使いません。
+
+<Accordion title="ログの調査の例">
+
+この架空のレスポンスには、トレースコンテキストのない警告のログと、近くのログが1件あります。レスポンスは、タイムスタンプからトレースへのリンクを作りません。
+
+```json
+{
+  "schema_version": 1,
+  "subject": {
+    "kind": "log",
+    "id": "66666666-6666-4666-8666-666666666666",
+    "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    "severity": "warning",
+    "content_trust": "untrusted_telemetry",
+    "source": "inventory",
+    "message": "Inventory update delayed",
+    "occurred_at": "2026-08-03T12:00:00Z",
+    "service_name": "checkout-api",
+    "environment": "production",
+    "release": "checkout@1.2.3",
+    "sdk": {"name": "@logbrew/node", "version": "0.1.11"}
+  },
+  "context": null,
+  "attributes": {
+    "values": {"retry_count": 2},
+    "included_leaf_count": 1,
+    "redacted": false,
+    "truncated": false
+  },
+  "analysis": {
+    "status": "warning_evidence",
+    "causality": "evidence_only",
+    "observations": ["subject_warning"]
+  },
+  "correlations": {
+    "trace": {
+      "status": "not_linked", "trace_id": null, "span_id": null, "exact_span": null,
+      "summary": null, "truncated": false
+    },
+    "issues": {"status": "not_linked", "items": [], "truncated": false},
+    "trace_logs": {"status": "not_linked", "items": [], "truncated": false},
+    "nearby_logs": {
+      "status": "available",
+      "items": [
+        {
+          "id": "77777777-7777-4777-8777-777777777777",
+          "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "severity": "info",
+          "source": "inventory", "message": "Inventory retry started",
+          "occurred_at": "2026-08-03T11:59:58Z", "service_name": "checkout-api",
+          "trace_id": null, "span_id": null, "environment": "production",
+          "release": "checkout@1.2.3", "relationship": "nearby_scope"
+        }
+      ],
+      "truncated": false
+    },
+    "actions": {"status": "not_linked", "items": [], "truncated": false},
+    "metrics": {"status": "not_linked", "items": [], "truncated": false},
+    "release": {
+      "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "release": "checkout@1.2.3",
+      "environment": "production", "service_name": "checkout-api"
+    }
+  },
+  "timeline": {
+    "items": [
+      {
+        "id": "77777777-7777-4777-8777-777777777777", "kind": "log",
+        "relationship": "nearby_scope", "occurred_at": "2026-08-03T11:59:58Z",
+        "name": "inventory", "message": "Inventory retry started",
+        "service_name": "checkout-api", "span_id": null, "severity": "info", "status": null,
+        "duration_ms": null
+      },
+      {
+        "id": "66666666-6666-4666-8666-666666666666", "kind": "log",
+        "relationship": "subject", "occurred_at": "2026-08-03T12:00:00Z",
+        "name": "inventory", "message": "Inventory update delayed",
+        "service_name": "checkout-api", "span_id": null, "severity": "warning",
+        "status": null, "duration_ms": null
+      }
+    ],
+    "truncated": false
+  },
+  "evidence": {
+    "status": "partial",
+    "captured_fields": [
+      "attributes", "attributes.retry_count", "correlations.nearby_logs",
+      "correlations.release", "subject.content_trust", "subject.environment", "subject.id",
+      "subject.message", "subject.occurred_at", "subject.project_id", "subject.release",
+      "subject.sdk.name", "subject.sdk.version", "subject.service_name", "subject.severity",
+      "subject.source", "timeline"
+    ],
+    "missing_fields": ["context", "correlations.trace.trace_id"],
+    "redacted_fields": [],
+    "truncated_fields": []
+  },
+  "next_actions": [
+    {
+      "priority": 1, "code": "review_nearby_logs", "target": "telemetry_logs",
+      "reason": "nearby_logs_available", "issue_id": null, "trace_id": null,
+      "span_id": null
+    },
+    {
+      "priority": 2, "code": "improve_capture", "target": "sdk_configuration",
+      "reason": "evidence_incomplete", "issue_id": null, "trace_id": null, "span_id": null
+    },
+    {
+      "priority": 3, "code": "compare_release", "target": "release_investigation",
+      "reason": "release_identity_available", "issue_id": null, "trace_id": null,
+      "span_id": null
+    }
+  ]
+}
+```
+
+</Accordion>
+
+| フィールド | 意味 |
+| --- | --- |
+| `attributes` | 上限内に収めた構造化された属性。`values` には `context` は含まれません。`context` は最上位の `context` フィールドにあります。 |
+| `analysis.status` | `critical_evidence`、`error_evidence`、`warning_evidence`、`no_failure_observed` のいずれか。 |
+| `correlations.trace` | トレース ID、スパン ID、`exact_span`、トレースの `summary`。 |
+| `correlations.trace_logs` | 同じトレース ID を持つログ。`relationship` は `exact_trace` です。 |
+| `correlations.nearby_logs` | 時間の範囲内にある、同じサービスのログ。`relationship` は `nearby_scope` です。対象のログと、トレースが完全に一致するログは除きます。 |
+| `correlations.issues`, `actions`, `metrics` | 同じトレース ID を持つシグナル。 |
+| `correlations.release` | リリースの調査のための、リリースの範囲。比較の結果は入りません。 |
+| `timeline[].relationship` | `subject`、`exact_span`、`exact_trace`、`nearby_scope` のいずれか。 |
+
+トレースのステータスが `not_found` や `unavailable` でも、トレース ID が含まれることがあります。トレースの概要を利用できても、`exact_span` があるとは限りません。
+
+### アクションの調査のレスポンス
+
+1件のプロダクトアクションと、その報告されたステータス、関連する証拠を読むには、`GET /api/telemetry/actions/{action_id}/investigation` を使います。このルートにクエリキーはありません。関連する読み取りでは、ログの調査と同じ時間の範囲と範囲を使います。
+
+```bash
+curl --fail-with-body -sS \
+  "https://api.logbrew.co/api/telemetry/actions/$ACTION_ID/investigation" \
+  -H "Authorization: Bearer $LOGBREW_TOKEN"
+```
+
+`correlations`、`timeline`、`next_actions` は、ログの調査と同じ形です。関連するアクションには、対象のアクション自体は含まれません。
+
+<Accordion title="アクションの調査の例">
+
+この架空のレスポンスは、サインインしたユーザーの、失敗したチェックアウトのアクションを説明しています。このアクションにはトレース ID がありません。
+
+```json
+{
+  "schema_version": 1,
+  "subject": {
+    "kind": "action",
+    "id": "14141414-1414-4141-8141-141414141414",
+    "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    "name": "checkout.submit",
+    "status": "failure",
+    "content_trust": "untrusted_telemetry",
+    "occurred_at": "2026-08-03T11:05:00Z",
+    "service_name": "checkout-api",
+    "environment": "production",
+    "release": "checkout@1.2.3",
+    "sdk": {"name": "@logbrew/node", "version": "0.1.11"},
+    "subject_classification": "user",
+    "session_captured": true
+  },
+  "context": null,
+  "properties": {
+    "values": {"plan": "team", "step": "payment"},
+    "included_leaf_count": 2,
+    "redacted": false,
+    "truncated": false
+  },
+  "analysis": {
+    "status": "subject_failure",
+    "causality": "evidence_only",
+    "observations": ["subject_failure"]
+  },
+  "correlations": {
+    "trace": {
+      "status": "not_linked", "trace_id": null, "span_id": null, "exact_span": null,
+      "summary": null, "truncated": false
+    },
+    "issues": {"status": "not_linked", "items": [], "truncated": false},
+    "trace_logs": {"status": "not_linked", "items": [], "truncated": false},
+    "nearby_logs": {"status": "not_found", "items": [], "truncated": false},
+    "actions": {"status": "not_linked", "items": [], "truncated": false},
+    "metrics": {"status": "not_linked", "items": [], "truncated": false},
+    "release": {
+      "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "release": "checkout@1.2.3",
+      "environment": "production", "service_name": "checkout-api"
+    }
+  },
+  "timeline": {
+    "items": [
+      {
+        "id": "14141414-1414-4141-8141-141414141414", "kind": "action",
+        "relationship": "subject", "occurred_at": "2026-08-03T11:05:00Z",
+        "name": "checkout.submit", "message": null, "service_name": "checkout-api",
+        "span_id": null, "severity": null, "status": "failure", "duration_ms": null
+      }
+    ],
+    "truncated": false
+  },
+  "evidence": {
+    "status": "partial",
+    "captured_fields": [
+      "correlations.nearby_logs", "correlations.release", "properties.metadata",
+      "properties.metadata.plan", "properties.metadata.step", "subject.content_trust",
+      "subject.environment", "subject.id", "subject.name", "subject.occurred_at",
+      "subject.project_id", "subject.release", "subject.sdk.name", "subject.sdk.version",
+      "subject.service_name", "subject.session_captured", "subject.status",
+      "subject.subject_classification", "timeline"
+    ],
+    "missing_fields": ["context", "correlations.trace.trace_id"],
+    "redacted_fields": ["subject.distinct_id", "subject.session_id"],
+    "truncated_fields": []
+  },
+  "next_actions": [
+    {
+      "priority": 1, "code": "inspect_analytics_paths", "target": "analytics_paths",
+      "reason": "session_captured", "issue_id": null, "trace_id": null, "span_id": null
+    },
+    {
+      "priority": 2, "code": "improve_capture", "target": "sdk_configuration",
+      "reason": "evidence_incomplete", "issue_id": null, "trace_id": null, "span_id": null
+    },
+    {
+      "priority": 3, "code": "compare_release", "target": "release_investigation",
+      "reason": "release_identity_available", "issue_id": null, "trace_id": null,
+      "span_id": null
+    }
+  ]
+}
+```
+
+</Accordion>
+
+| フィールド | 意味 |
+| --- | --- |
+| `subject.status` | `queued`、`running`、`success`、`failure` のいずれか。対応するステータスが取得されていない場合は `null`。 |
+| `subject.subject_classification` | `user`、`anonymous`、`legacy_unknown`、`missing`、`historical_unindexed`、`unsupported` のいずれか。 |
+| `subject.session_captured` | アクションにセッションがあったかどうか。レスポンスがセッション ID を返すことはありません。 |
+| `properties` | アクションの `metadata` オブジェクト。上限内に収めたもの。 |
+| `analysis.status` | `subject_failure`、`correlated_failure_evidence`、`in_progress`、`success_observed`、`status_not_captured` のいずれか。 |
+
+レスポンスが、サブジェクトやセッションの識別子を返すことはありません。証拠の記録には、常に `subject.distinct_id` が秘匿済みとして記載され、セッションが取得されている場合は `subject.session_id` も記載されます。このため、アクションのバンドルはどれも `partial` になり、`improve_capture` を含みます。これを満たすために、プライバシーの制御を外さないでください。
+
+### メトリクスの調査のレスポンス
+
+1つのプロジェクトと期間で、1つのメトリクス名を読むには、`GET /api/telemetry/metrics/investigation` を使います。レスポンスには、現在の系列、同じ長さの直前の期間との比較、最新のサンプル、トレースの exemplar、完了したデプロイが入ります。バージョン2では、保持済みの最新のサンプルから取ったメトリクスの説明が追加されます。バージョン1は、常に `description_status: "not_captured"` を報告します。
+
+```bash
+curl --fail-with-body -sS -G \
+  "https://api.logbrew.co/api/telemetry/metrics/investigation" \
+  -H "Authorization: Bearer $LOGBREW_TOKEN" \
+  --data-urlencode "project_id=$PROJECT_ID" \
+  --data-urlencode "name=http.server.duration" \
+  --data-urlencode "since=2026-08-02T12:00:00Z" \
+  --data-urlencode "until=2026-08-03T12:00:00Z" \
+  --data-urlencode "interval=5m" \
+  --data-urlencode "group_by=service_name" \
+  --data-urlencode "environment=production" \
+  --data-urlencode "series_limit=12" \
+  --data-urlencode "response_version=2"
+```
+
+`project_id`、`name`、`since` は必須です。`since` はその時刻を含み、`until` はその時刻を含みません。`until` のデフォルトは現在時刻です。比較では、同じ長さの直前の期間も読み取ります。
+
+<Accordion title="バージョン2のメトリクスの調査の例">
+
+この架空のヒストグラムでは、5分ごとの2つの時間バケットに5つのサンプルがあります。最新の時間バケットの p95 は48 ms です。前の期間の最新の時間バケットの p95 は24 ms です。
+
+```json
+{
+  "schema_version": 2,
+  "subject": {
+    "kind": "metric", "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    "name": "http.server.duration", "description_status": "captured",
+    "description": "Duration of one completed server request."
+  },
+  "query": {
+    "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "name": "http.server.duration",
+    "since": "2026-08-02T12:00:00Z", "until": "2026-08-03T12:00:00Z", "interval": "5m",
+    "interval_seconds": 300, "group_by": "service_name", "environment": "production",
+    "series_limit": 12
+  },
+  "purpose": "Explains one metric's latest application-supplied description and bounded change, compares the immediately preceding equal window, exposes one privacy-bounded latest-sample capture context, exact trace/span exemplars, and nearby completed deployments, and keeps every correlation evidence-only rather than claiming an anomaly or root cause.",
+  "content_trust": "untrusted_telemetry",
+  "analysis": {
+    "status": "change_observed",
+    "causality": "evidence_only",
+    "focus": {
+      "comparison_index": 0, "selection": "largest_absolute_relative_change",
+      "direction": "increased", "absolute_change": 24.0, "relative_change_percent": 100.0
+    }
+  },
+  "coverage": {
+    "samples": 5, "series": 1, "returned_series": 1, "points": 2,
+    "expected_buckets_per_series": 288, "first_seen_at": "2026-08-03T11:00:10Z",
+    "last_seen_at": "2026-08-03T11:09:50Z", "truncated": false
+  },
+  "series": [
+    {
+      "identity": {
+        "kind": "histogram", "unit": "ms", "temporality": "delta",
+        "group_by": "service_name", "group_value": "checkout-api"
+      },
+      "status": "ready",
+      "aggregation": {
+        "code": "distribution_p95",
+        "description": "Primary value is the approximate p95 of raw observations in each bucket; p50, p99, range, average, count, and sum preserve distribution context."
+      },
+      "sample_count": 5,
+      "points": [
+        {
+          "bucket_start": "2026-08-03T11:00:00Z", "bucket_end": "2026-08-03T11:05:00Z",
+          "sample_count": 2, "value": 42.0, "min": 42.0, "max": 42.0, "average": 42.0,
+          "sum": 84.0, "p50": 42.0, "p95": 42.0, "p99": 42.0, "trace_exemplars": []
+        },
+        {
+          "bucket_start": "2026-08-03T11:05:00Z",
+          "bucket_end": "2026-08-03T11:10:00Z",
+          "sample_count": 3,
+          "value": 48.0,
+          "min": 48.0,
+          "max": 48.0,
+          "average": 48.0,
+          "sum": 144.0,
+          "p50": 48.0,
+          "p95": 48.0,
+          "p99": 48.0,
+          "trace_exemplars": ["4bf92f3577b34da6a3ce929d0e0e4736"]
+        }
+      ]
+    }
+  ],
+  "comparison": {
+    "status": "available",
+    "method": "adjacent_equal_window_latest_bucket",
+    "previous_since": "2026-08-01T12:00:00Z",
+    "previous_until": "2026-08-02T12:00:00Z",
+    "items": [
+      {
+        "identity": {
+          "kind": "histogram", "unit": "ms", "temporality": "delta",
+          "group_by": "service_name", "group_value": "checkout-api"
+        },
+        "aggregation": "distribution_p95",
+        "current": {
+          "bucket_start": "2026-08-03T11:05:00Z", "bucket_end": "2026-08-03T11:10:00Z",
+          "sample_count": 3, "value": 48.0
+        },
+        "previous": {
+          "bucket_start": "2026-08-02T11:55:00Z", "bucket_end": "2026-08-02T12:00:00Z",
+          "sample_count": 2, "value": 24.0
+        },
+        "direction": "increased",
+        "absolute_change": 24.0,
+        "relative_change_percent": 100.0
+      }
+    ],
+    "truncated": false,
+    "limitation": "Each item compares the latest non-empty semantic bucket in adjacent equal-length windows. It is an observed value change, not seasonality-aware anomaly detection or evidence that a deployment caused the change."
+  },
+  "latest_sample": {
+    "status": "available",
+    "sample": {
+      "id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "kind": "histogram",
+      "value": 48.0,
+      "unit": "ms",
+      "temporality": "delta",
+      "occurred_at": "2026-08-03T11:09:50Z",
+      "service_name": "checkout-api",
+      "environment": "production",
+      "release": "checkout@1.2.3",
+      "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+      "span_id": "00f067aa0ba902b7",
+      "sdk": {"name": "@logbrew/node", "version": "0.1.11"},
+      "context": null,
+      "metadata": {"values": {}, "included_leaf_count": 0, "redacted": false, "truncated": false}
+    }
+  },
+  "exemplars": {
+    "status": "available",
+    "coverage": {
+      "matching_samples": 5, "trace_linked_samples": 1, "span_linked_samples": 1,
+      "returned_exemplars": 1
+    },
+    "items": [
+      {
+        "id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        "value": 48.0,
+        "occurred_at": "2026-08-03T11:09:50Z",
+        "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+        "span_id": "00f067aa0ba902b7",
+        "service_name": "checkout-api",
+        "environment": "production",
+        "release": "checkout@1.2.3",
+        "sdk": {"name": "@logbrew/node", "version": "0.1.11"}
+      }
+    ],
+    "truncated": false
+  },
+  "deployments": {
+    "status": "available",
+    "items": [
+      {
+        "deployment_id": "deploy-123", "release": "checkout@1.2.3",
+        "environment": "production", "service_name": "checkout-api", "status": "succeeded",
+        "started_at": "2026-08-03T11:02:00Z", "finished_at": "2026-08-03T11:03:00Z",
+        "commit_sha": "0123456789abcdef"
+      }
+    ],
+    "truncated": false
+  },
+  "timeline": {
+    "items": [
+      {
+        "id": "deploy-123", "kind": "deployment_finished",
+        "occurred_at": "2026-08-03T11:03:00Z", "value": null, "trace_id": null,
+        "span_id": null, "release": "checkout@1.2.3", "service_name": "checkout-api"
+      },
+      {
+        "id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd", "kind": "metric_exemplar",
+        "occurred_at": "2026-08-03T11:09:50Z", "value": 48.0,
+        "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736", "span_id": "00f067aa0ba902b7",
+        "release": "checkout@1.2.3", "service_name": "checkout-api"
+      }
+    ],
+    "truncated": false
+  },
+  "evidence": {
+    "status": "partial",
+    "captured_fields": [
+      "metric.current_window_coverage", "metric.deployment_overlays", "metric.description",
+      "metric.identity", "metric.latest_sample", "metric.latest_sample.kind",
+      "metric.latest_sample.occurred_at", "metric.latest_sample.scope",
+      "metric.latest_sample.sdk.name", "metric.latest_sample.sdk.version",
+      "metric.latest_sample.span_id", "metric.latest_sample.trace_id",
+      "metric.latest_sample.value", "metric.prior_window_comparison", "metric.query_scope",
+      "metric.series_semantics", "metric.span_exemplars", "metric.trace_exemplars"
+    ],
+    "missing_fields": ["metric.latest_sample.context", "metric.latest_sample.metadata"],
+    "redacted_fields": [],
+    "truncated_fields": []
+  },
+  "next_actions": [
+    {
+      "priority": 1,
+      "code": "inspect_exact_span",
+      "target": "span_investigation",
+      "reason": "Inspect the exact span that emitted a retained metric exemplar, then review its failure, latency, log, issue, action, and trace evidence.",
+      "context": {
+        "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736", "span_id": "00f067aa0ba902b7",
+        "environment": "production", "release": "checkout@1.2.3",
+        "service_name": "checkout-api"
+      }
+    },
+    {
+      "priority": 2,
+      "code": "review_deployment",
+      "target": "release_investigation",
+      "reason": "Review release-scoped telemetry for a completed deployment inside the compared evidence window without treating temporal proximity as causality.",
+      "context": {
+        "project_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "trace_id": null,
+        "span_id": null, "environment": "production", "release": "checkout@1.2.3",
+        "service_name": "checkout-api"
+      }
+    }
+  ]
+}
+```
+
+</Accordion>
+
+| フィールド | 意味 |
+| --- | --- |
+| `subject.description_status` | `captured`、`not_captured`、`unavailable` のいずれか。 |
+| `query` | 正規化されたクエリ。`service_name`、`release`、`environment` は、送信した場合にだけ含まれます。 |
+| `analysis.status` | `no_samples`、`change_observed`、`no_change_observed`、`baseline_not_found`、`comparison_unavailable` のいずれか。 |
+| `analysis.focus` | 相対的な変化が最も大きい比較の項目。相対的な変化がない場合は、絶対的な変化が最も大きい項目。比較できる項目がない場合は `null`。 |
+| `series[].aggregation.code` | `gauge_last`、`delta_sum`、`distribution_p95`、`raw_cumulative_last`、`raw_last` のいずれか。 |
+| `comparison.status` | `available`、`partial`、`not_found`、`unavailable`、`no_current_samples` のいずれか。 |
+| `comparison.items[]` | 同じ系列について、各期間の空でない最新の時間バケット。 |
+| `latest_sample` | 最新の生のサンプル。SDK、`context`、`metadata`、トレースへのリンクが入ります。 |
+| `exemplars` | トレース ID を持つ生のサンプル。`coverage` は、リンクされたサンプルを数えます。 |
+| `deployments` | 前の期間の開始から `until` までに完了したデプロイ。 |
+| `next_actions[]` | `code`、`target`、プレーンテキストの `reason`、次の読み取りのための `context` の範囲。 |
+
+`relative_change_percent` は `(current - previous) / abs(previous) * 100` です。前の値がゼロか、値がない場合は `null` です。`expected_buckets_per_series` は、ありうる時間バケットの数で、データのある時間バケットの数ではありません。空の時間バケットをゼロとして描かないでください。変化の近くにデプロイがあっても、そのデプロイが変化の原因だという証明にはなりません。
+
+アカウントが読み取れないプロジェクトには、`404` ではなく、`analysis.status: "no_samples"` とともに `200 OK` が返ります。空の結果は、ほかのシグナルの種類については何も示しません。
+
+メトリクスの上限：期間は最大31日です。各系列の時間バケットは最大500個です。`series_limit` は1〜20で、デフォルトは10です。レスポンスが返す exemplar は最大20件、デプロイは最大20件です。
+
+| HTTP | `error` | 対処 |
+| --- | --- | --- |
+| `422` | `metric investigation response_version must be 1 or 2` | `response_version` を省略するか、`2` を送信します。 |
+| `422` | `metric series project_id is required` | 読み取れるプロジェクトの ID を1つ送信します。 |
+| `422` | `metric series name is required` | メトリクスの一覧から名前をコピーします。 |
+| `422` | `metric series since is required` | `24h` のような値か、RFC 3339 形式のタイムスタンプを送信します。 |
+| `422` | `metric series range must not exceed 31 days` | もっと短い期間を使います。 |
+| `422` | `metric series interval would exceed 500 buckets` | `interval=auto` か、もっと広い間隔を使います。 |
+| `422` | `metric series_limit must be between 1 and 20` | 1〜20の値を送信します。 |
+
+`interval` は、`auto`、`1m`、`5m`、`15m`、`1h`、`6h`、`1d` のいずれかです。`group_by` は、`none`、`service_name`、`release`、`environment` のいずれかです。ほかの値には `422` が返ります。
+
+### 調査のエラー
+
+| HTTP | ルート | `error` |
+| --- | --- | --- |
+| `404` | ログ | `log not found` |
+| `404` | アクション | `action not found` |
+| `404` | トレース | `trace not found` |
+| `422` | トレース | `trace investigation response_version must be 1, 2, or 3` |
+| `400` | ログ、アクション、課題 | パスの ID が UUID でない場合は `invalid URL path parameters` |
+| `422` | 課題、トレース、スパン、メトリクス | 不明なキーや型の違う値には `invalid query parameters` |
+
+`404` は、そのレコードを持つ、読み取れるプロジェクトがないことを示します。どのルートも、有効な認証がない場合は `401` を、`GET` 以外のメソッドには `405` を返します。[見つからない場合](/ja/reference/api-errors#resource-not-found)、[パス](/ja/reference/api-errors#invalid-path-value)、[認証](/ja/reference/api-errors#authentication-failure)、[メソッド](/ja/reference/api-errors#unsupported-method)のレスポンスについては、[API エラー](/ja/reference/api-errors)を参照してください。
+
+任意の証拠の読み取りは、`200 OK` のレスポンスの中で失敗することがあります。その場合、コレクションは `unavailable` を報告します。それを `not_found` やレコード0件として表示しないでください。
+
+## <span id="severity-values">重大度の値</span>
+
+ユーザーに見える重大度の値は、`info`、`warning`、`error`、`critical` です。SDK やランタイムは、`trace`、`debug`、`warn`、`fatal` のような一般的な別名を送信できます。REST とライブのレスポンスは、常に正規の値を返します。たとえば、LogBrew は入力として `warn` を受け付け、`warning` を返します。取り込みでは、不明な重大度の値は拒否されます。
+
+| 別名 | 正規の値 |
+| --- | --- |
+| `trace`, `debug` | `info` |
+| `warn` | `warning` |
+| `fatal` | `critical` |
+
+## <span id="severity-rule-responses">重大度ルールのレスポンス</span>
+
+重大度ルールは、LogBrew がログや課題をどう表示するかを変えます。アプリケーションが取得した重大度は変えません。ログと課題は、`triage` オブジェクトを返します。
+
+| フィールド | 意味 |
+| --- | --- |
+| `effective_severity` | 表示する重大度。ルールがない場合は `severity` と同じです。 |
+| `ignored` | ログのルールがそのログを無視する場合、または課題がアーカイブ済みの場合は `true`。 |
+| `rule_applied` | 重大度ルールまたは無視の状態が適用されている場合は `true`。`false` はデフォルトの値で、データがないという意味ではありません。 |
+
+表示には `triage.effective_severity` を使います。`severity` は、取得された値としてそのまま残します。デフォルトでは、ログの一覧は無視されたログを省略します。含めるには、`GET /api/logs` で `status=ignored` または `status=all` を送信します。
+
+アカウントには、そのプロジェクトの課題を管理する権限が必要です。読み取りのアクセス権だけでは足りません。権限がない場合、ルールの変更には `code: forbidden` 付きの `403` が返ります。
+
+### ログのルールを変更する
+
+`PUT /api/logs/{log_id}/triage-rule` は、そのログと、同じシグネチャを持つ以降のログにルールを設定します。本文には `severity` と `ignored` の両方が必要です。
+
+```bash
+curl --request PUT "https://api.logbrew.co/api/logs/$LOG_ID/triage-rule" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --header "Content-Type: application/json" \
+  --data '{ "severity": "info", "ignored": true }'
+```
+
+`200 OK` のレスポンスには、完全な[ログ](#log-response)が入ります。その `severity` は `warning` のままです。その `triage` にルールが示されます。
+
+```json
+{
+  "severity": "warning",
+  "triage": {
+    "effective_severity": "info",
+    "ignored": true,
+    "rule_applied": true
+  }
+}
+```
+
+この抜粋は、変更されたフィールドだけを示しています。リクエストの `severity` は、`source`、`info`、`warning`、`error`、`critical` のいずれかです。`source` は、取得された重大度に戻します。無視されたログを有効に戻すものではありません。ログをもう一度表示するには、`"ignored": false` を送信します。
+
+### 課題のルールを変更する
+
+`PUT /api/telemetry/issues/{issue_id}/triage-rule` は、グループ化された課題とその以降の発生事象について、表示する重大度を設定します。本文で受け付けるのは `severity` だけです。
+
+```bash
+curl --request PUT "https://api.logbrew.co/api/telemetry/issues/$ISSUE_ID/triage-rule" \
+  --header "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
+  --header "Content-Type: application/json" \
+  --data '{ "severity": "warning" }'
+```
+
+`200 OK` のレスポンスには、バージョン1の完全な[課題](#issue-response)が入ります。取得された `severity` と `status` は変わりません。
+
+```json
+{
+  "severity": "error",
+  "status": "unresolved",
+  "triage": {
+    "effective_severity": "warning",
+    "ignored": false,
+    "rule_applied": true
+  }
+}
+```
+
+この抜粋は、一部のフィールドだけを示しています。ルールで課題を解決、アーカイブ、再開することはできません。それには[ステータスの変更](#issue-status-response-examples)を使ってください。導出された優先度は、新しく実際に適用された重大度に従います。それを確認するには、`response_version=2` または `3` で課題を読み取ります。
+
+対応していない重大度には `422` が返ります。
+
+```json
+{
+  "error": "triage severity must be source, info, warning, error, or critical",
+  "code": "validation_failed",
+  "next": "use source to restore captured severity, or choose info, warning, error, or critical",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+課題のルールに `status` を入れるなど、本文に不明なフィールドがあると、`code: invalid_json` 付きの `422` が返ります。ログや課題が存在しないか読み取れない場合は、`code: not_found` 付きの `404` が返ります。レスポンスを受け取れなかった場合は、ルールをもう一度送信する前に、ログや課題を読み直してください。
+
+## エラーレスポンスの形式
+
+アプリケーションのエラーは、JSON のエンベロープを返します。次の例は、拒否されたリクエストを示しています。`error` と `next` の文言は、問題によって変わります。
+
+```json
+{
+  "error": "<what is wrong>",
+  "code": "validation_failed",
+  "next": "<how to fix it>",
+  "next_action": {
+    "code": "fix_request",
+    "target": "request"
+  }
+}
+```
+
+プログラムの分岐には `code` を、自動化には `next_action` を使います。`error` と `next` は、プレーンテキストとして人に表示します。その文言を解析しないでください。エラーによっては、`limit`、`reset_at`、`retry_after_seconds` などのフィールドが追加されます。JSON の本文がないレスポンスには、LogBrew の `code` はありません。すべてのコードについては、[API エラー](/ja/reference/api-errors)を参照してください。
+
+## CLI でデータを読む
+
+CLI は同じルートを読み取り、`--json` を付けると同じ JSON を返します。最初は広く読み、それから絞り込みます。
+
+```bash
+logbrew read releases --environment production --json
+logbrew read issues --release api@1.2.3 --status unresolved --json
+logbrew read logs --release api@1.2.3 --since 24h --json
+logbrew read actions --name checkout_failed --since 24h --json
+logbrew read traces --status error --since 24h --json
+logbrew read trace <trace_id> --json
+```
+
+カーソルのエンベロープを取得するには、`--pagination cursor` を追加します。CLI は、課題のレスポンスバージョン3をリクエストします。[次のページを読む](/ja/reference/cli#read-the-next-page)と[ライブ監視](/ja/reference/cli#live-watch)を参照してください。

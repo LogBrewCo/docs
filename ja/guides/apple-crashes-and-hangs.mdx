@@ -1,0 +1,316 @@
+---
+title: "iOS のクラッシュレポート：Apple のクラッシュとハング"
+sidebarTitle: "Apple のクラッシュとハング"
+description: "iOS アプリのクラッシュレポートを設定し、一致する dSYM をアップロードして、シンボル化済みの iOS クラッシュログを LogBrew で読みます。"
+---
+
+この手順で、iOS アプリのネイティブクラッシュとメインスレッドのハングを取得します。ハングの取得には UIKit が必要です。スタックフレームでソースの位置を確認するには、一致する dSYM をアップロードします。
+
+アプリはクラッシュするとローカルにレポートを保存します。次回以降の起動時に、アプリが再送を呼び出してクラッシュの証拠を LogBrew に送信します。LogBrew は Apple の生のレポートを送信しません。
+
+<Note>
+  LogBrew Swift 0.1.6 以降を使ってください。デバッグ用のビルド成果物をアップロードするには、ネイティブ版の LogBrew CLI 0.1.24 以降を使ってください。
+</Note>
+
+<Warning>
+  アプリの中では、プロジェクト単位の取り込み設定を使います。ビルド成果物のアップロードと課題の読み取りには、アカウントのログインを使います。ビルドマシンからは、プロジェクトのビルド成果物キーでもアップロードできます。アカウントのアクセストークンやビルド成果物キーをアプリに含めないでください。
+</Warning>
+
+## 取得の範囲を計画する
+
+障害の種類ごとに、アプリが再送できるタイミングを確認します。
+
+| 障害 | 取得結果 | 送信のタイミング |
+| --- | --- | --- |
+| Apple の致命的なクラッシュ | 未処理のネイティブクラッシュのイベント | 次回以降のアプリ起動時 |
+| 回復したメインスレッドのハング | 処理済みのハングのイベント | 回復後の再送時 |
+| 終了に至ったハング | 未処理のハングのイベント | 次回以降のアプリ起動時 |
+
+リリースの値はビルドの前に設定します。この値で、アプリのバージョンとビルドを特定できる必要があります。SDK、dSYM のアップロード、課題のフィルターで同じ値を使います。
+
+クラッシュのメタデータに、ユーザーのペイロード、リクエストボディ、ヘッダーを付けないでください。
+
+## クラッシュ用のプロダクトを追加する
+
+まず、アプリの [SDK のテレメトリを設定](/ja/guides/sdk-ingestion)します。再送ではその `client` と `transport` を使います。
+
+Swift Package Manager で公開 SDK を追加します。
+
+```swift
+.package(
+    url: "https://github.com/LogBrewCo/sdk.git",
+    from: "0.1.6"
+)
+```
+
+テレメトリを送信するには `LogBrew` プロダクトを追加します。`LogBrewCrash` は、アプリでネイティブのクラッシュやハングの取得を明示的に有効にする場合だけ追加します。
+
+この取得の連携は iOS 15 以降に対応しています。ネイティブの致命的エラーのハンドラーはプロセス全体に及ぶため、アプリが所有する取得オブジェクトは1つだけにします。
+
+## 正確な識別情報を1つに決める
+
+実行時の設定とビルド成果物のアップロードで、同じプロジェクト、リリース、環境、サービスを使います。LogBrew はこれらの値を推測したり置き換えたりしません。
+
+```swift
+import Foundation
+import LogBrew
+import LogBrewCrash
+
+let applicationSupport = try FileManager.default.url(
+    for: .applicationSupportDirectory,
+    in: .userDomainMask,
+    appropriateFor: nil,
+    create: true
+)
+
+let identity = try NativeArtifactIdentity(
+    projectId: "550e8400-e29b-41d4-a716-446655440000",
+    release: "com.example.app@1.2.3+45",
+    environment: "production",
+    service: "ios-app"
+)
+
+let watchdog: NativeHangWatchdogConfiguration? = nil
+
+let crashCapture = NativeCrashCapture(
+    configuration: try NativeCrashConfiguration(
+        storageDirectory: applicationSupport.appendingPathComponent(
+            "LogBrewCrash",
+            isDirectory: true
+        ),
+        artifactIdentity: identity,
+        hangWatchdog: watchdog
+    )
+)
+
+try crashCapture.install()
+```
+
+ルート UI を作る前に、メインスレッドで取得オブジェクトをインストールします。先に親ディレクトリを作成します。保存先のディレクトリはアプリが所有し、非公開にします。
+
+取得オブジェクトは、Mach 例外、シグナル、C++ の例外、Objective-C の例外を記録します。ローカルのレポートには、メモリの内容、キュー名、コンソールのログは含まれません。
+
+ローカルのクラッシュレポートには、アプリやデバイスの機密情報が含まれることがあります。クラウドのバックアップや共有ディレクトリに入れないでください。LogBrew は生のレポートではなく、フレームの UUID、アーキテクチャ、オフセットを送信します。
+
+`NativeCrashConfiguration` には省略可能な上限が2つあります。
+
+| パラメーター | デフォルト | 範囲 | 効果 |
+| --- | --- | --- | --- |
+| `maxStoredReports` | `5` | 1〜32 | アプリが保持するローカルのレポートの数。 |
+| `maxReplayBytes` | 4 MiB | 1 KiB〜16 MiB | このサイズより大きいレポートは、再送時に破棄されます。 |
+
+範囲外の値を指定すると、設定は `crash_invalid_configuration` をスローします。
+
+## ハングの取得を有効にする
+
+`watchdog` が `nil` の場合、ハングの取得はオフです。有効にするには、`install()` を呼び出す前に、上の `watchdog` の宣言を次のように置き換えます。
+
+```swift
+let watchdog = try NativeHangWatchdogConfiguration(
+    threshold: 2
+)
+```
+
+しきい値は秒単位で、1〜30です。ハングの取得には `artifactIdentity` も必要です。これがないと、設定は `crash_invalid_configuration` をスローします。
+
+プロセスが動いている間は、`crashCapture` オブジェクトを1つだけ使い続けます。2つ目の取得オブジェクトはインストールできません。その `install()` の呼び出しは `crash_capture_owned` をスローします。しきい値を変えるには、次回のアプリ起動時に新しい値を使います。
+
+回復したハングは、`crash.handled` を `true` にして再送されます。プロセスの終了で残った進行中のハングは、`crash.handled` を `false` にして再送されます。
+
+どちらの形式にも、数値の `durationMs` メタデータが含まれます。また、致命的なクラッシュのフレームと同じビルド成果物の識別情報を保持します。
+
+ウォッチドッグは、アプリが非アクティブな間やデバッガーの下にある間は一時停止します。深刻な熱負荷がかかっている間も取得を止めます。
+
+しきい値が短いと、メインスレッドの通常の処理がハングとして報告されることがあります。しきい値は、出荷するビルド設定でテストしてください。処理済みの状態は回復したことを示します。課題が解決したという意味ではありません。処理済みのハングでもインターフェースは止まっていたので、これも確認してください。
+
+## 起動後に再送する
+
+取得オブジェクトをインストールした後、SDK のクライアントを通して保留中のレポートを再送します。
+
+```swift
+let replay = try crashCapture.replayPendingReports(
+    in: client,
+    transport: transport
+)
+
+print(
+    "acknowledged=\(replay.acknowledged) " +
+    "discarded=\(replay.discarded) " +
+    "pending=\(replay.pending)"
+)
+```
+
+再送はアプリが呼び出す必要があります。ハングから回復しただけでは、イベントは送信されません。回復後または次回の起動時に、同じメソッドを呼び出します。
+
+再送は、有効なレポートを古い順に処理し、安定したイベント ID を保持します。送信に失敗したレポートは保留のまま残ります。受け付けられたレポートは削除されます。
+
+再送は、読み取れないレポートと `maxReplayBytes` より大きいレポートを破棄します。3つの件数をすべて確認してください。保留件数が0というだけでは、送信できたことの証明になりません。
+
+失敗したリクエストを次の再起動の後まで残す必要がある場合は、再送の前に永続的な送信を有効にします。通常のネットワークや認証の回復中に `purge()` を呼び出さないでください。
+
+## 一致する dSYM をアップロードする
+
+デバッグ情報を有効にしてアプリをアーカイブします。ユーザーが実行するビルドそのものの dSYM を保管します。
+
+イメージの UUID を確認します。
+
+```bash
+xcrun dwarfdump --uuid "path/to/App.app.dSYM"
+```
+
+アップロードの前に、ローカルでビルド成果物を検証します。
+
+```bash
+logbrew debug-artifacts upload "path/to/App.app.dSYM" \
+  --project "<project UUID>" \
+  --release "com.example.app@1.2.3+45" \
+  --environment "production" \
+  --service "ios-app" \
+  --expect-image-uuid "<Mach-O UUID>" \
+  --dry-run \
+  --json
+```
+
+必要なアーキテクチャごとに `--expect-image-uuid` を繰り返します。見つかった UUID の集合が想定と異なる場合、コマンドは失敗します。
+
+アカウントのアクセスを確認します。次に、同じコマンドを `--dry-run` なしで実行します。
+
+```bash
+logbrew status --json
+
+logbrew debug-artifacts upload "path/to/App.app.dSYM" \
+  --project "<project UUID>" \
+  --release "com.example.app@1.2.3+45" \
+  --environment "production" \
+  --service "ios-app" \
+  --expect-image-uuid "<Mach-O UUID>" \
+  --json
+```
+
+アップロードコマンドは、対応する Apple のオブジェクトを検証し、アップロードしたすべての識別情報を確認します。API のメタデータにローカルのパスやファイル名は含めません。
+
+結果は JSON の `status` に表示されます。
+
+| `status` | 意味 |
+| --- | --- |
+| `validated` | ドライランで想定どおりのオブジェクトが見つかりました。何もアップロードしていません。 |
+| `verified` | アカウントのアクセスで、すべての識別情報をアップロードして確認しました。 |
+| `already_present` | LogBrew にすべての識別情報がすでにあります。 |
+| `uploaded` | プロジェクトのビルド成果物キーでファイルをアップロードしました。CLI はファイルを確認できませんでした。 |
+
+ビルドマシンでは、アカウントのアクセスの代わりに、`LOGBREW_TOKEN` に設定したプロジェクトのビルド成果物キーでアップロードできます。キーは [ビルド成果物キーを作成する](/ja/guides/source-maps#create-an-artifact-key)の手順で作成します。このアップロードは `uploaded` を返します。後でアカウントのアクセスを使って、各識別情報を確認します。
+
+```bash
+logbrew debug-artifacts lookup \
+  --project "<project UUID>" \
+  --release "com.example.app@1.2.3+45" \
+  --environment "production" \
+  --service "ios-app" \
+  --image-uuid "<Mach-O UUID>" \
+  --architecture arm64 \
+  --json
+```
+
+`status: "found"` は、ビルド成果物があることを示します。`status: "missing"` は、その識別情報のビルド成果物が LogBrew にないことを示します。
+
+解決は、ソースファイル名ではなく、イメージの UUID とビルド成果物の識別情報全体で照合します。同じソースからビルドし直しても、UUID が変わることがあります。ビルドディレクトリ全体ではなく、該当する dSYM バンドルだけをアップロードします。
+
+## ホスト側での読み取りを確認する
+
+実行時と同じスコープで課題の一覧を絞り込みます。この例では `unresolved` の課題を選びます。解決済みやアーカイブ済みの課題は表示されません。
+
+```bash
+logbrew read issues \
+  --project "<project UUID>" \
+  --release "com.example.app@1.2.3+45" \
+  --environment "production" \
+  --service "ios-app" \
+  --status "unresolved" \
+  --since "24h" \
+  --json
+```
+
+一覧のレスポンスで、グループ化された課題を特定できます。ホスト側でのフレームの解決を要求するには、その詳細を読みます。
+
+```bash
+logbrew read issue "<issue UUID>" --json
+```
+
+一致するビルド成果物があると、`symbolication` オブジェクトが追加されます。この例は、フレームが解決された課題のフィールドの一部です。完全なレスポンスではありません。
+
+```json
+{
+  "severity": "critical",
+  "attributes": {
+    "metadata": {
+      "crash.replayed": true
+    }
+  },
+  "symbolication": {
+    "status": "resolved",
+    "frames": [
+      {
+        "index": 0,
+        "status": "resolved",
+        "resolved": {
+          "source": "AppRuntime.swift",
+          "line": 42,
+          "column": 1,
+          "name": "terminateForCrash()"
+        }
+      }
+    ]
+  }
+}
+```
+
+## クラッシュの証拠を読む
+
+各フレームには個別の `status` があります。`symbolication.status` フィールドも同じ値を使います。
+
+| `status` | 意味 |
+| --- | --- |
+| `resolved` | 一致するビルド成果物でフレームを解決しました。`resolved` には、ビルド成果物が提供するソース、行、列、関数名が入ります。 |
+| `artifact_not_found` | イベントの識別情報とイメージの UUID に一致する、アップロード済みのビルド成果物がありません。 |
+| `source_not_resolved` | 一致するビルド成果物はありますが、このフレームは解決できませんでした。 |
+| `invalid_metadata` | イベントのビルド成果物のメタデータが不完全か、矛盾しています。 |
+| `unavailable` | フレームの解決の読み取りを完了できませんでした。 |
+
+解決されていないフレームは、メモでも未解決として残します。空のスタックとして報告しないでください。
+
+LogBrew は課題を読むときにフレームを解決します。後からアップロードした dSYM でも、それより前のイベントのフレームを解決できます。イベントが取得していないフレームを追加することはできません。
+
+アプリケーションフレームでコードの検索範囲は絞れますが、原因の証明にはなりません。直前の手順、例外チェーン、トレースの証拠は、課題の調査で読みます。
+
+```bash
+logbrew investigate issue "<issue UUID>" --json
+```
+
+このレスポンスで、`source: "symbolicated"` のフレームはアップロードされたビルド成果物から得たものです。`source: "captured"` のフレームは、アプリが送信した位置です。レスポンスのフィールドについては [課題を調査する](/ja/guides/investigate-an-issue)を参照してください。
+
+読み取りのたびに、プロジェクト、リリース、環境、サービスのスコープをすべて保持します。見つからなかったからといって、検索範囲をプロジェクトの外に広げないでください。
+
+## 本番環境の設定を確認する
+
+デプロイしたビルドで、承認済みのテスト用の障害を使います。顧客の操作をきっかけにしないでください。各項目を順に確認し、最初に失敗したところで止めます。
+
+1. 実行時の識別情報が、アップロードしたビルド成果物の識別情報と一致します。
+2. 次回以降の起動で、受け付けられたイベントが1件再送され、破棄と保留のレポートはどちらも0件です。
+3. スコープを指定した課題の一覧が、想定どおりの処理済みの状態でテストの課題を返します。
+4. 想定したアプリケーションフレームが解決されます。
+5. その後の正常な起動で、発生事象が追加されません。
+
+## 安全に回復する
+
+| 結果 | 回復方法 |
+| --- | --- |
+| アップロードの認証が失敗する | `logbrew login` を実行し、`logbrew status --json` で確認してから、同じアップロードを繰り返します。 |
+| アップロードの UUID の検証が失敗する | デプロイしたビルドの dSYM を選び、ドライランを繰り返します。 |
+| `artifact_not_found` | イベントの識別情報を確認し、同じスコープで一致する dSYM をアップロードします。 |
+| `source_not_resolved` | ビルドのデバッグ情報をすべて残し、デプロイしたビルドの設定を確認します。 |
+| `invalid_metadata` | LogBrew Swift 0.1.6 以降であることを確認します。正確な識別情報で新しいイベントを取得します。 |
+| `unavailable` | 課題を表示したままにし、後で同じスコープの詳細の読み取りを再試行します。 |
+| 再送が保留のままになる | 送信方式または認証の状態を直してから、レポートを削除せずにアプリを再起動します。 |
+| 再送で破棄された項目が報告される | 送信済みとして数えないでください。取得の設定を確認し、承認済みの新しいテストイベントで再現します。 |
+
+課題の調査全般については、[課題を調査する](/ja/guides/investigate-an-issue)を参照してください。
