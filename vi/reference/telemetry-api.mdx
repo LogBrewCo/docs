@@ -54,7 +54,12 @@ xem [Tích hợp SDK](/vi/guides/sdk-ingestion).
 | `GET` | `/api/telemetry/issues/{issue_id}/events` | Liệt kê các lần xảy ra của một vấn đề đã gộp nhóm. |
 | `PATCH` | `/api/telemetry/issues/{issue_id}` | Cập nhật trạng thái, mức ưu tiên hoặc người phụ trách của một vấn đề. |
 | `POST` | `/api/telemetry/issues/bulk` | Cập nhật trạng thái, mức ưu tiên hoặc người phụ trách của 1 đến 100 vấn đề trong một dự án. |
-| `GET` | `/api/telemetry/issues/assignees` | Liệt kê các tài khoản có thể được giao vấn đề trong một dự án. |
+| `GET` | `/api/telemetry/issues/assignees` | Liệt kê các tài khoản và nhóm có thể được giao vấn đề trong một dự án. |
+| `GET` | `/api/telemetry/issues/{issue_id}/owners` | Liệt kê các chủ sở hữu được đề xuất của một vấn đề. |
+| `GET`, `PUT` | `/api/telemetry/issues/ownership` | Đọc hoặc đặt quy tắc sở hữu và nội dung CODEOWNERS của một dự án. |
+| `GET` | `/api/telemetry/issues/{issue_id}/activity` | Đọc lịch sử thay đổi của một vấn đề. |
+| `GET` | `/api/telemetry/issues/notifications` | Liệt kê các vấn đề mà người khác đã giao cho bạn hoặc nhóm của bạn. |
+| `POST` | `/api/telemetry/issues/notifications/read` | Đánh dấu các thông báo vấn đề của bạn là đã đọc. |
 | `PUT` | `/api/telemetry/issues/{issue_id}/triage-rule` | Đặt quy tắc mức độ nghiêm trọng cho một vấn đề. |
 | `PUT` | `/api/logs/{log_id}/triage-rule` | Đặt quy tắc mức độ nghiêm trọng và trạng thái bỏ qua cho các log khớp với một log. |
 | `GET` | `/api/telemetry/traces` | Khám phá trace trong phạm vi dự án. |
@@ -171,13 +176,13 @@ Mỗi yêu cầu đặt 1 hoặc nhiều trường sau:
 | --- | --- |
 | `status` | `unresolved`, `resolved` hoặc `archived`. `ignored` là tên cũ của `archived`. |
 | `priority` | `high`, `medium` hoặc `low`. |
-| `assignee` | ID người dùng, `me` cho tài khoản đang đăng nhập, hoặc `none` để bỏ người phụ trách. |
+| `assignee` | ID người dùng, `me` cho tài khoản đang đăng nhập, `team:<team_id>` cho một nhóm, hoặc `none` để bỏ người phụ trách. |
 
 Yêu cầu không có trường nào trong số này sẽ thất bại với `422` và
 `validation_failed`.
 
-Một vấn đề có 0 hoặc 1 người phụ trách. Người phụ trách phải có quyền đọc dự án.
-Nếu không, yêu cầu thất bại với `422` và `validation_failed`, và LogBrew
+Một vấn đề có 0 hoặc 1 người phụ trách: một tài khoản hoặc một nhóm. Tài khoản
+phải có quyền đọc dự án, còn nhóm phải thuộc tổ chức của dự án. Nếu không, yêu cầu thất bại với `422` và `validation_failed`, và LogBrew
 không thay đổi gì. Lấy danh sách tài khoản mà bạn có thể giao từ
 [Liệt kê người phụ trách](#list-assignees). Mọi giá trị `assignee` khác cũng
 thất bại với `422` và `validation_failed`.
@@ -192,11 +197,14 @@ yêu cầu sau khi hết thời gian chờ. Hết thời gian chờ không chứ
 
 ### <span id="update-one-issue">Cập nhật một vấn đề</span>
 
-Thêm `response_version=3` để nhận `archived`, mức ưu tiên và người phụ trách
-trong phản hồi:
+Thêm `response_version=4` để nhận `archived`, mức ưu tiên và người phụ trách
+trong phản hồi. Ở phiên bản 4, `assignee` là
+`{ "type": "user", "user_id", "name", "email" }`,
+`{ "type": "team", "team_id", "slug", "name" }` hoặc `null`. Phiên bản 3 hiển
+thị người phụ trách là nhóm thành `null`.
 
 ```bash
-curl -X PATCH "$LOGBREW_API_URL/api/telemetry/issues/$ISSUE_ID?response_version=3" \
+curl -X PATCH "$LOGBREW_API_URL/api/telemetry/issues/$ISSUE_ID?response_version=4" \
   -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
   -H "Content-Type: application/json" \
   --data '{ "status": "archived", "priority": "low", "assignee": "me" }'
@@ -223,7 +231,8 @@ curl -X POST "$LOGBREW_API_URL/api/telemetry/issues/bulk" \
 Yêu cầu áp dụng cùng một thay đổi cho mọi vấn đề. Phản hồi có `project_id` và
 `results`, với 1 kết quả cho mỗi ID vấn đề, theo thứ tự trong yêu cầu. Mỗi kết
 quả có `issue_id`, `outcome` và `issue`. `issue` là vấn đề hiện tại ở phiên bản
-phản hồi 3, hoặc `null` với `not_found`.
+phản hồi 3, hoặc `null` với `not_found`. Thêm `"response_version": 2` vào body
+để nhận từng vấn đề ở phiên bản phản hồi 4.
 
 | `outcome` | Ý nghĩa |
 | --- | --- |
@@ -245,7 +254,9 @@ curl "$LOGBREW_API_URL/api/telemetry/issues/assignees?project_id=$PROJECT_ID" \
 ```
 
 Danh sách có mọi tài khoản đọc được dự án. Mỗi mục có `user_id`, `name` và
-`email`. `name` là `null` khi tài khoản không có tên. Xem
+`email`. `name` là `null` khi tài khoản không có tên. Thêm `response_version=2`
+để nhận thêm `teams`: mọi nhóm thuộc tổ chức của dự án, với `team_id`, `slug` và
+`name`. Xem
 [phản hồi danh sách người phụ trách](/vi/reference/telemetry-response-shapes#assignee-list-response).
 Mọi tài khoản đọc được dự án đều lấy được danh sách này. Nếu tài khoản không
 đọc được dự án, yêu cầu thất bại với `404` và `not_found`.
@@ -254,6 +265,39 @@ Khi một thành viên mất quyền truy cập dự án, các vấn đề đã 
 đó sẽ hiển thị là chưa có người phụ trách. Nếu thành viên được cấp lại quyền,
 các vấn đề lại hiển thị thành viên đó, trừ khi trong thời gian đó có người đã
 đổi hoặc bỏ người phụ trách.
+
+### <span id="ownership-and-suggested-owners">Quy tắc sở hữu và chủ sở hữu được đề xuất</span>
+
+`GET /api/telemetry/issues/ownership?project_id=<project-uuid>` trả về
+`rules`, `codeowners`, `updated_at` và `unresolved_owners`. Mọi tài khoản đọc
+được dự án đều đọc được dữ liệu này. `PUT` kèm `project_id` và `rules`,
+`codeowners` hoặc cả hai sẽ thay thế nội dung đó, và cần quyền quản lý vấn đề.
+Trường bạn không gửi sẽ giữ nguyên nội dung, còn chuỗi trống sẽ xóa nội dung.
+Mỗi nội dung tối đa 128 KiB. Nội dung không hợp lệ thất bại với `422` và nêu rõ
+dòng bị lỗi.
+
+`GET /api/telemetry/issues/{issue_id}/owners?response_version=2` trả về
+`suggested_assignee`, `owners` và `inputs`. Mỗi chủ sở hữu có `type` (`user`
+hoặc `team`), `source` (`ownership_rule`, `codeowners` hoặc `recent_activity`),
+`rule`, `line` và `matched`. Phiên bản 1, phiên bản mặc định, chỉ liệt kê tài
+khoản.
+
+### <span id="issue-history">Lịch sử vấn đề</span>
+
+`GET /api/telemetry/issues/{issue_id}/activity?response_version=2` trả về
+`activity`, mới nhất trước, và `next_cursor`. Mỗi mục có `type` (`status`,
+`priority`, `assigned`, `unassigned`, `severity_rule` hoặc `first_seen`),
+`value`, `actor_id`, `actor`, `assignee_id`, `assignee`, `team` và `at`.
+`limit` từ 1 đến 200, mặc định là 50. Gửi `cursor_time` và `cursor_id` lấy từ
+`next_cursor` để đọc trang tiếp theo.
+
+### <span id="notifications">Thông báo</span>
+
+`GET /api/telemetry/issues/notifications` trả về `notifications`, `unread`,
+`read_at` và `next_cursor`. Mỗi thông báo là một lần tài khoản khác giao vấn đề
+cho bạn hoặc cho nhóm của bạn. `POST
+/api/telemetry/issues/notifications/read` kèm một đối tượng JSON trống, hoặc kèm
+`read_at`, sẽ dời mốc đã đọc của bạn. Mốc này không bao giờ lùi lại.
 
 ### Đặt quy tắc cho vấn đề và log
 

@@ -54,7 +54,12 @@ Zie [SDK-integratie](/nl/guides/sdk-ingestion) voor de native envelop.
 | `GET` | `/api/telemetry/issues/{issue_id}/events` | De voorvallen van één gegroepeerd issue opvragen. |
 | `PATCH` | `/api/telemetry/issues/{issue_id}` | De status, prioriteit of toewijzing van één issue bijwerken. |
 | `POST` | `/api/telemetry/issues/bulk` | De status, prioriteit of toewijzing van 1 tot 100 issues in één project bijwerken. |
-| `GET` | `/api/telemetry/issues/assignees` | De accounts opvragen aan wie je issues in één project kunt toewijzen. |
+| `GET` | `/api/telemetry/issues/assignees` | De accounts en teams opvragen aan wie je issues in één project kunt toewijzen. |
+| `GET` | `/api/telemetry/issues/{issue_id}/owners` | De voorgestelde eigenaren van één issue opvragen. |
+| `GET`, `PUT` | `/api/telemetry/issues/ownership` | De eigenaarsregels en de CODEOWNERS-tekst van één project lezen of instellen. |
+| `GET` | `/api/telemetry/issues/{issue_id}/activity` | De wijzigingsgeschiedenis van één issue lezen. |
+| `GET` | `/api/telemetry/issues/notifications` | De issues opvragen die anderen aan jou of je teams hebben toegewezen. |
+| `POST` | `/api/telemetry/issues/notifications/read` | Je issuemeldingen als gelezen markeren. |
 | `PUT` | `/api/telemetry/issues/{issue_id}/triage-rule` | De ernstregel voor een issue instellen. |
 | `PUT` | `/api/logs/{log_id}/triage-rule` | De ernstregel en de status Genegeerd instellen voor logs die overeenkomen met een log. |
 | `GET` | `/api/telemetry/traces` | Traces vinden binnen een projectscope. |
@@ -174,14 +179,15 @@ Elk request stelt 1 of meer van deze velden in:
 | --- | --- |
 | `status` | `unresolved`, `resolved` of `archived`. `ignored` is een oudere naam voor `archived`. |
 | `priority` | `high`, `medium` of `low`. |
-| `assignee` | Een gebruikers-ID, `me` voor het ingelogde account, of `none` om de toewijzing op te heffen. |
+| `assignee` | Een gebruikers-ID, `me` voor het ingelogde account, `team:<team_id>` voor een team, of `none` om de toewijzing op te heffen. |
 
 Een request zonder een van deze velden mislukt met `422` en
 `validation_failed`.
 
-Een issue is aan 0 of 1 persoon toegewezen. Wie je toewijst, moet het project
-kunnen lezen. Zo niet, dan mislukt het request met `422` en
-`validation_failed`, en wijzigt LogBrew niets. Haal de accounts die je kunt
+Een issue heeft 0 of 1 toewijzing: een account of een team. Een account moet
+het project kunnen lezen, en een team moet bij de organisatie van het project
+horen. Zo niet, dan mislukt het request met `422` en `validation_failed`, en
+wijzigt LogBrew niets. Haal de accounts die je kunt
 toewijzen op via [Toewijsbare accounts opvragen](#list-assignees). Elke andere
 waarde voor `assignee` mislukt ook met `422` en `validation_failed`.
 
@@ -196,11 +202,14 @@ wijziging verstuurt.
 
 ### <span id="update-one-issue">Eén issue bijwerken</span>
 
-Voeg `response_version=3` toe om `archived`, de prioriteit en de toewijzing in
-de response te krijgen:
+Voeg `response_version=4` toe om `archived`, de prioriteit en de toewijzing in
+de response te krijgen. In versie 4 is `assignee`
+`{ "type": "user", "user_id", "name", "email" }`,
+`{ "type": "team", "team_id", "slug", "name" }` of `null`. In versie 3 is
+een teamtoewijzing `null`.
 
 ```bash
-curl -X PATCH "$LOGBREW_API_URL/api/telemetry/issues/$ISSUE_ID?response_version=3" \
+curl -X PATCH "$LOGBREW_API_URL/api/telemetry/issues/$ISSUE_ID?response_version=4" \
   -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
   -H "Content-Type: application/json" \
   --data '{ "status": "archived", "priority": "low", "assignee": "me" }'
@@ -227,7 +236,9 @@ curl -X POST "$LOGBREW_API_URL/api/telemetry/issues/bulk" \
 Het request past dezelfde wijziging toe op elk issue. De response heeft
 `project_id` en `results`, met 1 resultaat per issue-ID, in de volgorde van
 het request. Elk resultaat heeft `issue_id`, `outcome` en `issue`. `issue` is
-het huidige issue in responseversie 3, of `null` bij `not_found`.
+het huidige issue in responseversie 3, of `null` bij `not_found`. Voeg
+`"response_version": 2` toe aan de body om elk issue in responseversie 4 te
+krijgen.
 
 | `outcome` | Betekenis |
 | --- | --- |
@@ -252,7 +263,8 @@ curl "$LOGBREW_API_URL/api/telemetry/issues/assignees?project_id=$PROJECT_ID" \
 
 De lijst bevat elk account dat het project kan lezen. Elk item heeft
 `user_id`, `name` en `email`. `name` is `null` als het account geen naam
-heeft. Zie de
+heeft. Voeg `response_version=2` toe om ook `teams` te krijgen: elk team van
+de organisatie van het project, met `team_id`, `slug` en `name`. Zie de
 [response met toewijsbare accounts](/nl/reference/telemetry-response-shapes#assignee-list-response).
 Elk account dat het project kan lezen, kan deze lijst ophalen. Kan het
 account het project niet lezen, dan mislukt het request met `404` en
@@ -262,6 +274,39 @@ Verliest een lid de toegang tot het project, dan tonen de issues die aan dat
 lid waren toegewezen geen toewijzing meer. Krijgt het lid weer toegang, dan
 tonen de issues dat lid opnieuw, tenzij iemand de toewijzing intussen heeft
 gewijzigd of opgeheven.
+
+### <span id="ownership-and-suggested-owners">Eigenaarsregels en voorgestelde eigenaren</span>
+
+`GET /api/telemetry/issues/ownership?project_id=<project-uuid>` geeft
+`rules`, `codeowners`, `updated_at` en `unresolved_owners` terug. Elk account
+dat het project kan lezen, kan dit lezen. `PUT` met `project_id` en `rules`,
+`codeowners` of allebei vervangt die tekst en vraagt het recht om issues te
+beheren. Een veld dat je weglaat, houdt zijn tekst, en een lege string wist
+die. Elke tekst is maximaal 128 KiB. Ongeldige tekst mislukt met `422` en
+noemt de regel waar het misgaat.
+
+`GET /api/telemetry/issues/{issue_id}/owners?response_version=2` geeft
+`suggested_assignee`, `owners` en `inputs` terug. Elke eigenaar heeft `type`
+(`user` of `team`), `source` (`ownership_rule`, `codeowners` of
+`recent_activity`), `rule`, `line` en `matched`. Versie 1, de standaard, toont
+alleen accounts.
+
+### <span id="issue-history">Issuegeschiedenis</span>
+
+`GET /api/telemetry/issues/{issue_id}/activity?response_version=2` geeft
+`activity` terug, de nieuwste eerst, en `next_cursor`. Elk item heeft `type`
+(`status`, `priority`, `assigned`, `unassigned`, `severity_rule` of
+`first_seen`), `value`, `actor_id`, `actor`, `assignee_id`, `assignee`,
+`team` en `at`. `limit` is 1 tot 200, standaard 50. Stuur `cursor_time` en
+`cursor_id` uit `next_cursor` mee voor de volgende pagina.
+
+### <span id="notifications">Meldingen</span>
+
+`GET /api/telemetry/issues/notifications` geeft `notifications`, `unread`,
+`read_at` en `next_cursor` terug. Elke melding is een toewijzing van een issue
+aan jou of aan je team door een ander account. `POST
+/api/telemetry/issues/notifications/read` met een leeg JSON-object, of met
+`read_at`, verplaatst je leesmarkering. De markering gaat nooit terug.
 
 ### Regels voor issues en logs instellen
 

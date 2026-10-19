@@ -1,7 +1,7 @@
 ---
 title: "Triaż problemów i ich rozwiązywanie w LogBrew"
 sidebarTitle: "Zarządzanie problemami"
-description: "Zarządzaj problemami w LogBrew. Sprawdź dowody wystąpień, a potem rozwiąż, zarchiwizuj, otwórz ponownie, ustaw priorytet lub przypisz problemy pojedynczo lub zbiorczo."
+description: "Zarządzaj problemami w LogBrew. Sprawdź dowody wystąpień, ustal właściciela, a potem rozwiąż, zarchiwizuj, otwórz ponownie, ustaw priorytet lub przypisz problem osobie albo zespołowi."
 ---
 
 Problem grupuje wystąpienia błędów, które mają wspólny odcisk palca. Zanim
@@ -33,7 +33,7 @@ otworzysz szczegóły, przeczytaj te pola:
 | `status` | Stan problemu w procesie obsługi. Zobacz [Wartości statusu](#status-values). |
 | `priority` | Kolejność triażu problemu. Zobacz [Priorytet](#priority). |
 | `priority_source` | `manual`, gdy priorytet ustawiła osoba. `derived`, gdy priorytet wynika z ważności. |
-| `assignee` | Konto odpowiedzialne za następny krok lub `null`. Zobacz [Przypisz problemy](#assign-issues). |
+| `assignee` | Konto lub zespół odpowiedzialny za następny krok albo `null`. Zobacz [Przypisz problemy](#assign-issues). |
 
 Liczba wystąpień nie jest liczbą użytkowników, których dotyczy problem. Liczby
 i czasy dotyczą zwróconego zakresu, a nie całej historii błędu. Filtr
@@ -91,7 +91,7 @@ logbrew read issues --project "<project_id>" --status unresolved \
 ## <span id="assign-issues">Przypisz problemy</span>
 
 Przypisz problem, aby pokazać, kto odpowiada za następny krok. Problem może
-mieć 1 osobę przypisaną albo żadnej.
+być przypisany najwyżej do 1 konta albo 1 zespołu.
 
 <Steps>
   <Step title="Sprawdź, kogo można przypisać">
@@ -99,14 +99,16 @@ mieć 1 osobę przypisaną albo żadnej.
     logbrew issues assignees --project "<project_id>" --json
     ```
 
-    Lista zawiera każde konto, które może czytać projekt. Każdy wpis ma
-    `user_id`, `name` i `email`. Skopiuj `user_id`. Nie można przypisać
-    konta, które nie może czytać projektu.
+    `assignees` zawiera każde konto, które może czytać projekt, z polami
+    `user_id`, `name` i `email`. `teams` zawiera każdy zespół organizacji
+    projektu, z polami `team_id`, `slug` i `name`. Nie można przypisać konta,
+    które nie może czytać projektu, ani zespołu z innej organizacji.
   </Step>
 
   <Step title="Przypisz problem">
     ```bash
     logbrew issues assign "<user_id>" "<issue_id>" --json
+    logbrew issues assign "team:<team_id>" "<issue_id>" --json
     ```
 
     Aby przypisać problem do siebie, użyj `me` zamiast ID użytkownika. Aby
@@ -120,20 +122,96 @@ mieć 1 osobę przypisaną albo żadnej.
       --status unresolved --json
     ```
 
-    Użyj `--assignee none`, aby znaleźć problemy, do których nikt nie jest
-    przypisany.
+    Użyj `--assignee my_teams`, aby zobaczyć problemy swoich zespołów,
+    `--assignee "team:<team_id>"` dla jednego zespołu, a `--assignee none` dla
+    problemów, do których nikt nie jest przypisany.
   </Step>
 </Steps>
 
 Aby przypisywać problemy, potrzebujesz uprawnienia do zarządzania problemami w
-projekcie. To samo uprawnienie pozwala zmieniać status, priorytet oraz reguły
-problemów i logów. Osobą przypisaną może być każde konto, które może czytać
-projekt.
+projekcie. To samo uprawnienie pozwala zmieniać status, priorytet, reguły
+własności oraz reguły problemów i logów. Zespoły tworzą właściciele i
+administratorzy organizacji. Oni też wybierają członków zespołów. Zespół nie
+daje swoim członkom dostępu do projektu.
 
-Gdy członek zespołu traci dostęp do projektu, przypisane do niego problemy nie
-pokazują osoby przypisanej. Te problemy pojawiają się w odczytach z
+Gdy członek traci dostęp do projektu, przypisane do niego problemy nie
+pokazują osoby przypisanej. Gdy ktoś usunie zespół, przypisane do niego
+problemy też tracą przypisanie. Te problemy pojawiają się w odczytach z
 `--assignee none`. Jeśli członek odzyska dostęp, problemy znów go pokazują,
 chyba że ktoś w międzyczasie zmienił lub usunął przypisanie.
+
+## <span id="find-who-owns-an-issue">Znajdź właściciela problemu</span>
+
+```bash
+logbrew issues owners "<issue_id>" --json
+```
+
+Wynik zawiera proponowanych właścicieli, od najlepiej dopasowanego, oraz
+`suggested_assignee`. Każdy właściciel ma `source`:
+
+| `source` | Znaczenie |
+| --- | --- |
+| `ownership_rule` | Reguła własności projektu pasuje do problemu. `rule`, `line` i `matched` pokazują regułę i to, do czego pasuje. |
+| `codeowners` | Wiersz pliku CODEOWNERS projektu pasuje do ścieżki ramki stosu. |
+| `recent_activity` | Konto zmieniało problem albo było do niego przypisane. |
+
+`inputs` podaje, ile ścieżek ramek stosu, modułów, szablonów tras, tagów i
+reguł sprawdził LogBrew. Jeśli lista jest pusta, a `inputs` nie pokazuje
+żadnych ścieżek, problem nie ma dowodów do dopasowania. Nie oznacza to, że
+problem nie ma właściciela.
+
+Zapisz reguły własności w pliku tekstowym, po jednej regule w wierszu:
+
+```text
+# type:pattern owner...
+path:src/payments/** ada@example.com #payments
+url:/checkout/* #web
+service:billing-api ada@example.com
+tags.region:eu-* #europe
+module:app.billing.* ada@example.com
+```
+
+Wzorzec `path` pasuje do końca ścieżki ramki stosu, więc `src/payments/**`
+pasuje do ramek w dowolnym katalogu wdrożenia. `*` pasuje do dowolnego tekstu.
+Właścicielami są adresy e-mail kont lub `#team-slug`. Ostatnia pasująca reguła
+ma pierwszeństwo. Następnie wyślij reguły, plik CODEOWNERS z GitHuba albo
+jedno i drugie:
+
+```bash
+logbrew issues ownership set --project "<project_id>" \
+  --rules ownership.txt --codeowners .github/CODEOWNERS --json
+logbrew issues ownership --project "<project_id>" --json
+```
+
+W CODEOWNERS adres e-mail wskazuje konto, a `@org/team-slug` wskazuje zespół o
+tym slugu. Reguły, które wskazują konto bez dostępu do projektu lub nieznany
+zespół, kończą się błędem `422`. Właściciele z CODEOWNERS, którzy nie wskazują
+nikogo, trafiają do `unresolved_owners`. Pusty plik czyści zapisany tekst
+tego rodzaju.
+
+## <span id="read-the-issue-history">Odczytaj historię problemu</span>
+
+```bash
+logbrew issues activity "<issue_id>" --json
+```
+
+Historia zawiera każdą zmianę statusu, priorytetu, przypisania i reguły
+ważności, od najnowszej, razem z kontem, które ją wprowadziło. Ostatni wpis to
+`first_seen`. Konto, które straciło dostęp do projektu, zachowuje tylko swoje
+ID. Aby odczytać więcej, użyj `--limit` i wartości `next_cursor`.
+
+## <span id="read-your-inbox">Sprawdź skrzynkę odbiorczą</span>
+
+```bash
+logbrew inbox --json
+logbrew inbox read --json
+```
+
+Skrzynka odbiorcza zawiera problemy, które inne osoby przypisały tobie lub
+twoim zespołom, od najnowszych. `unread` liczy przypisania od twojego
+znacznika odczytu. `logbrew inbox read` przesuwa znacznik odczytu na bieżącą
+chwilę. LogBrew nie wysyła e-maili o tych przypisaniach. Skrzynka pokazuje
+tylko projekty, które możesz teraz czytać.
 
 ## Zalecany proces
 
@@ -302,8 +380,10 @@ z `status`, a kod błędu API z `api_code`.
 | Nieprawidłowe ID problemu | Skopiuj dokładne ID z listy problemów lub z odpowiedzi ze szczegółami. |
 | Nie znaleziono problemu | Sprawdź zalogowane konto i projekt. |
 | Zmiana kończy się błędem z `status` równym `403` | Konto nie może zarządzać problemami w tym projekcie. Poproś o pomoc osobę z dostępem. |
-| `invalid_assignee` | Filtr `--assignee` przyjmuje `me`, `none` lub ID użytkownika. |
-| Przypisanie kończy się błędem z `status` równym `422` i `api_code` równym `validation_failed` | Osoba przypisana nie może czytać projektu. Wybierz konto z `logbrew issues assignees` lub najpierw daj temu członkowi zespołu dostęp do projektu. |
+| `invalid_assignee` | Filtr `--assignee` przyjmuje `me`, `none`, `my_teams`, ID użytkownika lub `team:<team_id>`. |
+| Przypisanie kończy się błędem z `status` równym `422` i `api_code` równym `validation_failed` | Konto nie może czytać projektu albo zespół nie należy do organizacji projektu. Wybierz konto lub zespół z `logbrew issues assignees`. |
+| `invalid_ownership_command`, `invalid_ownership_file` | Popraw polecenie. Plik własności musi być tekstem UTF-8 o rozmiarze najwyżej 128 KiB. |
+| `invalid_inbox_command` | Użyj `logbrew inbox` lub `logbrew inbox read`. |
 | `investigation_response_invalid` | Odpowiedź nie przeszła walidacji CLI. Ponów raz. Jeśli błąd się powtórzy, zaktualizuj CLI lub zgłoś problem. Nie omijaj walidacji. |
 | Status śladu `not_linked` | Pracuj dalej na podstawie dowodów z problemu. Nie odczytuj śladu. |
 | Status śladu `unavailable` | Ponów odczyt analizy później. |

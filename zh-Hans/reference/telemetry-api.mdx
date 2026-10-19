@@ -43,7 +43,12 @@ description: "使用 LogBrew 可观测性 API 接收遥测数据、按范围读�
 | `GET` | `/api/telemetry/issues/{issue_id}/events` | 列出一个分组问题的发生记录。 |
 | `PATCH` | `/api/telemetry/issues/{issue_id}` | 更新一个问题的状态、优先级或负责人。 |
 | `POST` | `/api/telemetry/issues/bulk` | 更新同一项目中 1 到 100 个问题的状态、优先级或负责人。 |
-| `GET` | `/api/telemetry/issues/assignees` | 列出一个项目中可以被分配问题的账号。 |
+| `GET` | `/api/telemetry/issues/assignees` | 列出一个项目中可以被分配问题的账号和团队。 |
+| `GET` | `/api/telemetry/issues/{issue_id}/owners` | 列出一个问题的建议所有者。 |
+| `GET`, `PUT` | `/api/telemetry/issues/ownership` | 读取或设置一个项目的所有权规则和 CODEOWNERS 文本。 |
+| `GET` | `/api/telemetry/issues/{issue_id}/activity` | 读取一个问题的变更历史。 |
+| `GET` | `/api/telemetry/issues/notifications` | 列出其他人分配给你或你所在团队的问题。 |
+| `POST` | `/api/telemetry/issues/notifications/read` | 将你的问题通知标记为已读。 |
 | `PUT` | `/api/telemetry/issues/{issue_id}/triage-rule` | 设置问题的严重程度规则。 |
 | `PUT` | `/api/logs/{log_id}/triage-rule` | 为与某条日志匹配的日志设置严重程度规则和忽略状态。 |
 | `GET` | `/api/telemetry/traces` | 在项目范围内发现链路。 |
@@ -137,11 +142,11 @@ description: "使用 LogBrew 可观测性 API 接收遥测数据、按范围读�
 | --- | --- |
 | `status` | `unresolved`（未解决）、`resolved`（已解决）或 `archived`（已归档）。`ignored` 是 `archived` 的旧名称。 |
 | `priority` | `high`（高）、`medium`（中）或 `low`（低）。 |
-| `assignee` | 用户 ID、表示已登录账号的 `me`，或用于移除负责人的 `none`。 |
+| `assignee` | 用户 ID、表示已登录账号的 `me`、表示团队的 `team:<team_id>`，或用于移除负责人的 `none`。 |
 
 请求中不包含上述任何字段时，会以 `422` 和 `validation_failed` 失败。
 
-一个问题有 0 或 1 个负责人。负责人必须能够读取该项目。否则，请求会以 `422` 和 `validation_failed` 失败，LogBrew 不会做任何更改。可分配的账号请通过[列出负责人](#list-assignees)获取。其他任何 `assignee` 值也会以 `422` 和 `validation_failed` 失败。
+一个问题有 0 或 1 个负责人：一个账号或一个团队。账号必须能够读取该项目，团队必须属于该项目所在的组织。否则，请求会以 `422` 和 `validation_failed` 失败，LogBrew 不会做任何更改。可分配的账号请通过[列出负责人](#list-assignees)获取。其他任何 `assignee` 值也会以 `422` 和 `validation_failed` 失败。
 
 你手动设置的优先级会保持不变。没有手动设置优先级时，优先级跟随问题的严重程度：`error` 和 `critical` 为 `high`，`warning` 为 `medium`，`info` 为 `low`。
 
@@ -149,10 +154,10 @@ description: "使用 LogBrew 可观测性 API 接收遥测数据、按范围读�
 
 ### <span id="update-one-issue">更新单个问题</span>
 
-添加 `response_version=3`，即可在响应中获得 `archived`、优先级和负责人：
+添加 `response_version=4`，即可在响应中获得 `archived`、优先级和负责人。在版本 4 中，`assignee` 为 `{ "type": "user", "user_id", "name", "email" }`、`{ "type": "team", "team_id", "slug", "name" }` 或 `null`。版本 3 会把团队负责人显示为 `null`。
 
 ```bash
-curl -X PATCH "$LOGBREW_API_URL/api/telemetry/issues/$ISSUE_ID?response_version=3" \
+curl -X PATCH "$LOGBREW_API_URL/api/telemetry/issues/$ISSUE_ID?response_version=4" \
   -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
   -H "Content-Type: application/json" \
   --data '{ "status": "archived", "priority": "low", "assignee": "me" }'
@@ -175,7 +180,7 @@ curl -X POST "$LOGBREW_API_URL/api/telemetry/issues/bulk" \
   }'
 ```
 
-该请求会对每个问题应用相同的更改。响应包含 `project_id` 和 `results`，每个问题 ID 对应 1 个结果，顺序与请求相同。每个结果包含 `issue_id`、`outcome` 和 `issue`。在响应版本 3 中，`issue` 是该问题的当前数据；对于 `not_found`，它为 `null`。
+该请求会对每个问题应用相同的更改。响应包含 `project_id` 和 `results`，每个问题 ID 对应 1 个结果，顺序与请求相同。每个结果包含 `issue_id`、`outcome` 和 `issue`。在响应版本 3 中，`issue` 是该问题的当前数据；对于 `not_found`，它为 `null`。在请求体中添加 `"response_version": 2`，即可以响应版本 4 获取每个问题。
 
 | `outcome` | 含义 |
 | --- | --- |
@@ -194,9 +199,24 @@ curl "$LOGBREW_API_URL/api/telemetry/issues/assignees?project_id=$PROJECT_ID" \
   -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER"
 ```
 
-该列表包含所有能够读取该项目的账号。每个条目包含 `user_id`、`name` 和 `email`。账号没有姓名时，`name` 为 `null`。请参阅[负责人列表响应](/zh-Hans/reference/telemetry-response-shapes#assignee-list-response)。任何能够读取该项目的账号都可以获取此列表。如果账号无法读取该项目，请求会以 `404` 和 `not_found` 失败。
+该列表包含所有能够读取该项目的账号。每个条目包含 `user_id`、`name` 和 `email`。账号没有姓名时，`name` 为 `null`。添加 `response_version=2` 还可以获得 `teams`：该项目所属组织的所有团队，每个团队包含 `team_id`、`slug` 和 `name`。请参阅[负责人列表响应](/zh-Hans/reference/telemetry-response-shapes#assignee-list-response)。任何能够读取该项目的账号都可以获取此列表。如果账号无法读取该项目，请求会以 `404` 和 `not_found` 失败。
 
 成员失去项目访问权限后，分配给该成员的问题将不显示负责人。如果该成员重新获得访问权限，这些问题会再次显示该成员，除非在此期间有人更改或移除了负责人。
+
+### <span id="ownership-and-suggested-owners">所有权和建议的所有者</span>
+
+`GET /api/telemetry/issues/ownership?project_id=<project-uuid>` 返回 `rules`、`codeowners`、`updated_at` 和 `unresolved_owners`。任何能够读取该项目的账号都可以读取。发送带有 `project_id` 以及 `rules`、`codeowners` 或两者的 `PUT` 请求，会替换对应的文本，这需要问题管理权限。省略的字段保留原有文本，空字符串会清空该文本。每段文本不超过 128 KiB。文本无效时，请求以 `422` 失败，并指出出错的行。
+
+`GET /api/telemetry/issues/{issue_id}/owners?response_version=2` 返回 `suggested_assignee`、`owners` 和 `inputs`。每个所有者包含 `type`（`user` 或 `team`）、`source`（`ownership_rule`、`codeowners` 或 `recent_activity`）、`rule`、`line` 和 `matched`。版本 1（默认版本）只列出账号。
+
+### <span id="issue-history">问题变更历史</span>
+
+`GET /api/telemetry/issues/{issue_id}/activity?response_version=2` 按从新到旧返回 `activity`，并返回 `next_cursor`。每个条目包含 `type`（`status`、`priority`、`assigned`、`unassigned`、`severity_rule` 或 `first_seen`）、`value`、`actor_id`、`actor`、`assignee_id`、`assignee`、`team` 和 `at`。`limit` 取 1 到 200，默认为 50。要读取下一页，发送取自 `next_cursor` 的 `cursor_time` 和 `cursor_id`。
+
+### <span id="notifications">通知</span>
+
+`GET /api/telemetry/issues/notifications` 返回 `notifications`、`unread`、`read_at` 和 `next_cursor`。每条通知表示另一个账号把某个问题分配给了你或你所在的团队。向 `POST
+/api/telemetry/issues/notifications/read` 发送空 JSON 对象或带有 `read_at` 的对象，会移动你的已读标记。已读标记不会往回移动。
 
 ### 设置问题和日志规则
 

@@ -43,7 +43,12 @@ description: "LogBrew の Observability API で、テレメトリの取り込み
 | `GET` | `/api/telemetry/issues/{issue_id}/events` | グループ化された1件の課題の発生事象を一覧表示します。 |
 | `PATCH` | `/api/telemetry/issues/{issue_id}` | 1件の課題のステータス、優先度、担当者を更新します。 |
 | `POST` | `/api/telemetry/issues/bulk` | 1つのプロジェクトの1〜100件の課題のステータス、優先度、担当者を更新します。 |
-| `GET` | `/api/telemetry/issues/assignees` | 1つのプロジェクトで課題を割り当てられるアカウントを一覧表示します。 |
+| `GET` | `/api/telemetry/issues/assignees` | 1つのプロジェクトで課題を割り当てられるアカウントとチームを一覧表示します。 |
+| `GET` | `/api/telemetry/issues/{issue_id}/owners` | 1件の課題のオーナー候補を一覧表示します。 |
+| `GET`、`PUT` | `/api/telemetry/issues/ownership` | 1つのプロジェクトのオーナーシップルールと CODEOWNERS のテキストを読む、または設定します。 |
+| `GET` | `/api/telemetry/issues/{issue_id}/activity` | 1件の課題の変更履歴を読みます。 |
+| `GET` | `/api/telemetry/issues/notifications` | ほかの人があなたやあなたのチームに割り当てた課題を一覧表示します。 |
+| `POST` | `/api/telemetry/issues/notifications/read` | 課題の通知を既読にします。 |
 | `PUT` | `/api/telemetry/issues/{issue_id}/triage-rule` | 課題の重大度のルールを設定します。 |
 | `PUT` | `/api/logs/{log_id}/triage-rule` | あるログに一致するログについて、重大度のルールと無視の状態を設定します。 |
 | `GET` | `/api/telemetry/traces` | プロジェクトのスコープ内のトレースを探します。 |
@@ -137,11 +142,11 @@ description: "LogBrew の Observability API で、テレメトリの取り込み
 | --- | --- |
 | `status` | `unresolved`、`resolved`、`archived` のいずれか。`ignored` は `archived` の古い名前です。 |
 | `priority` | `high`、`medium`、`low` のいずれか。 |
-| `assignee` | ユーザー ID、サインイン中のアカウントを示す `me`、または担当者を解除する `none`。 |
+| `assignee` | ユーザー ID、サインイン中のアカウントを示す `me`、チームを示す `team:<team_id>`、または担当者を解除する `none`。 |
 
 これらのフィールドが1つもないリクエストは、`422` と `validation_failed` で失敗します。
 
-課題の担当者は0人または1人です。担当者は、そのプロジェクトを読み取れる必要があります。読み取れない場合、リクエストは `422` と `validation_failed` で失敗し、LogBrew は何も変更しません。割り当てられるアカウントは [担当者を一覧表示する](#list-assignees)で取得します。`assignee` にそれ以外の値を指定した場合も、`422` と `validation_failed` で失敗します。
+担当者は課題ごとに最大1つで、アカウントかチームです。アカウントはそのプロジェクトを読み取れる必要があり、チームはそのプロジェクトの組織に属している必要があります。条件を満たさない場合、リクエストは `422` と `validation_failed` で失敗し、LogBrew は何も変更しません。割り当てられるアカウントは [担当者を一覧表示する](#list-assignees)で取得します。`assignee` にそれ以外の値を指定した場合も、`422` と `validation_failed` で失敗します。
 
 設定した優先度は固定されます。優先度を設定していない場合、優先度は課題の重大度に従います。`error` と `critical` は `high`、`warning` は `medium`、`info` は `low` です。
 
@@ -149,10 +154,10 @@ description: "LogBrew の Observability API で、テレメトリの取り込み
 
 ### <span id="update-one-issue">1件の課題を更新する</span>
 
-レスポンスで `archived`、優先度、担当者を受け取るには、`response_version=3` を追加します。
+レスポンスで `archived`、優先度、担当者を受け取るには、`response_version=4` を追加します。バージョン4では、`assignee` は `{ "type": "user", "user_id", "name", "email" }`、`{ "type": "team", "team_id", "slug", "name" }`、`null` のいずれかです。バージョン3では、チームの担当者は `null` と表示されます。
 
 ```bash
-curl -X PATCH "$LOGBREW_API_URL/api/telemetry/issues/$ISSUE_ID?response_version=3" \
+curl -X PATCH "$LOGBREW_API_URL/api/telemetry/issues/$ISSUE_ID?response_version=4" \
   -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
   -H "Content-Type: application/json" \
   --data '{ "status": "archived", "priority": "low", "assignee": "me" }'
@@ -175,7 +180,7 @@ curl -X POST "$LOGBREW_API_URL/api/telemetry/issues/bulk" \
   }'
 ```
 
-リクエストは、すべての課題に同じ変更を適用します。レスポンスには `project_id` と `results` があり、`results` には課題 ID ごとに1つの結果がリクエストの順に入ります。各結果には `issue_id`、`outcome`、`issue` があります。`issue` は、レスポンスのバージョン3では現在の課題で、`not_found` の場合は `null` です。
+リクエストは、すべての課題に同じ変更を適用します。レスポンスには `project_id` と `results` があり、`results` には課題 ID ごとに1つの結果がリクエストの順に入ります。各結果には `issue_id`、`outcome`、`issue` があります。`issue` は、レスポンスのバージョン3では現在の課題で、`not_found` の場合は `null` です。各課題をレスポンスのバージョン4で受け取るには、ボディに `"response_version": 2` を追加します。
 
 | `outcome` | 意味 |
 | --- | --- |
@@ -194,9 +199,23 @@ curl "$LOGBREW_API_URL/api/telemetry/issues/assignees?project_id=$PROJECT_ID" \
   -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER"
 ```
 
-一覧には、そのプロジェクトを読み取れるすべてのアカウントが含まれます。各項目には `user_id`、`name`、`email` があります。アカウントに名前がない場合、`name` は `null` です。[担当者の一覧のレスポンス](/ja/reference/telemetry-response-shapes#assignee-list-response)を参照してください。プロジェクトを読み取れるアカウントであれば、この一覧を取得できます。アカウントがプロジェクトを読み取れない場合、リクエストは `404` と `not_found` で失敗します。
+一覧には、そのプロジェクトを読み取れるすべてのアカウントが含まれます。各項目には `user_id`、`name`、`email` があります。アカウントに名前がない場合、`name` は `null` です。`response_version=2` を追加すると、`teams` も受け取れます。`teams` には、プロジェクトが属する組織のすべてのチームが、`team_id`、`slug`、`name` 付きで入ります。[担当者の一覧のレスポンス](/ja/reference/telemetry-response-shapes#assignee-list-response)を参照してください。プロジェクトを読み取れるアカウントであれば、この一覧を取得できます。アカウントがプロジェクトを読み取れない場合、リクエストは `404` と `not_found` で失敗します。
 
 メンバーがプロジェクトへのアクセスを失うと、そのメンバーに割り当てられた課題には担当者が表示されなくなります。メンバーが再びアクセスできるようになると、その間に誰かが担当者を変更または解除していない限り、課題には再びそのメンバーが表示されます。
+
+### <span id="ownership-and-suggested-owners">オーナーシップとオーナー候補</span>
+
+`GET /api/telemetry/issues/ownership?project_id=<project-uuid>` は、`rules`、`codeowners`、`updated_at`、`unresolved_owners` を返します。プロジェクトを読み取れるアカウントであれば、読み取れます。`project_id` と、`rules`、`codeowners`、またはその両方を付けて `PUT` を送ると、そのテキストが置き換わります。これには課題を管理する権限が必要です。省略したフィールドのテキストはそのまま残り、空の文字列を送るとテキストが消去されます。各テキストは 128 KiB 以下です。無効なテキストは `422` で失敗し、問題のある行が示されます。
+
+`GET /api/telemetry/issues/{issue_id}/owners?response_version=2` は、`suggested_assignee`、`owners`、`inputs` を返します。各オーナーには、`type`（`user` または `team`）、`source`（`ownership_rule`、`codeowners`、`recent_activity` のいずれか）、`rule`、`line`、`matched` があります。デフォルトのバージョン1では、アカウントだけが一覧表示されます。
+
+### <span id="issue-history">課題の変更履歴</span>
+
+`GET /api/telemetry/issues/{issue_id}/activity?response_version=2` は、新しい順の `activity` と、`next_cursor` を返します。各項目には、`type`（`status`、`priority`、`assigned`、`unassigned`、`severity_rule`、`first_seen` のいずれか）、`value`、`actor_id`、`actor`、`assignee_id`、`assignee`、`team`、`at` があります。`limit` は 1〜200 で、デフォルトは 50 です。次のページを読むには、`next_cursor` の `cursor_time` と `cursor_id` を送信します。
+
+### <span id="notifications">通知</span>
+
+`GET /api/telemetry/issues/notifications` は、`notifications`、`unread`、`read_at`、`next_cursor` を返します。各通知は、ほかのアカウントがあなたやあなたのチームに課題を割り当てたことを表します。空の JSON オブジェクト、または `read_at` を付けて `POST /api/telemetry/issues/notifications/read` を送ると、既読位置が進みます。既読位置が戻ることはありません。
 
 ### 課題とログのルールを設定する
 

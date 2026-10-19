@@ -53,7 +53,12 @@ Untuk envelope native, lihat [Integrasi SDK](/id/guides/sdk-ingestion).
 | `GET` | `/api/telemetry/issues/{issue_id}/events` | Tampilkan daftar kemunculan dari satu masalah terkelompok. |
 | `PATCH` | `/api/telemetry/issues/{issue_id}` | Perbarui status, prioritas, atau penanggung jawab satu masalah. |
 | `POST` | `/api/telemetry/issues/bulk` | Perbarui status, prioritas, atau penanggung jawab 1 sampai 100 masalah dalam satu proyek. |
-| `GET` | `/api/telemetry/issues/assignees` | Tampilkan daftar akun yang bisa ditugaskan masalah di satu proyek. |
+| `GET` | `/api/telemetry/issues/assignees` | Tampilkan daftar akun dan tim yang bisa ditugaskan masalah di satu proyek. |
+| `GET` | `/api/telemetry/issues/{issue_id}/owners` | Tampilkan daftar usulan pemilik satu masalah. |
+| `GET`, `PUT` | `/api/telemetry/issues/ownership` | Baca atau tetapkan aturan kepemilikan dan teks CODEOWNERS satu proyek. |
+| `GET` | `/api/telemetry/issues/{issue_id}/activity` | Baca riwayat perubahan satu masalah. |
+| `GET` | `/api/telemetry/issues/notifications` | Tampilkan daftar masalah yang ditugaskan orang lain kepada Anda atau tim Anda. |
+| `POST` | `/api/telemetry/issues/notifications/read` | Tandai notifikasi masalah Anda sebagai sudah dibaca. |
 | `PUT` | `/api/telemetry/issues/{issue_id}/triage-rule` | Tetapkan aturan tingkat keparahan untuk masalah. |
 | `PUT` | `/api/logs/{log_id}/triage-rule` | Tetapkan aturan tingkat keparahan dan status diabaikan untuk semua log yang cocok dengan log tersebut. |
 | `GET` | `/api/telemetry/traces` | Temukan trace dalam lingkup proyek. |
@@ -172,14 +177,15 @@ Setiap permintaan mengisi 1 atau lebih kolom berikut:
 | --- | --- |
 | `status` | `unresolved`, `resolved`, atau `archived`. `ignored` adalah nama lama untuk `archived`. |
 | `priority` | `high`, `medium`, atau `low`. |
-| `assignee` | ID pengguna, `me` untuk akun yang sedang masuk, atau `none` untuk menghapus penanggung jawab. |
+| `assignee` | ID pengguna, `me` untuk akun yang sedang masuk, `team:<team_id>` untuk tim, atau `none` untuk menghapus penanggung jawab. |
 
 Permintaan tanpa satu pun kolom ini gagal dengan `422` dan
 `validation_failed`.
 
-Masalah punya 0 atau 1 penanggung jawab. Penanggung jawab harus bisa membaca
-proyek. Jika tidak, permintaan gagal dengan `422` dan `validation_failed`, dan
-LogBrew tidak mengubah apa pun. Ambil daftar akun yang bisa Anda tugaskan dari
+Masalah punya 0 atau 1 penanggung jawab: satu akun atau satu tim. Akun harus
+bisa membaca proyek, dan tim harus berada di organisasi proyek. Jika tidak,
+permintaan gagal dengan `422` dan `validation_failed`, dan LogBrew tidak
+mengubah apa pun. Ambil daftar akun yang bisa Anda tugaskan dari
 [Tampilkan daftar penanggung jawab](#list-assignees). Nilai `assignee` lain
 juga gagal dengan `422` dan `validation_failed`.
 
@@ -195,11 +201,14 @@ yang berbeda.
 
 ### <span id="update-one-issue">Perbarui satu masalah</span>
 
-Tambahkan `response_version=3` agar respons berisi `archived`, prioritas, dan
-penanggung jawab:
+Tambahkan `response_version=4` agar respons berisi `archived`, prioritas, dan
+penanggung jawab. Di versi 4, `assignee` bernilai
+`{ "type": "user", "user_id", "name", "email" }`,
+`{ "type": "team", "team_id", "slug", "name" }`, atau `null`. Versi 3
+menampilkan penanggung jawab berupa tim sebagai `null`.
 
 ```bash
-curl -X PATCH "$LOGBREW_API_URL/api/telemetry/issues/$ISSUE_ID?response_version=3" \
+curl -X PATCH "$LOGBREW_API_URL/api/telemetry/issues/$ISSUE_ID?response_version=4" \
   -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
   -H "Content-Type: application/json" \
   --data '{ "status": "archived", "priority": "low", "assignee": "me" }'
@@ -227,7 +236,8 @@ Permintaan ini menerapkan perubahan yang sama ke setiap masalah. Respons
 berisi `project_id` dan `results`, dengan 1 hasil untuk setiap ID masalah,
 sesuai urutan di permintaan. Setiap hasil berisi `issue_id`, `outcome`, dan
 `issue`. `issue` adalah masalah terkini dalam versi respons 3, atau `null`
-untuk `not_found`.
+untuk `not_found`. Tambahkan `"response_version": 2` ke body agar setiap
+masalah dikembalikan dalam versi respons 4.
 
 | `outcome` | Arti |
 | --- | --- |
@@ -252,7 +262,8 @@ curl "$LOGBREW_API_URL/api/telemetry/issues/assignees?project_id=$PROJECT_ID" \
 
 Daftar ini berisi setiap akun yang bisa membaca proyek. Setiap entri berisi
 `user_id`, `name`, dan `email`. `name` bernilai `null` jika akun tidak punya
-nama. Lihat
+nama. Tambahkan `response_version=2` untuk juga mendapatkan `teams`: setiap
+tim di organisasi proyek, dengan `team_id`, `slug`, dan `name`. Lihat
 [respons daftar penanggung jawab](/id/reference/telemetry-response-shapes#assignee-list-response).
 Setiap akun yang bisa membaca proyek bisa mengambil daftar ini. Jika akun
 tidak bisa membaca proyek, permintaan gagal dengan `404` dan `not_found`.
@@ -261,6 +272,41 @@ Saat anggota kehilangan akses ke proyek, masalah yang ditugaskan ke anggota
 itu tidak menampilkan penanggung jawab. Jika anggota itu mendapatkan akses
 lagi, masalah itu kembali menampilkan anggota tersebut, kecuali seseorang
 sudah mengubah atau menghapus penanggung jawabnya sementara itu.
+
+### <span id="ownership-and-suggested-owners">Kepemilikan dan usulan pemilik</span>
+
+`GET /api/telemetry/issues/ownership?project_id=<project-uuid>` mengembalikan
+`rules`, `codeowners`, `updated_at`, dan `unresolved_owners`. Setiap akun yang
+bisa membaca proyek bisa membacanya. `PUT` dengan `project_id` serta `rules`,
+`codeowners`, atau keduanya mengganti teks tersebut dan butuh izin untuk
+mengelola masalah. Kolom yang tidak Anda kirim tetap menyimpan teksnya, dan
+string kosong menghapusnya. Setiap teks berukuran maksimal 128 KiB. Teks yang
+tidak valid gagal dengan `422` dan menyebutkan barisnya.
+
+`GET /api/telemetry/issues/{issue_id}/owners?response_version=2` mengembalikan
+`suggested_assignee`, `owners`, dan `inputs`. Setiap pemilik punya `type`
+(`user` atau `team`), `source` (`ownership_rule`, `codeowners`, atau
+`recent_activity`), `rule`, `line`, dan `matched`. Versi 1, yaitu default,
+hanya menampilkan akun.
+
+### <span id="issue-history">Riwayat masalah</span>
+
+`GET /api/telemetry/issues/{issue_id}/activity?response_version=2`
+mengembalikan `activity`, mulai dari yang terbaru, dan `next_cursor`. Setiap
+entri punya `type` (`status`, `priority`, `assigned`, `unassigned`,
+`severity_rule`, atau `first_seen`), `value`, `actor_id`, `actor`,
+`assignee_id`, `assignee`, `team`, dan `at`. `limit` bernilai 1 sampai 200,
+dengan default 50. Kirim `cursor_time` dan `cursor_id` dari `next_cursor`
+untuk halaman berikutnya.
+
+### <span id="notifications">Notifikasi</span>
+
+`GET /api/telemetry/issues/notifications` mengembalikan `notifications`,
+`unread`, `read_at`, dan `next_cursor`. Setiap notifikasi adalah penugasan
+masalah kepada Anda atau tim Anda oleh akun lain. `POST
+/api/telemetry/issues/notifications/read` dengan objek JSON kosong, atau
+dengan `read_at`, memindahkan penanda baca Anda. Penanda ini tidak pernah
+mundur.
 
 ### Tetapkan aturan masalah dan log
 

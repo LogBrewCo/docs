@@ -56,7 +56,12 @@ sayfasına bakın.
 | `GET` | `/api/telemetry/issues/{issue_id}/events` | Gruplanmış tek bir sorunun oluşumlarını listeler. |
 | `PATCH` | `/api/telemetry/issues/{issue_id}` | Tek bir sorunun durumunu, önceliğini veya sorumlusunu günceller. |
 | `POST` | `/api/telemetry/issues/bulk` | Bir projedeki 1 ile 100 arası sorunun durumunu, önceliğini veya sorumlusunu günceller. |
-| `GET` | `/api/telemetry/issues/assignees` | Bir projede sorun atanabilecek hesapları listeler. |
+| `GET` | `/api/telemetry/issues/assignees` | Bir projede sorun atanabilecek hesapları ve ekipleri listeler. |
+| `GET` | `/api/telemetry/issues/{issue_id}/owners` | Tek bir sorunun önerilen sahiplerini listeler. |
+| `GET`, `PUT` | `/api/telemetry/issues/ownership` | Bir projenin sahiplik kurallarını ve CODEOWNERS metnini okur veya ayarlar. |
+| `GET` | `/api/telemetry/issues/{issue_id}/activity` | Tek bir sorunun değişiklik geçmişini okur. |
+| `GET` | `/api/telemetry/issues/notifications` | Başkalarının size veya ekiplerinize atadığı sorunları listeler. |
+| `POST` | `/api/telemetry/issues/notifications/read` | Sorun bildirimlerinizi okundu olarak işaretler. |
 | `PUT` | `/api/telemetry/issues/{issue_id}/triage-rule` | Bir sorun için önem düzeyi kuralını ayarlar. |
 | `PUT` | `/api/logs/{log_id}/triage-rule` | Bir logla eşleşen loglar için önem düzeyi kuralını ve yok sayılma durumunu ayarlar. |
 | `GET` | `/api/telemetry/traces` | Bir proje kapsamındaki izleri bulur. |
@@ -176,13 +181,13 @@ Her istek bu alanlardan 1 veya daha fazlasını ayarlar:
 | --- | --- |
 | `status` | `unresolved`, `resolved` veya `archived`. `ignored`, `archived` için eski bir addır. |
 | `priority` | `high`, `medium` veya `low`. |
-| `assignee` | Bir kullanıcı kimliği, giriş yapmış hesap için `me` veya sorumluyu kaldırmak için `none`. |
+| `assignee` | Bir kullanıcı kimliği, giriş yapmış hesap için `me`, bir ekip için `team:<team_id>` veya sorumluyu kaldırmak için `none`. |
 
 Bu alanların hiçbirini içermeyen bir istek `422` ve `validation_failed` ile
 başarısız olur.
 
-Bir sorunun 0 veya 1 sorumlusu olur. Sorumlu projeyi okuyabilmelidir.
-Okuyamıyorsa istek `422` ve `validation_failed` ile başarısız olur ve LogBrew
+Bir sorunun 0 veya 1 sorumlusu olur: bir hesap ya da bir ekip. Hesap projeyi
+okuyabilmeli, ekip de projenin organizasyonunda olmalıdır. Aksi hâlde istek `422` ve `validation_failed` ile başarısız olur ve LogBrew
 hiçbir şeyi değiştirmez. Atayabileceğiniz hesapları
 [Sorumluları listeleyin](#list-assignees) bölümünden alın. Diğer her
 `assignee` değeri de `422` ve `validation_failed` ile başarısız olur.
@@ -199,10 +204,13 @@ yeniden okuyun.
 ### <span id="update-one-issue">Tek bir sorunu güncelleyin</span>
 
 Yanıtta `archived` durumunu, önceliği ve sorumluyu almak için
-`response_version=3` ekleyin:
+`response_version=4` ekleyin. Sürüm 4'te `assignee` değeri
+`{ "type": "user", "user_id", "name", "email" }`,
+`{ "type": "team", "team_id", "slug", "name" }` veya `null` olur. Sürüm 3, ekip
+sorumlusunu `null` olarak gösterir.
 
 ```bash
-curl -X PATCH "$LOGBREW_API_URL/api/telemetry/issues/$ISSUE_ID?response_version=3" \
+curl -X PATCH "$LOGBREW_API_URL/api/telemetry/issues/$ISSUE_ID?response_version=4" \
   -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
   -H "Content-Type: application/json" \
   --data '{ "status": "archived", "priority": "low", "assignee": "me" }'
@@ -231,7 +239,8 @@ curl -X POST "$LOGBREW_API_URL/api/telemetry/issues/bulk" \
 İstek aynı değişikliği her soruna uygular. Yanıt `project_id` ve `results`
 alanlarını içerir. `results`, istek sırasıyla her sorun kimliği için 1 sonuç
 içerir. Her sonuç `issue_id`, `outcome` ve `issue` alanlarını içerir. `issue`,
-yanıt sürümü 3'te güncel sorundur. `not_found` için `null` olur.
+yanıt sürümü 3'te güncel sorundur. `not_found` için `null` olur. Her sorunu
+yanıt sürümü 4'te almak için gövdeye `"response_version": 2` ekleyin.
 
 | `outcome` | Anlamı |
 | --- | --- |
@@ -256,6 +265,8 @@ curl "$LOGBREW_API_URL/api/telemetry/issues/assignees?project_id=$PROJECT_ID" \
 
 Liste projeyi okuyabilen her hesabı içerir. Her girdi `user_id`, `name` ve
 `email` alanlarını içerir. Hesabın adı yoksa `name` değeri `null` olur.
+`teams` listesini de almak için `response_version=2` ekleyin. Bu liste,
+projenin organizasyonundaki her ekibi `team_id`, `slug` ve `name` ile verir.
 [Sorumlu listesi yanıtı](/tr/reference/telemetry-response-shapes#assignee-list-response)
 bölümüne bakın. Projeyi okuyabilen her hesap bu listeyi alabilir. Hesap
 projeyi okuyamıyorsa istek `404` ve `not_found` ile başarısız olur.
@@ -263,6 +274,41 @@ projeyi okuyamıyorsa istek `404` ve `not_found` ile başarısız olur.
 Bir üye projeye erişimini kaybettiğinde o üyeye atanan sorunlar sorumlu
 göstermez. Üye erişimi yeniden alırsa sorunlar o üyeyi yeniden gösterir. Ancak
 bu arada biri sorumluyu değiştirdiyse veya kaldırdıysa bu olmaz.
+
+### <span id="ownership-and-suggested-owners">Sahiplik ve önerilen sahipler</span>
+
+`GET /api/telemetry/issues/ownership?project_id=<project-uuid>` isteği
+`rules`, `codeowners`, `updated_at` ve `unresolved_owners` döndürür. Projeyi
+okuyabilen her hesap bunu okuyabilir. `project_id` ile birlikte `rules`,
+`codeowners` veya ikisini gönderen bir `PUT` isteği o metni değiştirir ve
+sorunları yönetme izni gerektirir. Göndermediğiniz bir alanın metni korunur,
+boş bir dize ise metni temizler. Her metin en fazla 128 KiB olabilir. Geçersiz
+metin `422` ile başarısız olur ve hatalı satırı belirtir.
+
+`GET /api/telemetry/issues/{issue_id}/owners?response_version=2` isteği
+`suggested_assignee`, `owners` ve `inputs` döndürür. Her sahipte `type`
+(`user` veya `team`), `source` (`ownership_rule`, `codeowners` veya
+`recent_activity`), `rule`, `line` ve `matched` bulunur. Varsayılan sürüm 1
+yalnızca hesapları listeler.
+
+### <span id="issue-history">Sorun geçmişi</span>
+
+`GET /api/telemetry/issues/{issue_id}/activity?response_version=2` isteği en
+yeniden başlayarak `activity` ve `next_cursor` döndürür. Her girdide `type`
+(`status`, `priority`, `assigned`, `unassigned`, `severity_rule` veya
+`first_seen`), `value`, `actor_id`, `actor`, `assignee_id`, `assignee`,
+`team` ve `at` bulunur. `limit` 1 ile 200 arasındadır, varsayılanı 50'dir.
+Sonraki sayfa için `next_cursor` içinden gelen `cursor_time` ve `cursor_id`
+değerlerini gönderin.
+
+### <span id="notifications">Bildirimler</span>
+
+`GET /api/telemetry/issues/notifications` isteği `notifications`, `unread`,
+`read_at` ve `next_cursor` döndürür. Her bildirim, başka bir hesabın bir
+sorunu size veya ekibinize atamasıdır. Boş bir JSON nesnesiyle ya da
+`read_at` ile gönderilen `POST
+/api/telemetry/issues/notifications/read` isteği okundu işaretinizi taşır.
+İşaret hiçbir zaman geri gitmez.
 
 ### Sorun ve log kurallarını ayarlayın
 

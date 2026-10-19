@@ -1,7 +1,7 @@
 ---
 title: "Issue triage and resolution in LogBrew"
 sidebarTitle: "Manage issues"
-description: "Manage issues in LogBrew. Read the occurrence evidence, then resolve, archive, reopen, prioritize, or assign issues one at a time or in bulk."
+description: "Manage issues in LogBrew. Read the occurrence evidence, find the owner, then resolve, archive, reopen, prioritize, or assign issues to a person or a team."
 ---
 
 An issue groups error occurrences that share a fingerprint. Read the group
@@ -30,7 +30,7 @@ before you open the detail:
 | `status` | Workflow state of the issue. See [Status values](#status-values). |
 | `priority` | Triage order of the issue. See [Priority](#priority). |
 | `priority_source` | `manual` when a person set the priority. `derived` when it follows severity. |
-| `assignee` | Account that owns the next step, or `null`. See [Assign issues](#assign-issues). |
+| `assignee` | Account or team that owns the next step, or `null`. See [Assign issues](#assign-issues). |
 
 The occurrence count is not an affected-user count. Counts and times apply to
 the returned scope, not to the full error history. A `--since` or `--until`
@@ -86,7 +86,8 @@ logbrew read issues --project "<project_id>" --status unresolved \
 
 ## Assign issues
 
-Assign an issue to show who owns the next step. An issue has 0 or 1 assignee.
+Assign an issue to show who owns the next step. An issue has 0 or 1 assignee:
+one account or one team.
 
 <Steps>
   <Step title="Find who can be assigned">
@@ -94,14 +95,16 @@ Assign an issue to show who owns the next step. An issue has 0 or 1 assignee.
     logbrew issues assignees --project "<project_id>" --json
     ```
 
-    The list has every account that can read the project. Each entry has
-    `user_id`, `name`, and `email`. Copy the `user_id`. You cannot assign an
-    account that cannot read the project.
+    `assignees` has every account that can read the project, with `user_id`,
+    `name`, and `email`. `teams` has every team of the project's organization,
+    with `team_id`, `slug`, and `name`. You cannot assign an account that
+    cannot read the project, or a team of another organization.
   </Step>
 
   <Step title="Assign the issue">
     ```bash
     logbrew issues assign "<user_id>" "<issue_id>" --json
+    logbrew issues assign "team:<team_id>" "<issue_id>" --json
     ```
 
     Use `me` instead of a user ID to assign the issue to yourself. Use
@@ -115,18 +118,91 @@ Assign an issue to show who owns the next step. An issue has 0 or 1 assignee.
       --status unresolved --json
     ```
 
-    Use `--assignee none` to find issues that nobody owns.
+    Use `--assignee my_teams` for the issues of your teams,
+    `--assignee "team:<team_id>"` for one team, and `--assignee none` for
+    issues that nobody owns.
   </Step>
 </Steps>
 
 To assign issues, you need permission to manage issues in the project. The
-same permission lets you change status, priority, and issue and log rules.
-Any account that can read the project can be an assignee.
+same permission lets you change status, priority, ownership rules, and issue
+and log rules. Organization owners and admins create teams and choose their
+members. A team gives its members no project access.
 
 When a member loses access to the project, the issues assigned to that member
-show no assignee. These issues appear in `--assignee none` reads. If the
-member gets access again, the issues show that member again, unless someone
-changed or removed the assignee in the meantime.
+show no assignee. When a team is deleted, the issues assigned to it show no
+assignee. These issues appear in `--assignee none` reads. If the member gets
+access again, the issues show that member again, unless someone changed or
+removed the assignee in the meantime.
+
+## Find who owns an issue
+
+```bash
+logbrew issues owners "<issue_id>" --json
+```
+
+The result lists the suggested owners, best first, and a
+`suggested_assignee`. Each owner has a `source`:
+
+| `source` | Meaning |
+| --- | --- |
+| `ownership_rule` | A rule of the project matches the issue. `rule`, `line`, and `matched` show the rule and what it matched. |
+| `codeowners` | A line of the project's CODEOWNERS file matches a stack frame path. |
+| `recent_activity` | The account changed the issue or was assigned to it. |
+
+`inputs` counts the stack frame paths, modules, route template, tags, and rules
+that LogBrew checked. If the list is empty and `inputs` shows no paths, the
+issue has no evidence to match, not no owner.
+
+Write ownership rules in a text file, one rule per line:
+
+```text
+# type:pattern owner...
+path:src/payments/** ada@example.com #payments
+url:/checkout/* #web
+service:billing-api ada@example.com
+tags.region:eu-* #europe
+module:app.billing.* ada@example.com
+```
+
+A `path` pattern matches the end of a stack frame path, so `src/payments/**`
+matches frames under any deployment directory. `*` matches any text. Owners
+are account emails or `#team-slug`. The last matching rule comes first.
+Then send the rules, a GitHub CODEOWNERS file, or both:
+
+```bash
+logbrew issues ownership set --project "<project_id>" \
+  --rules ownership.txt --codeowners .github/CODEOWNERS --json
+logbrew issues ownership --project "<project_id>" --json
+```
+
+In CODEOWNERS, an email names an account and `@org/team-slug` names the team
+with that slug. Rules that name an account without project access or an
+unknown team fail with `422`. CODEOWNERS owners that name nobody appear in
+`unresolved_owners`. An empty file clears its text.
+
+## Read the issue history
+
+```bash
+logbrew issues activity "<issue_id>" --json
+```
+
+The history lists every status, priority, assignee, and severity rule change,
+newest first, with the account that made it. It ends with `first_seen`. An
+account that lost project access keeps only its ID. Use `--limit` and the
+`next_cursor` values to read more.
+
+## Read your inbox
+
+```bash
+logbrew inbox --json
+logbrew inbox read --json
+```
+
+The inbox lists the issues that other people assigned to you or to your teams,
+newest first. `unread` counts the assignments after your read mark.
+`logbrew inbox read` moves the read mark to now. LogBrew does not send email
+for these assignments. The inbox shows only projects that you can read now.
 
 ## Recommended workflow
 
@@ -292,8 +368,10 @@ HTTP status and `api_code` for the API error code.
 | Invalid issue ID | Copy the exact ID from an issue list or detail response. |
 | Issue not found | Confirm the signed-in account and the project. |
 | A change fails with `status` `403` | The account cannot manage issues in this project. Ask a person with access. |
-| `invalid_assignee` | The `--assignee` filter takes `me`, `none`, or a user ID. |
-| An assign fails with `status` `422` and `api_code` `validation_failed` | The assignee cannot read the project. Pick an account from `logbrew issues assignees`, or give that member access to the project first. |
+| `invalid_assignee` | The `--assignee` filter takes `me`, `none`, `my_teams`, a user ID, or `team:<team_id>`. |
+| An assign fails with `status` `422` and `api_code` `validation_failed` | The account cannot read the project, or the team is not in the project's organization. Pick one from `logbrew issues assignees`. |
+| `invalid_ownership_command`, `invalid_ownership_file` | Correct the command. An ownership file must be UTF-8 text of at most 128 KiB. |
+| `invalid_inbox_command` | Use `logbrew inbox` or `logbrew inbox read`. |
 | `investigation_response_invalid` | The response failed CLI validation. Retry once. If it repeats, update the CLI or report the problem. Do not bypass validation. |
 | Trace status `not_linked` | Continue with the issue evidence. Do not read a trace. |
 | Trace status `unavailable` | Retry the investigation read later. |
