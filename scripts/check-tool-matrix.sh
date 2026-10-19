@@ -8,6 +8,7 @@
 # - a tool's `pins` text (with @VERSION@ replaced by its version) is missing from its file;
 # - a tool was last checked more than 30 days ago, or in the future;
 # - a tool lacks a required field, or names a command no gate runs.
+# A `commands` entry ending in * covers every command that starts with it.
 #
 # The gates are every workflow plus the scripts the matrix lists in `gates`.
 # The matrix uses a line-oriented TOML subset: one `key = value` per line,
@@ -89,8 +90,14 @@ done
 } | awk -F '\t' -v q="'" '
     # Heredoc bodies are data.
     BEGIN { quoted = "<<-?[ ]*[" q "\"][A-Za-z_]+[" q "\"]"; bare = "<<-?[ ]*[A-Za-z_]+" }
-    $1 != file { file = $1; stop = "" }
+    $1 != file { if (joined != "") print file "\t" joined; file = $1; stop = ""; joined = ""; array = 0 }
     stop != "" { if ($2 ~ "^[ \t]*" stop "$") stop = ""; next }
+    # Multi-line array assignments are data.
+    array { if ($2 ~ /\)[ \t]*$/) array = 0; next }
+    $2 ~ /^[ \t]*(local |declare |readonly )?[A-Za-z_][A-Za-z0-9_]*\+?=\([^)]*$/ { array = 1; next }
+    # Join lines continued with a backslash.
+    $2 ~ /\\$/ { joined = joined substr($2, 1, length($2) - 1) " "; next }
+    joined != "" { $2 = joined $2; joined = "" }
     {
         # A quoted terminator counts; a << inside a quoted string does not.
         unquoted = $2; gsub(/"[^"]*"/, "", unquoted); gsub(q "[^" q "]*" q, "", unquoted)
@@ -112,10 +119,13 @@ done
         if (word ~ /^\$[A-Za-z_{]/) { if (word !~ /\//) return; sub(/^[^\/]*\//, "", word) }
         sub(/^(\.\.?\/)+/, "", word)
         if (word !~ /^[A-Za-z0-9_][A-Za-z0-9_.\/:+-]*$/ && word != "[[" && word != "[") return
-        if (word ~ /\)$/ || word == "S") return
+        if (word ~ /\)$/ || word == "S" || word == "A" || word ~ /^[0-9]+$/) return
         name = word
         if (word == "cargo" || word == "go" || word == "npm" || word == "bun" || word == "swift" || word == "dotnet" || word == "gradle" || word == "./gradlew") {
-            for (i++; i <= n; i++) if (words[i] !~ /^[-+]/) { name = word " " words[i]; break }
+            for (i++; i <= n; i++) {
+                if (words[i] == "-C") { i++; continue }
+                if (words[i] !~ /^[-+]/) { if (words[i] != "S") name = word " " words[i]; break }
+            }
         } else if (word == "bash" || word == "sh" || word == "python3" || word == "python" || word == "source" || word == ".") {
             for (i++; i <= n; i++) if (words[i] !~ /^-/) { next1 = words[i]; break }
             gsub("[\"" q "]", "", next1); sub(/^\$[A-Za-z_{}]*\//, "", next1); sub(/^(\.\.?\/)+/, "", next1)
@@ -133,7 +143,9 @@ done
         if (open) { if (!(p = index(line, q))) next; line = substr(line, p + 1); open = 0 }
         gsub(q "[^" q "]*" q, "S", line)
         if ((p = index(line, q))) { line = substr(line, 1, p - 1); open = 1 }
-        gsub(/\$\(\(/, "((", line)                     # arithmetic
+        gsub(/\$?\(\([^)]*\)\)/, "0", line)              # arithmetic
+        gsub(/[A-Za-z_][A-Za-z0-9_]*\+?=\([^)]*\)/, "A", line)  # one-line arrays
+        sub(/^[ \t]*[^()$=]+\)[ \t]*/, "", line)             # a case pattern
         # Double-quoted strings are data unless they hold a command substitution
         # or name a program by path ("$tools/name").
         rest = line; line = ""
@@ -164,11 +176,25 @@ while IFS= read -r gate; do
 done < <(sed "s|^|$root/|" "$work/gates"; printf '%s\n' "$root"/.github/workflows/*.y*ml) >>"$work/known"
 cut -f 2 "$work/commands" >>"$work/known"
 
+# A `commands` entry may end in * to cover every command with that prefix.
+prefixes=()
+while IFS= read -r prefix; do prefixes+=("$prefix"); done < <(sed -n 's/\*$//p' "$work/known")
+listed() {
+    grep -qxF -- "$1" "$work/known" && return 0
+    local prefix
+    for prefix in ${prefixes[@]+"${prefixes[@]}"}; do [[ "$1" == "$prefix"* ]] && return 0; done
+    return 1
+}
 while IFS=$'\t' read -r file command; do
-    grep -qxF -- "$command" "$work/known" || fail "$file: \`$command\` has no tool-matrix entry; add it to quality/tool-matrix.toml"
+    listed "$command" || fail "$file: \`$command\` has no tool-matrix entry; add it to quality/tool-matrix.toml"
 done <"$work/found"
 while IFS=$'\t' read -r id command; do
-    cut -f 2 "$work/found" | grep -qxF -- "$command" || fail "$id: command \`$command\` matches no gate command; remove it"
+    if [[ "$command" == *"*" ]]; then
+        cut -f 2 "$work/found" | grep -qF -- "${command%"*"}" && continue
+    else
+        cut -f 2 "$work/found" | grep -qxF -- "$command" && continue
+    fi
+    fail "$id: command \`$command\` matches no gate command; remove it"
 done <"$work/commands"
 
 # Every action pin, exactly.
