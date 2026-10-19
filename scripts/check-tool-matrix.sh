@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+#
+# check-tool-matrix.sh
+# Keep this file identical in every public LogBrew repository.
+# Checks quality/tool-matrix.toml against the repository's gates. Fails when:
+# - a command a gate runs is neither a tool's `commands` entry nor in `utilities`;
+# - a workflow `uses:` line is not exactly a tool's `uses` pin (action, commit, version);
+# - a tool's `pins` text (with @VERSION@ replaced by its version) is missing from its file;
+# - a tool was last checked more than 30 days ago, or in the future;
+# - a tool lacks a required field, or names a command no gate runs.
+#
+# The gates are every workflow plus the scripts the matrix lists in `gates`.
+# The matrix uses a line-oriented TOML subset: one `key = value` per line,
+# arrays on one line. Usage: scripts/check-tool-matrix.sh [REPOSITORY_ROOT [TODAY]]
+
+set -euo pipefail
+shopt -s nullglob
+
+root="${1:-$(cd "$(dirname "$0")/.." && pwd)}"
+today="${2:-$(date -u +%F)}"
+matrix="$root/quality/tool-matrix.toml"
+[[ -f "$matrix" ]] || { echo "tool matrix: $matrix is missing" >&2; exit 1; }
+
+# Prints the values of a one-line string array or a string, one per line.
+values() { sed -n "s/^$1 = //p" | { grep -oE '"([^"\\]|\\.)*"' || true; } | sed 's/^"//; s/"$//; s/\\"/"/g'; }
+
+days() { # days since 1970-01-01 for YYYY-MM-DD, without GNU date
+    local y=$((10#${1:0:4})) m=$((10#${1:5:2})) d=$((10#${1:8:2}))
+    ((m <= 2)) && { y=$((y - 1)); m=$((m + 12)); }
+    echo $((365 * y + y / 4 - y / 100 + y / 400 + (153 * (m - 3) + 2) / 5 + d - 719469))
+}
+
+errors=()
+fail() { errors+=("$*"); }
+
+# Split the matrix into tool blocks (the header is block 0).
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+awk -v dir="$work" '/^\[\[tool\]\]$/ { n++ } { print > (dir "/" n+0) }' "$matrix"
+values gates <"$work/0" >"$work/gates"
+values utilities <"$work/0" >"$work/known"
+: >"$work/uses"
+for block in "$work"/[1-9]*; do
+    id="$(values id <"$block")"
+    [[ -n "$id" ]] || { fail "a [[tool]] entry has no id"; continue; }
+    for key in risk tool version config conflicts exceptions runtime findings replaces runs_in; do
+        grep -q "^$key = \"..*\"" "$block" || fail "$id: \`$key\` must be a non-empty string"
+    done
+    grep -qE '^(commands|uses) = ' "$block" || fail "$id: needs \`commands\` or \`uses\`"
+    version="$(values version <"$block")"
+    checked="$(sed -n 's/^checked = \([0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}\)$/\1/p' "$block")"
+    if [[ -z "$checked" ]]; then
+        fail "$id: \`checked\` must be a date (YYYY-MM-DD)"
+    elif (($(days "$checked") > $(days "$today"))); then
+        fail "$id: checked $checked is in the future"
+    elif (($(days "$today") - $(days "$checked") > 30)); then
+        fail "$id: last checked $checked, more than 30 days ago; check its releases, advisories, and rules, then update the entry"
+    fi
+    if ! grep -q '^pins = ' "$block" && ! grep -q '^unpinned = "..*"' "$block"; then
+        fail "$id: needs \`pins\` or \`unpinned\` (the reason)"
+    fi
+    while IFS= read -r pin; do
+        file="${pin%%::*}" text="${pin#*::}"
+        text="${text//@VERSION@/$version}"
+        [[ -f "$root/$file" ]] || { fail "$id: pin file $file is missing"; continue; }
+        grep -qF -- "$text" "$root/$file" || fail "$id: $file no longer pins \`$text\`; the gate's version differs from the matrix"
+    done < <(values pins <"$block")
+    values commands <"$block" | sed "s|^|$id	|" >>"$work/commands"
+    values uses <"$block" >>"$work/uses"
+done
+[[ -s "$work/commands" ]] || : >"$work/commands"
+
+# Commands the gates run: `run:` steps in workflows, every line of gate scripts.
+{
+    for workflow in "$root"/.github/workflows/*.y*ml; do
+        name=".github/workflows/${workflow##*/}"
+        awk -v name="$name" '
+            function indent(s) { match(s, /^ */); return RLENGTH }
+            block && (NF == 0 || indent($0) > depth) { print name "\t" $0; next }
+            { block = 0 }
+            /^[ -]*run: *[|>]/ { block = 1; depth = indent($0); next }
+            /^[ -]*run: / { sub(/^[ -]*run: /, ""); print name "\t" $0 }
+        ' "$workflow"
+    done
+    while IFS= read -r gate; do
+        [[ -f "$root/$gate" ]] || { fail "gate $gate is missing"; continue; }
+        sed "s|^|$gate	|" "$root/$gate"
+    done <"$work/gates"
+} | awk -F '\t' -v q="'" '
+    # Heredoc bodies are data.
+    BEGIN { heredoc = "<<-?[ " q "\"]*[A-Za-z_]+" }
+    stop != "" { if ($2 ~ "^[ \t]*" stop "$") stop = ""; next }
+    $2 ~ heredoc { match($2, heredoc); stop = substr($2, RSTART, RLENGTH); gsub("[<" q "\" -]", "", stop) }
+    { print }
+' | awk -F '\t' -v q="'" '
+    BEGIN {
+        split("! { } if then else elif while until do time exec env", w, " "); for (i in w) prefix[w[i]] = 1
+        split("for case select in fi done esac function return", w, " "); for (i in w) skip[w[i]] = 1
+    }
+    function emit(file, words, n,    i, word, name, next1) {
+        i = 1
+        while (i <= n && (words[i] in prefix || words[i] ~ /^[A-Za-z_][A-Za-z0-9_]*\+?=/)) i++
+        if (i > n || words[i] in skip) return
+        word = words[i]
+        if (word ~ /^\$[A-Za-z_{]/) { if (word !~ /\//) return; sub(/^[^\/]*\//, "", word) }
+        sub(/^(\.\.?\/)+/, "", word)
+        if (word !~ /^[A-Za-z0-9_][A-Za-z0-9_.\/:+-]*$/ && word != "[[" && word != "[") return
+        if (word ~ /\)$/) return
+        name = word
+        if (word == "cargo" || word == "go" || word == "npm" || word == "bun" || word == "swift" || word == "dotnet" || word == "gradle" || word == "./gradlew") {
+            for (i++; i <= n; i++) if (words[i] !~ /^[-+]/) { name = word " " words[i]; break }
+        } else if (word == "bash" || word == "sh" || word == "python3" || word == "python" || word == "source" || word == ".") {
+            for (i++; i <= n; i++) if (words[i] !~ /^-/) { next1 = words[i]; break }
+            gsub("[\"" q "]", "", next1); sub(/^\$[A-Za-z_{}]*\//, "", next1); sub(/^(\.\.?\/)+/, "", next1)
+            if (next1 ~ /\.(sh|py)$/) name = next1
+        }
+        print file "\t" name
+    }
+    {
+        line = $2
+        if (line ~ /^[ \t]*#/) next
+        gsub(/\$\{\{[^}]*\}\}/, "X", line)            # workflow expressions
+        gsub(q "[^" q "]*" q, "S", line)              # single-quoted strings are data
+        gsub(/\$\(\(/, "((", line)                     # arithmetic
+        while (match(line, /"[^"$]*"/)) line = substr(line, 1, RSTART - 1) "S" substr(line, RSTART + RLENGTH)
+        gsub(/[0-9]?>&[0-9]|&>/, " ", line)            # redirections
+        gsub(/"/, "", line)
+        gsub(/\$\(|`|&&|\|\||[;|&()]/, "\n", line)
+        n = split(line, parts, "\n")
+        for (p = 1; p <= n; p++) {
+            m = split(parts[p], words, /[ \t]+/)
+            j = 0; for (k = 1; k <= m; k++) if (words[k] != "") clean[++j] = words[k]
+            if (j > 0) emit($1, clean, j)
+            delete clean
+        }
+    }
+' | sort -u >"$work/found"
+
+# Shell functions the gate scripts define are not tools.
+while IFS= read -r gate; do
+    [[ -f "$root/$gate" ]] && sed -n 's/^[[:space:]]*\([A-Za-z_][A-Za-z0-9_-]*\)[[:space:]]*()[[:space:]]*{.*/\1/p' "$root/$gate"
+done <"$work/gates" >>"$work/known"
+cut -f 2 "$work/commands" >>"$work/known"
+
+while IFS=$'\t' read -r file command; do
+    grep -qxF -- "$command" "$work/known" || fail "$file: \`$command\` has no tool-matrix entry; add it to quality/tool-matrix.toml"
+done <"$work/found"
+while IFS=$'\t' read -r id command; do
+    cut -f 2 "$work/found" | grep -qxF -- "$command" || fail "$id: command \`$command\` matches no gate command; remove it"
+done <"$work/commands"
+
+# Every action pin, exactly.
+grep -hE '^[ -]*uses: ' "$root"/.github/workflows/*.y*ml | sed 's/^[ -]*uses: *//' | sort -u | while IFS= read -r uses; do
+    grep -qxF -- "$uses" "$work/uses" || echo "workflow \`uses: $uses\` is not a tool's \`uses\` pin (action, commit, and version)"
+done >"$work/uses-errors"
+while IFS= read -r line; do fail "$line"; done <"$work/uses-errors"
+
+if ((${#errors[@]} > 0)); then
+    printf 'tool matrix: %s\n' "${errors[@]}" >&2
+    exit 1
+fi
+echo "tool matrix: $(grep -c '^\[\[tool\]\]$' "$matrix") tools, every gate command listed, every pin current"
