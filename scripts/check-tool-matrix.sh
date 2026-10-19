@@ -88,9 +88,16 @@ done
     done <"$work/gates"
 } | awk -F '\t' -v q="'" '
     # Heredoc bodies are data.
-    BEGIN { heredoc = "<<-?[ " q "\"]*[A-Za-z_]+" }
+    BEGIN { quoted = "<<-?[ ]*[" q "\"][A-Za-z_]+[" q "\"]"; bare = "<<-?[ ]*[A-Za-z_]+" }
+    $1 != file { file = $1; stop = "" }
     stop != "" { if ($2 ~ "^[ \t]*" stop "$") stop = ""; next }
-    $2 ~ heredoc { match($2, heredoc); stop = substr($2, RSTART, RLENGTH); gsub("[<" q "\" -]", "", stop) }
+    {
+        # A quoted terminator counts; a << inside a quoted string does not.
+        unquoted = $2; gsub(/"[^"]*"/, "", unquoted); gsub(q "[^" q "]*" q, "", unquoted)
+        if (match($2, quoted)) stop = substr($2, RSTART, RLENGTH)
+        else if (match(unquoted, bare)) stop = substr(unquoted, RSTART, RLENGTH)
+        gsub("[<" q "\" -]", "", stop)
+    }
     { print }
 ' | awk -F '\t' -v q="'" '
     BEGIN {
@@ -105,7 +112,7 @@ done
         if (word ~ /^\$[A-Za-z_{]/) { if (word !~ /\//) return; sub(/^[^\/]*\//, "", word) }
         sub(/^(\.\.?\/)+/, "", word)
         if (word !~ /^[A-Za-z0-9_][A-Za-z0-9_.\/:+-]*$/ && word != "[[" && word != "[") return
-        if (word ~ /\)$/) return
+        if (word ~ /\)$/ || word == "S") return
         name = word
         if (word == "cargo" || word == "go" || word == "npm" || word == "bun" || word == "swift" || word == "dotnet" || word == "gradle" || word == "./gradlew") {
             for (i++; i <= n; i++) if (words[i] !~ /^[-+]/) { name = word " " words[i]; break }
@@ -119,10 +126,25 @@ done
     {
         line = $2
         if (line ~ /^[ \t]*#/) next
-        gsub(/\$\{\{[^}]*\}\}/, "X", line)            # workflow expressions
-        gsub(q "[^" q "]*" q, "S", line)              # single-quoted strings are data
+        while ((p = index(line, "${{")) && (e = index(substr(line, p), "}}")))  # workflow expressions
+            line = substr(line, 1, p - 1) "S" substr(line, p + e + 1)
+        # Single-quoted strings, which may span lines, are data.
+        if ($1 != file) { file = $1; open = 0 }
+        if (open) { if (!(p = index(line, q))) next; line = substr(line, p + 1); open = 0 }
+        gsub(q "[^" q "]*" q, "S", line)
+        if ((p = index(line, q))) { line = substr(line, 1, p - 1); open = 1 }
         gsub(/\$\(\(/, "((", line)                     # arithmetic
-        while (match(line, /"[^"$]*"/)) line = substr(line, 1, RSTART - 1) "S" substr(line, RSTART + RLENGTH)
+        # Double-quoted strings are data unless they hold a command substitution
+        # or name a program by path ("$tools/name").
+        rest = line; line = ""
+        while (match(rest, /"[^"]*"/)) {
+            quoted = substr(rest, RSTART, RLENGTH)
+            if (quoted ~ /^"\$[A-Za-z_{}]+\/[A-Za-z0-9_.\/-]+"$/) quoted = substr(quoted, 2, length(quoted) - 2)
+            else if (!index(quoted, "$(")) quoted = (substr(rest, 1, RSTART - 1) ~ /=$/ ? "S" : " S ")
+            line = line substr(rest, 1, RSTART - 1) quoted
+            rest = substr(rest, RSTART + RLENGTH)
+        }
+        line = line rest
         gsub(/[0-9]?>&[0-9]|&>/, " ", line)            # redirections
         gsub(/"/, "", line)
         gsub(/\$\(|`|&&|\|\||[;|&()]/, "\n", line)
@@ -136,10 +158,10 @@ done
     }
 ' | sort -u >"$work/found"
 
-# Shell functions the gate scripts define are not tools.
+# Shell functions the gates define are not tools.
 while IFS= read -r gate; do
-    [[ -f "$root/$gate" ]] && sed -n 's/^[[:space:]]*\([A-Za-z_][A-Za-z0-9_-]*\)[[:space:]]*()[[:space:]]*{.*/\1/p' "$root/$gate"
-done <"$work/gates" >>"$work/known"
+    [[ ! -f "$gate" ]] || sed -n 's/^[[:space:]]*\([A-Za-z_][A-Za-z0-9_-]*\)[[:space:]]*()[[:space:]]*[{(].*/\1/p' "$gate"
+done < <(sed "s|^|$root/|" "$work/gates"; printf '%s\n' "$root"/.github/workflows/*.y*ml) >>"$work/known"
 cut -f 2 "$work/commands" >>"$work/known"
 
 while IFS=$'\t' read -r file command; do
