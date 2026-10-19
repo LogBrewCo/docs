@@ -56,7 +56,12 @@ Para o envelope nativo, consulte
 | `GET` | `/api/telemetry/issues/{issue_id}/events` | Listar as ocorrências de um problema agrupado. |
 | `PATCH` | `/api/telemetry/issues/{issue_id}` | Atualizar o status, a prioridade ou o responsável de um problema. |
 | `POST` | `/api/telemetry/issues/bulk` | Atualizar o status, a prioridade ou o responsável de 1 a 100 problemas em um projeto. |
-| `GET` | `/api/telemetry/issues/assignees` | Listar as contas que podem ser responsáveis por problemas em um projeto. |
+| `GET` | `/api/telemetry/issues/assignees` | Listar as contas e as equipes que podem ser responsáveis por problemas em um projeto. |
+| `GET` | `/api/telemetry/issues/{issue_id}/owners` | Listar os donos sugeridos de um problema. |
+| `GET`, `PUT` | `/api/telemetry/issues/ownership` | Ler ou definir as regras de dono e o texto do CODEOWNERS de um projeto. |
+| `GET` | `/api/telemetry/issues/{issue_id}/activity` | Ler o histórico de mudanças de um problema. |
+| `GET` | `/api/telemetry/issues/notifications` | Listar os problemas que outras pessoas atribuíram a você ou às suas equipes. |
+| `POST` | `/api/telemetry/issues/notifications/read` | Marcar as suas notificações de problemas como lidas. |
 | `PUT` | `/api/telemetry/issues/{issue_id}/triage-rule` | Definir a regra de gravidade de um problema. |
 | `PUT` | `/api/logs/{log_id}/triage-rule` | Definir a regra de gravidade e o estado ignorado dos logs que correspondem a um log. |
 | `GET` | `/api/telemetry/traces` | Descobrir traces em um escopo de projeto. |
@@ -176,14 +181,15 @@ Cada requisição define 1 ou mais destes campos:
 | --- | --- |
 | `status` | `unresolved`, `resolved` ou `archived`. `ignored` é um nome antigo de `archived`. |
 | `priority` | `high`, `medium` ou `low`. |
-| `assignee` | Um ID de usuário, `me` para a conta conectada ou `none` para remover o responsável. |
+| `assignee` | Um ID de usuário, `me` para a conta conectada, `team:<team_id>` para uma equipe ou `none` para remover o responsável. |
 
 Uma requisição sem nenhum desses campos falha com `422` e
 `validation_failed`.
 
-Um problema tem 0 ou 1 responsável. O responsável precisa conseguir ler o
-projeto. Se não conseguir, a requisição falha com `422` e
-`validation_failed`, e o LogBrew não muda nada. Veja as contas que podem ser
+Um problema tem 0 ou 1 responsável: uma conta ou uma equipe. Uma conta precisa
+conseguir ler o projeto, e uma equipe precisa ser da organização do projeto.
+Se não for o caso, a requisição falha com `422` e `validation_failed`, e o
+LogBrew não muda nada. Veja as contas que podem ser
 responsáveis em [Listar responsáveis](#list-assignees). Qualquer outro valor
 de `assignee` também falha com `422` e `validation_failed`.
 
@@ -198,11 +204,14 @@ diferente.
 
 ### <span id="update-one-issue">Atualizar um problema</span>
 
-Adicione `response_version=3` para receber `archived`, a prioridade e o
-responsável na resposta:
+Adicione `response_version=4` para receber `archived`, a prioridade e o
+responsável na resposta. Na versão 4, `assignee` é
+`{ "type": "user", "user_id", "name", "email" }`,
+`{ "type": "team", "team_id", "slug", "name" }` ou `null`. A versão 3 mostra
+uma equipe responsável como `null`.
 
 ```bash
-curl -X PATCH "$LOGBREW_API_URL/api/telemetry/issues/$ISSUE_ID?response_version=3" \
+curl -X PATCH "$LOGBREW_API_URL/api/telemetry/issues/$ISSUE_ID?response_version=4" \
   -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
   -H "Content-Type: application/json" \
   --data '{ "status": "archived", "priority": "low", "assignee": "me" }'
@@ -230,6 +239,8 @@ A requisição aplica a mesma mudança a todos os problemas. A resposta tem
 `project_id` e `results`, com 1 resultado para cada ID de problema, na ordem
 da requisição. Cada resultado tem `issue_id`, `outcome` e `issue`. `issue` é
 o problema atual na versão 3 da resposta, ou `null` para `not_found`.
+Adicione `"response_version": 2` ao corpo para receber cada problema na versão
+4 da resposta.
 
 | `outcome` | Significado |
 | --- | --- |
@@ -253,6 +264,8 @@ curl "$LOGBREW_API_URL/api/telemetry/issues/assignees?project_id=$PROJECT_ID" \
 
 A lista tem todas as contas que podem ler o projeto. Cada entrada tem
 `user_id`, `name` e `email`. `name` é `null` quando a conta não tem nome.
+Adicione `response_version=2` para receber também `teams`: todas as equipes
+da organização do projeto, com `team_id`, `slug` e `name`.
 Consulte a
 [resposta da lista de responsáveis](/pt-BR/reference/telemetry-response-shapes#assignee-list-response).
 Qualquer conta que pode ler o projeto pode obter esta lista. Se a conta não
@@ -262,6 +275,39 @@ Quando um membro perde o acesso ao projeto, os problemas atribuídos a ele
 aparecem sem responsável. Se o membro voltar a ter acesso, os problemas
 mostram esse membro de novo, a não ser que alguém tenha mudado ou removido o
 responsável nesse meio-tempo.
+
+### <span id="ownership-and-suggested-owners">Regras de dono e donos sugeridos</span>
+
+`GET /api/telemetry/issues/ownership?project_id=<project-uuid>` retorna
+`rules`, `codeowners`, `updated_at` e `unresolved_owners`. Qualquer conta que
+pode ler o projeto pode fazer essa leitura. Um `PUT` com `project_id` e
+`rules`, `codeowners` ou os dois substitui esse texto e exige permissão para
+gerenciar problemas. Um campo que você não envia mantém o texto atual, e uma
+string vazia apaga o texto. Cada texto tem no máximo 128 KiB. Um texto
+inválido falha com `422` e indica a linha.
+
+`GET /api/telemetry/issues/{issue_id}/owners?response_version=2` retorna
+`suggested_assignee`, `owners` e `inputs`. Cada dono tem `type` (`user` ou
+`team`), `source` (`ownership_rule`, `codeowners` ou `recent_activity`),
+`rule`, `line` e `matched`. A versão 1, a padrão, lista só contas.
+
+### <span id="issue-history">Histórico do problema</span>
+
+`GET /api/telemetry/issues/{issue_id}/activity?response_version=2` retorna
+`activity`, da mudança mais recente para a mais antiga, e `next_cursor`. Cada
+entrada tem `type` (`status`, `priority`, `assigned`, `unassigned`,
+`severity_rule` ou `first_seen`), `value`, `actor_id`, `actor`,
+`assignee_id`, `assignee`, `team` e `at`. `limit` vai de 1 a 200, com 50 por
+padrão. Envie `cursor_time` e `cursor_id` de `next_cursor` para ler a próxima
+página.
+
+### <span id="notifications">Notificações</span>
+
+`GET /api/telemetry/issues/notifications` retorna `notifications`, `unread`,
+`read_at` e `next_cursor`. Cada notificação é uma atribuição de um problema a
+você ou à sua equipe feita por outra conta. Um `POST
+/api/telemetry/issues/notifications/read` com um objeto JSON vazio, ou com
+`read_at`, move a sua marca de leitura. A marca nunca volta para trás.
 
 ### Definir regras de problemas e de logs
 

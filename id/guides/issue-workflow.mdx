@@ -1,7 +1,7 @@
 ---
 title: "Triase dan penyelesaian masalah di LogBrew"
 sidebarTitle: "Kelola masalah"
-description: "Kelola masalah di LogBrew. Baca bukti kemunculan, lalu selesaikan, arsipkan, buka kembali, beri prioritas, atau tugaskan masalah satu per satu atau secara massal."
+description: "Kelola masalah di LogBrew. Baca bukti kemunculan, cari pemiliknya, lalu selesaikan, arsipkan, buka kembali, beri prioritas, atau tugaskan masalah ke seseorang atau ke tim."
 ---
 
 Masalah mengelompokkan kemunculan error yang punya fingerprint yang sama. Baca
@@ -32,7 +32,7 @@ kolom berikut sebelum Anda membuka detailnya:
 | `status` | Status alur kerja masalah. Lihat [Nilai status](#status-values). |
 | `priority` | Urutan triase masalah. Lihat [Prioritas](#priority). |
 | `priority_source` | `manual` jika seseorang menetapkan prioritas. `derived` jika prioritas mengikuti tingkat keparahan. |
-| `assignee` | Akun yang memegang langkah berikutnya, atau `null`. Lihat [Tugaskan masalah](#assign-issues). |
+| `assignee` | Akun atau tim yang memegang langkah berikutnya, atau `null`. Lihat [Tugaskan masalah](#assign-issues). |
 
 Jumlah kemunculan bukan jumlah pengguna yang terdampak. Jumlah dan waktu
 berlaku untuk lingkup yang dikembalikan, bukan untuk seluruh riwayat error.
@@ -91,7 +91,7 @@ logbrew read issues --project "<project_id>" --status unresolved \
 ## <span id="assign-issues">Tugaskan masalah</span>
 
 Tugaskan masalah untuk menunjukkan siapa yang memegang langkah berikutnya.
-Masalah punya 0 atau 1 penanggung jawab.
+Masalah punya 0 atau 1 penanggung jawab: satu akun atau satu tim.
 
 <Steps>
   <Step title="Cari siapa yang bisa ditugaskan">
@@ -99,14 +99,16 @@ Masalah punya 0 atau 1 penanggung jawab.
     logbrew issues assignees --project "<project_id>" --json
     ```
 
-    Daftar ini berisi setiap akun yang bisa membaca proyek. Setiap entri punya
-    `user_id`, `name`, dan `email`. Salin `user_id`. Anda tidak bisa
-    menugaskan akun yang tidak bisa membaca proyek.
+    `assignees` berisi setiap akun yang bisa membaca proyek, dengan `user_id`,
+    `name`, dan `email`. `teams` berisi setiap tim di organisasi proyek, dengan
+    `team_id`, `slug`, dan `name`. Anda tidak bisa menugaskan akun yang tidak
+    bisa membaca proyek, atau tim dari organisasi lain.
   </Step>
 
   <Step title="Tugaskan masalah">
     ```bash
     logbrew issues assign "<user_id>" "<issue_id>" --json
+    logbrew issues assign "team:<team_id>" "<issue_id>" --json
     ```
 
     Gunakan `me` sebagai pengganti ID pengguna untuk menugaskan masalah ke
@@ -121,21 +123,98 @@ Masalah punya 0 atau 1 penanggung jawab.
       --status unresolved --json
     ```
 
-    Gunakan `--assignee none` untuk menemukan masalah yang belum punya
-    penanggung jawab.
+    Gunakan `--assignee my_teams` untuk masalah milik tim Anda,
+    `--assignee "team:<team_id>"` untuk satu tim, dan `--assignee none` untuk
+    masalah yang belum punya penanggung jawab.
   </Step>
 </Steps>
 
 Untuk menugaskan masalah, Anda butuh izin untuk mengelola masalah di proyek.
-Izin yang sama memungkinkan Anda mengubah status, prioritas, serta aturan
-masalah dan log. Setiap akun yang bisa membaca proyek dapat menjadi
-penanggung jawab.
+Izin yang sama memungkinkan Anda mengubah status, prioritas, aturan
+kepemilikan, serta aturan masalah dan log. Pemilik dan admin organisasi
+membuat tim dan memilih anggotanya. Tim tidak memberi anggotanya akses ke
+proyek.
 
 Jika seorang anggota kehilangan akses ke proyek, masalah yang ditugaskan
-kepadanya tidak menampilkan penanggung jawab. Masalah ini muncul dalam
-pembacaan `--assignee none`. Jika anggota itu mendapat akses lagi, masalah
-tersebut kembali menampilkan anggota itu, kecuali seseorang sudah mengubah
-atau menghapus penanggung jawabnya.
+kepadanya tidak menampilkan penanggung jawab. Jika sebuah tim dihapus, masalah
+yang ditugaskan ke tim itu juga tidak menampilkan penanggung jawab. Masalah ini
+muncul dalam pembacaan `--assignee none`. Jika anggota itu mendapat akses
+lagi, masalah tersebut kembali menampilkan anggota itu, kecuali seseorang
+sudah mengubah atau menghapus penanggung jawabnya.
+
+## <span id="find-who-owns-an-issue">Cari pemilik masalah</span>
+
+```bash
+logbrew issues owners "<issue_id>" --json
+```
+
+Hasilnya berisi daftar usulan pemilik, mulai dari yang paling cocok, dan satu
+`suggested_assignee`. Setiap pemilik punya `source`:
+
+| `source` | Arti |
+| --- | --- |
+| `ownership_rule` | Salah satu aturan proyek cocok dengan masalah. `rule`, `line`, dan `matched` menunjukkan aturannya dan bagian yang cocok. |
+| `codeowners` | Satu baris di file CODEOWNERS proyek cocok dengan path stack frame. |
+| `recent_activity` | Akun itu pernah mengubah masalah atau pernah ditugaskan ke masalah itu. |
+
+`inputs` menghitung path stack frame, modul, template rute, tag, dan aturan
+yang diperiksa LogBrew. Jika daftarnya kosong dan `inputs` tidak berisi path,
+artinya masalah belum punya bukti untuk dicocokkan, bukan berarti tidak ada
+pemiliknya.
+
+Tulis aturan kepemilikan di file teks, satu aturan per baris:
+
+```text
+# type:pattern owner...
+path:src/payments/** ada@example.com #payments
+url:/checkout/* #web
+service:billing-api ada@example.com
+tags.region:eu-* #europe
+module:app.billing.* ada@example.com
+```
+
+Pola `path` mencocokkan bagian akhir path stack frame, jadi `src/payments/**`
+cocok dengan frame di bawah direktori deployment mana pun. `*` cocok dengan
+teks apa pun. Pemilik berupa email akun atau `#team-slug`. Aturan cocok yang
+paling akhir didahulukan. Lalu kirim aturannya, file CODEOWNERS dari GitHub,
+atau keduanya:
+
+```bash
+logbrew issues ownership set --project "<project_id>" \
+  --rules ownership.txt --codeowners .github/CODEOWNERS --json
+logbrew issues ownership --project "<project_id>" --json
+```
+
+Di CODEOWNERS, email menunjuk ke satu akun, dan `@org/team-slug` menunjuk ke
+tim dengan slug itu. Aturan yang menyebut akun tanpa akses ke proyek atau tim
+yang tidak dikenal gagal dengan `422`. Pemilik di CODEOWNERS yang tidak
+menunjuk ke siapa pun muncul di `unresolved_owners`. File kosong menghapus
+isinya.
+
+## <span id="read-the-issue-history">Baca riwayat masalah</span>
+
+```bash
+logbrew issues activity "<issue_id>" --json
+```
+
+Riwayat menampilkan setiap perubahan status, prioritas, penanggung jawab, dan
+aturan tingkat keparahan, mulai dari yang terbaru, beserta akun yang
+membuatnya. Riwayat diakhiri dengan `first_seen`. Untuk akun yang sudah
+kehilangan akses ke proyek, hanya ID-nya yang tersisa. Gunakan `--limit` dan
+nilai `next_cursor` untuk membaca entri berikutnya.
+
+## <span id="read-your-inbox">Baca kotak masuk Anda</span>
+
+```bash
+logbrew inbox --json
+logbrew inbox read --json
+```
+
+Kotak masuk menampilkan masalah yang ditugaskan orang lain kepada Anda atau
+ke tim Anda, mulai dari yang terbaru. `unread` menghitung penugasan setelah
+penanda baca Anda. `logbrew inbox read` memindahkan penanda baca ke waktu
+sekarang. LogBrew tidak mengirim email untuk penugasan ini. Kotak masuk hanya
+menampilkan proyek yang bisa Anda baca saat ini.
 
 ## Alur kerja yang disarankan
 
@@ -311,8 +390,10 @@ status HTTP dan `api_code` untuk kode error API.
 | ID masalah tidak valid | Salin ID yang tepat dari daftar masalah atau respons detail. |
 | Masalah tidak ditemukan | Pastikan akun yang sedang masuk dan proyeknya sudah benar. |
 | Perubahan gagal dengan `status` `403` | Akun tidak bisa mengelola masalah di proyek ini. Minta bantuan seseorang yang punya akses. |
-| `invalid_assignee` | Filter `--assignee` menerima `me`, `none`, atau ID pengguna. |
-| Penugasan gagal dengan `status` `422` dan `api_code` `validation_failed` | Penanggung jawab tidak bisa membaca proyek. Pilih akun dari `logbrew issues assignees`, atau beri anggota itu akses ke proyek terlebih dahulu. |
+| `invalid_assignee` | Filter `--assignee` menerima `me`, `none`, `my_teams`, ID pengguna, atau `team:<team_id>`. |
+| Penugasan gagal dengan `status` `422` dan `api_code` `validation_failed` | Akun tidak bisa membaca proyek, atau tim tidak ada di organisasi proyek. Pilih salah satu dari `logbrew issues assignees`. |
+| `invalid_ownership_command`, `invalid_ownership_file` | Perbaiki perintah. File kepemilikan harus berupa teks UTF-8 dengan ukuran maksimal 128 KiB. |
+| `invalid_inbox_command` | Gunakan `logbrew inbox` atau `logbrew inbox read`. |
 | `investigation_response_invalid` | Respons gagal validasi CLI. Coba lagi sekali. Jika terulang, perbarui CLI atau laporkan masalah. Jangan melewati validasi. |
 | Status trace `not_linked` | Lanjutkan dengan bukti masalah. Jangan membaca trace. |
 | Status trace `unavailable` | Coba lagi pembacaan investigasi nanti. |

@@ -1,7 +1,7 @@
 ---
 title: "Issues in LogBrew triagieren und lösen"
 sidebarTitle: "Issues verwalten"
-description: "Verwalten Sie Issues in LogBrew. Lesen Sie die Belege eines Vorkommens, und lösen, archivieren, öffnen, priorisieren oder weisen Sie Issues einzeln oder gesammelt zu."
+description: "Verwalten Sie Issues in LogBrew. Lesen Sie die Belege eines Vorkommens, finden Sie die Zuständigen, und lösen, archivieren, öffnen, priorisieren oder weisen Sie Issues einer Person oder einem Team zu."
 ---
 
 Ein Issue gruppiert Fehlervorkommen mit demselben Fingerprint. Lesen Sie die
@@ -33,7 +33,7 @@ Ereignis. Lesen Sie diese Felder, bevor Sie die Details öffnen:
 | `status` | Workflow-Status des Issues. Siehe [Statuswerte](#status-values). |
 | `priority` | Reihenfolge des Issues in der Triage. Siehe [Priorität](#priority). |
 | `priority_source` | `manual`, wenn eine Person die Priorität gesetzt hat. `derived`, wenn sie dem Schweregrad folgt. |
-| `assignee` | Konto, das für den nächsten Schritt zuständig ist, oder `null`. Siehe [Issues zuweisen](#assign-issues). |
+| `assignee` | Konto oder Team, das für den nächsten Schritt zuständig ist, oder `null`. Siehe [Issues zuweisen](#assign-issues). |
 
 Die Anzahl der Vorkommen ist keine Anzahl betroffener Nutzer. Anzahlen und
 Zeitpunkte gelten für den gelieferten Bereich, nicht für den gesamten
@@ -93,7 +93,7 @@ logbrew read issues --project "<project_id>" --status unresolved \
 ## <span id="assign-issues">Issues zuweisen</span>
 
 Weisen Sie ein Issue zu, um zu zeigen, wer für den nächsten Schritt zuständig
-ist. Ein Issue hat 0 oder 1 zuständige Person.
+ist. Ein Issue hat 0 oder 1 Zuständige: ein Konto oder ein Team.
 
 <Steps>
   <Step title="Mögliche Zuständige finden">
@@ -101,14 +101,17 @@ ist. Ein Issue hat 0 oder 1 zuständige Person.
     logbrew issues assignees --project "<project_id>" --json
     ```
 
-    Die Liste enthält jedes Konto, das das Projekt lesen darf. Jeder Eintrag
-    hat `user_id`, `name` und `email`. Kopieren Sie die `user_id`. Ein Konto,
-    das das Projekt nicht lesen darf, können Sie nicht zuweisen.
+    `assignees` enthält jedes Konto, das das Projekt lesen darf, mit
+    `user_id`, `name` und `email`. `teams` enthält jedes Team der
+    Organisation des Projekts, mit `team_id`, `slug` und `name`. Ein Konto,
+    das das Projekt nicht lesen darf, oder ein Team einer anderen
+    Organisation können Sie nicht zuweisen.
   </Step>
 
   <Step title="Issue zuweisen">
     ```bash
     logbrew issues assign "<user_id>" "<issue_id>" --json
+    logbrew issues assign "team:<team_id>" "<issue_id>" --json
     ```
 
     Verwenden Sie `me` statt einer Nutzer-ID, um das Issue sich selbst
@@ -123,20 +126,98 @@ ist. Ein Issue hat 0 oder 1 zuständige Person.
       --status unresolved --json
     ```
 
-    Mit `--assignee none` finden Sie Issues, für die niemand zuständig ist.
+    Mit `--assignee my_teams` finden Sie die Issues Ihrer Teams, mit
+    `--assignee "team:<team_id>"` die Issues eines Teams und mit
+    `--assignee none` Issues, für die niemand zuständig ist.
   </Step>
 </Steps>
 
 Zum Zuweisen von Issues brauchen Sie die Berechtigung, Issues im Projekt zu
-verwalten. Mit derselben Berechtigung ändern Sie Status, Priorität sowie
-Issue- und Log-Regeln. Jedes Konto, das das Projekt lesen darf, kann
-zuständig sein.
+verwalten. Mit derselben Berechtigung ändern Sie Status, Priorität,
+Zuständigkeitsregeln sowie Issue- und Log-Regeln. Eigentümer und Admins der
+Organisation legen Teams an und wählen ihre Mitglieder. Ein Team gibt seinen
+Mitgliedern keinen Zugriff auf Projekte.
 
 Verliert ein Mitglied den Zugriff auf das Projekt, zeigen die ihm
-zugewiesenen Issues keine zuständige Person mehr. Diese Issues erscheinen in
-Lesezugriffen mit `--assignee none`. Erhält das Mitglied wieder Zugriff,
-zeigen die Issues wieder dieses Mitglied, sofern niemand die Zuweisung in der
-Zwischenzeit geändert oder entfernt hat.
+zugewiesenen Issues keine Zuständigen mehr. Wird ein Team gelöscht, zeigen
+die ihm zugewiesenen Issues ebenfalls keine Zuständigen mehr. Diese Issues
+erscheinen in Lesezugriffen mit `--assignee none`. Erhält das Mitglied wieder
+Zugriff, zeigen die Issues wieder dieses Mitglied, sofern niemand die
+Zuweisung in der Zwischenzeit geändert oder entfernt hat.
+
+## <span id="find-who-owns-an-issue">Zuständige eines Issues finden</span>
+
+```bash
+logbrew issues owners "<issue_id>" --json
+```
+
+Das Ergebnis listet die vorgeschlagenen Zuständigen, die passendsten zuerst,
+und einen `suggested_assignee`. Jeder Eintrag hat eine `source`:
+
+| `source` | Bedeutung |
+| --- | --- |
+| `ownership_rule` | Eine Regel des Projekts passt zum Issue. `rule`, `line` und `matched` zeigen die Regel und das, worauf sie gepasst hat. |
+| `codeowners` | Eine Zeile der CODEOWNERS-Datei des Projekts passt zum Pfad eines Stack-Frames. |
+| `recent_activity` | Das Konto hat das Issue geändert oder war ihm zugewiesen. |
+
+`inputs` zählt die Stack-Frame-Pfade, Module, die Routenvorlage, die Tags und
+die Regeln, die LogBrew geprüft hat. Ist die Liste leer und zeigt `inputs`
+keine Pfade, fehlen dem Issue Belege für einen Abgleich. Das heißt nicht, dass
+niemand zuständig ist.
+
+Schreiben Sie Zuständigkeitsregeln in eine Textdatei, eine Regel pro Zeile:
+
+```text
+# type:pattern owner...
+path:src/payments/** ada@example.com #payments
+url:/checkout/* #web
+service:billing-api ada@example.com
+tags.region:eu-* #europe
+module:app.billing.* ada@example.com
+```
+
+Ein `path`-Muster passt auf das Ende eines Stack-Frame-Pfads. So passt
+`src/payments/**` auf Frames unter jedem Bereitstellungsverzeichnis. `*` passt
+auf beliebigen Text. Zuständige sind E-Mail-Adressen von Konten oder
+`#team-slug`. Die letzte passende Regel hat Vorrang. Senden Sie dann die
+Regeln, eine CODEOWNERS-Datei von GitHub oder beides:
+
+```bash
+logbrew issues ownership set --project "<project_id>" \
+  --rules ownership.txt --codeowners .github/CODEOWNERS --json
+logbrew issues ownership --project "<project_id>" --json
+```
+
+In CODEOWNERS bezeichnet eine E-Mail-Adresse ein Konto und
+`@org/team-slug` das Team mit diesem Slug. Regeln, die ein Konto ohne Zugriff
+auf das Projekt oder ein unbekanntes Team nennen, schlagen mit `422` fehl.
+CODEOWNERS-Einträge, die niemanden bezeichnen, erscheinen in
+`unresolved_owners`. Eine leere Datei löscht ihren Text.
+
+## <span id="read-the-issue-history">Verlauf eines Issues lesen</span>
+
+```bash
+logbrew issues activity "<issue_id>" --json
+```
+
+Der Verlauf listet jede Änderung an Status, Priorität, Zuweisung und
+Schweregrad-Regel, die neueste zuerst, mit dem Konto, das sie vorgenommen hat.
+Er endet mit `first_seen`. Von einem Konto, das den Zugriff auf das Projekt
+verloren hat, bleibt nur die ID. Mit `--limit` und den Werten aus
+`next_cursor` lesen Sie weitere Einträge.
+
+## <span id="read-your-inbox">Posteingang lesen</span>
+
+```bash
+logbrew inbox --json
+logbrew inbox read --json
+```
+
+Der Posteingang listet die Issues, die andere Personen Ihnen oder Ihren Teams
+zugewiesen haben, die neuesten zuerst. `unread` zählt die Zuweisungen nach
+Ihrer Lesemarke. `logbrew inbox read` setzt die Lesemarke auf jetzt. LogBrew
+verschickt für diese Zuweisungen keine E-Mails. Der Posteingang zeigt nur
+Projekte, die Sie aktuell lesen dürfen.
 
 ## Empfohlener Ablauf
 
@@ -314,8 +395,10 @@ Lehnt die API eine Anfrage ab, ist `error` gleich `api_error`. Lesen Sie
 | Ungültige Issue-ID | Kopieren Sie die exakte ID aus einer Issue-Liste oder einer Detailantwort. |
 | Issue nicht gefunden | Prüfen Sie das angemeldete Konto und das Projekt. |
 | Eine Änderung schlägt mit `status` `403` fehl | Das Konto darf in diesem Projekt keine Issues verwalten. Bitten Sie eine Person mit Zugriff. |
-| `invalid_assignee` | Der Filter `--assignee` nimmt `me`, `none` oder eine Nutzer-ID an. |
-| Eine Zuweisung schlägt mit `status` `422` und `api_code` `validation_failed` fehl | Die zuständige Person darf das Projekt nicht lesen. Wählen Sie ein Konto aus `logbrew issues assignees`, oder geben Sie diesem Mitglied zuerst Zugriff auf das Projekt. |
+| `invalid_assignee` | Der Filter `--assignee` nimmt `me`, `none`, `my_teams`, eine Nutzer-ID oder `team:<team_id>` an. |
+| Eine Zuweisung schlägt mit `status` `422` und `api_code` `validation_failed` fehl | Das Konto darf das Projekt nicht lesen, oder das Team gehört nicht zur Organisation des Projekts. Wählen Sie einen Eintrag aus `logbrew issues assignees`. |
+| `invalid_ownership_command`, `invalid_ownership_file` | Korrigieren Sie den Befehl. Eine Zuständigkeitsdatei muss UTF-8-Text mit höchstens 128 KiB sein. |
+| `invalid_inbox_command` | Verwenden Sie `logbrew inbox` oder `logbrew inbox read`. |
 | `investigation_response_invalid` | Die Antwort hat die Validierung der CLI nicht bestanden. Wiederholen Sie den Vorgang einmal. Tritt der Fehler erneut auf, aktualisieren Sie die CLI oder melden Sie das Problem. Umgehen Sie die Validierung nicht. |
 | Trace-Status `not_linked` | Fahren Sie mit den Belegen des Issues fort. Lesen Sie keinen Trace. |
 | Trace-Status `unavailable` | Wiederholen Sie den Lesezugriff auf die Untersuchung später. |

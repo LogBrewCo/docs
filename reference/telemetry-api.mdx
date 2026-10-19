@@ -53,7 +53,12 @@ native envelope, see [Send SDK telemetry](/guides/sdk-ingestion).
 | `GET` | `/api/telemetry/issues/{issue_id}/events` | List the occurrences of one grouped issue. |
 | `PATCH` | `/api/telemetry/issues/{issue_id}` | Update the status, priority, or assignee of one issue. |
 | `POST` | `/api/telemetry/issues/bulk` | Update the status, priority, or assignee of 1 to 100 issues in one project. |
-| `GET` | `/api/telemetry/issues/assignees` | List the accounts that can be assigned issues in one project. |
+| `GET` | `/api/telemetry/issues/assignees` | List the accounts and teams that can be assigned issues in one project. |
+| `GET` | `/api/telemetry/issues/{issue_id}/owners` | List the suggested owners of one issue. |
+| `GET`, `PUT` | `/api/telemetry/issues/ownership` | Read or set the ownership rules and CODEOWNERS text of one project. |
+| `GET` | `/api/telemetry/issues/{issue_id}/activity` | Read the change history of one issue. |
+| `GET` | `/api/telemetry/issues/notifications` | List the issues that others assigned to you or your teams. |
+| `POST` | `/api/telemetry/issues/notifications/read` | Mark your issue notifications read. |
 | `PUT` | `/api/telemetry/issues/{issue_id}/triage-rule` | Set the severity rule for an issue. |
 | `PUT` | `/api/logs/{log_id}/triage-rule` | Set the severity rule and the ignored state for logs that match a log. |
 | `GET` | `/api/telemetry/traces` | Discover traces in a project scope. |
@@ -169,14 +174,15 @@ Each request sets 1 or more of these fields:
 | --- | --- |
 | `status` | `unresolved`, `resolved`, or `archived`. `ignored` is an older name for `archived`. |
 | `priority` | `high`, `medium`, or `low`. |
-| `assignee` | A user ID, `me` for the signed-in account, or `none` to remove the assignee. |
+| `assignee` | A user ID, `me` for the signed-in account, `team:<team_id>` for a team, or `none` to remove the assignee. |
 
 A request without any of these fields fails with `422` and
 `validation_failed`.
 
-An issue has 0 or 1 assignee. The assignee must be able to read the project.
-If not, the request fails with `422` and `validation_failed`, and LogBrew
-changes nothing. Get the accounts that you can assign from
+An issue has 0 or 1 assignee: an account or a team. An account must be able to
+read the project, and a team must belong to the project's organization. If
+not, the request fails with `422` and `validation_failed`, and LogBrew changes
+nothing. Get the accounts that you can assign from
 [List assignees](#list-assignees). Any other `assignee` value also fails with
 `422` and `validation_failed`.
 
@@ -190,11 +196,14 @@ change did not occur. Read the issue again before you send a different change.
 
 ### Update one issue
 
-Add `response_version=3` to get `archived`, the priority, and the assignee
-in the response:
+Add `response_version=4` to get `archived`, the priority, and the assignee
+in the response. In version 4, `assignee` is
+`{ "type": "user", "user_id", "name", "email" }`,
+`{ "type": "team", "team_id", "slug", "name" }`, or `null`. Version 3 shows a
+team assignee as `null`.
 
 ```bash
-curl -X PATCH "$LOGBREW_API_URL/api/telemetry/issues/$ISSUE_ID?response_version=3" \
+curl -X PATCH "$LOGBREW_API_URL/api/telemetry/issues/$ISSUE_ID?response_version=4" \
   -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
   -H "Content-Type: application/json" \
   --data '{ "status": "archived", "priority": "low", "assignee": "me" }'
@@ -221,7 +230,8 @@ curl -X POST "$LOGBREW_API_URL/api/telemetry/issues/bulk" \
 The request applies the same change to every issue. The response has
 `project_id` and `results`, with 1 result for each issue ID, in the request
 order. Each result has `issue_id`, `outcome`, and `issue`. `issue` is the
-current issue in response version 3, or `null` for `not_found`.
+current issue in response version 3, or `null` for `not_found`. Add
+`"response_version": 2` to the body to get each issue in response version 4.
 
 | `outcome` | Meaning |
 | --- | --- |
@@ -245,6 +255,8 @@ curl "$LOGBREW_API_URL/api/telemetry/issues/assignees?project_id=$PROJECT_ID" \
 
 The list has every account that can read the project. Each entry has
 `user_id`, `name`, and `email`. `name` is `null` when the account has no name.
+Add `response_version=2` to also get `teams`: every team of the project's
+organization, with `team_id`, `slug`, and `name`.
 See the [assignee list response](/reference/telemetry-response-shapes#assignee-list-response).
 Any account that can read the project can get this list. If the account
 cannot read the project, the request fails with `404` and `not_found`.
@@ -252,6 +264,38 @@ cannot read the project, the request fails with `404` and `not_found`.
 When a member loses access to the project, the issues assigned to that member
 show no assignee. If the member gets access again, the issues show that
 member again, unless someone changed or removed the assignee in the meantime.
+
+### Ownership and suggested owners
+
+`GET /api/telemetry/issues/ownership?project_id=<project-uuid>` returns
+`rules`, `codeowners`, `updated_at`, and `unresolved_owners`. Any account that
+can read the project can read it. `PUT` with `project_id` and `rules`,
+`codeowners`, or both replaces that text and needs permission to manage
+issues. A field that you leave out keeps its text, and an empty string clears
+it. Each text is at most 128 KiB. Invalid text fails with `422` and names the
+line.
+
+`GET /api/telemetry/issues/{issue_id}/owners?response_version=2` returns
+`suggested_assignee`, `owners`, and `inputs`. Each owner has `type` (`user` or
+`team`), `source` (`ownership_rule`, `codeowners`, or `recent_activity`),
+`rule`, `line`, and `matched`. Version 1, the default, lists accounts only.
+
+### Issue history
+
+`GET /api/telemetry/issues/{issue_id}/activity?response_version=2` returns
+`activity`, newest first, and `next_cursor`. Each entry has `type`
+(`status`, `priority`, `assigned`, `unassigned`, `severity_rule`, or
+`first_seen`), `value`, `actor_id`, `actor`, `assignee_id`, `assignee`,
+`team`, and `at`. `limit` is 1 to 200, 50 by default. Send `cursor_time` and
+`cursor_id` from `next_cursor` for the next page.
+
+### Notifications
+
+`GET /api/telemetry/issues/notifications` returns `notifications`, `unread`,
+`read_at`, and `next_cursor`. Each notification is an assignment of an issue to
+you or to your team by another account. `POST
+/api/telemetry/issues/notifications/read` with an empty JSON object, or with
+`read_at`, moves your read mark. The mark never moves back.
 
 ### Set issue and log rules
 

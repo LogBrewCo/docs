@@ -57,7 +57,12 @@ nicht von Hand. Den nativen Umschlag beschreibt
 | `GET` | `/api/telemetry/issues/{issue_id}/events` | Die Vorkommen eines gruppierten Issues auflisten. |
 | `PATCH` | `/api/telemetry/issues/{issue_id}` | Status, Priorität oder zuständige Person eines Issues ändern. |
 | `POST` | `/api/telemetry/issues/bulk` | Status, Priorität oder zuständige Person von 1 bis 100 Issues in einem Projekt ändern. |
-| `GET` | `/api/telemetry/issues/assignees` | Die Konten auflisten, denen in einem Projekt Issues zugewiesen werden können. |
+| `GET` | `/api/telemetry/issues/assignees` | Die Konten und Teams auflisten, denen in einem Projekt Issues zugewiesen werden können. |
+| `GET` | `/api/telemetry/issues/{issue_id}/owners` | Die vorgeschlagenen Zuständigen eines Issues auflisten. |
+| `GET`, `PUT` | `/api/telemetry/issues/ownership` | Die Zuständigkeitsregeln und den CODEOWNERS-Text eines Projekts lesen oder setzen. |
+| `GET` | `/api/telemetry/issues/{issue_id}/activity` | Den Änderungsverlauf eines Issues lesen. |
+| `GET` | `/api/telemetry/issues/notifications` | Die Issues auflisten, die andere Ihnen oder Ihren Teams zugewiesen haben. |
+| `POST` | `/api/telemetry/issues/notifications/read` | Ihre Issue-Benachrichtigungen als gelesen markieren. |
 | `PUT` | `/api/telemetry/issues/{issue_id}/triage-rule` | Die Schweregrad-Regel für ein Issue setzen. |
 | `PUT` | `/api/logs/{log_id}/triage-rule` | Die Schweregrad-Regel und den Zustand „ignoriert“ für Logs setzen, die zu einem Log passen. |
 | `GET` | `/api/telemetry/traces` | Traces in einem Projektbereich finden. |
@@ -178,14 +183,14 @@ Jede Anfrage setzt mindestens eines dieser Felder:
 | --- | --- |
 | `status` | `unresolved`, `resolved` oder `archived`. `ignored` ist ein älterer Name für `archived`. |
 | `priority` | `high`, `medium` oder `low`. |
-| `assignee` | Eine Nutzer-ID, `me` für das angemeldete Konto oder `none`, um die Zuweisung zu entfernen. |
+| `assignee` | Eine Nutzer-ID, `me` für das angemeldete Konto, `team:<team_id>` für ein Team oder `none`, um die Zuweisung zu entfernen. |
 
 Eine Anfrage ohne eines dieser Felder schlägt mit `422` und
 `validation_failed` fehl.
 
-Ein Issue hat 0 oder 1 zuständige Person. Die zuständige Person muss das
-Projekt lesen können. Sonst schlägt die Anfrage mit `422` und
-`validation_failed` fehl, und LogBrew ändert nichts. Die Konten, die Sie
+Ein Issue hat 0 oder 1 Zuständige: ein Konto oder ein Team. Ein Konto muss
+das Projekt lesen können, und ein Team muss zur Organisation des Projekts
+gehören. Sonst schlägt die Anfrage mit `422` und `validation_failed` fehl, und LogBrew ändert nichts. Die Konten, die Sie
 zuweisen können, liefert [Zuständige auflisten](#list-assignees). Jeder
 andere Wert für `assignee` schlägt ebenfalls mit `422` und
 `validation_failed` fehl.
@@ -201,11 +206,14 @@ hat. Lesen Sie das Issue erneut, bevor Sie eine andere Änderung senden.
 
 ### <span id="update-one-issue">Ein Issue ändern</span>
 
-Fügen Sie `response_version=3` hinzu, um `archived`, die Priorität und die
-zuständige Person in der Antwort zu erhalten:
+Fügen Sie `response_version=4` hinzu, um `archived`, die Priorität und die
+Zuständigen in der Antwort zu erhalten. In Version 4 ist `assignee`
+`{ "type": "user", "user_id", "name", "email" }`,
+`{ "type": "team", "team_id", "slug", "name" }` oder `null`. Version 3 zeigt
+ein zugewiesenes Team als `null`.
 
 ```bash
-curl -X PATCH "$LOGBREW_API_URL/api/telemetry/issues/$ISSUE_ID?response_version=3" \
+curl -X PATCH "$LOGBREW_API_URL/api/telemetry/issues/$ISSUE_ID?response_version=4" \
   -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
   -H "Content-Type: application/json" \
   --data '{ "status": "archived", "priority": "low", "assignee": "me" }'
@@ -234,6 +242,8 @@ Die Anfrage wendet dieselbe Änderung auf jedes Issue an. Die Antwort hat
 `project_id` und `results`, mit 1 Ergebnis pro Issue-ID in der Reihenfolge
 der Anfrage. Jedes Ergebnis hat `issue_id`, `outcome` und `issue`. `issue`
 ist in Antwortversion 3 das aktuelle Issue oder `null` bei `not_found`.
+Fügen Sie dem Body `"response_version": 2` hinzu, um jedes Issue in
+Antwortversion 4 zu erhalten.
 
 | `outcome` | Bedeutung |
 | --- | --- |
@@ -258,8 +268,9 @@ curl "$LOGBREW_API_URL/api/telemetry/issues/assignees?project_id=$PROJECT_ID" \
 
 Die Liste enthält jedes Konto, das das Projekt lesen kann. Jeder Eintrag hat
 `user_id`, `name` und `email`. `name` ist `null`, wenn das Konto keinen
-Namen hat. Siehe die
-[Antwort mit der Liste der Zuständigen](/de/reference/telemetry-response-shapes#assignee-list-response).
+Namen hat. Mit `response_version=2` erhalten Sie zusätzlich `teams`: jedes
+Team der Organisation des Projekts, mit `team_id`, `slug` und `name`. Siehe
+die [Antwort mit der Liste der Zuständigen](/de/reference/telemetry-response-shapes#assignee-list-response).
 Jedes Konto, das das Projekt lesen kann, kann diese Liste abrufen. Wenn das
 Konto das Projekt nicht lesen kann, schlägt die Anfrage mit `404` und
 `not_found` fehl.
@@ -268,6 +279,40 @@ Wenn ein Mitglied den Zugriff auf das Projekt verliert, zeigen die ihm
 zugewiesenen Issues keine zuständige Person. Erhält das Mitglied wieder
 Zugriff, zeigen die Issues es wieder an, außer jemand hat die Zuweisung in
 der Zwischenzeit geändert oder entfernt.
+
+### <span id="ownership-and-suggested-owners">Zuständigkeit und vorgeschlagene Zuständige</span>
+
+`GET /api/telemetry/issues/ownership?project_id=<project-uuid>` liefert
+`rules`, `codeowners`, `updated_at` und `unresolved_owners`. Jedes Konto, das
+das Projekt lesen kann, kann diese Werte lesen. `PUT` mit `project_id` und
+`rules`, `codeowners` oder beidem ersetzt diesen Text und braucht die
+Berechtigung, Issues zu verwalten. Ein Feld, das Sie weglassen, behält seinen
+Text. Ein leerer String löscht ihn. Jeder Text hat höchstens 128 KiB.
+Ungültiger Text schlägt mit `422` fehl und nennt die Zeile.
+
+`GET /api/telemetry/issues/{issue_id}/owners?response_version=2` liefert
+`suggested_assignee`, `owners` und `inputs`. Jeder Eintrag hat `type` (`user`
+oder `team`), `source` (`ownership_rule`, `codeowners` oder
+`recent_activity`), `rule`, `line` und `matched`. Version 1, der Standard,
+listet nur Konten auf.
+
+### <span id="issue-history">Verlauf eines Issues</span>
+
+`GET /api/telemetry/issues/{issue_id}/activity?response_version=2` liefert
+`activity`, die neuesten Einträge zuerst, und `next_cursor`. Jeder Eintrag hat
+`type` (`status`, `priority`, `assigned`, `unassigned`, `severity_rule` oder
+`first_seen`), `value`, `actor_id`, `actor`, `assignee_id`, `assignee`,
+`team` und `at`. `limit` liegt zwischen 1 und 200, der Standard ist 50.
+Senden Sie `cursor_time` und `cursor_id` aus `next_cursor`, um die nächste
+Seite zu lesen.
+
+### <span id="notifications">Benachrichtigungen</span>
+
+`GET /api/telemetry/issues/notifications` liefert `notifications`, `unread`,
+`read_at` und `next_cursor`. Jede Benachrichtigung ist eine Zuweisung eines
+Issues an Sie oder Ihr Team durch ein anderes Konto. `POST
+/api/telemetry/issues/notifications/read` mit einem leeren JSON-Objekt oder
+mit `read_at` setzt Ihre Lesemarke weiter. Die Marke geht nie zurück.
 
 ### Regeln für Issues und Logs setzen
 

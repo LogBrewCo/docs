@@ -1,7 +1,7 @@
 ---
 title: "Trier et résoudre les problèmes dans LogBrew"
 sidebarTitle: "Gérer les problèmes"
-description: "Gérez les problèmes dans LogBrew. Lisez les preuves d’une occurrence, puis résolvez, archivez, rouvrez, priorisez ou attribuez, un par un ou en masse."
+description: "Gérez les problèmes dans LogBrew. Lisez les preuves d’une occurrence, trouvez le propriétaire, puis résolvez, archivez, rouvrez, priorisez ou attribuez les problèmes à une personne ou à une équipe."
 ---
 
 Un problème regroupe les occurrences d’erreur qui partagent une empreinte.
@@ -33,7 +33,7 @@ Lisez ces champs avant d’ouvrir le détail :
 | `status` | État du problème dans le workflow. Consultez [Valeurs de statut](#status-values). |
 | `priority` | Ordre de triage du problème. Consultez [Priorité](#priority). |
 | `priority_source` | `manual` quand une personne a défini la priorité. `derived` quand elle suit la gravité. |
-| `assignee` | Compte responsable de la prochaine étape, ou `null`. Consultez [Attribuer des problèmes](#assign-issues). |
+| `assignee` | Compte ou équipe responsable de la prochaine étape, ou `null`. Consultez [Attribuer des problèmes](#assign-issues). |
 
 Le nombre d’occurrences n’est pas un nombre d’utilisateurs touchés. Les
 comptages et les heures s’appliquent au périmètre renvoyé, pas à tout
@@ -93,7 +93,7 @@ logbrew read issues --project "<project_id>" --status unresolved \
 ## <span id="assign-issues">Attribuer des problèmes</span>
 
 Attribuez un problème pour indiquer qui est responsable de la prochaine étape.
-Un problème a 0 ou 1 responsable.
+Un problème a 0 ou 1 responsable : un compte ou une équipe.
 
 <Steps>
   <Step title="Trouver les comptes attribuables">
@@ -101,14 +101,17 @@ Un problème a 0 ou 1 responsable.
     logbrew issues assignees --project "<project_id>" --json
     ```
 
-    La liste contient chaque compte qui peut lire le projet. Chaque entrée a
-    `user_id`, `name` et `email`. Copiez le `user_id`. Vous ne pouvez pas
-    attribuer un problème à un compte qui ne peut pas lire le projet.
+    `assignees` contient chaque compte qui peut lire le projet, avec
+    `user_id`, `name` et `email`. `teams` contient chaque équipe de
+    l’organisation du projet, avec `team_id`, `slug` et `name`. Vous ne pouvez
+    pas attribuer un problème à un compte qui ne peut pas lire le projet, ni à
+    une équipe d’une autre organisation.
   </Step>
 
   <Step title="Attribuer le problème">
     ```bash
     logbrew issues assign "<user_id>" "<issue_id>" --json
+    logbrew issues assign "team:<team_id>" "<issue_id>" --json
     ```
 
     Utilisez `me` à la place d’un ID d’utilisateur pour vous attribuer le
@@ -123,21 +126,102 @@ Un problème a 0 ou 1 responsable.
       --status unresolved --json
     ```
 
-    Utilisez `--assignee none` pour trouver les problèmes qui n’ont pas de
-    responsable.
+    Utilisez `--assignee my_teams` pour les problèmes de vos équipes,
+    `--assignee "team:<team_id>"` pour une seule équipe, et `--assignee none`
+    pour les problèmes qui n’ont pas de responsable.
   </Step>
 </Steps>
 
 Pour attribuer des problèmes, vous devez avoir l’autorisation de gérer les
 problèmes du projet. La même autorisation permet de changer le statut, la
-priorité, ainsi que les règles de problèmes et de logs. Tout compte qui peut
-lire le projet peut être responsable.
+priorité, les règles de propriété, ainsi que les règles de problèmes et de
+logs. Les propriétaires et les admins de l’organisation créent les équipes et
+choisissent leurs membres. Une équipe ne donne à ses membres aucun accès aux
+projets.
 
 Quand un membre perd l’accès au projet, les problèmes qui lui sont attribués
-n’affichent plus de responsable. Ces problèmes apparaissent dans les lectures
-avec `--assignee none`. Si le membre retrouve l’accès, les problèmes affichent
-de nouveau ce membre, sauf si quelqu’un a changé ou retiré l’attribution
-entre-temps.
+n’affichent plus de responsable. Quand une équipe est supprimée, les problèmes
+qui lui sont attribués n’affichent plus de responsable. Ces problèmes
+apparaissent dans les lectures avec `--assignee none`. Si le membre retrouve
+l’accès, les problèmes affichent de nouveau ce membre, sauf si quelqu’un a
+changé ou retiré l’attribution entre-temps.
+
+## <span id="find-who-owns-an-issue">Trouver le propriétaire d’un problème</span>
+
+```bash
+logbrew issues owners "<issue_id>" --json
+```
+
+Le résultat liste les propriétaires suggérés, du plus pertinent au moins
+pertinent, ainsi qu’un `suggested_assignee`. Chaque propriétaire a une
+`source` :
+
+| `source` | Signification |
+| --- | --- |
+| `ownership_rule` | Une règle du projet correspond au problème. `rule`, `line` et `matched` indiquent la règle et ce qu’elle a trouvé. |
+| `codeowners` | Une ligne du fichier CODEOWNERS du projet correspond au chemin d’un frame de pile. |
+| `recent_activity` | Le compte a modifié le problème ou en a été responsable. |
+
+`inputs` compte les chemins de frames de pile, les modules, le modèle de route,
+les tags et les règles que LogBrew a vérifiés. Si la liste est vide et que
+`inputs` n’indique aucun chemin, le problème n’a pas de preuve à comparer. Cela
+ne veut pas dire qu’il n’a pas de propriétaire.
+
+Écrivez les règles de propriété dans un fichier texte, une règle par ligne :
+
+```text
+# type:pattern owner...
+path:src/payments/** ada@example.com #payments
+url:/checkout/* #web
+service:billing-api ada@example.com
+tags.region:eu-* #europe
+module:app.billing.* ada@example.com
+```
+
+Un motif `path` correspond à la fin du chemin d’un frame de pile : ainsi,
+`src/payments/**` trouve les frames sous n’importe quel répertoire de
+déploiement. `*` correspond à n’importe quel texte. Les propriétaires sont des
+e-mails de comptes ou des `#team-slug`. La dernière règle qui correspond passe
+en premier. Envoyez ensuite les règles, un fichier CODEOWNERS de GitHub, ou les
+deux :
+
+```bash
+logbrew issues ownership set --project "<project_id>" \
+  --rules ownership.txt --codeowners .github/CODEOWNERS --json
+logbrew issues ownership --project "<project_id>" --json
+```
+
+Dans CODEOWNERS, un e-mail désigne un compte, et `@org/team-slug` désigne
+l’équipe qui a ce slug. Les règles qui désignent un compte sans accès au projet
+ou une équipe inconnue échouent avec `422`. Les propriétaires CODEOWNERS qui ne
+désignent personne apparaissent dans `unresolved_owners`. Un fichier vide
+efface son texte.
+
+## <span id="read-the-issue-history">Lire l’historique d’un problème</span>
+
+```bash
+logbrew issues activity "<issue_id>" --json
+```
+
+L’historique liste chaque changement de statut, de priorité, de responsable et
+de règle de gravité, du plus récent au plus ancien, avec le compte qui l’a
+fait. Il se termine par `first_seen`. Un compte qui a perdu l’accès au projet
+ne garde que son ID. Utilisez `--limit` et les valeurs de `next_cursor` pour
+lire la suite.
+
+## <span id="read-your-inbox">Lire votre boîte de réception</span>
+
+```bash
+logbrew inbox --json
+logbrew inbox read --json
+```
+
+La boîte de réception liste les problèmes que d’autres personnes vous ont
+attribués, à vous ou à vos équipes, du plus récent au plus ancien. `unread`
+compte les attributions arrivées après votre marque de lecture.
+`logbrew inbox read` place la marque de lecture à maintenant. LogBrew n’envoie
+pas d’e-mail pour ces attributions. La boîte de réception n’affiche que les
+projets que vous pouvez lire actuellement.
 
 ## Workflow recommandé
 
@@ -318,8 +402,10 @@ le statut HTTP et `api_code` pour le code d’erreur de l’API.
 | ID de problème non valide | Copiez l’ID exact depuis une liste de problèmes ou une réponse de détail. |
 | Problème introuvable | Vérifiez le compte connecté et le projet. |
 | Une modification échoue avec le `status` `403` | Le compte ne peut pas gérer les problèmes de ce projet. Demandez à une personne qui a cet accès. |
-| `invalid_assignee` | Le filtre `--assignee` accepte `me`, `none` ou un ID d’utilisateur. |
-| Une attribution échoue avec le `status` `422` et l’`api_code` `validation_failed` | Le responsable ne peut pas lire le projet. Choisissez un compte dans `logbrew issues assignees`, ou donnez d’abord à ce membre l’accès au projet. |
+| `invalid_assignee` | Le filtre `--assignee` accepte `me`, `none`, `my_teams`, un ID d’utilisateur ou `team:<team_id>`. |
+| Une attribution échoue avec le `status` `422` et l’`api_code` `validation_failed` | Le compte ne peut pas lire le projet, ou l’équipe n’appartient pas à l’organisation du projet. Choisissez-en un dans `logbrew issues assignees`. |
+| `invalid_ownership_command`, `invalid_ownership_file` | Corrigez la commande. Un fichier de propriété doit être un texte UTF-8 de 128 Kio au plus. |
+| `invalid_inbox_command` | Utilisez `logbrew inbox` ou `logbrew inbox read`. |
 | `investigation_response_invalid` | La réponse n’a pas passé la validation de la CLI. Réessayez une fois. Si l’erreur se répète, mettez à jour la CLI ou signalez le dysfonctionnement. Ne contournez pas la validation. |
 | Statut de trace `not_linked` | Continuez avec les preuves du problème. Ne lisez pas de trace. |
 | Statut de trace `unavailable` | Relancez la lecture d’investigation plus tard. |

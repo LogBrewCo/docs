@@ -1,7 +1,7 @@
 ---
 title: "在 LogBrew 中分诊和解决问题"
 sidebarTitle: "管理问题"
-description: "在 LogBrew 中管理问题。先读取发生记录的证据，再逐个或批量解决、归档、重新打开问题，设置优先级或分配负责人。"
+description: "在 LogBrew 中管理问题。先读取发生记录的证据，找到问题的所有者，再解决、归档、重新打开问题，设置优先级，或把问题分配给某个人或团队。"
 ---
 
 问题把具有相同指纹的错误发生记录归为一组。更改状态、优先级或负责人之前，先阅读分组摘要和一条发生记录。更改状态、优先级或负责人只是记录团队的决定，不会修复软件，也不会改写已采集的事件。
@@ -27,7 +27,7 @@ description: "在 LogBrew 中管理问题。先读取发生记录的证据，再
 | `status` | 问题的工作流状态。参见[状态值](#status-values)。 |
 | `priority` | 问题的分诊顺序。参见[优先级](#priority)。 |
 | `priority_source` | 由人设置优先级时为 `manual`；优先级跟随严重程度时为 `derived`。 |
-| `assignee` | 负责下一步的账号，或 `null`。参见[分配问题](#assign-issues)。 |
+| `assignee` | 负责下一步的账号或团队，或 `null`。参见[分配问题](#assign-issues)。 |
 
 发生次数不是受影响的用户数。计数和时间只针对返回的范围，而不是完整的错误历史。`--since` 或 `--until` 筛选条件会限制 LogBrew 统计的发生记录。报告某个计数时，同时说明得出该计数所用的筛选条件。
 
@@ -66,7 +66,7 @@ logbrew read issues --project "<project_id>" --status unresolved \
 
 ## <span id="assign-issues">分配问题</span>
 
-分配问题，以表明由谁负责下一步。一个问题有 0 或 1 个负责人。
+分配问题，以表明由谁负责下一步。一个问题有 0 或 1 个负责人：一个账号或一个团队。
 
 <Steps>
   <Step title="查找可分配的人">
@@ -74,12 +74,13 @@ logbrew read issues --project "<project_id>" --status unresolved \
     logbrew issues assignees --project "<project_id>" --json
     ```
 
-    该列表包含所有可以读取该项目的账号。每个条目都有 `user_id`、`name` 和 `email`。复制 `user_id`。不能把问题分配给无法读取该项目的账号。
+    `assignees` 包含所有可以读取该项目的账号，带有 `user_id`、`name` 和 `email`。`teams` 包含该项目所属组织的所有团队，带有 `team_id`、`slug` 和 `name`。不能把问题分配给无法读取该项目的账号，也不能分配给其他组织的团队。
   </Step>
 
   <Step title="分配问题">
     ```bash
     logbrew issues assign "<user_id>" "<issue_id>" --json
+    logbrew issues assign "team:<team_id>" "<issue_id>" --json
     ```
 
     用 `me` 代替用户 ID，即可把问题分配给自己。使用 `logbrew issues unassign "<issue_id>" --json` 移除负责人。添加 `--project`，可以一次更改同一项目中最多 100 个问题。
@@ -91,13 +92,67 @@ logbrew read issues --project "<project_id>" --status unresolved \
       --status unresolved --json
     ```
 
-    使用 `--assignee none` 查找没有负责人的问题。
+    使用 `--assignee my_teams` 查看你所在团队的问题，使用 `--assignee "team:<team_id>"` 查看某个团队的问题，使用 `--assignee none` 查找没有负责人的问题。
   </Step>
 </Steps>
 
-分配问题需要拥有该项目的问题管理权限。有了这项权限，你还可以更改状态、优先级，以及问题规则和日志规则。任何可以读取该项目的账号都可以成为负责人。
+分配问题需要拥有该项目的问题管理权限。有了这项权限，你还可以更改状态、优先级、所有权规则，以及问题规则和日志规则。团队由组织的所有者和管理员创建，成员也由他们选择。加入团队不会让成员获得项目访问权限。
 
-成员失去项目访问权限后，分配给该成员的问题会显示为没有负责人，并出现在 `--assignee none` 的读取结果中。如果该成员重新获得访问权限，这些问题会再次显示该成员为负责人，除非在此期间有人更改或移除了负责人。
+成员失去项目访问权限后，分配给该成员的问题会显示为没有负责人。团队被删除后，分配给该团队的问题也会显示为没有负责人。这些问题会出现在 `--assignee none` 的读取结果中。如果该成员重新获得访问权限，这些问题会再次显示该成员为负责人，除非在此期间有人更改或移除了负责人。
+
+## <span id="find-who-owns-an-issue">查找问题的所有者</span>
+
+```bash
+logbrew issues owners "<issue_id>" --json
+```
+
+结果按匹配程度从高到低列出建议的所有者，并给出一个 `suggested_assignee`。每个所有者都有一个 `source`：
+
+| `source` | 含义 |
+| --- | --- |
+| `ownership_rule` | 项目的某条规则与该问题匹配。`rule`、`line` 和 `matched` 显示是哪条规则以及它匹配到了什么。 |
+| `codeowners` | 项目 CODEOWNERS 文件中的某一行与某个堆栈帧路径匹配。 |
+| `recent_activity` | 该账号更改过这个问题，或者曾被分配到这个问题。 |
+
+`inputs` 统计 LogBrew 检查过的堆栈帧路径、模块、路由模板、标签和规则的数量。如果列表为空，而 `inputs` 中也没有路径，说明这个问题没有可供匹配的证据，而不是没有所有者。
+
+把所有权规则写在一个文本文件中，每行一条：
+
+```text
+# type:pattern owner...
+path:src/payments/** ada@example.com #payments
+url:/checkout/* #web
+service:billing-api ada@example.com
+tags.region:eu-* #europe
+module:app.billing.* ada@example.com
+```
+
+`path` 模式匹配堆栈帧路径的末尾，所以无论部署目录是什么，`src/payments/**` 都能匹配其下的堆栈帧。`*` 匹配任意文本。所有者可以是账号邮箱，也可以是 `#team-slug`。最后一条匹配的规则排在最前面。然后发送这些规则、GitHub CODEOWNERS 文件，或两者都发送：
+
+```bash
+logbrew issues ownership set --project "<project_id>" \
+  --rules ownership.txt --codeowners .github/CODEOWNERS --json
+logbrew issues ownership --project "<project_id>" --json
+```
+
+在 CODEOWNERS 中，邮箱表示一个账号，`@org/team-slug` 表示具有该 slug 的团队。如果规则指定了没有项目访问权限的账号或不存在的团队，请求会以 `422` 失败。CODEOWNERS 中找不到对应对象的所有者会出现在 `unresolved_owners` 中。发送空文件会清空对应的文本。
+
+## <span id="read-the-issue-history">查看问题的变更历史</span>
+
+```bash
+logbrew issues activity "<issue_id>" --json
+```
+
+变更历史按从新到旧列出状态、优先级、负责人和严重程度规则的每一次更改，以及做出更改的账号。最后一条是 `first_seen`。失去项目访问权限的账号只保留其 ID。使用 `--limit` 和 `next_cursor` 中的值读取更多记录。
+
+## <span id="read-your-inbox">查看收件箱</span>
+
+```bash
+logbrew inbox --json
+logbrew inbox read --json
+```
+
+收件箱按从新到旧列出其他人分配给你或你所在团队的问题。`unread` 统计你的已读标记之后的分配数量。`logbrew inbox read` 会把已读标记移到当前时间。LogBrew 不会为这些分配发送邮件。收件箱只显示你当前可以读取的项目。
 
 ## 推荐工作流
 
@@ -226,8 +281,10 @@ API 拒绝请求时，`error` 为 `api_error`。从 `status` 读取 HTTP 状态�
 | 问题 ID 无效 | 从问题列表或详情响应中复制确切的 ID。 |
 | 找不到问题 | 确认当前登录的账号和项目。 |
 | 更改失败，`status` 为 `403` | 该账号无权管理此项目中的问题。请有权限的人处理。 |
-| `invalid_assignee` | `--assignee` 筛选条件只接受 `me`、`none` 或用户 ID。 |
-| 分配失败，`status` 为 `422`，`api_code` 为 `validation_failed` | 负责人无法读取该项目。从 `logbrew issues assignees` 中选择一个账号，或者先为该成员授予项目访问权限。 |
+| `invalid_assignee` | `--assignee` 筛选条件只接受 `me`、`none`、`my_teams`、用户 ID 或 `team:<team_id>`。 |
+| 分配失败，`status` 为 `422`，`api_code` 为 `validation_failed` | 该账号无法读取该项目，或该团队不属于项目所在的组织。从 `logbrew issues assignees` 中重新选择。 |
+| `invalid_ownership_command`、`invalid_ownership_file` | 修正命令。所有权文件必须是 UTF-8 文本，大小不超过 128 KiB。 |
+| `invalid_inbox_command` | 使用 `logbrew inbox` 或 `logbrew inbox read`。 |
 | `investigation_response_invalid` | 响应未通过 CLI 校验。重试一次。如果仍然出现，更新 CLI 或报告问题。不要绕过校验。 |
 | 链路状态为 `not_linked` | 继续使用问题证据。不要读取链路。 |
 | 链路状态为 `unavailable` | 稍后重试排查读取。 |

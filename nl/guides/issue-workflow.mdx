@@ -1,7 +1,7 @@
 ---
 title: "Triage en oplossen van issues in LogBrew"
 sidebarTitle: "Issues beheren"
-description: "Beheer issues in LogBrew. Lees eerst het bewijs. Los daarna op, archiveer, heropen, stel prioriteit in of wijs toe, per issue of in bulk."
+description: "Beheer issues in LogBrew. Lees eerst het bewijs en zoek de eigenaar. Los daarna op, archiveer, heropen, stel prioriteit in of wijs toe aan een persoon of een team."
 ---
 
 Een issue groepeert foutvoorvallen met dezelfde vingerafdruk. Lees de
@@ -33,7 +33,7 @@ event. Lees deze velden voordat je de details opent:
 | `status` | Workflowstatus van het issue. Zie [Statuswaarden](#status-values). |
 | `priority` | Triagevolgorde van het issue. Zie [Prioriteit](#priority). |
 | `priority_source` | `manual` als een persoon de prioriteit heeft ingesteld. `derived` als de prioriteit de ernst volgt. |
-| `assignee` | Account dat verantwoordelijk is voor de volgende stap, of `null`. Zie [Issues toewijzen](#assign-issues). |
+| `assignee` | Account of team dat verantwoordelijk is voor de volgende stap, of `null`. Zie [Issues toewijzen](#assign-issues). |
 
 Het aantal voorvallen is geen aantal getroffen gebruikers. Aantallen en
 tijdstippen gelden voor het teruggegeven bereik, niet voor de volledige
@@ -92,7 +92,7 @@ logbrew read issues --project "<project_id>" --status unresolved \
 ## <span id="assign-issues">Issues toewijzen</span>
 
 Wijs een issue toe om te laten zien wie verantwoordelijk is voor de volgende
-stap. Een issue is aan 0 of 1 persoon toegewezen.
+stap. Een issue heeft 0 of 1 toewijzing: één account of één team.
 
 <Steps>
   <Step title="Zoek op aan wie je kunt toewijzen">
@@ -100,14 +100,17 @@ stap. Een issue is aan 0 of 1 persoon toegewezen.
     logbrew issues assignees --project "<project_id>" --json
     ```
 
-    De lijst bevat elk account dat het project kan lezen. Elk item heeft
-    `user_id`, `name` en `email`. Kopieer de `user_id`. Je kunt een issue niet
-    toewijzen aan een account dat het project niet kan lezen.
+    `assignees` bevat elk account dat het project kan lezen, met `user_id`,
+    `name` en `email`. `teams` bevat elk team van de organisatie van het
+    project, met `team_id`, `slug` en `name`. Je kunt een issue niet toewijzen
+    aan een account dat het project niet kan lezen, of aan een team van een
+    andere organisatie.
   </Step>
 
   <Step title="Wijs het issue toe">
     ```bash
     logbrew issues assign "<user_id>" "<issue_id>" --json
+    logbrew issues assign "team:<team_id>" "<issue_id>" --json
     ```
 
     Gebruik `me` in plaats van een gebruikers-ID om het issue aan jezelf toe te
@@ -122,21 +125,98 @@ stap. Een issue is aan 0 of 1 persoon toegewezen.
       --status unresolved --json
     ```
 
-    Gebruik `--assignee none` om issues te vinden die aan niemand zijn
-    toegewezen.
+    Gebruik `--assignee my_teams` voor de issues van je teams,
+    `--assignee "team:<team_id>"` voor één team en `--assignee none` voor
+    issues die aan niemand zijn toegewezen.
   </Step>
 </Steps>
 
 Om issues toe te wijzen, heb je het recht nodig om issues in het project te
-beheren. Met hetzelfde recht wijzig je de status, de prioriteit en de regels
-voor issues en logs. Elk account dat het project kan lezen, kan een issue
-toegewezen krijgen.
+beheren. Met hetzelfde recht wijzig je de status, de prioriteit, de
+eigenaarsregels en de regels voor issues en logs. Eigenaren en beheerders van
+de organisatie maken teams aan en kiezen de leden. Een team geeft zijn leden
+geen toegang tot projecten.
 
 Verliest een lid de toegang tot het project? Dan tonen de issues die aan dat
-lid zijn toegewezen geen toewijzing meer. Deze issues verschijnen bij het
-lezen met `--assignee none`. Krijgt het lid weer toegang? Dan tonen de issues
+lid zijn toegewezen geen toewijzing meer. Wordt een team verwijderd? Dan tonen
+de issues die aan dat team zijn toegewezen geen toewijzing meer. Deze issues
+verschijnen bij het lezen met `--assignee none`. Krijgt het lid weer toegang? Dan tonen de issues
 dat lid weer, tenzij iemand de toewijzing intussen heeft gewijzigd of
 opgeheven.
+
+## <span id="find-who-owns-an-issue">Zoeken wie eigenaar is van een issue</span>
+
+```bash
+logbrew issues owners "<issue_id>" --json
+```
+
+Het resultaat toont de voorgestelde eigenaren, de beste eerst, en een
+`suggested_assignee`. Elke eigenaar heeft een `source`:
+
+| `source` | Betekenis |
+| --- | --- |
+| `ownership_rule` | Een regel van het project past bij het issue. `rule`, `line` en `matched` tonen de regel en waar die op paste. |
+| `codeowners` | Een tekstregel uit het CODEOWNERS-bestand van het project past bij het pad van een stackframe. |
+| `recent_activity` | Het account heeft het issue gewijzigd of kreeg het toegewezen. |
+
+`inputs` telt de paden van stackframes, de modules, de routetemplate, de tags
+en de regels die LogBrew heeft gecontroleerd. Is de lijst leeg en toont
+`inputs` geen paden? Dan heeft het issue geen bewijs om op te matchen. Dat
+betekent niet dat het issue geen eigenaar heeft.
+
+Schrijf eigenaarsregels in een tekstbestand, één regel per tekstregel:
+
+```text
+# type:pattern owner...
+path:src/payments/** ada@example.com #payments
+url:/checkout/* #web
+service:billing-api ada@example.com
+tags.region:eu-* #europe
+module:app.billing.* ada@example.com
+```
+
+Een patroon `path` past op het einde van het pad van een stackframe. Zo past
+`src/payments/**` op frames onder elke deploymentmap. `*` past op elke tekst.
+Eigenaren zijn e-mailadressen van accounts of `#team-slug`. De laatste regel
+die past, komt als eerste. Verstuur daarna de regels, een CODEOWNERS-bestand
+van GitHub, of allebei:
+
+```bash
+logbrew issues ownership set --project "<project_id>" \
+  --rules ownership.txt --codeowners .github/CODEOWNERS --json
+logbrew issues ownership --project "<project_id>" --json
+```
+
+In CODEOWNERS staat een e-mailadres voor een account en `@org/team-slug` voor
+het team met die slug. Regels met een account zonder toegang tot het project
+of met een onbekend team mislukken met `422`. Eigenaren in CODEOWNERS die naar
+niemand verwijzen, verschijnen in `unresolved_owners`. Een leeg bestand wist
+de bijbehorende tekst.
+
+## <span id="read-the-issue-history">De geschiedenis van een issue lezen</span>
+
+```bash
+logbrew issues activity "<issue_id>" --json
+```
+
+De geschiedenis toont elke wijziging van status, prioriteit, toewijzing en
+ernstregel, de nieuwste eerst, met het account dat de wijziging deed. Ze
+eindigt met `first_seen`. Van een account dat de toegang tot het project
+kwijt is, blijft alleen het ID over. Gebruik `--limit` en de waarden van
+`next_cursor` om verder te lezen.
+
+## <span id="read-your-inbox">Je inbox lezen</span>
+
+```bash
+logbrew inbox --json
+logbrew inbox read --json
+```
+
+De inbox toont de issues die anderen aan jou of aan je teams hebben
+toegewezen, de nieuwste eerst. `unread` telt de toewijzingen na je
+leesmarkering. `logbrew inbox read` zet de leesmarkering op nu. LogBrew
+stuurt voor deze toewijzingen geen e-mail. De inbox toont alleen projecten
+die je nu kunt lezen.
 
 ## Aanbevolen workflow
 
@@ -309,8 +389,10 @@ Weigert de API een request? Dan is `error` gelijk aan `api_error`. Lees
 | Ongeldig issue-ID | Kopieer het exacte ID uit een lijst met issues of uit een response met details. |
 | Issue niet gevonden | Controleer het ingelogde account en het project. |
 | Een wijziging mislukt met `status` `403` | Het account kan geen issues beheren in dit project. Vraag iemand met toegang. |
-| `invalid_assignee` | De filter `--assignee` accepteert `me`, `none` of een gebruikers-ID. |
-| Een toewijzing mislukt met `status` `422` en `api_code` `validation_failed` | De gekozen persoon kan het project niet lezen. Kies een account uit `logbrew issues assignees`, of geef dat lid eerst toegang tot het project. |
+| `invalid_assignee` | De filter `--assignee` accepteert `me`, `none`, `my_teams`, een gebruikers-ID of `team:<team_id>`. |
+| Een toewijzing mislukt met `status` `422` en `api_code` `validation_failed` | Het account kan het project niet lezen, of het team hoort niet bij de organisatie van het project. Kies er een uit `logbrew issues assignees`. |
+| `invalid_ownership_command`, `invalid_ownership_file` | Corrigeer de opdracht. Een eigenaarsbestand moet UTF-8-tekst zijn van maximaal 128 KiB. |
+| `invalid_inbox_command` | Gebruik `logbrew inbox` of `logbrew inbox read`. |
 | `investigation_response_invalid` | De response is niet door de validatie van de CLI gekomen. Probeer het één keer opnieuw. Gebeurt het weer? Werk de CLI bij of meld het probleem. Omzeil de validatie niet. |
 | Tracestatus `not_linked` | Ga verder met het bewijs uit het issue. Lees geen trace. |
 | Tracestatus `unavailable` | Lees het onderzoek later opnieuw. |
