@@ -15,6 +15,7 @@ Konto-Zugangsdaten nie als SDK- oder Ingest-Konfiguration.
 | Aktuelle Nutzung und Kontingentstatus lesen | `GET /api/account/usage` |
 | Nutzung im Zeitverlauf lesen | `GET /api/account/usage/history` |
 | Bereitschaft von Abo und Organisation lesen | `GET /api/account/subscription` |
+| Tarife und ihre Kontingente lesen | `GET /api/billing/catalog` |
 | Eine App- oder CLI-Anmeldung abmelden | `POST /api/auth/logout` |
 | Jede LogBrew-Anmeldung widerrufen | `POST /api/auth/logout-all` |
 | Browsersitzung löschen | `POST /api/auth/web/logout` |
@@ -84,7 +85,7 @@ Projekt und hat im aktuellen Zeitraum nur Logs gesendet:
 | `plan.tier` | Kennung des Tarifs: `free`, `pro` oder `scale`. |
 | `plan.status` | `free`, `trial`, `active`, `past_due` oder `disabled`. |
 | `limits.events`, `limits.bytes`, `limits.projects` | Kompatibilitätsfelder. Sie sind `null`. `null` heißt nicht unbegrenzt. Nutzen Sie `state`, `limit` und `percent_used` für den Kontingentstatus. |
-| `limits.retention_days` | Aufbewahrung der Daten im Tarif in Tagen oder `null`. |
+| `limits.retention_days` | Aufbewahrung der Daten im Tarif in Tagen oder `null`. Ein aktives Beta-Angebot legt die Aufbewahrung seines Tarifs fest. |
 | `usage.events`, `usage.bytes` | Summen aller Telemetrieströme im Zeitraum. |
 | `usage.projects` | Die Zahl der Projekte, die dem Konto gehören. |
 | `state` | `ok`, `warning` oder `blocked`. |
@@ -122,6 +123,36 @@ curl "https://api.logbrew.co/api/account/usage?response_version=2" \
 | `events` | Die Anzahl der verworfenen Ereignisse. |
 
 Verworfene Ereignisse haben LogBrew nie erreicht. Sie werden nicht berechnet und zählen nicht zu `usage`, `by_project` oder `by_stream`. Das Array ist leer, wenn kein SDK verworfene Ereignisse gemeldet hat.
+
+### Beta-Angebot
+
+Konten, die sich während der öffentlichen Beta anmelden, erhalten die Pro-Kontingente 6 Monate lang kostenlos. Konten, die am 2026-10-22 bereits existierten, zählen die 6 Monate ab diesem Datum. Senden Sie `response_version=3`, um zusätzlich `offer` zu erhalten. Die Versionen 1 und 2 haben dieses Feld nicht. Version 3 enthält außerdem `sdk_dropped_events`.
+
+```bash
+curl "https://api.logbrew.co/api/account/usage?response_version=3" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER"
+```
+
+`offer` ist `null`, wenn kein Angebot aktiv ist. Andernfalls enthält es diese Felder:
+
+```json
+{
+  "offer": {
+    "kind": "public_beta",
+    "tier": "team",
+    "starts_at": "2026-10-22T00:00:00Z",
+    "ends_at": "2027-04-22T00:00:00Z"
+  }
+}
+```
+
+| Feld | Bedeutung |
+| --- | --- |
+| `kind` | Warum die Kontingente gelten. Der Wert ist `public_beta`. |
+| `tier` | Der Tarif, dessen Kontingente gelten. `team` ist der Tarif Pro. |
+| `starts_at`, `ends_at` | Der Zeitraum des Angebots. Das Ende ist exklusiv. |
+
+Solange ein Angebot aktiv ist, verwenden `limits.retention_days`, `state`, `limit`, `percent_used` und `next_action` die größeren Kontingente aus dem eigenen Tarif des Kontos und dem Angebot. `plan` zeigt weiterhin den eigenen Tarif des Kontos. Nach `ends_at` gilt wieder der eigene Tarif des Kontos. Die Versionen 1 und 2 folgen denselben Kontingenten, zeigen das Angebot aber nicht. Die Abrechnungsübersicht `GET /api/billing/overview` hat dasselbe Feld `offer`.
 
 ### Kontingentstatus
 
@@ -289,11 +320,60 @@ Ein nicht unterstütztes Intervall gibt `422` zurück:
 Ein unbekannter Query-Schlüssel gibt ebenfalls `422` mit
 `validation_failed` zurück.
 
+## Tarife und Kontingente
+
+`GET /api/billing/catalog` listet die Tarife auf. Der Aufruf braucht keine Authentifizierung. Jeder Tarif enthält alle Funktionen sowie unbegrenzt viele Teammitglieder und Projekte. Die Tarife unterscheiden sich in Volumen und Aufbewahrung. Die Kontingente werden jeden Abrechnungsmonat zurückgesetzt. 1 GB sind 1.000.000.000 Bytes.
+
+| Tarif | `tier` | Preis pro Monat | Logs | App-Metriken | Trace-Spans | Issue-Ereignisse | Aufbewahrung |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Free | `developer` | $0 | 50 GB | 50 GB | 50 Millionen | 100.000 | 30 Tage |
+| Pro | `team` | $25 | 500 GB | 500 GB | 500 Millionen | 2 Millionen | 90 Tage |
+| Business | `business` | $80 | 2.000 GB | 2.000 GB | 2 Milliarden | 10 Millionen | 365 Tage |
+| Enterprise | `enterprise` | Nach Angebot | Individuell | Individuell | Individuell | Individuell | Individuell |
+
+Katalog und Abrechnungsübersicht verwenden die `tier`-Werte `developer`, `team`, `business` und `enterprise`. Die Antworten zu Nutzung und Abo verwenden `free`, `pro` und `scale`. Die Tarife Business und Enterprise sind beide `scale`.
+
+```bash
+curl "https://api.logbrew.co/api/billing/catalog"
+```
+
+Die Antwort listet die Tarife in dieser Reihenfolge auf. Das Beispiel zeigt den Tarif Pro:
+
+```json
+{
+  "response_version": 1,
+  "currency": "usd",
+  "interval": "month",
+  "checkout_available": false,
+  "plans": [
+    {
+      "tier": "team",
+      "monthly_price_cents": 2500,
+      "activation": "checkout",
+      "quote_email": null,
+      "limits": {
+        "issue_events": 2000000,
+        "log_bytes": 500000000000,
+        "metric_bytes": 500000000000,
+        "trace_spans": 500000000,
+        "retention_days": 90,
+        "unlimited_projects": true
+      }
+    }
+  ]
+}
+```
+
+| Feld | Bedeutung |
+| --- | --- |
+| `checkout_available` | `true`, wenn Sie einen kostenpflichtigen Tarif kaufen können. |
+| `monthly_price_cents` | Der Preis in US-Cent. Bei einem Tarif auf Angebot ist er `null`. |
+| `activation` | `included`, `checkout` oder `quote`. |
+| `limits` | Die Kontingente für 1 Abrechnungsmonat. Ein Wert von `null` wird vertraglich festgelegt. |
+
 ## Abo-Bereitschaft
 
-`GET /api/account/subscription` ist schreibgeschützt. Entscheiden Sie damit,
-ob Sie Steuerungen für kostenpflichtige Tarife oder Organisationen
-aktivieren. Für den Kontingentstatus nutzen Sie den Nutzungs-Endpunkt.
+`GET /api/account/subscription` ist schreibgeschützt. Entscheiden Sie damit, ob Sie Steuerungen für Organisationen aktivieren. Für den Kontingentstatus nutzen Sie den Nutzungs-Endpunkt.
 
 ```bash
 curl "https://api.logbrew.co/api/account/subscription" \
@@ -314,26 +394,25 @@ synthetisch:
   "current_period_end": null,
   "renews_at": null,
   "cancels_at": null,
-  "organization_creation_allowed": false,
-  "organization_creation_blocker": "subscription_required",
+  "organization_creation_allowed": true,
+  "organization_creation_blocker": null,
   "limits": {
-    "organizations": 0,
-    "members_per_organization": 0,
-    "projects_per_organization": 0,
-    "invitations_per_day": 0
+    "organizations": 1,
+    "members_per_organization": 9007199254740991,
+    "projects_per_organization": 9007199254740991,
+    "invitations_per_day": 20
   },
   "next": "<display text>",
   "next_action": {
-    "code": "choose_plan",
-    "target": "pricing"
+    "code": "create_or_manage_organization",
+    "target": "organization"
   }
 }
 ```
 
-`next` ist Anzeigetext. Er ändert sich, je nachdem, ob kostenpflichtige
-Tarife zum Kauf angeboten werden. Zeigen Sie den zurückgegebenen Text an
-oder lokalisieren Sie anhand von `next_action`. Leiten Sie keinen
-Tarifnamen fest aus `next` ab.
+Jeder Tarif kann eine Organisation erstellen, Teammitglieder einladen und Projekte hinzufügen. Eine Organisation hat kein Limit für Mitglieder oder Projekte. Der Wert `9007199254740991` bedeutet unbegrenzt. Es ist die größte Ganzzahl, die JSON-Clients exakt lesen. Zeigen Sie dafür „Unbegrenzt“ an. Nur die Anzahl der Organisationen, die ein Konto besitzt, kann das Erstellen einer Organisation blockieren.
+
+`next` ist Anzeigetext. Zeigen Sie den zurückgegebenen Text an, oder lokalisieren Sie anhand von `next_action`. Codieren Sie keinen Tarifnamen aus `next` fest.
 
 Enum-Werte:
 
@@ -343,21 +422,16 @@ Enum-Werte:
 | `billing_interval` | `none`, `monthly`, `yearly` |
 | `state` | `free`, `trialing`, `active`, `past_due`, `paused`, `canceled` |
 | `access_state` | `active` bei `free`, `trialing` und `active`. `paused` bei `past_due`, `paused` und `canceled`. |
-| `organization_creation_blocker` | `subscription_required`, `subscription_inactive`, `organization_limit_exceeded` oder `null` |
+| `organization_creation_blocker` | `organization_limit_exceeded` oder `null` |
 
-Zu jedem Hindernis gehört genau ein Paar in `next_action`:
+Die API gibt die Hindernisse `subscription_required` und `subscription_inactive` nicht zurück. Zu jedem Hindernis gehört genau ein Paar in `next_action`:
 
 | `organization_creation_blocker` | `next_action.code` | `next_action.target` |
 | --- | --- | --- |
 | `null` | `create_or_manage_organization` | `organization` |
-| `subscription_required` | `choose_plan` | `pricing` |
-| `subscription_inactive` | `resume_subscription` | `billing` |
 | `organization_limit_exceeded` | `manage_organization_limit` | `organization` |
 
-Tarifwerte sind Kennungen, keine Anzeigenamen. Lassen Sie sie in einem
-lokalisierten Client unverändert. Auch ein kostenpflichtiges Konto kann
-blockiert sein. Prüfen Sie `organization_creation_allowed`, bevor Sie das
-Erstellen von Organisationen aktivieren.
+Tarifwerte sind Kennungen, keine Anzeigenamen. Lassen Sie sie in einem lokalisierten Client unverändert. Prüfen Sie `organization_creation_allowed`, bevor Sie das Erstellen von Organisationen aktivieren.
 
 Dieser Endpunkt erstellt keine Organisationen, versendet keine
 Einladungen, ändert keine Rollen und ändert nichts an der Abrechnung.

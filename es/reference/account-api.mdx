@@ -15,6 +15,7 @@ credencial de cuenta en la configuración del SDK o de la ingesta.
 | Leer el uso actual y el estado de la cuota | `GET /api/account/usage` |
 | Leer el uso a lo largo del tiempo | `GET /api/account/usage/history` |
 | Leer el estado de la suscripción y de la organización | `GET /api/account/subscription` |
+| Leer los planes y sus cuotas | `GET /api/billing/catalog` |
 | Cerrar la sesión de una app o de la CLI | `POST /api/auth/logout` |
 | Revocar todas las sesiones de LogBrew | `POST /api/auth/logout-all` |
 | Borrar la sesión del navegador | `POST /api/auth/web/logout` |
@@ -82,7 +83,7 @@ proyecto y solo envió logs en el periodo actual:
 | `plan.tier` | Identificador del plan: `free`, `pro` o `scale`. |
 | `plan.status` | `free`, `trial`, `active`, `past_due` o `disabled`. |
 | `limits.events`, `limits.bytes`, `limits.projects` | Campos de compatibilidad. Son `null`. `null` no significa ilimitado. Usa `state`, `limit` y `percent_used` para el estado de la cuota. |
-| `limits.retention_days` | La retención de datos del plan, en días, o `null`. |
+| `limits.retention_days` | La retención de datos del plan, en días, o `null`. Una oferta beta activa fija la retención de su plan. |
 | `usage.events`, `usage.bytes` | Los totales de todos los flujos de telemetría del periodo. |
 | `usage.projects` | El número de proyectos de los que es propietaria la cuenta. |
 | `state` | `ok`, `warning` o `blocked`. |
@@ -120,6 +121,36 @@ curl "https://api.logbrew.co/api/account/usage?response_version=2" \
 | `events` | La cantidad de eventos descartados. |
 
 Los eventos descartados nunca llegaron a LogBrew. No se facturan y no cuentan en `usage`, `by_project` ni `by_stream`. El array está vacío cuando ningún SDK informó descartes.
+
+### Oferta beta
+
+Las cuentas que se registran durante la beta pública reciben gratis las cuotas de Pro durante 6 meses. Las cuentas que ya existían el 2026-10-22 cuentan los 6 meses desde esa fecha. Envía `response_version=3` para recibir también `offer`. Las versiones 1 y 2 no tienen este campo. La versión 3 también tiene `sdk_dropped_events`.
+
+```bash
+curl "https://api.logbrew.co/api/account/usage?response_version=3" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER"
+```
+
+`offer` es `null` cuando no hay ninguna oferta activa. Si hay una, tiene estos campos:
+
+```json
+{
+  "offer": {
+    "kind": "public_beta",
+    "tier": "team",
+    "starts_at": "2026-10-22T00:00:00Z",
+    "ends_at": "2027-04-22T00:00:00Z"
+  }
+}
+```
+
+| Campo | Significado |
+| --- | --- |
+| `kind` | Por qué se aplican las cuotas. El valor es `public_beta`. |
+| `tier` | El plan cuyas cuotas se aplican. `team` es el plan Pro. |
+| `starts_at`, `ends_at` | El periodo de la oferta. El final es exclusivo. |
+
+Mientras una oferta está activa, `limits.retention_days`, `state`, `limit`, `percent_used` y `next_action` usan las cuotas mayores entre el plan propio de la cuenta y la oferta. `plan` sigue mostrando el plan propio de la cuenta. Después de `ends_at`, la cuenta vuelve a usar su plan propio. Las versiones 1 y 2 siguen las mismas cuotas, pero no muestran la oferta. El resumen de facturación, `GET /api/billing/overview`, tiene el mismo campo `offer`.
 
 ### Estados de la cuota
 
@@ -281,11 +312,60 @@ Un intervalo no admitido devuelve `422`:
 Una clave de consulta desconocida también devuelve `422` con
 `validation_failed`.
 
+## Planes y cuotas
+
+`GET /api/billing/catalog` lista los planes. No necesita autenticación. Todos los planes incluyen todas las funciones, con compañeros y proyectos ilimitados. Los planes se diferencian en volumen y retención. Las cuotas se reinician cada mes de facturación. 1 GB son 1.000.000.000 de bytes.
+
+| Plan | `tier` | Precio al mes | Logs | Métricas de aplicación | Spans de trazas | Eventos de incidencias | Retención |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Free | `developer` | $0 | 50 GB | 50 GB | 50 millones | 100.000 | 30 días |
+| Pro | `team` | $25 | 500 GB | 500 GB | 500 millones | 2 millones | 90 días |
+| Business | `business` | $80 | 2.000 GB | 2.000 GB | 2000 millones | 10 millones | 365 días |
+| Enterprise | `enterprise` | Según presupuesto | Personalizado | Personalizado | Personalizado | Personalizado | Personalizado |
+
+El catálogo y el resumen de facturación usan los valores `tier` `developer`, `team`, `business` y `enterprise`. Las respuestas de uso y de suscripción usan `free`, `pro` y `scale`. Los planes Business y Enterprise son ambos `scale`.
+
+```bash
+curl "https://api.logbrew.co/api/billing/catalog"
+```
+
+La respuesta lista los planes en este orden. Este ejemplo muestra el plan Pro:
+
+```json
+{
+  "response_version": 1,
+  "currency": "usd",
+  "interval": "month",
+  "checkout_available": false,
+  "plans": [
+    {
+      "tier": "team",
+      "monthly_price_cents": 2500,
+      "activation": "checkout",
+      "quote_email": null,
+      "limits": {
+        "issue_events": 2000000,
+        "log_bytes": 500000000000,
+        "metric_bytes": 500000000000,
+        "trace_spans": 500000000,
+        "retention_days": 90,
+        "unlimited_projects": true
+      }
+    }
+  ]
+}
+```
+
+| Campo | Significado |
+| --- | --- |
+| `checkout_available` | `true` cuando puedes comprar un plan de pago. |
+| `monthly_price_cents` | El precio en centavos de dólar. Es `null` en un plan con presupuesto. |
+| `activation` | `included`, `checkout` o `quote`. |
+| `limits` | Las cuotas de 1 mes de facturación. Un valor `null` se fija por contrato. |
+
 ## Estado de la suscripción
 
-`GET /api/account/subscription` es de solo lectura. Úsalo para decidir si
-activas los controles de los planes de pago o de la organización. Usa el
-endpoint de uso para el estado de la cuota.
+`GET /api/account/subscription` es de solo lectura. Úsalo para decidir si activas los controles de la organización. Usa el endpoint de uso para el estado de la cuota.
 
 ```bash
 curl "https://api.logbrew.co/api/account/subscription" \
@@ -305,25 +385,25 @@ Una cuenta gratuita devuelve esta respuesta. El `account_id` es sintético:
   "current_period_end": null,
   "renews_at": null,
   "cancels_at": null,
-  "organization_creation_allowed": false,
-  "organization_creation_blocker": "subscription_required",
+  "organization_creation_allowed": true,
+  "organization_creation_blocker": null,
   "limits": {
-    "organizations": 0,
-    "members_per_organization": 0,
-    "projects_per_organization": 0,
-    "invitations_per_day": 0
+    "organizations": 1,
+    "members_per_organization": 9007199254740991,
+    "projects_per_organization": 9007199254740991,
+    "invitations_per_day": 20
   },
   "next": "<display text>",
   "next_action": {
-    "code": "choose_plan",
-    "target": "pricing"
+    "code": "create_or_manage_organization",
+    "target": "organization"
   }
 }
 ```
 
-`next` es un texto para mostrar. Cambia cuando los planes de pago están o no a
-la venta. Muestra el texto devuelto o localiza a partir de `next_action`. No
-fijes en el código un nombre de plan sacado de `next`.
+Cualquier plan puede crear una organización, invitar a compañeros y añadir proyectos. Una organización no tiene límite de miembros ni de proyectos. El valor `9007199254740991` significa ilimitado. Es el entero más grande que los clientes JSON leen con exactitud. Muestra «Ilimitado» para ese valor. Solo el número de organizaciones que posee una cuenta puede bloquear la creación de una organización.
+
+`next` es texto para mostrar. Muestra el texto devuelto o localiza a partir de `next_action`. No fijes en el código un nombre de plan a partir de `next`.
 
 Valores de enumeración:
 
@@ -333,21 +413,16 @@ Valores de enumeración:
 | `billing_interval` | `none`, `monthly`, `yearly` |
 | `state` | `free`, `trialing`, `active`, `past_due`, `paused`, `canceled` |
 | `access_state` | `active` para `free`, `trialing` y `active`. `paused` para `past_due`, `paused` y `canceled`. |
-| `organization_creation_blocker` | `subscription_required`, `subscription_inactive`, `organization_limit_exceeded` o `null` |
+| `organization_creation_blocker` | `organization_limit_exceeded` o `null` |
 
-Cada bloqueo tiene un par `next_action`:
+La API no devuelve los bloqueos `subscription_required` ni `subscription_inactive`. Cada bloqueo tiene un par `next_action`:
 
 | `organization_creation_blocker` | `next_action.code` | `next_action.target` |
 | --- | --- | --- |
 | `null` | `create_or_manage_organization` | `organization` |
-| `subscription_required` | `choose_plan` | `pricing` |
-| `subscription_inactive` | `resume_subscription` | `billing` |
 | `organization_limit_exceeded` | `manage_organization_limit` | `organization` |
 
-Los valores de nivel son identificadores, no nombres para mostrar. No los
-cambies en un cliente localizado. Una cuenta de pago puede estar bloqueada
-igualmente. Revisa `organization_creation_allowed` antes de activar la creación
-de organizaciones.
+Los valores de nivel son identificadores, no nombres para mostrar. No los cambies en un cliente localizado. Revisa `organization_creation_allowed` antes de activar la creación de organizaciones.
 
 Este endpoint no crea organizaciones, no envía invitaciones, no cambia roles ni
 cambia la facturación.

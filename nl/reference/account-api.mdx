@@ -15,6 +15,7 @@ toegangsgegevens van een account als SDK- of ingest-configuratie.
 | Huidig gebruik en quotastatus lezen | `GET /api/account/usage` |
 | Gebruik door de tijd heen lezen | `GET /api/account/usage/history` |
 | Gereedheid van abonnement en organisatie lezen | `GET /api/account/subscription` |
+| De abonnementen en hun limieten lezen | `GET /api/billing/catalog` |
 | Eén app- of CLI-login beëindigen | `POST /api/auth/logout` |
 | Elke LogBrew-login intrekken | `POST /api/auth/logout-all` |
 | De browsersessie wissen | `POST /api/auth/web/logout` |
@@ -82,7 +83,7 @@ en heeft in de huidige periode alleen logs verstuurd:
 | `plan.tier` | Code van het abonnement: `free`, `pro` of `scale`. |
 | `plan.status` | `free`, `trial`, `active`, `past_due` of `disabled`. |
 | `limits.events`, `limits.bytes`, `limits.projects` | Compatibiliteitsvelden. Ze zijn `null`. `null` betekent niet onbeperkt. Gebruik `state`, `limit` en `percent_used` voor de quotastatus. |
-| `limits.retention_days` | De bewaartermijn van gegevens voor het abonnement, in dagen, of `null`. |
+| `limits.retention_days` | De bewaartermijn van gegevens voor het abonnement, in dagen, of `null`. Een actieve bèta-aanbieding bepaalt de bewaartermijn van haar abonnement. |
 | `usage.events`, `usage.bytes` | Totalen voor alle telemetriestromen in de periode. |
 | `usage.projects` | Het aantal projecten waarvan het account eigenaar is. |
 | `state` | `ok`, `warning` of `blocked`. |
@@ -120,6 +121,36 @@ curl "https://api.logbrew.co/api/account/usage?response_version=2" \
 | `events` | Het aantal weggegooide events. |
 
 Weggegooide events hebben LogBrew nooit bereikt. Ze worden niet gefactureerd en tellen niet mee in `usage`, `by_project` of `by_stream`. De array is leeg als geen enkele SDK weggegooide events heeft gemeld.
+
+### Bèta-aanbieding
+
+Accounts die zich tijdens de openbare bèta aanmelden, krijgen de Pro-limieten 6 maanden gratis. Accounts die op 2026-10-22 al bestonden, tellen de 6 maanden vanaf die datum. Stuur `response_version=3` om ook `offer` te krijgen. Versie 1 en 2 hebben dit veld niet. Versie 3 heeft ook `sdk_dropped_events`.
+
+```bash
+curl "https://api.logbrew.co/api/account/usage?response_version=3" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER"
+```
+
+`offer` is `null` wanneer er geen aanbieding actief is. Anders heeft het deze velden:
+
+```json
+{
+  "offer": {
+    "kind": "public_beta",
+    "tier": "team",
+    "starts_at": "2026-10-22T00:00:00Z",
+    "ends_at": "2027-04-22T00:00:00Z"
+  }
+}
+```
+
+| Veld | Betekenis |
+| --- | --- |
+| `kind` | Waarom de limieten gelden. De waarde is `public_beta`. |
+| `tier` | Het abonnement waarvan de limieten gelden. `team` is het Pro-abonnement. |
+| `starts_at`, `ends_at` | De periode van de aanbieding. Het einde valt er niet meer in. |
+
+Zolang een aanbieding actief is, gebruiken `limits.retention_days`, `state`, `limit`, `percent_used` en `next_action` de grootste limieten van het eigen abonnement van het account en de aanbieding. `plan` toont nog steeds het eigen abonnement van het account. Na `ends_at` gebruikt het account weer zijn eigen abonnement. Versie 1 en 2 volgen dezelfde limieten, maar tonen de aanbieding niet. Het factureringsoverzicht `GET /api/billing/overview` heeft hetzelfde veld `offer`.
 
 ### Quotastatussen
 
@@ -282,11 +313,60 @@ Een niet-ondersteund interval geeft `422`:
 
 Een onbekende queryparameter geeft ook `422` met `validation_failed`.
 
+## Abonnementen en limieten
+
+`GET /api/billing/catalog` toont de abonnementen. Het vraagt geen authenticatie. Elk abonnement heeft alle functies, met onbeperkt veel teamgenoten en projecten. De abonnementen verschillen in volume en bewaartermijn. De limieten worden elke factureringsmaand gereset. 1 GB is 1.000.000.000 bytes.
+
+| Abonnement | `tier` | Prijs per maand | Logs | App-metrics | Trace-spans | Issue-events | Bewaartermijn |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Free | `developer` | $0 | 50 GB | 50 GB | 50 miljoen | 100.000 | 30 dagen |
+| Pro | `team` | $25 | 500 GB | 500 GB | 500 miljoen | 2 miljoen | 90 dagen |
+| Business | `business` | $80 | 2.000 GB | 2.000 GB | 2 miljard | 10 miljoen | 365 dagen |
+| Enterprise | `enterprise` | Op offerte | Op maat | Op maat | Op maat | Op maat | Op maat |
+
+De catalogus en het factureringsoverzicht gebruiken de `tier`-waarden `developer`, `team`, `business` en `enterprise`. De gebruiks- en abonnementsresponses gebruiken `free`, `pro` en `scale`. De abonnementen Business en Enterprise zijn allebei `scale`.
+
+```bash
+curl "https://api.logbrew.co/api/billing/catalog"
+```
+
+De response toont de abonnementen in deze volgorde. Dit voorbeeld toont het Pro-abonnement:
+
+```json
+{
+  "response_version": 1,
+  "currency": "usd",
+  "interval": "month",
+  "checkout_available": false,
+  "plans": [
+    {
+      "tier": "team",
+      "monthly_price_cents": 2500,
+      "activation": "checkout",
+      "quote_email": null,
+      "limits": {
+        "issue_events": 2000000,
+        "log_bytes": 500000000000,
+        "metric_bytes": 500000000000,
+        "trace_spans": 500000000,
+        "retention_days": 90,
+        "unlimited_projects": true
+      }
+    }
+  ]
+}
+```
+
+| Veld | Betekenis |
+| --- | --- |
+| `checkout_available` | `true` wanneer je een betaald abonnement kunt kopen. |
+| `monthly_price_cents` | De prijs in Amerikaanse centen. Bij een abonnement op offerte is het `null`. |
+| `activation` | `included`, `checkout` of `quote`. |
+| `limits` | De limieten voor 1 factureringsmaand. Een waarde `null` wordt contractueel vastgelegd. |
+
 ## Gereedheid van het abonnement
 
-`GET /api/account/subscription` is alleen-lezen. Gebruik het om te bepalen of
-je de opties voor betaalde abonnementen of organisaties inschakelt. Gebruik
-het gebruiksendpoint voor de quotastatus.
+`GET /api/account/subscription` is alleen-lezen. Gebruik het om te bepalen of je de opties voor organisaties inschakelt. Gebruik het gebruiksendpoint voor de quotastatus.
 
 ```bash
 curl "https://api.logbrew.co/api/account/subscription" \
@@ -306,25 +386,25 @@ Een gratis account geeft deze response. De `account_id` is synthetisch:
   "current_period_end": null,
   "renews_at": null,
   "cancels_at": null,
-  "organization_creation_allowed": false,
-  "organization_creation_blocker": "subscription_required",
+  "organization_creation_allowed": true,
+  "organization_creation_blocker": null,
   "limits": {
-    "organizations": 0,
-    "members_per_organization": 0,
-    "projects_per_organization": 0,
-    "invitations_per_day": 0
+    "organizations": 1,
+    "members_per_organization": 9007199254740991,
+    "projects_per_organization": 9007199254740991,
+    "invitations_per_day": 20
   },
   "next": "<display text>",
   "next_action": {
-    "code": "choose_plan",
-    "target": "pricing"
+    "code": "create_or_manage_organization",
+    "target": "organization"
   }
 }
 ```
 
-`next` is weergavetekst. Die verandert als betaalde abonnementen wel of niet
-te koop zijn. Toon de teruggegeven tekst, of lokaliseer op basis van
-`next_action`. Neem geen abonnementsnaam uit `next` vast op in je code.
+Elk abonnement kan een organisatie aanmaken, teamgenoten uitnodigen en projecten toevoegen. Een organisatie heeft geen limiet voor leden of projecten. De waarde `9007199254740991` betekent onbeperkt. Het is het grootste gehele getal dat JSON-clients exact lezen. Toon hiervoor „Onbeperkt”. Alleen het aantal organisaties dat een account bezit, kan het aanmaken van een organisatie blokkeren.
+
+`next` is weergavetekst. Toon de teruggegeven tekst, of lokaliseer op basis van `next_action`. Leg geen abonnementsnaam uit `next` vast in code.
 
 Enumwaarden:
 
@@ -334,21 +414,16 @@ Enumwaarden:
 | `billing_interval` | `none`, `monthly`, `yearly` |
 | `state` | `free`, `trialing`, `active`, `past_due`, `paused`, `canceled` |
 | `access_state` | `active` voor `free`, `trialing` en `active`. `paused` voor `past_due`, `paused` en `canceled`. |
-| `organization_creation_blocker` | `subscription_required`, `subscription_inactive`, `organization_limit_exceeded` of `null` |
+| `organization_creation_blocker` | `organization_limit_exceeded` of `null` |
 
-Elke blokkade heeft één `next_action`-paar:
+De API geeft de blokkades `subscription_required` en `subscription_inactive` niet terug. Elke blokkade heeft één `next_action`-paar:
 
 | `organization_creation_blocker` | `next_action.code` | `next_action.target` |
 | --- | --- | --- |
 | `null` | `create_or_manage_organization` | `organization` |
-| `subscription_required` | `choose_plan` | `pricing` |
-| `subscription_inactive` | `resume_subscription` | `billing` |
 | `organization_limit_exceeded` | `manage_organization_limit` | `organization` |
 
-Tierwaarden zijn identifiers, geen weergavenamen. Houd ze ongewijzigd in een
-gelokaliseerde client. Een betaald account kan nog steeds geblokkeerd zijn.
-Controleer `organization_creation_allowed` voordat je het maken van
-organisaties inschakelt.
+Tierwaarden zijn identifiers, geen weergavenamen. Houd ze ongewijzigd in een gelokaliseerde client. Controleer `organization_creation_allowed` voordat je het maken van organisaties inschakelt.
 
 Dit endpoint maakt geen organisaties, verstuurt geen uitnodigingen, wijzigt
 geen rollen en wijzigt de facturering niet.

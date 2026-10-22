@@ -14,6 +14,7 @@ Never use an account credential as SDK or ingest configuration.
 | Read current usage and quota state | `GET /api/account/usage` |
 | Read usage over time | `GET /api/account/usage/history` |
 | Read subscription and organization readiness | `GET /api/account/subscription` |
+| Read the plans and their allowances | `GET /api/billing/catalog` |
 | Sign out one app or CLI login | `POST /api/auth/logout` |
 | Revoke every LogBrew login | `POST /api/auth/logout-all` |
 | Clear the browser session | `POST /api/auth/web/logout` |
@@ -81,7 +82,7 @@ sent only logs in the current period:
 | `plan.tier` | Plan identifier: `free`, `pro`, or `scale`. |
 | `plan.status` | `free`, `trial`, `active`, `past_due`, or `disabled`. |
 | `limits.events`, `limits.bytes`, `limits.projects` | Compatibility fields. They are `null`. `null` does not mean unlimited. Use `state`, `limit`, and `percent_used` for quota state. |
-| `limits.retention_days` | Data retention for the plan, in days, or `null`. |
+| `limits.retention_days` | Data retention for the plan, in days, or `null`. An active beta offer sets the retention of its plan. |
 | `usage.events`, `usage.bytes` | Totals for all telemetry streams in the period. |
 | `usage.projects` | The number of projects that the account owns. |
 | `state` | `ok`, `warning`, or `blocked`. |
@@ -124,6 +125,44 @@ full. There is 1 row for each project and reason:
 Dropped events never reached LogBrew. They are not billed, and they do not
 count toward `usage`, `by_project`, or `by_stream`. The array is empty when no
 SDK reported a drop.
+
+### Beta offer
+
+Accounts that sign up during the public beta get the Pro allowances free for
+6 months. Accounts that existed on 2026-10-22 count the 6 months from that
+date. Send `response_version=3` to also get `offer`. Versions 1 and 2 do not
+have this field. Version 3 also has `sdk_dropped_events`.
+
+```bash
+curl "https://api.logbrew.co/api/account/usage?response_version=3" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER"
+```
+
+`offer` is `null` when no offer is active. Otherwise it has these fields:
+
+```json
+{
+  "offer": {
+    "kind": "public_beta",
+    "tier": "team",
+    "starts_at": "2026-10-22T00:00:00Z",
+    "ends_at": "2027-04-22T00:00:00Z"
+  }
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `kind` | Why the allowances apply. The value is `public_beta`. |
+| `tier` | The plan whose allowances apply. `team` is the Pro plan. |
+| `starts_at`, `ends_at` | The offer period. The end is exclusive. |
+
+While an offer is active, `limits.retention_days`, `state`, `limit`,
+`percent_used`, and `next_action` use the larger of the account's own plan and
+the offer. `plan` still shows the account's own plan. After `ends_at`, the
+account uses its own plan again. Versions 1 and 2 follow the same allowances,
+but they do not show the offer. The billing overview,
+`GET /api/billing/overview`, has the same `offer` field.
 
 ### Quota states
 
@@ -282,11 +321,66 @@ An unsupported interval returns `422`:
 
 An unknown query key also returns `422` with `validation_failed`.
 
+## Plans and allowances
+
+`GET /api/billing/catalog` lists the plans. It needs no authentication.
+Every plan has every feature, and every plan has unlimited teammates and
+projects. Plans differ in volume and retention. Allowances reset each billing
+month. 1 GB is 1,000,000,000 bytes.
+
+| Plan | `tier` | Price per month | Logs | Metrics | Spans | Issue events | Retention |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Free | `developer` | $0 | 50 GB | 50 GB | 50 million | 100,000 | 30 days |
+| Pro | `team` | $25 | 500 GB | 500 GB | 500 million | 2 million | 90 days |
+| Business | `business` | $80 | 2,000 GB | 2,000 GB | 2 billion | 10 million | 365 days |
+| Enterprise | `enterprise` | Quote | Custom | Custom | Custom | Custom | Custom |
+
+The catalog and the billing overview use the `tier` values `developer`,
+`team`, `business`, and `enterprise`. The usage and subscription responses use
+`free`, `pro`, and `scale`. The Business and Enterprise plans are both `scale`.
+
+```bash
+curl "https://api.logbrew.co/api/billing/catalog"
+```
+
+The response lists the plans in this order. This example shows the Pro plan:
+
+```json
+{
+  "response_version": 1,
+  "currency": "usd",
+  "interval": "month",
+  "checkout_available": false,
+  "plans": [
+    {
+      "tier": "team",
+      "monthly_price_cents": 2500,
+      "activation": "checkout",
+      "quote_email": null,
+      "limits": {
+        "issue_events": 2000000,
+        "log_bytes": 500000000000,
+        "metric_bytes": 500000000000,
+        "trace_spans": 500000000,
+        "retention_days": 90,
+        "unlimited_projects": true
+      }
+    }
+  ]
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `checkout_available` | `true` when you can buy a paid plan. |
+| `monthly_price_cents` | The price in US cents. It is `null` for a quoted plan. |
+| `activation` | `included`, `checkout`, or `quote`. |
+| `limits` | The allowances for 1 billing month. A value of `null` is set by contract. |
+
 ## Subscription readiness
 
 `GET /api/account/subscription` is read-only. Use it to decide whether to
-enable paid-plan or organization controls. Use the usage endpoint for quota
-state.
+enable organization controls. Use the usage endpoint for quota state.
 
 ```bash
 curl "https://api.logbrew.co/api/account/subscription" \
@@ -306,25 +400,30 @@ A free account returns this response. The `account_id` is synthetic:
   "current_period_end": null,
   "renews_at": null,
   "cancels_at": null,
-  "organization_creation_allowed": false,
-  "organization_creation_blocker": "subscription_required",
+  "organization_creation_allowed": true,
+  "organization_creation_blocker": null,
   "limits": {
-    "organizations": 0,
-    "members_per_organization": 0,
-    "projects_per_organization": 0,
-    "invitations_per_day": 0
+    "organizations": 1,
+    "members_per_organization": 9007199254740991,
+    "projects_per_organization": 9007199254740991,
+    "invitations_per_day": 20
   },
   "next": "<display text>",
   "next_action": {
-    "code": "choose_plan",
-    "target": "pricing"
+    "code": "create_or_manage_organization",
+    "target": "organization"
   }
 }
 ```
 
-`next` is display text. It changes when paid plans are or are not for sale.
-Show the returned text, or localize from `next_action`. Do not hard-code a
-plan name from `next`.
+Every plan can create an organization, invite teammates, and add projects.
+An organization has no limit on members or projects. The value
+`9007199254740991` means unlimited. It is the largest integer that JSON
+clients read exactly. Show "Unlimited" for it. Only the number of
+organizations that an account owns can block organization creation.
+
+`next` is display text. Show the returned text, or localize from
+`next_action`. Do not hard-code a plan name from `next`.
 
 Enum values:
 
@@ -334,20 +433,19 @@ Enum values:
 | `billing_interval` | `none`, `monthly`, `yearly` |
 | `state` | `free`, `trialing`, `active`, `past_due`, `paused`, `canceled` |
 | `access_state` | `active` for `free`, `trialing`, and `active`. `paused` for `past_due`, `paused`, and `canceled`. |
-| `organization_creation_blocker` | `subscription_required`, `subscription_inactive`, `organization_limit_exceeded`, or `null` |
+| `organization_creation_blocker` | `organization_limit_exceeded` or `null` |
 
-Each blocker has one `next_action` pair:
+The API does not return the blockers `subscription_required` and
+`subscription_inactive`. Each blocker has one `next_action` pair:
 
 | `organization_creation_blocker` | `next_action.code` | `next_action.target` |
 | --- | --- | --- |
 | `null` | `create_or_manage_organization` | `organization` |
-| `subscription_required` | `choose_plan` | `pricing` |
-| `subscription_inactive` | `resume_subscription` | `billing` |
 | `organization_limit_exceeded` | `manage_organization_limit` | `organization` |
 
 Tier values are identifiers, not display names. Keep them unchanged in a
-localized client. A paid account can still be blocked. Check
-`organization_creation_allowed` before you enable organization creation.
+localized client. Check `organization_creation_allowed` before you enable
+organization creation.
 
 This endpoint does not create organizations, send invitations, change roles,
 or change billing.

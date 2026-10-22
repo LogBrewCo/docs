@@ -14,6 +14,7 @@ description: "اقرأ حدود استخدام حساب LogBrew والحصة ع�
 | قراءة الاستخدام الحالي وحالة الحصة | `GET /api/account/usage` |
 | قراءة الاستخدام عبر الزمن | `GET /api/account/usage/history` |
 | قراءة جاهزية الاشتراك والمؤسسة | `GET /api/account/subscription` |
+| قراءة الخطط وحصصها | `GET /api/billing/catalog` |
 | تسجيل الخروج من تطبيق واحد أو من تسجيل دخول CLI واحد | `POST /api/auth/logout` |
 | إبطال كل عمليات تسجيل الدخول إلى LogBrew | `POST /api/auth/logout-all` |
 | مسح جلسة المتصفح | `POST /api/auth/web/logout` |
@@ -80,7 +81,7 @@ curl "https://api.logbrew.co/api/account/usage" \
 | `plan.tier` | معرّف الخطة: `free` أو `pro` أو `scale`. |
 | `plan.status` | `free` أو `trial` أو `active` أو `past_due` أو `disabled`. |
 | `limits.events`، `limits.bytes`، `limits.projects` | حقول للتوافق. قيمتها `null`. و`null` لا تعني بلا حدود. استخدم `state` و`limit` و`percent_used` لحالة الحصة. |
-| `limits.retention_days` | مدة الاحتفاظ بالبيانات في الخطة بالأيام، أو `null`. |
+| `limits.retention_days` | مدة الاحتفاظ بالبيانات في الخطة بالأيام، أو `null`. يحدد عرض النسخة التجريبية النشط مدة الاحتفاظ بحسب خطته. |
 | `usage.events`، `usage.bytes` | المجاميع لكل تدفقات بيانات القياس عن بُعد في الفترة. |
 | `usage.projects` | عدد المشاريع التي يملكها الحساب. |
 | `state` | `ok` أو `warning` أو `blocked`. |
@@ -118,6 +119,36 @@ curl "https://api.logbrew.co/api/account/usage?response_version=2" \
 | `events` | عدد الأحداث التي تم إسقاطها. |
 
 لم تصل الأحداث التي تم إسقاطها إلى LogBrew أبدًا. لا تُحتسب في الفاتورة ولا تُحسب ضمن `usage` أو `by_project` أو `by_stream`. تكون المصفوفة فارغة عندما لا تُبلغ أي حزمة SDK عن إسقاط أحداث.
+
+### عرض النسخة التجريبية
+
+تحصل الحسابات التي تُنشأ خلال النسخة التجريبية العامة على حصص خطة Pro مجانًا لمدة 6 أشهر. أما الحسابات الموجودة في 2026-10-22 فتحسب الأشهر الستة من ذلك التاريخ. أرسل `response_version=3` لتحصل أيضًا على `offer`. لا يوجد هذا الحقل في الإصدارين 1 و2. ويحتوي الإصدار 3 أيضًا على `sdk_dropped_events`.
+
+```bash
+curl "https://api.logbrew.co/api/account/usage?response_version=3" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER"
+```
+
+قيمة `offer` هي `null` عندما لا يوجد عرض نشط. وإلا فإنه يحتوي على هذه الحقول:
+
+```json
+{
+  "offer": {
+    "kind": "public_beta",
+    "tier": "team",
+    "starts_at": "2026-10-22T00:00:00Z",
+    "ends_at": "2027-04-22T00:00:00Z"
+  }
+}
+```
+
+| الحقل | المعنى |
+| --- | --- |
+| `kind` | سبب انطباق الحصص. القيمة هي `public_beta`. |
+| `tier` | الخطة التي تنطبق حصصها. `team` هي خطة Pro. |
+| `starts_at`، `ends_at` | مدة العرض. النهاية غير مشمولة. |
+
+أثناء سريان العرض، تستخدم `limits.retention_days` و`state` و`limit` و`percent_used` و`next_action` الحصص الأكبر بين خطة الحساب نفسه والعرض. يظل `plan` يعرض خطة الحساب نفسه. بعد `ends_at` يعود الحساب إلى استخدام خطته. يتبع الإصداران 1 و2 الحصص نفسها، لكنهما لا يعرضان العرض. ولنظرة الفوترة العامة `GET /api/billing/overview` الحقل `offer` نفسه.
 
 ### حالات الحصة
 
@@ -275,11 +306,60 @@ curl --get "https://api.logbrew.co/api/account/usage/history" \
 
 ومفتاح الاستعلام غير المعروف يعيد أيضًا `422` مع `validation_failed`.
 
+## الخطط والحصص
+
+تعرض `GET /api/billing/catalog` الخطط. ولا تحتاج إلى مصادقة. تتضمن كل خطة كل الميزات، مع عدد غير محدود من الزملاء والمشاريع. تختلف الخطط في الحجم ومدة الاحتفاظ. تُعاد ضبط الحصص كل شهر فوترة. 1 GB يساوي 1,000,000,000 بايت.
+
+| الخطة | `tier` | السعر الشهري | السجلات | مقاييس التطبيق | Spans التتبّع | أحداث المشكلات | مدة الاحتفاظ |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Free | `developer` | $0 | 50 GB | 50 GB | 50 مليون | 100,000 | 30 يومًا |
+| Pro | `team` | $25 | 500 GB | 500 GB | 500 مليون | 2 مليون | 90 يومًا |
+| Business | `business` | $80 | 2,000 GB | 2,000 GB | 2 مليار | 10 ملايين | 365 يومًا |
+| Enterprise | `enterprise` | حسب عرض السعر | مخصص | مخصص | مخصص | مخصص | مخصص |
+
+يستخدم الكتالوج ونظرة الفوترة العامة قيم `tier` التالية: `developer` و`team` و`business` و`enterprise`. وتستخدم استجابتا الاستخدام والاشتراك القيم `free` و`pro` و`scale`. وخطتا Business وEnterprise كلتاهما `scale`.
+
+```bash
+curl "https://api.logbrew.co/api/billing/catalog"
+```
+
+تعرض الاستجابة الخطط بهذا الترتيب. يعرض هذا المثال خطة Pro:
+
+```json
+{
+  "response_version": 1,
+  "currency": "usd",
+  "interval": "month",
+  "checkout_available": false,
+  "plans": [
+    {
+      "tier": "team",
+      "monthly_price_cents": 2500,
+      "activation": "checkout",
+      "quote_email": null,
+      "limits": {
+        "issue_events": 2000000,
+        "log_bytes": 500000000000,
+        "metric_bytes": 500000000000,
+        "trace_spans": 500000000,
+        "retention_days": 90,
+        "unlimited_projects": true
+      }
+    }
+  ]
+}
+```
+
+| الحقل | المعنى |
+| --- | --- |
+| `checkout_available` | `true` عندما يمكنك شراء خطة مدفوعة. |
+| `monthly_price_cents` | السعر بالسنتات الأمريكية. وهو `null` للخطة بحسب عرض السعر. |
+| `activation` | `included` أو `checkout` أو `quote`. |
+| `limits` | الحصص لشهر فوترة واحد. القيمة `null` يحددها العقد. |
+
 ## جاهزية الاشتراك
 
-`GET /api/account/subscription` للقراءة فقط. استخدمها لتقرر ما إذا كنت ستفعّل
-أدوات التحكم في الخطط المدفوعة أو المؤسسات. استخدم نقطة نهاية الاستخدام لحالة
-الحصة.
+`GET /api/account/subscription` للقراءة فقط. استخدمها لتقرر ما إذا كنت ستفعّل أدوات التحكم في المؤسسات. استخدم نقطة نهاية الاستخدام لحالة الحصة.
 
 ```bash
 curl "https://api.logbrew.co/api/account/subscription" \
@@ -299,25 +379,25 @@ curl "https://api.logbrew.co/api/account/subscription" \
   "current_period_end": null,
   "renews_at": null,
   "cancels_at": null,
-  "organization_creation_allowed": false,
-  "organization_creation_blocker": "subscription_required",
+  "organization_creation_allowed": true,
+  "organization_creation_blocker": null,
   "limits": {
-    "organizations": 0,
-    "members_per_organization": 0,
-    "projects_per_organization": 0,
-    "invitations_per_day": 0
+    "organizations": 1,
+    "members_per_organization": 9007199254740991,
+    "projects_per_organization": 9007199254740991,
+    "invitations_per_day": 20
   },
   "next": "<display text>",
   "next_action": {
-    "code": "choose_plan",
-    "target": "pricing"
+    "code": "create_or_manage_organization",
+    "target": "organization"
   }
 }
 ```
 
-`next` نص للعرض. يتغير عندما تكون الخطط المدفوعة معروضة للبيع أو غير معروضة.
-اعرض النص المُعاد، أو ترجم النص في واجهتك انطلاقًا من `next_action`. لا تثبّت في
-الشيفرة اسم خطة مأخوذًا من `next`.
+يمكن لأي خطة إنشاء مؤسسة ودعوة الزملاء وإضافة المشاريع. لا يوجد حد لعدد الأعضاء أو المشاريع في المؤسسة. القيمة `9007199254740991` تعني غير محدود. وهي أكبر عدد صحيح تقرأه عملاء JSON بدقة. اعرض "غير محدود" لهذه القيمة. لا يمنع إنشاء مؤسسة إلا عدد المؤسسات التي يملكها الحساب.
+
+`next` نص للعرض. اعرض النص المُعاد، أو ترجمه بالاعتماد على `next_action`. لا تثبّت اسم خطة في الشيفرة اعتمادًا على `next`.
 
 قيم التعداد:
 
@@ -327,20 +407,16 @@ curl "https://api.logbrew.co/api/account/subscription" \
 | `billing_interval` | `none`، `monthly`، `yearly` |
 | `state` | `free`، `trialing`، `active`، `past_due`، `paused`، `canceled` |
 | `access_state` | `active` للقيم `free` و`trialing` و`active`. و`paused` للقيم `past_due` و`paused` و`canceled`. |
-| `organization_creation_blocker` | `subscription_required` أو `subscription_inactive` أو `organization_limit_exceeded` أو `null` |
+| `organization_creation_blocker` | `organization_limit_exceeded` أو `null` |
 
-لكل مانع زوج `next_action` واحد:
+لا تعيد API المانعين `subscription_required` و`subscription_inactive`. لكل مانع زوج `next_action` واحد:
 
 | `organization_creation_blocker` | `next_action.code` | `next_action.target` |
 | --- | --- | --- |
 | `null` | `create_or_manage_organization` | `organization` |
-| `subscription_required` | `choose_plan` | `pricing` |
-| `subscription_inactive` | `resume_subscription` | `billing` |
 | `organization_limit_exceeded` | `manage_organization_limit` | `organization` |
 
-قيم `tier` معرّفات، لا أسماء للعرض. أبقِها دون تغيير في العميل المترجَم. قد يكون
-الحساب المدفوع ممنوعًا مع ذلك. افحص `organization_creation_allowed` قبل أن تفعّل
-إنشاء المؤسسات.
+قيم `tier` معرّفات، لا أسماء للعرض. أبقِها دون تغيير في العميل المترجَم. افحص `organization_creation_allowed` قبل أن تفعّل إنشاء المؤسسات.
 
 لا تنشئ نقطة النهاية هذه مؤسسات، ولا ترسل دعوات، ولا تغيّر الأدوار أو الفوترة.
 

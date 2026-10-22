@@ -15,6 +15,7 @@ atau ingest.
 | Baca penggunaan dan status kuota saat ini | `GET /api/account/usage` |
 | Baca penggunaan dari waktu ke waktu | `GET /api/account/usage/history` |
 | Baca kesiapan langganan dan organisasi | `GET /api/account/subscription` |
+| Baca paket dan kuotanya | `GET /api/billing/catalog` |
 | Keluarkan satu login aplikasi atau CLI | `POST /api/auth/logout` |
 | Cabut semua login LogBrew | `POST /api/auth/logout-all` |
 | Hapus sesi browser | `POST /api/auth/web/logout` |
@@ -83,7 +84,7 @@ mengirim log pada periode saat ini:
 | `plan.tier` | Pengenal paket: `free`, `pro`, atau `scale`. |
 | `plan.status` | `free`, `trial`, `active`, `past_due`, atau `disabled`. |
 | `limits.events`, `limits.bytes`, `limits.projects` | Kolom kompatibilitas. Nilainya `null`. `null` tidak berarti tanpa batas. Gunakan `state`, `limit`, dan `percent_used` untuk status kuota. |
-| `limits.retention_days` | Retensi data untuk paket, dalam hari, atau `null`. |
+| `limits.retention_days` | Retensi data untuk paket, dalam hari, atau `null`. Promo beta yang aktif menetapkan retensi dari paketnya. |
 | `usage.events`, `usage.bytes` | Total untuk semua stream telemetri dalam periode ini. |
 | `usage.projects` | Jumlah proyek yang dimiliki akun. |
 | `state` | `ok`, `warning`, atau `blocked`. |
@@ -121,6 +122,36 @@ curl "https://api.logbrew.co/api/account/usage?response_version=2" \
 | `events` | Jumlah peristiwa yang dibuang. |
 
 Peristiwa yang dibuang tidak pernah sampai ke LogBrew. Peristiwa ini tidak ditagih dan tidak dihitung dalam `usage`, `by_project`, atau `by_stream`. Array kosong jika tidak ada SDK yang melaporkan peristiwa yang dibuang.
+
+### Promo beta
+
+Akun yang mendaftar selama beta publik mendapat kuota Pro gratis selama 6 bulan. Akun yang sudah ada pada 2026-10-22 menghitung 6 bulan dari tanggal itu. Kirim `response_version=3` untuk mendapatkan `offer` juga. Versi 1 dan 2 tidak memiliki kolom ini. Versi 3 juga memiliki `sdk_dropped_events`.
+
+```bash
+curl "https://api.logbrew.co/api/account/usage?response_version=3" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER"
+```
+
+`offer` bernilai `null` jika tidak ada promo yang aktif. Jika ada, isinya memiliki kolom berikut:
+
+```json
+{
+  "offer": {
+    "kind": "public_beta",
+    "tier": "team",
+    "starts_at": "2026-10-22T00:00:00Z",
+    "ends_at": "2027-04-22T00:00:00Z"
+  }
+}
+```
+
+| Kolom | Arti |
+| --- | --- |
+| `kind` | Alasan kuota berlaku. Nilainya `public_beta`. |
+| `tier` | Paket yang kuotanya berlaku. `team` adalah paket Pro. |
+| `starts_at`, `ends_at` | Periode promo. Akhir periode bersifat eksklusif. |
+
+Selama promo aktif, `limits.retention_days`, `state`, `limit`, `percent_used`, dan `next_action` memakai kuota yang lebih besar antara paket milik akun dan promo. `plan` tetap menampilkan paket milik akun. Setelah `ends_at`, akun kembali memakai paketnya sendiri. Versi 1 dan 2 mengikuti kuota yang sama, tetapi tidak menampilkan promo. Ringkasan penagihan `GET /api/billing/overview` memiliki kolom `offer` yang sama.
 
 ### Status kuota
 
@@ -285,11 +316,60 @@ Interval yang tidak didukung mengembalikan `422`:
 Kunci kueri yang tidak dikenal juga mengembalikan `422` dengan
 `validation_failed`.
 
+## Paket dan kuota
+
+`GET /api/billing/catalog` mencantumkan paket. Endpoint ini tidak memerlukan autentikasi. Setiap paket memiliki semua fitur, dengan rekan kerja dan proyek tanpa batas. Paket berbeda dalam volume dan retensi. Kuota direset setiap bulan penagihan. 1 GB sama dengan 1.000.000.000 byte.
+
+| Paket | `tier` | Harga per bulan | Log | Metrik aplikasi | Span trace | Peristiwa masalah | Masa simpan |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Free | `developer` | $0 | 50 GB | 50 GB | 50 juta | 100.000 | 30 hari |
+| Pro | `team` | $25 | 500 GB | 500 GB | 500 juta | 2 juta | 90 hari |
+| Business | `business` | $80 | 2.000 GB | 2.000 GB | 2 miliar | 10 juta | 365 hari |
+| Enterprise | `enterprise` | Sesuai penawaran | Khusus | Khusus | Khusus | Khusus | Khusus |
+
+Katalog dan ringkasan penagihan memakai nilai `tier` `developer`, `team`, `business`, dan `enterprise`. Respons penggunaan dan langganan memakai `free`, `pro`, dan `scale`. Paket Business dan Enterprise sama-sama `scale`.
+
+```bash
+curl "https://api.logbrew.co/api/billing/catalog"
+```
+
+Respons mencantumkan paket dalam urutan ini. Contoh ini menampilkan paket Pro:
+
+```json
+{
+  "response_version": 1,
+  "currency": "usd",
+  "interval": "month",
+  "checkout_available": false,
+  "plans": [
+    {
+      "tier": "team",
+      "monthly_price_cents": 2500,
+      "activation": "checkout",
+      "quote_email": null,
+      "limits": {
+        "issue_events": 2000000,
+        "log_bytes": 500000000000,
+        "metric_bytes": 500000000000,
+        "trace_spans": 500000000,
+        "retention_days": 90,
+        "unlimited_projects": true
+      }
+    }
+  ]
+}
+```
+
+| Kolom | Arti |
+| --- | --- |
+| `checkout_available` | `true` jika Anda dapat membeli paket berbayar. |
+| `monthly_price_cents` | Harga dalam sen dolar AS. Nilainya `null` untuk paket sesuai penawaran. |
+| `activation` | `included`, `checkout`, atau `quote`. |
+| `limits` | Kuota untuk 1 bulan penagihan. Nilai `null` ditetapkan melalui kontrak. |
+
 ## Kesiapan langganan
 
-`GET /api/account/subscription` bersifat hanya baca. Gunakan endpoint ini untuk
-memutuskan apakah kontrol paket berbayar atau organisasi diaktifkan. Gunakan
-endpoint penggunaan untuk status kuota.
+`GET /api/account/subscription` bersifat hanya baca. Gunakan endpoint ini untuk memutuskan apakah kontrol organisasi diaktifkan. Gunakan endpoint penggunaan untuk status kuota.
 
 ```bash
 curl "https://api.logbrew.co/api/account/subscription" \
@@ -310,25 +390,25 @@ sintetis:
   "current_period_end": null,
   "renews_at": null,
   "cancels_at": null,
-  "organization_creation_allowed": false,
-  "organization_creation_blocker": "subscription_required",
+  "organization_creation_allowed": true,
+  "organization_creation_blocker": null,
   "limits": {
-    "organizations": 0,
-    "members_per_organization": 0,
-    "projects_per_organization": 0,
-    "invitations_per_day": 0
+    "organizations": 1,
+    "members_per_organization": 9007199254740991,
+    "projects_per_organization": 9007199254740991,
+    "invitations_per_day": 20
   },
   "next": "<display text>",
   "next_action": {
-    "code": "choose_plan",
-    "target": "pricing"
+    "code": "create_or_manage_organization",
+    "target": "organization"
   }
 }
 ```
 
-`next` adalah teks tampilan. Teks ini berubah saat paket berbayar dijual atau
-tidak dijual. Tampilkan teks yang dikembalikan, atau buat teks terjemahan
-berdasarkan `next_action`. Jangan meng-hard-code nama paket dari `next`.
+Setiap paket dapat membuat organisasi, mengundang rekan kerja, dan menambahkan proyek. Organisasi tidak memiliki batas anggota maupun proyek. Nilai `9007199254740991` berarti tanpa batas. Ini adalah bilangan bulat terbesar yang dibaca persis oleh klien JSON. Tampilkan "Tanpa batas" untuk nilai ini. Hanya jumlah organisasi yang dimiliki akun yang dapat memblokir pembuatan organisasi.
+
+`next` adalah teks tampilan. Tampilkan teks yang dikembalikan, atau lokalkan dari `next_action`. Jangan menulis tetap nama paket dari `next` di kode.
 
 Nilai enum:
 
@@ -338,21 +418,16 @@ Nilai enum:
 | `billing_interval` | `none`, `monthly`, `yearly` |
 | `state` | `free`, `trialing`, `active`, `past_due`, `paused`, `canceled` |
 | `access_state` | `active` untuk `free`, `trialing`, dan `active`. `paused` untuk `past_due`, `paused`, dan `canceled`. |
-| `organization_creation_blocker` | `subscription_required`, `subscription_inactive`, `organization_limit_exceeded`, atau `null` |
+| `organization_creation_blocker` | `organization_limit_exceeded` atau `null` |
 
-Setiap penghambat punya satu pasangan `next_action`:
+API tidak mengembalikan penghambat `subscription_required` dan `subscription_inactive`. Setiap penghambat punya satu pasangan `next_action`:
 
 | `organization_creation_blocker` | `next_action.code` | `next_action.target` |
 | --- | --- | --- |
 | `null` | `create_or_manage_organization` | `organization` |
-| `subscription_required` | `choose_plan` | `pricing` |
-| `subscription_inactive` | `resume_subscription` | `billing` |
 | `organization_limit_exceeded` | `manage_organization_limit` | `organization` |
 
-Nilai tier adalah pengenal, bukan nama tampilan. Jangan ubah nilai itu di
-klien yang dilokalkan. Akun berbayar tetap bisa diblokir. Periksa
-`organization_creation_allowed` sebelum Anda mengaktifkan pembuatan
-organisasi.
+Nilai tier adalah pengenal, bukan nama tampilan. Jangan ubah nilai itu di klien yang dilokalkan. Periksa `organization_creation_allowed` sebelum Anda mengaktifkan pembuatan organisasi.
 
 Endpoint ini tidak membuat organisasi, mengirim undangan, mengubah peran, atau
 mengubah penagihan.
