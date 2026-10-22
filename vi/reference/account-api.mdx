@@ -15,6 +15,7 @@ tin xác thực tài khoản làm cấu hình SDK hoặc cấu hình gửi dữ 
 | Đọc mức sử dụng và trạng thái hạn mức hiện tại | `GET /api/account/usage` |
 | Đọc mức sử dụng theo thời gian | `GET /api/account/usage/history` |
 | Đọc trạng thái sẵn sàng của gói đăng ký và tổ chức | `GET /api/account/subscription` |
+| Đọc các gói và hạn mức của từng gói | `GET /api/billing/catalog` |
 | Đăng xuất một phiên đăng nhập trên ứng dụng hoặc CLI | `POST /api/auth/logout` |
 | Thu hồi mọi phiên đăng nhập LogBrew | `POST /api/auth/logout-all` |
 | Xóa phiên trình duyệt | `POST /api/auth/web/logout` |
@@ -82,7 +83,7 @@ log trong kỳ hiện tại:
 | `plan.tier` | ID của gói: `free`, `pro` hoặc `scale`. |
 | `plan.status` | `free`, `trial`, `active`, `past_due` hoặc `disabled`. |
 | `limits.events`, `limits.bytes`, `limits.projects` | Trường tương thích. Các trường này là `null`. `null` không có nghĩa là không giới hạn. Dùng `state`, `limit` và `percent_used` để biết trạng thái hạn mức. |
-| `limits.retention_days` | Thời gian giữ dữ liệu của gói, tính bằng ngày, hoặc `null`. |
+| `limits.retention_days` | Thời gian giữ dữ liệu của gói, tính bằng ngày, hoặc `null`. Ưu đãi beta đang hiệu lực đặt thời gian giữ dữ liệu theo gói của ưu đãi đó. |
 | `usage.events`, `usage.bytes` | Tổng của mọi luồng telemetry trong kỳ. |
 | `usage.projects` | Số dự án mà tài khoản sở hữu. |
 | `state` | `ok`, `warning` hoặc `blocked`. |
@@ -120,6 +121,36 @@ curl "https://api.logbrew.co/api/account/usage?response_version=2" \
 | `events` | Số sự kiện bị loại bỏ. |
 
 Các sự kiện bị loại bỏ chưa bao giờ đến được LogBrew. Chúng không bị tính phí và không được tính vào `usage`, `by_project` hoặc `by_stream`. Mảng sẽ trống khi không có SDK nào báo loại bỏ sự kiện.
+
+### Ưu đãi beta
+
+Tài khoản đăng ký trong thời gian beta công khai được dùng hạn mức của gói Pro miễn phí trong 6 tháng. Tài khoản đã có vào ngày 2026-10-22 tính 6 tháng từ ngày đó. Gửi `response_version=3` để nhận thêm `offer`. Phiên bản 1 và 2 không có trường này. Phiên bản 3 cũng có `sdk_dropped_events`.
+
+```bash
+curl "https://api.logbrew.co/api/account/usage?response_version=3" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER"
+```
+
+`offer` là `null` khi không có ưu đãi nào đang hiệu lực. Nếu có, nó gồm các trường sau:
+
+```json
+{
+  "offer": {
+    "kind": "public_beta",
+    "tier": "team",
+    "starts_at": "2026-10-22T00:00:00Z",
+    "ends_at": "2027-04-22T00:00:00Z"
+  }
+}
+```
+
+| Trường | Ý nghĩa |
+| --- | --- |
+| `kind` | Lý do áp dụng các hạn mức. Giá trị là `public_beta`. |
+| `tier` | Gói có hạn mức được áp dụng. `team` là gói Pro. |
+| `starts_at`, `ends_at` | Khoảng thời gian của ưu đãi. Thời điểm kết thúc không thuộc khoảng này. |
+
+Khi một ưu đãi đang hiệu lực, `limits.retention_days`, `state`, `limit`, `percent_used` và `next_action` dùng hạn mức lớn hơn giữa gói riêng của tài khoản và ưu đãi. `plan` vẫn hiển thị gói riêng của tài khoản. Sau `ends_at`, tài khoản dùng lại gói riêng của mình. Phiên bản 1 và 2 theo cùng các hạn mức, nhưng không hiển thị ưu đãi. Tổng quan thanh toán `GET /api/billing/overview` có cùng trường `offer`.
 
 ### Trạng thái hạn mức
 
@@ -280,11 +311,60 @@ Chu kỳ không được hỗ trợ trả về `422`:
 
 Tham số truy vấn không xác định cũng trả về `422` với `validation_failed`.
 
+## Gói và hạn mức
+
+`GET /api/billing/catalog` liệt kê các gói. Endpoint này không cần xác thực. Mọi gói đều có đầy đủ tính năng, với số đồng nghiệp và dự án không giới hạn. Các gói khác nhau về khối lượng và thời gian giữ dữ liệu. Hạn mức được đặt lại mỗi tháng thanh toán. 1 GB là 1.000.000.000 byte.
+
+| Gói | `tier` | Giá mỗi tháng | Log | Chỉ số ứng dụng | Span trace | Sự kiện vấn đề | Thời gian giữ dữ liệu |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Free | `developer` | $0 | 50 GB | 50 GB | 50 triệu | 100.000 | 30 ngày |
+| Pro | `team` | $25 | 500 GB | 500 GB | 500 triệu | 2 triệu | 90 ngày |
+| Business | `business` | $80 | 2.000 GB | 2.000 GB | 2 tỷ | 10 triệu | 365 ngày |
+| Enterprise | `enterprise` | Theo báo giá | Tùy chỉnh | Tùy chỉnh | Tùy chỉnh | Tùy chỉnh | Tùy chỉnh |
+
+Danh mục và tổng quan thanh toán dùng các giá trị `tier` `developer`, `team`, `business` và `enterprise`. Phản hồi về mức sử dụng và gói đăng ký dùng `free`, `pro` và `scale`. Gói Business và Enterprise đều là `scale`.
+
+```bash
+curl "https://api.logbrew.co/api/billing/catalog"
+```
+
+Phản hồi liệt kê các gói theo thứ tự này. Ví dụ này cho thấy gói Pro:
+
+```json
+{
+  "response_version": 1,
+  "currency": "usd",
+  "interval": "month",
+  "checkout_available": false,
+  "plans": [
+    {
+      "tier": "team",
+      "monthly_price_cents": 2500,
+      "activation": "checkout",
+      "quote_email": null,
+      "limits": {
+        "issue_events": 2000000,
+        "log_bytes": 500000000000,
+        "metric_bytes": 500000000000,
+        "trace_spans": 500000000,
+        "retention_days": 90,
+        "unlimited_projects": true
+      }
+    }
+  ]
+}
+```
+
+| Trường | Ý nghĩa |
+| --- | --- |
+| `checkout_available` | `true` khi bạn có thể mua gói trả phí. |
+| `monthly_price_cents` | Giá tính bằng cent Mỹ. Giá trị là `null` với gói báo giá. |
+| `activation` | `included`, `checkout` hoặc `quote`. |
+| `limits` | Các hạn mức cho 1 tháng thanh toán. Giá trị `null` do hợp đồng quy định. |
+
 ## Trạng thái sẵn sàng của gói đăng ký
 
-`GET /api/account/subscription` là endpoint chỉ đọc. Dùng endpoint này để quyết
-định có bật các tùy chọn của gói trả phí hoặc của tổ chức hay không. Dùng
-endpoint mức sử dụng để biết trạng thái hạn mức.
+`GET /api/account/subscription` là endpoint chỉ đọc. Dùng endpoint này để quyết định có bật các tùy chọn của tổ chức hay không. Dùng endpoint mức sử dụng để biết trạng thái hạn mức.
 
 ```bash
 curl "https://api.logbrew.co/api/account/subscription" \
@@ -304,25 +384,25 @@ Tài khoản miễn phí trả về phản hồi này. `account_id` là giá tr�
   "current_period_end": null,
   "renews_at": null,
   "cancels_at": null,
-  "organization_creation_allowed": false,
-  "organization_creation_blocker": "subscription_required",
+  "organization_creation_allowed": true,
+  "organization_creation_blocker": null,
   "limits": {
-    "organizations": 0,
-    "members_per_organization": 0,
-    "projects_per_organization": 0,
-    "invitations_per_day": 0
+    "organizations": 1,
+    "members_per_organization": 9007199254740991,
+    "projects_per_organization": 9007199254740991,
+    "invitations_per_day": 20
   },
   "next": "<display text>",
   "next_action": {
-    "code": "choose_plan",
-    "target": "pricing"
+    "code": "create_or_manage_organization",
+    "target": "organization"
   }
 }
 ```
 
-`next` là văn bản hiển thị. Văn bản này thay đổi tùy theo các gói trả phí có
-đang được bán hay không. Hiển thị văn bản được trả về, hoặc bản địa hóa dựa trên
-`next_action`. Không hard-code tên gói lấy từ `next`.
+Mọi gói đều có thể tạo tổ chức, mời đồng nghiệp và thêm dự án. Một tổ chức không giới hạn số thành viên hay số dự án. Giá trị `9007199254740991` nghĩa là không giới hạn. Đây là số nguyên lớn nhất mà ứng dụng khách JSON đọc chính xác. Hiển thị "Không giới hạn" cho giá trị này. Chỉ số tổ chức mà một tài khoản sở hữu mới có thể chặn việc tạo tổ chức.
+
+`next` là văn bản để hiển thị. Hiển thị văn bản được trả về, hoặc bản địa hóa từ `next_action`. Không gán cứng tên gói từ `next`.
 
 Giá trị enum:
 
@@ -332,20 +412,16 @@ Giá trị enum:
 | `billing_interval` | `none`, `monthly`, `yearly` |
 | `state` | `free`, `trialing`, `active`, `past_due`, `paused`, `canceled` |
 | `access_state` | `active` cho `free`, `trialing` và `active`. `paused` cho `past_due`, `paused` và `canceled`. |
-| `organization_creation_blocker` | `subscription_required`, `subscription_inactive`, `organization_limit_exceeded` hoặc `null` |
+| `organization_creation_blocker` | `organization_limit_exceeded` hoặc `null` |
 
-Mỗi lý do chặn có một cặp `next_action`:
+API không trả về các lý do chặn `subscription_required` và `subscription_inactive`. Mỗi lý do chặn có một cặp `next_action`:
 
 | `organization_creation_blocker` | `next_action.code` | `next_action.target` |
 | --- | --- | --- |
 | `null` | `create_or_manage_organization` | `organization` |
-| `subscription_required` | `choose_plan` | `pricing` |
-| `subscription_inactive` | `resume_subscription` | `billing` |
 | `organization_limit_exceeded` | `manage_organization_limit` | `organization` |
 
-Giá trị tier là ID, không phải tên hiển thị. Giữ nguyên các giá trị này trong
-client đã bản địa hóa. Tài khoản trả phí vẫn có thể bị chặn. Kiểm tra
-`organization_creation_allowed` trước khi bật tính năng tạo tổ chức.
+Giá trị tier là ID, không phải tên hiển thị. Giữ nguyên các giá trị này trong client đã bản địa hóa. Kiểm tra `organization_creation_allowed` trước khi bật tính năng tạo tổ chức.
 
 Endpoint này không tạo tổ chức, không gửi lời mời, không đổi vai trò và không
 thay đổi thông tin thanh toán.

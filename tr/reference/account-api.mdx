@@ -15,6 +15,7 @@ yapılandırması olarak kullanmayın.
 | Güncel kullanımı ve kota durumunu okuyun | `GET /api/account/usage` |
 | Zaman içindeki kullanımı okuyun | `GET /api/account/usage/history` |
 | Abonelik ve organizasyon hazırlığını okuyun | `GET /api/account/subscription` |
+| Planları ve kullanım haklarını okuyun | `GET /api/billing/catalog` |
 | Tek bir uygulama veya CLI girişinden çıkış yapın | `POST /api/auth/logout` |
 | Tüm LogBrew girişlerini iptal edin | `POST /api/auth/logout-all` |
 | Tarayıcı oturumunu temizleyin | `POST /api/auth/web/logout` |
@@ -82,7 +83,7 @@ dönemde yalnızca log gönderdi:
 | `plan.tier` | Plan tanımlayıcısı: `free`, `pro` veya `scale`. |
 | `plan.status` | `free`, `trial`, `active`, `past_due` veya `disabled`. |
 | `limits.events`, `limits.bytes`, `limits.projects` | Uyumluluk alanları. Değerleri `null` olur. `null` sınırsız anlamına gelmez. Kota durumu için `state`, `limit` ve `percent_used` kullanın. |
-| `limits.retention_days` | Planın gün cinsinden veri saklama süresi veya `null`. |
+| `limits.retention_days` | Planın gün cinsinden veri saklama süresi veya `null`. Etkin bir beta teklifi, kendi planının saklama süresini belirler. |
 | `usage.events`, `usage.bytes` | Dönemdeki tüm telemetri akışlarının toplamları. |
 | `usage.projects` | Hesaba ait proje sayısı. |
 | `state` | `ok`, `warning` veya `blocked`. |
@@ -120,6 +121,36 @@ curl "https://api.logbrew.co/api/account/usage?response_version=2" \
 | `events` | Düşürülen olay sayısı. |
 
 Düşürülen olaylar LogBrew'a hiç ulaşmaz. Faturalandırılmaz ve `usage`, `by_project` veya `by_stream` değerlerine sayılmaz. Hiçbir SDK düşürme bildirmediğinde dizi boştur.
+
+### Beta teklifi
+
+Herkese açık beta sırasında kaydolan hesaplar, Pro kullanım haklarını 6 ay ücretsiz alır. 2026-10-22 tarihinde var olan hesaplar 6 ayı bu tarihten saymaya başlar. `offer` alanını da almak için `response_version=3` gönderin. 1 ve 2 sürümlerinde bu alan yoktur. 3. sürümde `sdk_dropped_events` alanı da vardır.
+
+```bash
+curl "https://api.logbrew.co/api/account/usage?response_version=3" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER"
+```
+
+Etkin teklif yoksa `offer` değeri `null` olur. Teklif varsa şu alanları içerir:
+
+```json
+{
+  "offer": {
+    "kind": "public_beta",
+    "tier": "team",
+    "starts_at": "2026-10-22T00:00:00Z",
+    "ends_at": "2027-04-22T00:00:00Z"
+  }
+}
+```
+
+| Alan | Anlamı |
+| --- | --- |
+| `kind` | Kullanım haklarının neden geçerli olduğu. Değer `public_beta` olur. |
+| `tier` | Kullanım hakları geçerli olan plan. `team`, Pro planıdır. |
+| `starts_at`, `ends_at` | Teklif dönemi. Bitiş zamanı aralığa dâhil değildir. |
+
+Bir teklif etkinken `limits.retention_days`, `state`, `limit`, `percent_used` ve `next_action`, hesabın kendi planı ile teklifin daha geniş olan kullanım haklarını kullanır. `plan` yine hesabın kendi planını gösterir. `ends_at` zamanından sonra hesap yeniden kendi planını kullanır. 1 ve 2 sürümleri aynı kullanım haklarını izler ama teklifi göstermez. Faturalandırma özeti `GET /api/billing/overview` aynı `offer` alanını içerir.
 
 ### Kota durumları
 
@@ -282,11 +313,60 @@ Desteklenmeyen bir dönem `422` döndürür:
 
 Bilinmeyen bir sorgu anahtarı da `validation_failed` ile `422` döndürür.
 
+## Planlar ve kullanım hakları
+
+`GET /api/billing/catalog` planları listeler. Kimlik doğrulama gerektirmez. Her planda tüm özellikler ile sınırsız ekip arkadaşı ve proje bulunur. Planlar hacim ve saklama süresinde farklılaşır. Kullanım hakları her faturalandırma ayında sıfırlanır. 1 GB, 1.000.000.000 bayttır.
+
+| Plan | `tier` | Aylık fiyat | Loglar | Uygulama metrikleri | İz span'leri | Sorun olayları | Saklama süresi |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Free | `developer` | $0 | 50 GB | 50 GB | 50 milyon | 100.000 | 30 gün |
+| Pro | `team` | $25 | 500 GB | 500 GB | 500 milyon | 2 milyon | 90 gün |
+| Business | `business` | $80 | 2.000 GB | 2.000 GB | 2 milyar | 10 milyon | 365 gün |
+| Enterprise | `enterprise` | Teklife göre | Özel | Özel | Özel | Özel | Özel |
+
+Katalog ve faturalandırma özeti `tier` değerleri olarak `developer`, `team`, `business` ve `enterprise` kullanır. Kullanım ve abonelik yanıtları `free`, `pro` ve `scale` kullanır. Business ve Enterprise planlarının ikisi de `scale` olur.
+
+```bash
+curl "https://api.logbrew.co/api/billing/catalog"
+```
+
+Yanıt planları bu sırayla listeler. Bu örnek Pro planını gösterir:
+
+```json
+{
+  "response_version": 1,
+  "currency": "usd",
+  "interval": "month",
+  "checkout_available": false,
+  "plans": [
+    {
+      "tier": "team",
+      "monthly_price_cents": 2500,
+      "activation": "checkout",
+      "quote_email": null,
+      "limits": {
+        "issue_events": 2000000,
+        "log_bytes": 500000000000,
+        "metric_bytes": 500000000000,
+        "trace_spans": 500000000,
+        "retention_days": 90,
+        "unlimited_projects": true
+      }
+    }
+  ]
+}
+```
+
+| Alan | Anlamı |
+| --- | --- |
+| `checkout_available` | Ücretli bir planı satın alabiliyorsanız `true`. |
+| `monthly_price_cents` | ABD senti cinsinden fiyat. Teklifle belirlenen plan için `null`. |
+| `activation` | `included`, `checkout` veya `quote`. |
+| `limits` | 1 faturalandırma ayı için kullanım hakları. `null` değeri sözleşmeyle belirlenir. |
+
 ## Abonelik hazırlığı
 
-`GET /api/account/subscription` salt okunurdur. Ücretli plan veya
-organizasyon denetimlerini etkinleştirip etkinleştirmeyeceğinize karar vermek
-için bunu kullanın. Kota durumu için kullanım uç noktasını kullanın.
+`GET /api/account/subscription` salt okunurdur. Organizasyon denetimlerini etkinleştirip etkinleştirmeyeceğinize karar vermek için bunu kullanın. Kota durumu için kullanım uç noktasını kullanın.
 
 ```bash
 curl "https://api.logbrew.co/api/account/subscription" \
@@ -306,25 +386,25 @@ curl "https://api.logbrew.co/api/account/subscription" \
   "current_period_end": null,
   "renews_at": null,
   "cancels_at": null,
-  "organization_creation_allowed": false,
-  "organization_creation_blocker": "subscription_required",
+  "organization_creation_allowed": true,
+  "organization_creation_blocker": null,
   "limits": {
-    "organizations": 0,
-    "members_per_organization": 0,
-    "projects_per_organization": 0,
-    "invitations_per_day": 0
+    "organizations": 1,
+    "members_per_organization": 9007199254740991,
+    "projects_per_organization": 9007199254740991,
+    "invitations_per_day": 20
   },
   "next": "<display text>",
   "next_action": {
-    "code": "choose_plan",
-    "target": "pricing"
+    "code": "create_or_manage_organization",
+    "target": "organization"
   }
 }
 ```
 
-`next` görüntüleme metnidir. Ücretli planların satışta olup olmamasına göre
-değişir. Dönen metni gösterin veya yerelleştirmeyi `next_action` üzerinden
-yapın. `next` içindeki bir plan adını koda sabit yazmayın.
+Her plan organizasyon oluşturabilir, ekip arkadaşlarını davet edebilir ve proje ekleyebilir. Bir organizasyonda üye veya proje sınırı yoktur. `9007199254740991` değeri sınırsız anlamına gelir. JSON istemcilerinin tam okuyabildiği en büyük tam sayıdır. Bu değer için "Sınırsız" gösterin. Organizasyon oluşturmayı yalnızca hesabın sahip olduğu organizasyon sayısı engelleyebilir.
+
+`next` görüntülenecek metindir. Döndürülen metni gösterin veya `next_action` alanından yerelleştirin. Plan adını `next` metninden sabit kodlamayın.
 
 Enum değerleri:
 
@@ -334,21 +414,16 @@ Enum değerleri:
 | `billing_interval` | `none`, `monthly`, `yearly` |
 | `state` | `free`, `trialing`, `active`, `past_due`, `paused`, `canceled` |
 | `access_state` | `free`, `trialing` ve `active` için `active`. `past_due`, `paused` ve `canceled` için `paused`. |
-| `organization_creation_blocker` | `subscription_required`, `subscription_inactive`, `organization_limit_exceeded` veya `null` |
+| `organization_creation_blocker` | `organization_limit_exceeded` veya `null` |
 
-Her engelin bir `next_action` çifti vardır:
+API, `subscription_required` ve `subscription_inactive` engellerini döndürmez. Her engelin bir `next_action` çifti vardır:
 
 | `organization_creation_blocker` | `next_action.code` | `next_action.target` |
 | --- | --- | --- |
 | `null` | `create_or_manage_organization` | `organization` |
-| `subscription_required` | `choose_plan` | `pricing` |
-| `subscription_inactive` | `resume_subscription` | `billing` |
 | `organization_limit_exceeded` | `manage_organization_limit` | `organization` |
 
-Plan düzeyi değerleri görünen adlar değil, tanımlayıcılardır. Yerelleştirilmiş bir
-istemcide bunları değiştirmeyin. Ücretli bir hesap da engellenmiş olabilir.
-Organizasyon oluşturmayı etkinleştirmeden önce
-`organization_creation_allowed` değerini kontrol edin.
+Plan düzeyi değerleri görünen adlar değil, tanımlayıcılardır. Yerelleştirilmiş bir istemcide bunları değiştirmeyin. Organizasyon oluşturmayı etkinleştirmeden önce `organization_creation_allowed` değerini kontrol edin.
 
 Bu uç nokta organizasyon oluşturmaz, davet göndermez, rolleri veya
 faturalandırmayı değiştirmez.

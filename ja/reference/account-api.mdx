@@ -11,6 +11,7 @@ description: "LogBrew アカウントの使用量の上限、クォータの履�
 | 現在の使用量とクォータの状態を読む | `GET /api/account/usage` |
 | 使用量の推移を読む | `GET /api/account/usage/history` |
 | サブスクリプションと組織の準備状況を読む | `GET /api/account/subscription` |
+| プランと使用量の上限を読む | `GET /api/billing/catalog` |
 | 1つのアプリまたは CLI のログインからログアウトする | `POST /api/auth/logout` |
 | すべての LogBrew のログインを無効化する | `POST /api/auth/logout-all` |
 | ブラウザーのセッションを消去する | `POST /api/auth/web/logout` |
@@ -68,7 +69,7 @@ curl "https://api.logbrew.co/api/account/usage" \
 | `plan.tier` | プランの識別子：`free`、`pro`、`scale`。 |
 | `plan.status` | `free`、`trial`、`active`、`past_due`、`disabled`。 |
 | `limits.events`、`limits.bytes`、`limits.projects` | 互換性のためのフィールドで、値は `null` です。`null` は無制限という意味ではありません。クォータの状態には `state`、`limit`、`percent_used` を使います。 |
-| `limits.retention_days` | プランのデータ保持期間（日数）、または `null`。 |
+| `limits.retention_days` | プランのデータ保持期間（日数）、または `null`。有効なベータ特典では、そのプランのデータ保持期間が使われます。 |
 | `usage.events`、`usage.bytes` | 期間内の、すべてのテレメトリストリームの合計。 |
 | `usage.projects` | アカウントが所有するプロジェクトの数。 |
 | `state` | `ok`、`warning`、`blocked` のいずれか。 |
@@ -106,6 +107,36 @@ curl "https://api.logbrew.co/api/account/usage?response_version=2" \
 | `events` | 破棄されたイベントの数。 |
 
 破棄されたイベントは LogBrew に届いていません。課金されず、`usage`、`by_project`、`by_stream` にも含まれません。破棄を報告した SDK がない場合、配列は空です。
+
+### ベータ特典
+
+公開ベータ中に登録したアカウントは、Pro の使用量の上限を 6 か月間無料で利用できます。2026-10-22 時点で存在していたアカウントは、この日から 6 か月を数えます。`offer` も取得するには `response_version=3` を送ります。バージョン 1 と 2 にはこのフィールドがありません。バージョン 3 には `sdk_dropped_events` もあります。
+
+```bash
+curl "https://api.logbrew.co/api/account/usage?response_version=3" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER"
+```
+
+有効な特典がない場合、`offer` は `null` です。ある場合は次のフィールドを持ちます。
+
+```json
+{
+  "offer": {
+    "kind": "public_beta",
+    "tier": "team",
+    "starts_at": "2026-10-22T00:00:00Z",
+    "ends_at": "2027-04-22T00:00:00Z"
+  }
+}
+```
+
+| フィールド | 意味 |
+| --- | --- |
+| `kind` | 上限が適用される理由。値は `public_beta` です。 |
+| `tier` | 上限が適用されるプラン。`team` は Pro プランです。 |
+| `starts_at`、`ends_at` | 特典の期間。終了の時刻自体は含みません。 |
+
+特典が有効な間、`limits.retention_days`、`state`、`limit`、`percent_used`、`next_action` には、アカウント自身のプランと特典のうち大きいほうの上限が使われます。`plan` には引き続きアカウント自身のプランが表示されます。`ends_at` を過ぎると、アカウントは自身のプランに戻ります。バージョン 1 と 2 も同じ上限に従いますが、特典は表示しません。請求の概要 `GET /api/billing/overview` にも同じ `offer` フィールドがあります。
 
 ### クォータの状態
 
@@ -235,9 +266,60 @@ curl --get "https://api.logbrew.co/api/account/usage/history" \
 
 不明なクエリキーも、`validation_failed` 付きで `422` を返します。
 
+## プランと使用量の上限
+
+`GET /api/billing/catalog` はプランを一覧します。認証は不要です。どのプランにも、すべての機能と無制限のチームメイト、無制限のプロジェクトが含まれます。プランの違いは、量と保持期間だけです。上限は請求月ごとにリセットされます。1 GB は 1,000,000,000 バイトです。
+
+| プラン | `tier` | 月額 | ログ | アプリメトリクス | トレーススパン | Issue イベント | 保持期間 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Free | `developer` | $0 | 50 GB | 50 GB | 5,000 万 | 100,000 | 30 日 |
+| Pro | `team` | $25 | 500 GB | 500 GB | 5 億 | 200 万 | 90 日 |
+| Business | `business` | $80 | 2,000 GB | 2,000 GB | 20 億 | 1,000 万 | 365 日 |
+| Enterprise | `enterprise` | 見積もり | 個別設定 | 個別設定 | 個別設定 | 個別設定 | 個別設定 |
+
+カタログと請求の概要では、`tier` の値に `developer`、`team`、`business`、`enterprise` を使います。使用量とサブスクリプションのレスポンスでは、`free`、`pro`、`scale` を使います。Business と Enterprise は、どちらも `scale` です。
+
+```bash
+curl "https://api.logbrew.co/api/billing/catalog"
+```
+
+レスポンスは、この順でプランを一覧します。この例は Pro プランです。
+
+```json
+{
+  "response_version": 1,
+  "currency": "usd",
+  "interval": "month",
+  "checkout_available": false,
+  "plans": [
+    {
+      "tier": "team",
+      "monthly_price_cents": 2500,
+      "activation": "checkout",
+      "quote_email": null,
+      "limits": {
+        "issue_events": 2000000,
+        "log_bytes": 500000000000,
+        "metric_bytes": 500000000000,
+        "trace_spans": 500000000,
+        "retention_days": 90,
+        "unlimited_projects": true
+      }
+    }
+  ]
+}
+```
+
+| フィールド | 意味 |
+| --- | --- |
+| `checkout_available` | 有料プランを購入できる場合は `true`。 |
+| `monthly_price_cents` | 米ドルのセント単位の価格。見積もりのプランでは `null`。 |
+| `activation` | `included`、`checkout`、`quote`。 |
+| `limits` | 請求月 1 か月分の上限。値が `null` の場合は、契約で決まります。 |
+
 ## サブスクリプションの準備状況
 
-`GET /api/account/subscription` は読み取り専用です。有料プランや組織の操作を有効にするかどうかの判断に使います。クォータの状態には、使用量のエンドポイントを使います。
+`GET /api/account/subscription` は読み取り専用です。組織の操作を有効にするかどうかの判断に使います。クォータの状態には、使用量のエンドポイントを使います。
 
 ```bash
 curl "https://api.logbrew.co/api/account/subscription" \
@@ -257,23 +339,25 @@ curl "https://api.logbrew.co/api/account/subscription" \
   "current_period_end": null,
   "renews_at": null,
   "cancels_at": null,
-  "organization_creation_allowed": false,
-  "organization_creation_blocker": "subscription_required",
+  "organization_creation_allowed": true,
+  "organization_creation_blocker": null,
   "limits": {
-    "organizations": 0,
-    "members_per_organization": 0,
-    "projects_per_organization": 0,
-    "invitations_per_day": 0
+    "organizations": 1,
+    "members_per_organization": 9007199254740991,
+    "projects_per_organization": 9007199254740991,
+    "invitations_per_day": 20
   },
   "next": "<display text>",
   "next_action": {
-    "code": "choose_plan",
-    "target": "pricing"
+    "code": "create_or_manage_organization",
+    "target": "organization"
   }
 }
 ```
 
-`next` は表示用のテキストです。有料プランを販売しているかどうかで変わります。返されたテキストを表示するか、`next_action` からローカライズします。`next` からプラン名を取り出してハードコードしないでください。
+どのプランでも、組織の作成、チームメイトの招待、プロジェクトの追加ができます。組織のメンバー数とプロジェクト数に上限はありません。値 `9007199254740991` は無制限を意味します。JSON クライアントが正確に読み取れる最大の整数です。この値は「無制限」と表示してください。組織の作成を妨げるのは、アカウントが所有する組織の数だけです。
+
+`next` は表示用のテキストです。返されたテキストを表示するか、`next_action` から現地化します。`next` からプラン名を固定で取り出さないでください。
 
 列挙値：
 
@@ -283,18 +367,16 @@ curl "https://api.logbrew.co/api/account/subscription" \
 | `billing_interval` | `none`、`monthly`、`yearly` |
 | `state` | `free`、`trialing`、`active`、`past_due`、`paused`、`canceled` |
 | `access_state` | `free`、`trialing`、`active` では `active`。`past_due`、`paused`、`canceled` では `paused`。 |
-| `organization_creation_blocker` | `subscription_required`、`subscription_inactive`、`organization_limit_exceeded`、または `null` |
+| `organization_creation_blocker` | `organization_limit_exceeded`、または `null` |
 
-それぞれのブロック要因には、`next_action` の組み合わせが1つあります。
+API は、ブロック要因 `subscription_required` と `subscription_inactive` を返しません。それぞれのブロック要因には、`next_action` の組み合わせが1つあります。
 
 | `organization_creation_blocker` | `next_action.code` | `next_action.target` |
 | --- | --- | --- |
 | `null` | `create_or_manage_organization` | `organization` |
-| `subscription_required` | `choose_plan` | `pricing` |
-| `subscription_inactive` | `resume_subscription` | `billing` |
 | `organization_limit_exceeded` | `manage_organization_limit` | `organization` |
 
-ティアの値は識別子で、表示名ではありません。ローカライズしたクライアントでも変更しないでください。有料アカウントでもブロックされることがあります。組織の作成を有効にする前に `organization_creation_allowed` を確認してください。
+ティアの値は識別子で、表示名ではありません。ローカライズしたクライアントでも変更しないでください。組織の作成を有効にする前に `organization_creation_allowed` を確認してください。
 
 このエンドポイントは、組織の作成、招待の送信、ロールの変更、請求の変更を行いません。
 

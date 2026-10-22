@@ -11,6 +11,7 @@ description: "读取 LogBrew 账号的用量限制、配额历史、订阅就绪
 | 读取当前用量和配额状态 | `GET /api/account/usage` |
 | 读取随时间变化的用量 | `GET /api/account/usage/history` |
 | 读取订阅和组织就绪状态 | `GET /api/account/subscription` |
+| 读取套餐及其额度 | `GET /api/billing/catalog` |
 | 退出一个应用或 CLI 登录 | `POST /api/auth/logout` |
 | 撤销所有 LogBrew 登录 | `POST /api/auth/logout-all` |
 | 清除浏览器会话 | `POST /api/auth/web/logout` |
@@ -68,7 +69,7 @@ curl "https://api.logbrew.co/api/account/usage" \
 | `plan.tier` | 套餐标识符：`free`、`pro` 或 `scale`。 |
 | `plan.status` | `free`、`trial`、`active`、`past_due` 或 `disabled`。 |
 | `limits.events`、`limits.bytes`、`limits.projects` | 兼容字段，值为 `null`。`null` 不表示无限制。配额状态请使用 `state`、`limit` 和 `percent_used`。 |
-| `limits.retention_days` | 该套餐的数据保留天数，或 `null`。 |
+| `limits.retention_days` | 该套餐的数据保留天数，或 `null`。生效的测试期优惠会采用其套餐的数据保留期。 |
 | `usage.events`、`usage.bytes` | 该周期内所有遥测数据流的总数。 |
 | `usage.projects` | 该账号拥有的项目数。 |
 | `state` | `ok`、`warning` 或 `blocked`。 |
@@ -106,6 +107,36 @@ curl "https://api.logbrew.co/api/account/usage?response_version=2" \
 | `events` | 被丢弃的事件数量。 |
 
 被丢弃的事件从未到达 LogBrew。这些事件不计费，也不计入 `usage`、`by_project` 或 `by_stream`。如果没有 SDK 报告丢弃事件，该数组为空。
+
+### 测试期优惠
+
+在公开测试期间注册的账号，可免费使用 Pro 额度 6 个月。2026-10-22 已存在的账号，从这一天起算 6 个月。发送 `response_version=3` 可同时获得 `offer`。版本 1 和 2 没有此字段。版本 3 也包含 `sdk_dropped_events`。
+
+```bash
+curl "https://api.logbrew.co/api/account/usage?response_version=3" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER"
+```
+
+没有生效的优惠时，`offer` 为 `null`。否则它包含以下字段：
+
+```json
+{
+  "offer": {
+    "kind": "public_beta",
+    "tier": "team",
+    "starts_at": "2026-10-22T00:00:00Z",
+    "ends_at": "2027-04-22T00:00:00Z"
+  }
+}
+```
+
+| 字段 | 含义 |
+| --- | --- |
+| `kind` | 额度适用的原因。值为 `public_beta`。 |
+| `tier` | 额度适用的套餐。`team` 是 Pro 套餐。 |
+| `starts_at`、`ends_at` | 优惠的期间。结束时间不包含在内。 |
+
+优惠生效期间，`limits.retention_days`、`state`、`limit`、`percent_used` 和 `next_action` 采用账号自身套餐与优惠中额度更大的一方。`plan` 仍显示账号自身的套餐。`ends_at` 之后，账号恢复使用自身套餐。版本 1 和 2 遵循同样的额度，但不显示优惠。账单概览 `GET /api/billing/overview` 也有相同的 `offer` 字段。
 
 ### 配额状态
 
@@ -235,9 +266,60 @@ curl --get "https://api.logbrew.co/api/account/usage/history" \
 
 未知的查询键也会返回 `422` 和 `validation_failed`。
 
+## 套餐与额度
+
+`GET /api/billing/catalog` 列出所有套餐。它无需身份验证。每个套餐都包含全部功能，同事和项目数量不限。套餐的区别在于用量和数据保留期。额度每个计费月重置一次。1 GB 是 1,000,000,000 字节。
+
+| 套餐 | `tier` | 月价 | 日志 | 应用指标 | 链路 Span | 问题事件 | 数据保留 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Free | `developer` | $0 | 50 GB | 50 GB | 5,000 万 | 100,000 | 30 天 |
+| Pro | `team` | $25 | 500 GB | 500 GB | 5 亿 | 200 万 | 90 天 |
+| Business | `business` | $80 | 2,000 GB | 2,000 GB | 20 亿 | 1,000 万 | 365 天 |
+| Enterprise | `enterprise` | 按报价 | 定制 | 定制 | 定制 | 定制 | 定制 |
+
+目录和账单概览使用 `tier` 值 `developer`、`team`、`business` 和 `enterprise`。用量和订阅响应使用 `free`、`pro` 和 `scale`。Business 和 Enterprise 套餐都是 `scale`。
+
+```bash
+curl "https://api.logbrew.co/api/billing/catalog"
+```
+
+响应按此顺序列出套餐。此示例显示 Pro 套餐：
+
+```json
+{
+  "response_version": 1,
+  "currency": "usd",
+  "interval": "month",
+  "checkout_available": false,
+  "plans": [
+    {
+      "tier": "team",
+      "monthly_price_cents": 2500,
+      "activation": "checkout",
+      "quote_email": null,
+      "limits": {
+        "issue_events": 2000000,
+        "log_bytes": 500000000000,
+        "metric_bytes": 500000000000,
+        "trace_spans": 500000000,
+        "retention_days": 90,
+        "unlimited_projects": true
+      }
+    }
+  ]
+}
+```
+
+| 字段 | 含义 |
+| --- | --- |
+| `checkout_available` | 可以购买付费套餐时为 `true`。 |
+| `monthly_price_cents` | 以美分计的价格。按报价的套餐为 `null`。 |
+| `activation` | `included`、`checkout` 或 `quote`。 |
+| `limits` | 1 个计费月的额度。值为 `null` 时由合同约定。 |
+
 ## 订阅就绪状态
 
-`GET /api/account/subscription` 是只读的。用它判断是否启用付费套餐或组织相关控件。配额状态请使用用量端点。
+`GET /api/account/subscription` 是只读的。用它判断是否启用组织相关控件。配额状态请使用用量端点。
 
 ```bash
 curl "https://api.logbrew.co/api/account/subscription" \
@@ -257,23 +339,25 @@ curl "https://api.logbrew.co/api/account/subscription" \
   "current_period_end": null,
   "renews_at": null,
   "cancels_at": null,
-  "organization_creation_allowed": false,
-  "organization_creation_blocker": "subscription_required",
+  "organization_creation_allowed": true,
+  "organization_creation_blocker": null,
   "limits": {
-    "organizations": 0,
-    "members_per_organization": 0,
-    "projects_per_organization": 0,
-    "invitations_per_day": 0
+    "organizations": 1,
+    "members_per_organization": 9007199254740991,
+    "projects_per_organization": 9007199254740991,
+    "invitations_per_day": 20
   },
   "next": "<display text>",
   "next_action": {
-    "code": "choose_plan",
-    "target": "pricing"
+    "code": "create_or_manage_organization",
+    "target": "organization"
   }
 }
 ```
 
-`next` 是显示文本。付费套餐开始或停止销售时，它会变化。显示返回的文本，或根据 `next_action` 做本地化。不要从 `next` 中硬编码套餐名称。
+每个套餐都可以创建组织、邀请同事和添加项目。组织的成员数和项目数不设上限。值 `9007199254740991` 表示不限。它是 JSON 客户端能精确读取的最大整数。请对该值显示“不限”。只有账号拥有的组织数量会阻止创建组织。
+
+`next` 是展示文本。显示返回的文本，或根据 `next_action` 本地化。不要根据 `next` 硬编码套餐名称。
 
 枚举值：
 
@@ -283,18 +367,16 @@ curl "https://api.logbrew.co/api/account/subscription" \
 | `billing_interval` | `none`、`monthly`、`yearly` |
 | `state` | `free`、`trialing`、`active`、`past_due`、`paused`、`canceled` |
 | `access_state` | 对于 `free`、`trialing` 和 `active`，值为 `active`。对于 `past_due`、`paused` 和 `canceled`，值为 `paused`。 |
-| `organization_creation_blocker` | `subscription_required`、`subscription_inactive`、`organization_limit_exceeded` 或 `null` |
+| `organization_creation_blocker` | `organization_limit_exceeded` 或 `null` |
 
-每种阻止原因都对应一组 `next_action` 值：
+API 不会返回阻止原因 `subscription_required` 和 `subscription_inactive`。每个阻止原因对应一组 `next_action`：
 
 | `organization_creation_blocker` | `next_action.code` | `next_action.target` |
 | --- | --- | --- |
 | `null` | `create_or_manage_organization` | `organization` |
-| `subscription_required` | `choose_plan` | `pricing` |
-| `subscription_inactive` | `resume_subscription` | `billing` |
 | `organization_limit_exceeded` | `manage_organization_limit` | `organization` |
 
-套餐层级值是标识符，不是显示名称。在本地化客户端中保持它们不变。付费账号也可能被阻止。启用创建组织功能之前，先检查 `organization_creation_allowed`。
+套餐层级值是标识符，不是显示名称。在本地化客户端中保持它们不变。启用创建组织功能之前，先检查 `organization_creation_allowed`。
 
 该端点不会创建组织、发送邀请、更改角色或修改账单。
 

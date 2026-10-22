@@ -16,6 +16,7 @@ configuration du SDK ou de l’ingestion.
 | Lire l’utilisation actuelle et l’état des quotas | `GET /api/account/usage` |
 | Lire l’utilisation dans le temps | `GET /api/account/usage/history` |
 | Lire l’état de l’abonnement et de l’organisation | `GET /api/account/subscription` |
+| Lire les forfaits et leurs quotas | `GET /api/billing/catalog` |
 | Déconnecter une application ou la CLI | `POST /api/auth/logout` |
 | Révoquer toutes les connexions LogBrew | `POST /api/auth/logout-all` |
 | Effacer la session du navigateur | `POST /api/auth/web/logout` |
@@ -86,7 +87,7 @@ et n’a envoyé que des logs pendant la période en cours :
 | `plan.tier` | L’identifiant du forfait : `free`, `pro` ou `scale`. |
 | `plan.status` | `free`, `trial`, `active`, `past_due` ou `disabled`. |
 | `limits.events`, `limits.bytes`, `limits.projects` | Champs de compatibilité. Ils valent `null`. `null` ne signifie pas illimité. Utilisez `state`, `limit` et `percent_used` pour l’état des quotas. |
-| `limits.retention_days` | La durée de conservation des données du forfait, en jours, ou `null`. |
+| `limits.retention_days` | La durée de conservation des données du forfait, en jours, ou `null`. Une offre bêta active fixe la durée de conservation de son forfait. |
 | `usage.events`, `usage.bytes` | Les totaux de tous les flux de télémétrie sur la période. |
 | `usage.projects` | Le nombre de projets que possède le compte. |
 | `state` | `ok`, `warning` ou `blocked`. |
@@ -124,6 +125,36 @@ curl "https://api.logbrew.co/api/account/usage?response_version=2" \
 | `events` | Le nombre d’événements abandonnés. |
 
 Les événements abandonnés ne sont jamais arrivés chez LogBrew. Ils ne sont pas facturés et ne comptent pas dans `usage`, `by_project` ou `by_stream`. Le tableau est vide quand aucun SDK n’a signalé d’abandon.
+
+### Offre bêta
+
+Les comptes qui s’inscrivent pendant la bêta publique reçoivent gratuitement les quotas de Pro pendant 6 mois. Les comptes qui existaient le 2026-10-22 comptent les 6 mois à partir de cette date. Envoyez `response_version=3` pour obtenir aussi `offer`. Les versions 1 et 2 n’ont pas ce champ. La version 3 a aussi `sdk_dropped_events`.
+
+```bash
+curl "https://api.logbrew.co/api/account/usage?response_version=3" \
+  -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER"
+```
+
+`offer` vaut `null` quand aucune offre n’est active. Sinon, il contient ces champs :
+
+```json
+{
+  "offer": {
+    "kind": "public_beta",
+    "tier": "team",
+    "starts_at": "2026-10-22T00:00:00Z",
+    "ends_at": "2027-04-22T00:00:00Z"
+  }
+}
+```
+
+| Champ | Signification |
+| --- | --- |
+| `kind` | Pourquoi les quotas s’appliquent. La valeur est `public_beta`. |
+| `tier` | Le forfait dont les quotas s’appliquent. `team` est le forfait Pro. |
+| `starts_at`, `ends_at` | La période de l’offre. La fin est exclue. |
+
+Tant qu’une offre est active, `limits.retention_days`, `state`, `limit`, `percent_used` et `next_action` utilisent les quotas les plus élevés entre le forfait propre du compte et l’offre. `plan` continue d’afficher le forfait propre du compte. Après `ends_at`, le compte utilise de nouveau son forfait propre. Les versions 1 et 2 suivent les mêmes quotas, mais n’affichent pas l’offre. L’aperçu de facturation, `GET /api/billing/overview`, a le même champ `offer`.
 
 ### États des quotas
 
@@ -288,11 +319,60 @@ Un intervalle non pris en charge renvoie `422` :
 
 Un paramètre de requête inconnu renvoie aussi `422` avec `validation_failed`.
 
+## Forfaits et quotas
+
+`GET /api/billing/catalog` liste les forfaits. Il ne demande aucune authentification. Chaque forfait inclut toutes les fonctionnalités, avec des collègues et des projets illimités. Les forfaits diffèrent par le volume et la durée de conservation. Les quotas se réinitialisent chaque mois de facturation. 1 Go correspond à 1 000 000 000 octets.
+
+| Forfait | `tier` | Prix par mois | Logs | Métriques d’application | Spans de traces | Événements de problèmes | Rétention |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Free | `developer` | $0 | 50 Go | 50 Go | 50 millions | 100 000 | 30 jours |
+| Pro | `team` | $25 | 500 Go | 500 Go | 500 millions | 2 millions | 90 jours |
+| Business | `business` | $80 | 2 000 Go | 2 000 Go | 2 milliards | 10 millions | 365 jours |
+| Enterprise | `enterprise` | Sur devis | Sur mesure | Sur mesure | Sur mesure | Sur mesure | Sur mesure |
+
+Le catalogue et l’aperçu de facturation utilisent les valeurs `tier` `developer`, `team`, `business` et `enterprise`. Les réponses d’utilisation et d’abonnement utilisent `free`, `pro` et `scale`. Les forfaits Business et Enterprise sont tous deux `scale`.
+
+```bash
+curl "https://api.logbrew.co/api/billing/catalog"
+```
+
+La réponse liste les forfaits dans cet ordre. Cet exemple montre le forfait Pro :
+
+```json
+{
+  "response_version": 1,
+  "currency": "usd",
+  "interval": "month",
+  "checkout_available": false,
+  "plans": [
+    {
+      "tier": "team",
+      "monthly_price_cents": 2500,
+      "activation": "checkout",
+      "quote_email": null,
+      "limits": {
+        "issue_events": 2000000,
+        "log_bytes": 500000000000,
+        "metric_bytes": 500000000000,
+        "trace_spans": 500000000,
+        "retention_days": 90,
+        "unlimited_projects": true
+      }
+    }
+  ]
+}
+```
+
+| Champ | Signification |
+| --- | --- |
+| `checkout_available` | `true` quand vous pouvez acheter un forfait payant. |
+| `monthly_price_cents` | Le prix en cents américains. Il vaut `null` pour un forfait sur devis. |
+| `activation` | `included`, `checkout` ou `quote`. |
+| `limits` | Les quotas pour 1 mois de facturation. Une valeur `null` est fixée par contrat. |
+
 ## État de l’abonnement
 
-`GET /api/account/subscription` est en lecture seule. Utilisez-le pour décider
-s’il faut activer les contrôles de forfait payant ou d’organisation. Utilisez
-le point de terminaison d’utilisation pour l’état des quotas.
+`GET /api/account/subscription` est en lecture seule. Utilisez-le pour décider s’il faut activer les contrôles d’organisation. Utilisez le point de terminaison d’utilisation pour l’état des quotas.
 
 ```bash
 curl "https://api.logbrew.co/api/account/subscription" \
@@ -312,25 +392,25 @@ Un compte gratuit renvoie cette réponse. L’`account_id` est synthétique :
   "current_period_end": null,
   "renews_at": null,
   "cancels_at": null,
-  "organization_creation_allowed": false,
-  "organization_creation_blocker": "subscription_required",
+  "organization_creation_allowed": true,
+  "organization_creation_blocker": null,
   "limits": {
-    "organizations": 0,
-    "members_per_organization": 0,
-    "projects_per_organization": 0,
-    "invitations_per_day": 0
+    "organizations": 1,
+    "members_per_organization": 9007199254740991,
+    "projects_per_organization": 9007199254740991,
+    "invitations_per_day": 20
   },
   "next": "<display text>",
   "next_action": {
-    "code": "choose_plan",
-    "target": "pricing"
+    "code": "create_or_manage_organization",
+    "target": "organization"
   }
 }
 ```
 
-`next` est un texte d’affichage. Il change selon que les forfaits payants sont
-en vente ou non. Affichez le texte renvoyé, ou localisez à partir de
-`next_action`. Ne codez pas en dur un nom de forfait tiré de `next`.
+Chaque forfait peut créer une organisation, inviter des collègues et ajouter des projets. Une organisation n’a pas de limite de membres ni de projets. La valeur `9007199254740991` signifie illimité. C’est le plus grand entier que les clients JSON lisent exactement. Affichez « Illimité » pour cette valeur. Seul le nombre d’organisations qu’un compte possède peut bloquer la création d’une organisation.
+
+`next` est un texte d’affichage. Affichez le texte renvoyé, ou localisez à partir de `next_action`. Ne codez pas en dur un nom de forfait à partir de `next`.
 
 Valeurs des énumérations :
 
@@ -340,21 +420,16 @@ Valeurs des énumérations :
 | `billing_interval` | `none`, `monthly`, `yearly` |
 | `state` | `free`, `trialing`, `active`, `past_due`, `paused`, `canceled` |
 | `access_state` | `active` pour `free`, `trialing` et `active`. `paused` pour `past_due`, `paused` et `canceled`. |
-| `organization_creation_blocker` | `subscription_required`, `subscription_inactive`, `organization_limit_exceeded` ou `null` |
+| `organization_creation_blocker` | `organization_limit_exceeded` ou `null` |
 
-Chaque blocage a une seule paire `next_action` :
+L’API ne renvoie pas les blocages `subscription_required` et `subscription_inactive`. Chaque blocage a une paire `next_action` :
 
 | `organization_creation_blocker` | `next_action.code` | `next_action.target` |
 | --- | --- | --- |
 | `null` | `create_or_manage_organization` | `organization` |
-| `subscription_required` | `choose_plan` | `pricing` |
-| `subscription_inactive` | `resume_subscription` | `billing` |
 | `organization_limit_exceeded` | `manage_organization_limit` | `organization` |
 
-Les valeurs de niveau de forfait sont des identifiants, pas des noms d’affichage.
-Gardez-les inchangées dans un client localisé. Un compte payant peut quand même
-être bloqué. Vérifiez `organization_creation_allowed` avant d’activer la
-création d’organisations.
+Les valeurs de niveau de forfait sont des identifiants, pas des noms d’affichage. Gardez-les inchangées dans un client localisé. Vérifiez `organization_creation_allowed` avant d’activer la création d’organisations.
 
 Ce point de terminaison ne crée pas d’organisation, n’envoie pas
 d’invitations, ne modifie pas les rôles et ne modifie pas la facturation.
