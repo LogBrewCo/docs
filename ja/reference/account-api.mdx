@@ -43,7 +43,7 @@ curl "https://api.logbrew.co/api/account/usage" \
   "usage": { "events": 27000, "bytes": 10485760, "projects": 1 },
   "state": "ok",
   "warning_threshold": 0.8,
-  "percent_used": 0.2,
+  "percent_used": 0.02,
   "warning": false,
   "blocked": false,
   "limit": null,
@@ -71,7 +71,7 @@ curl "https://api.logbrew.co/api/account/usage" \
 | `plan.tier` | プランの識別子：`free`、`pro`、`scale`。 |
 | `plan.status` | `free`、`trial`、`active`、`past_due`、`disabled`。 |
 | `limits.events`、`limits.bytes`、`limits.projects` | 互換性のためのフィールドで、値は `null` です。`null` は無制限という意味ではありません。クォータの状態には `state`、`limit`、`percent_used` を使います。 |
-| `limits.retention_days` | プランのデータ保持期間（日数）、または `null`。有効なベータ特典では、そのプランのデータ保持期間が使われます。 |
+| `limits.retention_days` | アカウントのデータ保持期間（日数）。プランと有効なベータ特典のうち、長いほうです。Enterprise プランでは `null` で、データ保持期間は契約で決まります。[データ保持期間](#data-retention)を参照してください。 |
 | `usage.events`、`usage.bytes` | 期間内の、すべてのテレメトリストリームの合計。 |
 | `usage.projects` | アカウントが所有するプロジェクトの数。 |
 | `state` | `ok`、`warning`、`blocked` のいずれか。 |
@@ -110,7 +110,7 @@ curl "https://api.logbrew.co/api/account/usage?response_version=2" \
 
 破棄されたイベントは LogBrew に届いていません。課金されず、`usage`、`by_project`、`by_stream` にも含まれません。破棄を報告した SDK がない場合、配列は空です。
 
-### ベータ特典
+### <span id="beta-offer">ベータ特典</span>
 
 公開ベータ中に登録したアカウントは、Pro の使用量の上限を 6 か月間無料で利用できます。2026-10-22 時点で存在していたアカウントは、この日から 6 か月を数えます。`offer` も取得するには `response_version=3` を送ります。バージョン 1 と 2 にはこのフィールドがありません。バージョン 3 には `sdk_dropped_events` もあります。
 
@@ -149,6 +149,8 @@ curl "https://api.logbrew.co/api/account/usage?response_version=3" \
 | `ok` | `false` | `false` | `null` | `continue_sending_telemetry` | `telemetry_ingest` |
 | `warning` | `true` | `false` | `events` または `bytes` | `reduce_usage_or_upgrade` | `pricing` |
 | `blocked` | `false` | `true` | `events` または `bytes` | `wait_until_reset_or_upgrade` | `pricing` |
+
+この表はバージョン2と3に当てはまります。デフォルトのバージョン1には2つの違いがあります。`blocked` の状態でも `warning` が `true` になり、`warning` の状態では `next_action.target` が `account_usage` になります。
 
 `next_action.state`、`next_action.limit`、`next_action.reset_at` は、トップレベルの値を繰り返します。`next_action.code` の値には、ターゲットが `account_usage` の `check_usage_limits` もあります。クライアントがこの組み合わせを受け取ったら、使用量をもう一度読み、`next` を表示します。
 
@@ -190,7 +192,7 @@ curl --get "https://api.logbrew.co/api/account/usage/history" \
 | --- | --- |
 | `interval` | リクエストした間隔。 |
 | `period_start`、`period_end` | 履歴の期間の開始と終了。終了の時刻自体は含みません。 |
-| `current` | 現在の期間の、`GET /api/account/usage` のレスポンス全体。 |
+| `current` | 現在の期間の、`GET /api/account/usage` のレスポンス全体（バージョン3）。常に `sdk_dropped_events` と `offer` があります。 |
 | `buckets` | 古い順に並んだバケット。各バケットには `period_start`、`period_end`、`usage`、`by_project`、`by_stream` があります。 |
 
 この `yearly` のレスポンスは、2026年6月のリクエストに対する合成データです。使用量はすべて6月に発生しました。
@@ -209,7 +211,7 @@ curl --get "https://api.logbrew.co/api/account/usage/history" \
     "usage": { "events": 27000, "bytes": 10485760, "projects": 1 },
     "state": "ok",
     "warning_threshold": 0.8,
-    "percent_used": 0.2,
+    "percent_used": 0.02,
     "warning": false,
     "blocked": false,
     "limit": null,
@@ -224,7 +226,9 @@ curl --get "https://api.logbrew.co/api/account/usage/history" \
     "by_project": [
       { "project_id": "00000000-0000-4000-8000-000000000001", "events": 27000, "bytes": 10485760 }
     ],
-    "by_stream": [{ "kind": "logs", "events": 27000, "bytes": 10485760 }]
+    "by_stream": [{ "kind": "logs", "events": 27000, "bytes": 10485760 }],
+    "sdk_dropped_events": [],
+    "offer": null
   },
   "buckets": [
     { "period_start": "2022-01-01T00:00:00Z", "period_end": "2023-01-01T00:00:00Z", "usage": { "events": 0, "bytes": 0, "projects": 0 }, "by_project": [], "by_stream": [] },
@@ -270,7 +274,9 @@ curl --get "https://api.logbrew.co/api/account/usage/history" \
 
 ## プランと使用量の上限
 
-`GET /api/billing/catalog` はプランを一覧します。認証は不要です。どのプランにも、すべての機能と無制限のチームメイト、無制限のプロジェクトが含まれます。プランの違いは、量と保持期間だけです。上限は請求月ごとにリセットされます。1 GB は 1,000,000,000 バイトです。
+`GET /api/billing/catalog` はプランを一覧します。認証は不要です。どのプランにも、すべての機能が含まれます。どのプランでも、メンバーとプロジェクトは無制限です。プランの違いは、量と保持期間だけです。上限は請求月ごとにリセットされます。1 GB は 1,000,000,000 バイトです。
+
+有料プランの購入はまだ始まっていません。有料プランは購入できず、`checkout_available` は `false` です。公開ベータ中、アカウントは Pro の使用量の上限を無料で利用できます。[ベータ特典](#beta-offer)を参照してください。
 
 | プラン | `tier` | 月額 | ログ | アプリメトリクス | トレーススパン | Issue イベント | 保持期間 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -314,10 +320,19 @@ curl "https://api.logbrew.co/api/billing/catalog"
 
 | フィールド | 意味 |
 | --- | --- |
-| `checkout_available` | 有料プランを購入できる場合は `true`。 |
+| `checkout_available` | 有料プランを購入できる場合は `true`。有料プランの購入が始まっていない間は `false`。 |
 | `monthly_price_cents` | 米ドルのセント単位の価格。見積もりのプランでは `null`。 |
 | `activation` | `included`、`checkout`、`quote`。 |
+| `quote_email` | 見積もりを依頼するメールアドレス。ほかのプランでは `null`。 |
 | `limits` | 請求月 1 か月分の上限。値が `null` の場合は、契約で決まります。 |
+
+### <span id="data-retention">データ保持期間</span>
+
+データ保持期間は、LogBrew がアカウントのテレメトリを保管する日数です。アカウントのデータ保持期間は、プランと有効なベータ特典のうち、長いほうです。Enterprise の契約では、独自のデータ保持期間を定めます。
+
+- 読み取りで返るのは、データ保持期間内のテレメトリだけです。
+- LogBrew は毎日、データ保持期間に1日を足した日数より古いアカウントのテレメトリを削除します。
+- プランのダウングレードやベータ特典の終了後は、次の毎日の削除から、短いほうのデータ保持期間が適用されます。
 
 ## サブスクリプションの準備状況
 
@@ -357,7 +372,7 @@ curl "https://api.logbrew.co/api/account/subscription" \
 }
 ```
 
-どのプランでも、組織の作成、チームメイトの招待、プロジェクトの追加ができます。組織のメンバー数とプロジェクト数に上限はありません。値 `9007199254740991` は無制限を意味します。JSON クライアントが正確に読み取れる最大の整数です。この値は「無制限」と表示してください。組織の作成を妨げるのは、アカウントが所有する組織の数だけです。
+`members_per_organization` と `projects_per_organization` の値 `9007199254740991` は、無制限を意味します。JSON クライアントが正確に読み取れる最大の整数です。この値は「無制限」と表示してください。組織の作成を妨げるのは、アカウントが所有する組織の数だけです。
 
 `next` は表示用のテキストです。返されたテキストを表示するか、`next_action` から現地化します。`next` からプラン名を固定で取り出さないでください。
 

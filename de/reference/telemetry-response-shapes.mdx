@@ -535,6 +535,12 @@ oder eine generische Operation, ist `next_action` gleich
 `next_cursor` enthält `time` und `trace_id`. Senden Sie diese Werte als
 `cursor_time` und `cursor_trace_id`.
 
+Mit `response_version=2` hat jeder Trace zusätzlich `capture_span_count` und
+`capture_error_count`. Dann zählen `span_count` und `error_span_count` die
+[Erfassungs-Spans](/de/concepts/distributed-tracing#capture-spans) nicht mit.
+Version 1 zählt sie mit. `status=error` passt auf einen Trace, wenn
+`error_span_count` oder `capture_error_count` über `0` liegt.
+
 `GET /api/telemetry/traces/{trace_id}` gibt die Spans eines Trace zurück.
 `GET /api/telemetry/traces/{trace_id}/summary` gibt den Root-Span, die
 Fehler-Spans, die Dienste, die Dauer und den langsamsten Pfad zurück, ohne rohe
@@ -574,11 +580,12 @@ Ein fehlendes Issue verwendet `"error": "issue not found"`. Eine fehlende
 Trace-Zusammenfassung verwendet `"error": "trace not found"`. Eine unbekannte
 ID und eine ID, die das Konto nicht lesen kann, geben dieselbe Antwort zurück.
 
-Eine Liste mit einer `project_id`, die das Konto nicht lesen kann, gibt `200`
-mit einer leeren Liste zurück. Prüfen Sie die Projekt-ID, bevor Sie melden,
-dass keine Daten existieren.
+Eine Liste mit einer `project_id`, die das Konto nicht lesen kann, gibt `404`
+mit `"error": "project selection not found"` zurück. Eine unbekannte
+Projekt-ID gibt dieselbe Antwort zurück. Siehe
+[abgelehnte Projektauswahl](#rejected-project-selections).
 
-### Abgelehnte Projektauswahl
+### <span id="rejected-project-selections">Abgelehnte Projektauswahl</span>
 
 Die Listen für Logs, Issues, Aktionen, Metriken, Releases und Traces
 akzeptieren ein Projekt mit `project_id` oder 2 bis 50 Projekte mit
@@ -603,8 +610,8 @@ Eine Anfrage mit `project_id` und `project_ids` gibt `422` zurück:
 oder mehr als 50 IDs gibt ebenfalls `422` mit `code: validation_failed`
 zurück.
 
-Kann das Konto ein Projekt aus einer `project_ids`-Menge nicht lesen, gibt die
-gesamte Anfrage `404` zurück. Sie gibt die anderen Projekte nicht als
+Kann das Konto das Projekt aus `project_id` oder ein Projekt aus einer
+`project_ids`-Menge nicht lesen, gibt die gesamte Anfrage `404` zurück. Sie gibt die anderen Projekte nicht als
 Teilergebnis zurück:
 
 ```json
@@ -705,6 +712,7 @@ Ergebnis.
 | Nur ein Cursor-Feld oder ein leeres `cursor_trace_id` | `cursor_time and cursor_trace_id must be sent together` |
 | `cursor_time`, das kein RFC3339-Zeitstempel ist | `cursor_time must be an RFC3339 timestamp` |
 | Cursor-Felder ohne `pagination=cursor` | `pagination must be cursor when cursor pagination is requested` |
+| `response_version` außer `1` oder `2` | `trace response_version must be 1 or 2` |
 
 Um beide Trace-Zustände einzuschließen, lassen Sie `status` weg. Für die
 nächste Seite kopieren Sie `next_cursor.time` nach `cursor_time` und
@@ -1168,8 +1176,9 @@ aktuellen Zustand gelesen haben. Siehe
 
 `POST /api/telemetry/issues/bulk` gibt `200 OK` mit einem Ergebnis pro
 angefragter Issue-ID zurück, in der Reihenfolge der Anfrage. Jedes gefundene
-Issue hat die Struktur aus Version 3. Ein Ergebnis `not_found` hat
-`issue: null`:
+Issue hat die Struktur aus Version 3. Fügen Sie dem Anfrage-Body
+`"response_version": 2` hinzu, um jedes Issue in der Struktur aus Version 4 zu
+erhalten. Ein Ergebnis `not_found` hat `issue: null`:
 
 ```json
 {
@@ -3177,6 +3186,13 @@ Eine `GET`-Anfrage gibt `405` zurück:
 und einen Zeitraum. Die Route braucht `project_id` und `since`. Sie akzeptiert
 kein `project_ids`.
 
+Um 1 bis 50 Projekte gemeinsam zu zählen, senden Sie `project_ids` und `since`
+an `GET /api/telemetry/summary/volume/combined`. Die Antwort hat dieselbe Form.
+Ihr `query` enthält `project_ids` statt `project_id`. Ein Trace mit Spans in
+mehreren ausgewählten Projekten zählt einmal. Kann das Konto eines der Projekte
+nicht lesen, gibt diese Route `404` mit `"error": "project selection not found"`
+zurück.
+
 `until` darf nicht in der Zukunft liegen. Lassen Sie es weg, ist das Ende der
 Zeitpunkt der Anfrage. Ein kompaktes `since` wie `24h` zählt ab `until`
 zurück. `interval` ist `auto`, `1m`, `5m`, `15m`, `1h`, `6h` oder `1d`. Der
@@ -5098,7 +5114,7 @@ Dieser Ausschnitt zeigt nur einige Felder. Eine Regel löst, archiviert oder
 öffnet ein Issue nicht wieder. Verwenden Sie dafür die
 [Statusänderung](#issue-status-response-examples). Eine abgeleitete Priorität
 folgt dem neuen effektiven Schweregrad. Lesen Sie das Issue mit
-`response_version=2` oder `3`, um sie zu sehen.
+`response_version=2` oder höher, um sie zu sehen.
 
 Ein nicht unterstützter Schweregrad gibt `422` zurück:
 

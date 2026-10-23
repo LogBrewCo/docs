@@ -519,6 +519,12 @@ chung chung, route không khớp hoặc thao tác chung chung, `next_action` là
 `next_cursor` chứa `time` và `trace_id`. Gửi chúng dưới dạng `cursor_time` và
 `cursor_trace_id`.
 
+Với `response_version=2`, mỗi trace còn có `capture_span_count` và
+`capture_error_count`. Khi đó `span_count` và `error_span_count` không đếm
+[span ghi nhận](/vi/concepts/distributed-tracing#capture-spans). Phiên bản 1 có
+đếm chúng. `status=error` khớp với một trace khi `error_span_count` hoặc
+`capture_error_count` lớn hơn `0`.
+
 `GET /api/telemetry/traces/{trace_id}` trả về các span của một trace.
 `GET /api/telemetry/traces/{trace_id}/summary` trả về span gốc, các span lỗi,
 dịch vụ, thời lượng và đường đi chậm nhất, không kèm thuộc tính thô của span.
@@ -556,10 +562,11 @@ Vấn đề không tồn tại dùng `"error": "issue not found"`. Bản tóm t�
 tồn tại dùng `"error": "trace not found"`. ID không xác định và ID mà tài khoản
 không đọc được đều trả về cùng một phản hồi.
 
-Danh sách với một `project_id` mà tài khoản không đọc được trả về `200` với danh
-sách trống. Kiểm tra ID dự án trước khi báo rằng không có dữ liệu.
+Danh sách với một `project_id` mà tài khoản không đọc được trả về `404` với
+`"error": "project selection not found"`. ID dự án không xác định trả về cùng
+phản hồi. Xem [lựa chọn dự án bị từ chối](#rejected-project-selections).
 
-### Lựa chọn dự án bị từ chối
+### <span id="rejected-project-selections">Lựa chọn dự án bị từ chối</span>
 
 Danh sách log, vấn đề, hành động, chỉ số, bản phát hành và trace nhận một dự án
 qua `project_id`, hoặc từ 2 đến 50 dự án qua `project_ids`. Danh mục thuộc tính
@@ -583,8 +590,8 @@ Yêu cầu có cả `project_id` lẫn `project_ids` trả về `422`:
 `project_ids` có UUID không hợp lệ, có ID lặp lại, hoặc có ít hơn 2 hay nhiều
 hơn 50 ID cũng trả về `422` với `code: validation_failed`.
 
-Nếu tài khoản không đọc được một dự án trong tập `project_ids`, toàn bộ yêu cầu
-trả về `404`. Yêu cầu không trả về các dự án còn lại thành kết quả một phần:
+Nếu tài khoản không đọc được dự án của `project_id` hoặc một dự án trong tập
+`project_ids`, toàn bộ yêu cầu trả về `404`. Yêu cầu không trả về các dự án còn lại thành kết quả một phần:
 
 ```json
 {
@@ -679,6 +686,7 @@ Các lỗi này áp dụng cho `GET /api/telemetry/traces`. Mỗi lỗi trả v�
 | Chỉ có 1 trường cursor, hoặc `cursor_trace_id` để trống | `cursor_time and cursor_trace_id must be sent together` |
 | `cursor_time` không phải dấu thời gian RFC3339 | `cursor_time must be an RFC3339 timestamp` |
 | Có trường cursor nhưng thiếu `pagination=cursor` | `pagination must be cursor when cursor pagination is requested` |
+| `response_version` khác `1` hoặc `2` | `trace response_version must be 1 or 2` |
 
 Để lấy cả hai trạng thái trace, bỏ `status`. Với trang tiếp theo, sao chép
 `next_cursor.time` vào `cursor_time` và `next_cursor.trace_id` vào
@@ -1128,7 +1136,8 @@ thay đổi khác trước khi đọc trạng thái hiện tại. Xem
 
 `POST /api/telemetry/issues/bulk` trả về `200 OK` với 1 kết quả cho mỗi ID vấn
 đề được yêu cầu, theo thứ tự trong yêu cầu. Mỗi vấn đề tìm thấy dùng cấu trúc
-phiên bản 3. Kết quả `not_found` có `issue: null`:
+phiên bản 3. Thêm `"response_version": 2` vào body để nhận mỗi vấn đề theo cấu trúc
+phiên bản 4. Kết quả `not_found` có `issue: null`:
 
 ```json
 {
@@ -3092,6 +3101,13 @@ Yêu cầu `GET` trả về `405`:
 trong một khoảng thời gian. Route này yêu cầu `project_id` và `since`. Route
 không nhận `project_ids`.
 
+Để đếm 1 đến 50 dự án gộp lại, gửi `project_ids` và `since` đến
+`GET /api/telemetry/summary/volume/combined`. Phản hồi có cùng cấu trúc. Trường
+`query` của nó có `project_ids` thay cho `project_id`. Một trace có span trong
+nhiều dự án được chọn chỉ được đếm một lần. Nếu tài khoản không đọc được một
+trong các dự án, route này trả về `404` với
+`"error": "project selection not found"`.
+
 `until` không được ở tương lai. Nếu bỏ `until`, thời điểm kết thúc là lúc gửi
 yêu cầu. `since` dạng rút gọn như `24h` được tính lùi từ `until`. `interval` là
 `auto`, `1m`, `5m`, `15m`, `1h`, `6h` hoặc `1d`. Giá trị mặc định `auto` chọn
@@ -4993,7 +5009,7 @@ Phản hồi `200 OK` chứa toàn bộ [vấn đề](#issue-response) ở phiê
 Đoạn trích này chỉ hiển thị một số trường. Quy tắc không giải quyết, lưu trữ hay
 mở lại vấn đề. Dùng [thao tác đổi trạng thái](#issue-status-response-examples)
 cho việc đó. Mức ưu tiên suy ra sẽ theo mức độ nghiêm trọng hiệu lực mới. Đọc
-vấn đề với `response_version=2` hoặc `3` để xem mức ưu tiên đó.
+vấn đề với `response_version=2` trở lên để xem mức ưu tiên đó.
 
 Mức độ nghiêm trọng không được hỗ trợ trả về `422`:
 

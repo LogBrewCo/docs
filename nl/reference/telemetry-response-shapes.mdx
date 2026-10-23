@@ -524,6 +524,12 @@ van traces terug, zonder `naming_quality`.
 `next_cursor` bevat `time` en `trace_id`. Stuur ze als `cursor_time` en
 `cursor_trace_id`.
 
+Met `response_version=2` heeft elke trace ook `capture_span_count` en
+`capture_error_count`. Dan tellen `span_count` en `error_span_count` de
+[vastleggingsspans](/nl/concepts/distributed-tracing#capture-spans) niet mee.
+Versie 1 telt ze wel mee. `status=error` komt overeen met een trace als
+`error_span_count` of `capture_error_count` groter is dan `0`.
+
 `GET /api/telemetry/traces/{trace_id}` geeft de spans van één trace terug.
 `GET /api/telemetry/traces/{trace_id}/summary` geeft de rootspan, de foutspans,
 de services, de duur en het traagste pad terug, zonder ruwe spanattributen.
@@ -562,10 +568,11 @@ tracesamenvatting gebruikt `"error": "trace not found"`. Een onbekend ID en een
 ID dat het account niet kan lezen, geven dezelfde response.
 
 Een lijstrequest met één `project_id` dat het account niet kan lezen, geeft
-`200` met een lege lijst. Controleer het project-ID voordat je meldt dat er geen
-gegevens zijn.
+`404` met `"error": "project selection not found"`. Een onbekend project-ID geeft
+dezelfde response. Zie
+[geweigerde projectselecties](#rejected-project-selections).
 
-### Geweigerde projectselecties
+### <span id="rejected-project-selections">Geweigerde projectselecties</span>
 
 De lijsten voor logs, issues, acties, metrics, releases en traces accepteren
 één project met `project_id` of 2 tot 50 projecten met `project_ids`. De
@@ -589,8 +596,8 @@ Een request met zowel `project_id` als `project_ids` geeft `422`:
 `project_ids` met een ongeldige UUID, een dubbel ID, of minder dan 2 of meer
 dan 50 ID's geeft ook `422` met `code: validation_failed`.
 
-Als het account één project in een set `project_ids` niet kan lezen, geeft het
-hele request `404`. Het geeft de andere projecten niet terug als gedeeltelijk
+Als het account het project van `project_id` of één project in een set
+`project_ids` niet kan lezen, geeft het hele request `404`. Het geeft de andere projecten niet terug als gedeeltelijk
 resultaat:
 
 ```json
@@ -688,6 +695,7 @@ Deze fouten gelden voor `GET /api/telemetry/traces`. Elke fout geeft `422` met
 | Maar 1 cursorveld, of een lege `cursor_trace_id` | `cursor_time and cursor_trace_id must be sent together` |
 | `cursor_time` dat geen RFC3339-tijdstempel is | `cursor_time must be an RFC3339 timestamp` |
 | Cursorvelden zonder `pagination=cursor` | `pagination must be cursor when cursor pagination is requested` |
+| `response_version` anders dan `1` of `2` | `trace response_version must be 1 or 2` |
 
 Laat `status` weg om beide tracestatussen mee te nemen. Kopieer voor de
 volgende pagina `next_cursor.time` naar `cursor_time` en `next_cursor.trace_id`
@@ -1140,7 +1148,8 @@ Zie [Schrijfacties](/nl/reference/api-errors#writes).
 
 `POST /api/telemetry/issues/bulk` geeft `200 OK` terug met 1 resultaat per
 gevraagd issue-ID, in de volgorde van het request. Elk gevonden issue gebruikt
-de vorm van versie 3. Een resultaat `not_found` heeft `issue: null`:
+de vorm van versie 3. Voeg `"response_version": 2` toe aan de body om elk issue in de
+vorm van versie 4 te krijgen. Een resultaat `not_found` heeft `issue: null`:
 
 ```json
 {
@@ -3125,6 +3134,13 @@ Een `GET`-request geeft `405`:
 tijdsbereik. De route vereist `project_id` en `since`. Ze accepteert geen
 `project_ids`.
 
+Om 1 tot 50 projecten samen te tellen, stuur je `project_ids` en `since` naar
+`GET /api/telemetry/summary/volume/combined`. De response heeft dezelfde vorm.
+De `query` bevat `project_ids` in plaats van `project_id`. Een trace met spans in
+meerdere geselecteerde projecten telt één keer. Kan het account een van de
+projecten niet lezen, dan geeft deze route `404` met
+`"error": "project selection not found"`.
+
 `until` mag niet in de toekomst liggen. Laat je het weg, dan is het einde het
 tijdstip van het request. Een korte `since` zoals `24h` telt terug vanaf
 `until`. `interval` is `auto`, `1m`, `5m`, `15m`, `1h`, `6h` of `1d`. De
@@ -5036,7 +5052,7 @@ Dit fragment toont maar een deel van de velden. Een regel lost een issue niet
 op, archiveert het niet en heropent het niet. Gebruik daarvoor de
 [statuswijziging](#issue-status-response-examples). Een afgeleide prioriteit
 volgt de nieuwe effectieve ernst. Lees het issue met `response_version=2` of
-`3` om die te zien.
+later om die te zien.
 
 Een niet-ondersteunde ernst geeft `422`:
 

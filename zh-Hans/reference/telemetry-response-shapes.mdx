@@ -448,6 +448,8 @@ SDK 批次成功时返回 `200 OK`，并给出每个数据流已接收的数量�
 
 `next_cursor` 包含 `time` 和 `trace_id`。把它们作为 `cursor_time` 和 `cursor_trace_id` 发送。
 
+使用 `response_version=2` 时，每个链路还包含 `capture_span_count` 和 `capture_error_count`。此时 `span_count` 和 `error_span_count` 不统计[采集 Span](/zh-Hans/concepts/distributed-tracing#capture-spans)。第 1 版会统计。当 `error_span_count` 或 `capture_error_count` 大于 `0` 时，`status=error` 会匹配该链路。
+
 `GET /api/telemetry/traces/{trace_id}` 返回 1 条链路的所有 Span。`GET /api/telemetry/traces/{trace_id}/summary` 返回根 Span、错误 Span、服务、耗时和最慢路径，不含原始 Span 属性。摘要返回 `404` 表示没有链路匹配完整的范围。不要去掉筛选条件后重试。请参阅[链路 Span 与摘要响应](#trace-spans-and-summary-responses)。
 
 ### 空列表与缺失的记录
@@ -478,9 +480,9 @@ SDK 批次成功时返回 `200 OK`，并给出每个数据流已接收的数量�
 
 缺失的问题使用 `"error": "issue not found"`。缺失的链路摘要使用 `"error": "trace not found"`。未知的 ID 和账号无法读取的 ID 返回相同的响应。
 
-如果列表只指定了 1 个 `project_id`，而账号无法读取该项目，会返回 `200` 和空列表。报告“没有数据”之前，先检查项目 ID。
+如果列表只指定了 1 个 `project_id`，而账号无法读取该项目，会返回 `404` 和 `"error": "project selection not found"`。未知的项目 ID 返回相同的响应。参见[被拒绝的项目选择](#rejected-project-selections)。
 
-### 被拒绝的项目选择
+### <span id="rejected-project-selections">被拒绝的项目选择</span>
 
 日志、问题、操作、指标、版本和链路列表接受用 `project_id` 指定 1 个项目，或用 `project_ids` 指定 2 到 50 个项目。日志属性目录接受同样的选择参数。问题发生记录历史不接受这些参数。
 
@@ -500,7 +502,7 @@ SDK 批次成功时返回 `200 OK`，并给出每个数据流已接收的数量�
 
 如果 `project_ids` 包含无效的 UUID、重复的 ID，或 ID 少于 2 个、多于 50 个，也会返回 `422` 和 `code: validation_failed`。
 
-如果账号无法读取 `project_ids` 中的某个项目，整个请求都返回 `404`，不会把其他项目作为部分结果返回：
+如果账号无法读取 `project_id` 指定的项目，或无法读取 `project_ids` 中的某个项目，整个请求都返回 `404`，不会把其他项目作为部分结果返回：
 
 ```json
 {
@@ -578,6 +580,7 @@ SDK 批次成功时返回 `200 OK`，并给出每个数据流已接收的数量�
 | 只有 1 个游标字段，或 `cursor_trace_id` 为空 | `cursor_time and cursor_trace_id must be sent together` |
 | `cursor_time` 不是 RFC3339 时间戳 | `cursor_time must be an RFC3339 timestamp` |
 | 有游标字段但没有 `pagination=cursor` | `pagination must be cursor when cursor pagination is requested` |
+| `response_version` 不是 `1` 或 `2` | `trace response_version must be 1 or 2` |
 
 要同时包含两种链路状态，省略 `status`。读取下一页时，把 `next_cursor.time` 复制到 `cursor_time`，把 `next_cursor.trace_id` 复制到 `cursor_trace_id`。读取链路分页时不要发送 `cursor_id`。请参阅[链路筛选条件](/zh-Hans/reference/telemetry-api-filters#trace-filters)。
 
@@ -967,7 +970,7 @@ curl --request POST "https://api.logbrew.co/api/feed/ticket" \
 
 已经是所请求值的字段不会变化。超时或响应丢失后，重新发送同一个请求，或先读取该问题。读取当前状态之前，不要发送不同的更改。请参阅[写入请求](/zh-Hans/reference/api-errors#writes)。
 
-`POST /api/telemetry/issues/bulk` 返回 `200 OK`，按请求顺序为每个请求的问题 ID 给出 1 个结果。找到的每个问题都使用版本 3 的结构。`not_found` 结果包含 `issue: null`：
+`POST /api/telemetry/issues/bulk` 返回 `200 OK`，按请求顺序为每个请求的问题 ID 给出 1 个结果。找到的每个问题都使用版本 3 的结构。在请求体中加入 `"response_version": 2`，可让每个问题使用版本 4 的结构。`not_found` 结果包含 `issue: null`：
 
 ```json
 {
@@ -2672,6 +2675,8 @@ curl --get "https://api.logbrew.co/api/telemetry/analytics/properties" \
 ## 信号数量响应
 
 `GET /api/telemetry/summary/volume` 统计 1 个项目在某个时间范围内已保留的信号。它需要 `project_id` 和 `since`，不接受 `project_ids`。
+
+要合并统计 1 到 50 个项目，把 `project_ids` 和 `since` 发送到 `GET /api/telemetry/summary/volume/combined`。响应结构相同。它的 `query` 包含 `project_ids`，而不是 `project_id`。在所选的多个项目中都有 Span 的链路只计 1 次。如果账号无法读取其中任何一个项目，该路由返回 `404` 和 `"error": "project selection not found"`。
 
 `until` 不能是未来的时间。省略它时，结束时间为请求时间。`24h` 这样的简写 `since` 从 `until` 往前计算。`interval` 为 `auto`、`1m`、`5m`、`15m`、`1h`、`6h` 或 `1d`。默认的 `auto` 会选择时间桶不超过 120 个的最小间隔。请求所需的时间桶不能超过 500 个。`response_version` 只有 `1`。
 
@@ -4429,7 +4434,7 @@ curl --request PUT "https://api.logbrew.co/api/telemetry/issues/$ISSUE_ID/triage
 }
 ```
 
-以下摘录只显示部分字段。规则不会解决、归档或重新打开问题。要执行这些更改，使用[状态更改](#issue-status-response-examples)。自动推导的优先级会跟随新的有效严重程度。用 `response_version=2` 或 `3` 读取问题即可看到它。
+以下摘录只显示部分字段。规则不会解决、归档或重新打开问题。要执行这些更改，使用[状态更改](#issue-status-response-examples)。自动推导的优先级会跟随新的有效严重程度。用 `response_version=2` 或更高版本读取问题即可看到它。
 
 不支持的严重程度返回 `422`：
 

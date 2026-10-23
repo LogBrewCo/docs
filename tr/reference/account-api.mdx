@@ -57,7 +57,7 @@ dönemde yalnızca log gönderdi:
   "usage": { "events": 27000, "bytes": 10485760, "projects": 1 },
   "state": "ok",
   "warning_threshold": 0.8,
-  "percent_used": 0.2,
+  "percent_used": 0.02,
   "warning": false,
   "blocked": false,
   "limit": null,
@@ -85,7 +85,7 @@ dönemde yalnızca log gönderdi:
 | `plan.tier` | Plan tanımlayıcısı: `free`, `pro` veya `scale`. |
 | `plan.status` | `free`, `trial`, `active`, `past_due` veya `disabled`. |
 | `limits.events`, `limits.bytes`, `limits.projects` | Uyumluluk alanları. Değerleri `null` olur. `null` sınırsız anlamına gelmez. Kota durumu için `state`, `limit` ve `percent_used` kullanın. |
-| `limits.retention_days` | Planın gün cinsinden veri saklama süresi veya `null`. Etkin bir beta teklifi, kendi planının saklama süresini belirler. |
+| `limits.retention_days` | Hesabın gün cinsinden veri saklama süresi. Planın ve etkin bir beta teklifinin büyük olanıdır. Enterprise planında `null` olur; saklama süresini sözleşme belirler. Bkz. [Veri saklama süresi](#data-retention). |
 | `usage.events`, `usage.bytes` | Dönemdeki tüm telemetri akışlarının toplamları. |
 | `usage.projects` | Hesaba ait proje sayısı. |
 | `state` | `ok`, `warning` veya `blocked`. |
@@ -124,7 +124,7 @@ curl "https://api.logbrew.co/api/account/usage?response_version=2" \
 
 Düşürülen olaylar LogBrew'a hiç ulaşmaz. Faturalandırılmaz ve `usage`, `by_project` veya `by_stream` değerlerine sayılmaz. Hiçbir SDK düşürme bildirmediğinde dizi boştur.
 
-### Beta teklifi
+### <span id="beta-offer">Beta teklifi</span>
 
 Herkese açık beta sırasında kaydolan hesaplar, Pro kullanım haklarını 6 ay ücretsiz alır. 2026-10-22 tarihinde var olan hesaplar 6 ayı bu tarihten saymaya başlar. `offer` alanını da almak için `response_version=3` gönderin. 1 ve 2 sürümlerinde bu alan yoktur. 3. sürümde `sdk_dropped_events` alanı da vardır.
 
@@ -164,6 +164,10 @@ Ana dal için `state` kullanın. `limit` yalnızca `state` değeri `ok` olduğun
 | `ok` | `false` | `false` | `null` | `continue_sending_telemetry` | `telemetry_ingest` |
 | `warning` | `true` | `false` | `events` veya `bytes` | `reduce_usage_or_upgrade` | `pricing` |
 | `blocked` | `false` | `true` | `events` veya `bytes` | `wait_until_reset_or_upgrade` | `pricing` |
+
+Bu tablo 2 ve 3 sürümleri için geçerlidir. Varsayılan olan sürüm 1'de 2 fark
+vardır: `blocked` durumunda `warning` da `true` olur ve `warning` durumunda
+`next_action.target` değeri `account_usage` olur.
 
 `next_action.state`, `next_action.limit` ve `next_action.reset_at` üst
 düzeydeki değerleri tekrarlar. `next_action.code` değerleri arasında
@@ -227,7 +231,7 @@ curl --get "https://api.logbrew.co/api/account/usage/history" \
 | --- | --- |
 | `interval` | İstenen dönem. |
 | `period_start`, `period_end` | Geçmiş aralığının başlangıcı ve aralığa dâhil olmayan bitişi. |
-| `current` | Güncel dönem için `GET /api/account/usage` yanıtının tamamı. |
+| `current` | Güncel dönem için `GET /api/account/usage` yanıtının tamamı, 3. sürümde. Her zaman `sdk_dropped_events` ve `offer` alanlarını içerir. |
 | `buckets` | En eskiden başlayarak zaman sırasına göre dilimler. Her dilim `period_start`, `period_end`, `usage`, `by_project` ve `by_stream` içerir. |
 
 Bu `yearly` yanıtı, Haziran 2026'daki bir istek için sentetik veriler
@@ -247,7 +251,7 @@ kullanır. Tüm kullanım Haziran'da gerçekleşti:
     "usage": { "events": 27000, "bytes": 10485760, "projects": 1 },
     "state": "ok",
     "warning_threshold": 0.8,
-    "percent_used": 0.2,
+    "percent_used": 0.02,
     "warning": false,
     "blocked": false,
     "limit": null,
@@ -262,7 +266,9 @@ kullanır. Tüm kullanım Haziran'da gerçekleşti:
     "by_project": [
       { "project_id": "00000000-0000-4000-8000-000000000001", "events": 27000, "bytes": 10485760 }
     ],
-    "by_stream": [{ "kind": "logs", "events": 27000, "bytes": 10485760 }]
+    "by_stream": [{ "kind": "logs", "events": 27000, "bytes": 10485760 }],
+    "sdk_dropped_events": [],
+    "offer": null
   },
   "buckets": [
     { "period_start": "2022-01-01T00:00:00Z", "period_end": "2023-01-01T00:00:00Z", "usage": { "events": 0, "bytes": 0, "projects": 0 }, "by_project": [], "by_stream": [] },
@@ -317,7 +323,9 @@ Bilinmeyen bir sorgu anahtarı da `validation_failed` ile `422` döndürür.
 
 ## Planlar ve kullanım hakları
 
-`GET /api/billing/catalog` planları listeler. Kimlik doğrulama gerektirmez. Her planda tüm özellikler ile sınırsız ekip arkadaşı ve proje bulunur. Planlar hacim ve saklama süresinde farklılaşır. Kullanım hakları her faturalandırma ayında sıfırlanır. 1 GB, 1.000.000.000 bayttır.
+`GET /api/billing/catalog` planları listeler. Kimlik doğrulama gerektirmez. Her planda tüm özellikler bulunur. Her planda sınırsız üye ve proje vardır. Planlar hacim ve saklama süresinde farklılaşır. Kullanım hakları her faturalandırma ayında sıfırlanır. 1 GB, 1.000.000.000 bayttır.
+
+Ücretli ödeme henüz açık değil. Ücretli bir plan satın alamazsınız ve `checkout_available` değeri `false` olur. Herkese açık beta sırasında hesaplar Pro kullanım haklarını ücretsiz alır. Bkz. [Beta teklifi](#beta-offer).
 
 | Plan | `tier` | Aylık fiyat | Loglar | Uygulama metrikleri | İz span'leri | Sorun olayları | Saklama süresi |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -361,10 +369,19 @@ Yanıt planları bu sırayla listeler. Bu örnek Pro planını gösterir:
 
 | Alan | Anlamı |
 | --- | --- |
-| `checkout_available` | Ücretli bir planı satın alabiliyorsanız `true`. |
+| `checkout_available` | Ücretli bir planı satın alabiliyorsanız `true`. Ücretli ödeme açık olmadığı sürece `false` olur. |
 | `monthly_price_cents` | ABD senti cinsinden fiyat. Teklifle belirlenen plan için `null`. |
 | `activation` | `included`, `checkout` veya `quote`. |
+| `quote_email` | Fiyat teklifi için yazacağınız e-posta adresi. Diğer planlarda `null` olur. |
 | `limits` | 1 faturalandırma ayı için kullanım hakları. `null` değeri sözleşmeyle belirlenir. |
+
+### <span id="data-retention">Veri saklama süresi</span>
+
+Saklama süresi, LogBrew'ün bir hesabın telemetrisini kaç gün sakladığını gösterir. Hesabın saklama süresi, planı ile etkin beta teklifinin büyük olanıdır. Enterprise sözleşmesi kendi saklama süresini belirler.
+
+- Okumalar yalnızca saklama süresi içindeki telemetriyi döndürür.
+- LogBrew her gün, hesabın saklama süresinden 1 gün daha eski telemetrisini siler.
+- Plan düşürüldükten veya teklif sona erdikten sonra, kısa olan saklama süresi bir sonraki günlük silmede uygulanır.
 
 ## Abonelik hazırlığı
 
@@ -404,7 +421,7 @@ curl "https://api.logbrew.co/api/account/subscription" \
 }
 ```
 
-Her plan organizasyon oluşturabilir, ekip arkadaşlarını davet edebilir ve proje ekleyebilir. Bir organizasyonda üye veya proje sınırı yoktur. `9007199254740991` değeri sınırsız anlamına gelir. JSON istemcilerinin tam okuyabildiği en büyük tam sayıdır. Bu değer için "Sınırsız" gösterin. Organizasyon oluşturmayı yalnızca hesabın sahip olduğu organizasyon sayısı engelleyebilir.
+`members_per_organization` ve `projects_per_organization` alanlarındaki `9007199254740991` değeri sınırsız anlamına gelir. JSON istemcilerinin tam okuyabildiği en büyük tam sayıdır. Bu değer için "Sınırsız" gösterin. Organizasyon oluşturmayı yalnızca hesabın sahip olduğu organizasyon sayısı engelleyebilir.
 
 `next` görüntülenecek metindir. Döndürülen metni gösterin veya `next_action` alanından yerelleştirin. Plan adını `next` metninden sabit kodlamayın.
 

@@ -67,13 +67,13 @@ LogBrew の `code` を HTTP ステータスの名前で置き換えないでく�
 | `409` | `account_recovery_available` | アカウントは復旧期間中です。 | 返された復旧アクションに従います。復旧用のトークンは非公開にしてください。 |
 | `410` | `account_recovery_expired` | アカウントの復旧期間が終了しました。 | サインインして新しいアカウントを作成します。 |
 | `422` | `validation_failed` | クエリの値、フィールド、フィルター、カーソル、ヘッダー、または期間が有効ではありません。 | 示された値を修正します。その後、リクエストをもう一度送信します。 |
-| `422` | `invite_invalid` | 組織への招待のメールアドレスまたはロールが無効です。 | 招待を修正します。その後、もう一度送信します。 |
+| `422` | `invite_invalid` | 招待が `owner` ロールを指定しているか、招待を承諾できません。期限切れ、取り消し済み、または自分のアカウント宛てではありません。 | `admin` または `member` ロールで招待します。承諾するには、オーナーまたは管理者に新しい招待を依頼します。 |
 | `422` | `organization_limit_exceeded` | アカウントの組織数が上限に達しています。 | 組織を削除するか、サポートに連絡します。 |
 | `423` | `organization_paused` | 有料のサブスクリプションが有効でないため、組織が一時停止されています。 | 有料のサブスクリプションを再開して有効にします。 |
 | `429` | `rate_limited` | リクエストの送信回数が多すぎます。`retry_after_seconds` が追加されます。 | `retry_after_seconds` だけ待ちます。その後、バックオフしながら再試行します。 |
-| `429` | `usage_limit_exceeded` | 取り込みが、請求期間のアカウントの許容量に達しました。`limit` と `reset_at` が追加されます。 | `reset_at` まで取り込みを止めるか、プランを変更します。 |
+| `429` | `usage_limit_exceeded` | 取り込みが、請求期間のアカウントの許容量に達しました。`limit` と `reset_at` が追加されます。 | `reset_at` まで取り込みを止めます。上限を引き上げるには、`next` に従います。 |
 | `429` | `artifact_storage_limit_exceeded` | リリースのビルド成果物またはデバッグファイルのアップロードが、ストレージの上限に達しました。`limit` が追加されます。 | 待ってからもう一度アップロードします。上限が解除されない場合は、サポートに連絡します。 |
-| `429` | `invitation_limit_exceeded` | 組織または招待したアカウントが、1日の招待の許容量に達しました。`limit` と `reset_at` が追加されます。 | `reset_at` まで待ちます。`invitations_per_day` の場合は、プランを変更することもできます。 |
+| `429` | `invitation_limit_exceeded` | 組織または招待したアカウントが、1日の招待の許容量に達しました。`limit` と `reset_at` が追加されます。 | `reset_at` まで待ちます。`invitations_per_day` の場合は、`next` に従って上限を引き上げます。 |
 | `500` | `storage_error`、`json_error`、`internal_error` | サーバーはリクエストを完了しませんでした。 | [再試行のルール](#retry-rules)に従います。失敗が続く場合は、[問題を報告](/ja/guides/report-a-problem)してください。 |
 | `503` | `service_unavailable` | API は現在リクエストを受け付けられません。 | 待ちます。その後、リクエストをもう一度送信します。 |
 | `503` | `artifact_storage_unavailable` | リリースのビルド成果物とデバッグファイルのアップロードが、一時的に利用できません。 | 待ってからもう一度アップロードします。並行してアップロードを始めないでください。 |
@@ -106,7 +106,7 @@ LogBrew の `code` を HTTP ステータスの名前で置き換えないでく�
 | `method_not_allowed` | `next` のメソッドを使います。拒否されたメソッドで再送信しないでください。 |
 | `idempotency_conflict` | 元のリクエストを変更せずに再試行するか、新しい処理には新しいキーを使います。 |
 | `rate_limited` | `retry_after_seconds` だけ待ちます。その後、ジッターを加えた指数バックオフを使います。 |
-| `usage_limit_exceeded` または `invitation_limit_exceeded` | `reset_at` まで待つか、プランを変更します。 |
+| `usage_limit_exceeded` または `invitation_limit_exceeded` | `reset_at` まで待ちます。上限を引き上げるには、`next` に従います。 |
 | `artifact_storage_limit_exceeded` | 待ってからもう一度アップロードします。上限が解除されない場合は、サポートに連絡します。 |
 | `subscription_required`、`organization_paused`、`organization_limit_exceeded` | `next` に従います。プランや組織を変えずに再試行しても、また失敗します。 |
 | `request_timeout`、`service_unavailable`、`artifact_storage_unavailable`、`billing_unavailable` | 待ちます。その後、読み取りは同じ範囲でもう一度送信します。書き込みは、[書き込みのルール](#writes)に従います。 |
@@ -378,16 +378,16 @@ LogBrew の `code` を HTTP ステータスの名前で置き換えないでく�
 
 ### 使用量の上限
 
-`next` のテキストと `next_action` は、プランを変更できるかどうかによって変わります。変更できない場合、`next_action.code` は `wait_or_contact_support` で、対象は `support` です。
+`next` のテキストと `next_action` は、有料プランの購入が始まっているかどうかによって変わります。購入はまだ始まっていないため、レスポンスは次の例のようになります。購入が始まると、`next_action.code` は `wait_or_upgrade` で、対象は `billing` です。
 
 ```json
 {
   "error": "Usage limit exceeded",
   "code": "usage_limit_exceeded",
-  "next": "wait until reset_at or upgrade your plan before retrying ingestion",
+  "next": "wait until reset_at or contact LogBrew support to raise your limit before retrying ingestion",
   "next_action": {
-    "code": "wait_or_upgrade",
-    "target": "billing"
+    "code": "wait_or_contact_support",
+    "target": "support"
   },
   "limit": "log_bytes",
   "reset_at": "2026-11-01T00:00:00+00:00"

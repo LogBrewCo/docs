@@ -448,6 +448,8 @@ description: "اقرأ استجابات LogBrew API لقوائم بيانات ا
 
 يحمل `next_cursor` الحقلين `time` و`trace_id`. أرسلهما في `cursor_time` و`cursor_trace_id`.
 
+مع `response_version=2` يحمل كل تتبّع أيضًا `capture_span_count` و`capture_error_count`. عندها لا تحسب `span_count` و`error_span_count` [Spans الالتقاط](/ar/concepts/distributed-tracing#capture-spans). أما الإصدار 1 فيحسبها. ويطابق `status=error` التتبّع عندما تكون `error_span_count` أو `capture_error_count` أكبر من `0`.
+
 يعيد `GET /api/telemetry/traces/{trace_id}` الـ Spans لتتبّع واحد. ويعيد `GET /api/telemetry/traces/{trace_id}/summary` الـ Span الجذري وSpans الأخطاء والخدمات والمدة وأبطأ مسار، دون سمات الـ Spans الخام. الاستجابة `404` للملخص تعني أنه لم يطابق أي تتبّع النطاق الكامل. لا تُعد المحاولة دون عوامل التصفية. راجع [استجابات Spans التتبّع وملخصه](#trace-spans-and-summary-responses).
 
 ### <span id="empty-lists-and-missing-records">القوائم الفارغة والقيود المفقودة</span>
@@ -478,7 +480,7 @@ description: "اقرأ استجابات LogBrew API لقوائم بيانات ا
 
 تستخدم المشكلة المفقودة `"error": "issue not found"`. ويستخدم ملخص التتبّع المفقود `"error": "trace not found"`. المعرّف غير المعروف والمعرّف الذي لا يستطيع الحساب قراءته يعيدان الاستجابة نفسها.
 
-القائمة التي فيها `project_id` واحد لا يستطيع الحساب قراءته تعيد `200` مع قائمة فارغة. تحقق من معرّف المشروع قبل أن تبلّغ بعدم وجود بيانات.
+القائمة التي فيها `project_id` واحد لا يستطيع الحساب قراءته تعيد `404` مع `"error": "project selection not found"`. ويعيد معرّف المشروع غير المعروف الاستجابة نفسها. راجع [تحديدات المشاريع المرفوضة](#rejected-project-selections).
 
 ### <span id="rejected-project-selections">تحديدات المشاريع المرفوضة</span>
 
@@ -500,7 +502,7 @@ description: "اقرأ استجابات LogBrew API لقوائم بيانات ا
 
 يعيد `project_ids` أيضًا `422` مع `code: validation_failed` عندما يحتوي على UUID غير صالح، أو معرّف مكرر، أو أقل من 2 أو أكثر من 50 معرّفًا.
 
-إذا لم يستطع الحساب قراءة مشروع واحد في مجموعة `project_ids`، يعيد الطلب كله `404`. ولا يعيد المشاريع الأخرى نتيجةً جزئية:
+إذا لم يستطع الحساب قراءة مشروع `project_id` أو مشروع واحد في مجموعة `project_ids`، يعيد الطلب كله `404`. ولا يعيد المشاريع الأخرى نتيجةً جزئية:
 
 ```json
 {
@@ -578,6 +580,7 @@ description: "اقرأ استجابات LogBrew API لقوائم بيانات ا
 | حقل مؤشر واحد فقط، أو `cursor_trace_id` فارغ | `cursor_time and cursor_trace_id must be sent together` |
 | `cursor_time` ليس طابعًا زمنيًا بتنسيق RFC3339 | `cursor_time must be an RFC3339 timestamp` |
 | حقول المؤشر دون `pagination=cursor` | `pagination must be cursor when cursor pagination is requested` |
+| `response_version` غير `1` و`2` | `trace response_version must be 1 or 2` |
 
 لتضمين حالتي التتبّع كلتيهما، احذف `status`. للصفحة التالية، انسخ `next_cursor.time` إلى `cursor_time` و`next_cursor.trace_id` إلى `cursor_trace_id`. لا ترسل `cursor_id` لصفحة تتبّعات. راجع [عوامل تصفية التتبّعات](/ar/reference/telemetry-api-filters#trace-filters).
 
@@ -967,7 +970,7 @@ curl --request POST "https://api.logbrew.co/api/feed/ticket" \
 
 الحقل الذي له القيمة المطلوبة بالفعل لا يتغير. بعد انتهاء المهلة أو ضياع الاستجابة، أرسل الطلب نفسه مرة أخرى، أو اقرأ المشكلة أولًا. لا ترسل تغييرًا مختلفًا قبل أن تقرأ الحالة الحالية. راجع [عمليات الكتابة](/ar/reference/api-errors#writes).
 
-يعيد `POST /api/telemetry/issues/bulk` الاستجابة `200 OK` مع نتيجة واحدة لكل معرّف مشكلة مطلوب، بترتيب الطلب. تستخدم كل مشكلة موجودة شكل النسخة 3. ولنتيجة `not_found` القيمة `issue: null`:
+يعيد `POST /api/telemetry/issues/bulk` الاستجابة `200 OK` مع نتيجة واحدة لكل معرّف مشكلة مطلوب، بترتيب الطلب. تستخدم كل مشكلة موجودة شكل النسخة 3. أضف `"response_version": 2` إلى النص لتحصل على كل مشكلة بشكل النسخة 4. ولنتيجة `not_found` القيمة `issue: null`:
 
 ```json
 {
@@ -2672,6 +2675,8 @@ curl --get "https://api.logbrew.co/api/telemetry/analytics/properties" \
 ## <span id="signal-volume-response">استجابة حجم الإشارات</span>
 
 يعدّ `GET /api/telemetry/summary/volume` الإشارات المحتفَظ بها لمشروع واحد ونطاق زمني واحد. ويتطلب `project_id` و`since`. ولا يقبل `project_ids`.
+
+لعدّ من 1 إلى 50 مشروعًا معًا، أرسل `project_ids` و`since` إلى `GET /api/telemetry/summary/volume/combined`. للاستجابة الشكل نفسه. ويحتوي `query` فيها على `project_ids` بدل `project_id`. ويُحسب التتبّع الذي له Spans في عدة مشاريع محددة مرة واحدة. وإذا لم يستطع الحساب قراءة أحد المشاريع، يعيد هذا المسار `404` مع `"error": "project selection not found"`.
 
 لا يمكن أن يكون `until` في المستقبل. إذا حذفته، فالنهاية هي وقت الطلب. وقيمة `since` المختصرة مثل `24h` تُحسب رجوعًا من `until`. قيمة `interval` هي `auto` أو `1m` أو `5m` أو `15m` أو `1h` أو `6h` أو `1d`. القيمة الافتراضية `auto` تختار أصغر فاصل زمني يحتاج إلى 120 فاصلًا على الأكثر. ولا يمكن أن يحتاج الطلب إلى أكثر من 500 فاصل. قيمة `response_version` الوحيدة هي `1`.
 
@@ -4429,7 +4434,7 @@ curl --request PUT "https://api.logbrew.co/api/telemetry/issues/$ISSUE_ID/triage
 }
 ```
 
-يعرض هذا المقتطف بعض الحقول فقط. لا تحلّ القاعدة المشكلة ولا تؤرشفها ولا تعيد فتحها. استخدم [تغيير الحالة](#issue-status-response-examples) لذلك. تتبع الأولوية المشتقة الخطورة الفعلية الجديدة. اقرأ المشكلة مع `response_version=2` أو `3` لتراها.
+يعرض هذا المقتطف بعض الحقول فقط. لا تحلّ القاعدة المشكلة ولا تؤرشفها ولا تعيد فتحها. استخدم [تغيير الحالة](#issue-status-response-examples) لذلك. تتبع الأولوية المشتقة الخطورة الفعلية الجديدة. اقرأ المشكلة مع `response_version=2` أو أحدث لتراها.
 
 الخطورة غير المدعومة تعيد `422`:
 

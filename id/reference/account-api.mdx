@@ -58,7 +58,7 @@ mengirim log pada periode saat ini:
   "usage": { "events": 27000, "bytes": 10485760, "projects": 1 },
   "state": "ok",
   "warning_threshold": 0.8,
-  "percent_used": 0.2,
+  "percent_used": 0.02,
   "warning": false,
   "blocked": false,
   "limit": null,
@@ -86,7 +86,7 @@ mengirim log pada periode saat ini:
 | `plan.tier` | Pengenal paket: `free`, `pro`, atau `scale`. |
 | `plan.status` | `free`, `trial`, `active`, `past_due`, atau `disabled`. |
 | `limits.events`, `limits.bytes`, `limits.projects` | Kolom kompatibilitas. Nilainya `null`. `null` tidak berarti tanpa batas. Gunakan `state`, `limit`, dan `percent_used` untuk status kuota. |
-| `limits.retention_days` | Retensi data untuk paket, dalam hari, atau `null`. Promo beta yang aktif menetapkan retensi dari paketnya. |
+| `limits.retention_days` | Retensi data akun, dalam hari. Nilainya yang lebih besar antara paket dan promo beta yang aktif. Nilainya `null` untuk paket Enterprise, yang retensinya ditetapkan kontrak. Lihat [Retensi data](#data-retention). |
 | `usage.events`, `usage.bytes` | Total untuk semua stream telemetri dalam periode ini. |
 | `usage.projects` | Jumlah proyek yang dimiliki akun. |
 | `state` | `ok`, `warning`, atau `blocked`. |
@@ -125,7 +125,7 @@ curl "https://api.logbrew.co/api/account/usage?response_version=2" \
 
 Peristiwa yang dibuang tidak pernah sampai ke LogBrew. Peristiwa ini tidak ditagih dan tidak dihitung dalam `usage`, `by_project`, atau `by_stream`. Array kosong jika tidak ada SDK yang melaporkan peristiwa yang dibuang.
 
-### Promo beta
+### <span id="beta-offer">Promo beta</span>
 
 Akun yang mendaftar selama beta publik mendapat kuota Pro gratis selama 6 bulan. Akun yang sudah ada pada 2026-10-22 menghitung 6 bulan dari tanggal itu. Kirim `response_version=3` untuk mendapatkan `offer` juga. Versi 1 dan 2 tidak memiliki kolom ini. Versi 3 juga memiliki `sdk_dropped_events`.
 
@@ -165,6 +165,10 @@ Gunakan `state` untuk percabangan utama. `limit` bernilai `null` hanya jika
 | `ok` | `false` | `false` | `null` | `continue_sending_telemetry` | `telemetry_ingest` |
 | `warning` | `true` | `false` | `events` atau `bytes` | `reduce_usage_or_upgrade` | `pricing` |
 | `blocked` | `false` | `true` | `events` atau `bytes` | `wait_until_reset_or_upgrade` | `pricing` |
+
+Tabel ini berlaku untuk versi 2 dan 3. Versi 1, yang default, punya 2 perbedaan:
+`warning` juga `true` pada status `blocked`, dan pada status `warning`,
+`next_action.target` adalah `account_usage`.
 
 `next_action.state`, `next_action.limit`, dan `next_action.reset_at`
 mengulang nilai di tingkat teratas. Nilai `next_action.code` juga mencakup
@@ -228,7 +232,7 @@ curl --get "https://api.logbrew.co/api/account/usage/history" \
 | --- | --- |
 | `interval` | Interval yang diminta. |
 | `period_start`, `period_end` | Awal dan akhir eksklusif dari rentang waktu riwayat. |
-| `current` | Respons `GET /api/account/usage` lengkap untuk periode saat ini. |
+| `current` | Respons `GET /api/account/usage` lengkap untuk periode saat ini, pada versi 3. Respons ini selalu memuat `sdk_dropped_events` dan `offer`. |
 | `buckets` | Interval waktu sesuai urutan waktu, yang terlama lebih dulu. Setiap interval waktu punya `period_start`, `period_end`, `usage`, `by_project`, dan `by_stream`. |
 
 Respons `yearly` ini memakai data sintetis untuk permintaan pada Juni 2026.
@@ -248,7 +252,7 @@ Semua penggunaan terjadi pada bulan Juni:
     "usage": { "events": 27000, "bytes": 10485760, "projects": 1 },
     "state": "ok",
     "warning_threshold": 0.8,
-    "percent_used": 0.2,
+    "percent_used": 0.02,
     "warning": false,
     "blocked": false,
     "limit": null,
@@ -263,7 +267,9 @@ Semua penggunaan terjadi pada bulan Juni:
     "by_project": [
       { "project_id": "00000000-0000-4000-8000-000000000001", "events": 27000, "bytes": 10485760 }
     ],
-    "by_stream": [{ "kind": "logs", "events": 27000, "bytes": 10485760 }]
+    "by_stream": [{ "kind": "logs", "events": 27000, "bytes": 10485760 }],
+    "sdk_dropped_events": [],
+    "offer": null
   },
   "buckets": [
     { "period_start": "2022-01-01T00:00:00Z", "period_end": "2023-01-01T00:00:00Z", "usage": { "events": 0, "bytes": 0, "projects": 0 }, "by_project": [], "by_stream": [] },
@@ -320,7 +326,9 @@ Kunci kueri yang tidak dikenal juga mengembalikan `422` dengan
 
 ## Paket dan kuota
 
-`GET /api/billing/catalog` mencantumkan paket. Endpoint ini tidak memerlukan autentikasi. Setiap paket memiliki semua fitur, dengan rekan kerja dan proyek tanpa batas. Paket berbeda dalam volume dan retensi. Kuota direset setiap bulan penagihan. 1 GB sama dengan 1.000.000.000 byte.
+`GET /api/billing/catalog` mencantumkan paket. Endpoint ini tidak memerlukan autentikasi. Setiap paket memiliki semua fitur. Setiap paket memiliki anggota dan proyek tanpa batas. Paket berbeda dalam volume dan retensi. Kuota direset setiap bulan penagihan. 1 GB sama dengan 1.000.000.000 byte.
+
+Pembelian paket berbayar belum dibuka. Anda tidak dapat membeli paket berbayar, dan `checkout_available` bernilai `false`. Selama beta publik, akun mendapat kuota Pro gratis. Lihat [Promo beta](#beta-offer).
 
 | Paket | `tier` | Harga per bulan | Log | Metrik aplikasi | Span trace | Peristiwa masalah | Masa simpan |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -364,10 +372,23 @@ Respons mencantumkan paket dalam urutan ini. Contoh ini menampilkan paket Pro:
 
 | Kolom | Arti |
 | --- | --- |
-| `checkout_available` | `true` jika Anda dapat membeli paket berbayar. |
+| `checkout_available` | `true` jika Anda dapat membeli paket berbayar. Nilainya `false` selama pembelian paket berbayar belum dibuka. |
 | `monthly_price_cents` | Harga dalam sen dolar AS. Nilainya `null` untuk paket sesuai penawaran. |
 | `activation` | `included`, `checkout`, atau `quote`. |
+| `quote_email` | Alamat email tujuan Anda menulis untuk meminta penawaran harga. Nilainya `null` untuk paket lain. |
 | `limits` | Kuota untuk 1 bulan penagihan. Nilai `null` ditetapkan melalui kontrak. |
+
+### <span id="data-retention">Retensi data</span>
+
+Retensi adalah jumlah hari LogBrew menyimpan telemetri sebuah akun. Retensi akun
+adalah yang lebih besar antara paketnya dan promo beta yang aktif. Kontrak
+Enterprise menetapkan retensinya sendiri.
+
+- Pembacaan hanya mengembalikan telemetri di dalam retensi.
+- Setiap hari, LogBrew menghapus telemetri akun yang lebih lama dari retensi
+  ditambah 1 hari.
+- Setelah paket diturunkan atau promo berakhir, retensi yang lebih pendek
+  berlaku pada penghapusan harian berikutnya.
 
 ## Kesiapan langganan
 
@@ -408,7 +429,7 @@ sintetis:
 }
 ```
 
-Setiap paket dapat membuat organisasi, mengundang rekan kerja, dan menambahkan proyek. Organisasi tidak memiliki batas anggota maupun proyek. Nilai `9007199254740991` berarti tanpa batas. Ini adalah bilangan bulat terbesar yang dibaca persis oleh klien JSON. Tampilkan "Tanpa batas" untuk nilai ini. Hanya jumlah organisasi yang dimiliki akun yang dapat memblokir pembuatan organisasi.
+Nilai `9007199254740991` pada `members_per_organization` dan `projects_per_organization` berarti tanpa batas. Ini adalah bilangan bulat terbesar yang dibaca persis oleh klien JSON. Tampilkan "Tanpa batas" untuk nilai ini. Hanya jumlah organisasi yang dimiliki akun yang dapat memblokir pembuatan organisasi.
 
 `next` adalah teks tampilan. Tampilkan teks yang dikembalikan, atau lokalkan dari `next_action`. Jangan menulis tetap nama paket dari `next` di kode.
 

@@ -448,6 +448,8 @@ SDK 배치가 거부되면 `code: validation_failed`와 함께 `422`를 반환�
 
 `next_cursor`에는 `time`과 `trace_id`가 들어 있습니다. 이 값을 `cursor_time`과 `cursor_trace_id`로 보내세요.
 
+`response_version=2`를 보내면 각 트레이스에 `capture_span_count`와 `capture_error_count`도 들어 있습니다. 이때 `span_count`와 `error_span_count`에는 [수집 스팬](/ko/concepts/distributed-tracing#capture-spans)이 포함되지 않습니다. 버전 1은 포함합니다. `error_span_count` 또는 `capture_error_count`가 `0`보다 크면 `status=error`와 일치합니다.
+
 `GET /api/telemetry/traces/{trace_id}`는 트레이스 1개의 스팬을 반환합니다. `GET /api/telemetry/traces/{trace_id}/summary`는 루트 스팬, 오류 스팬, 서비스, 소요 시간, 가장 느린 경로를 원시 스팬 속성 없이 반환합니다. 요약에서 `404`가 오면 전체 범위와 일치하는 트레이스가 없다는 뜻입니다. 필터를 빼고 재시도하지 마세요. [트레이스 스팬과 요약 응답](#trace-spans-and-summary-responses)을 참고하세요.
 
 ### 빈 목록과 없는 레코드
@@ -478,9 +480,9 @@ SDK 배치가 거부되면 `code: validation_failed`와 함께 `422`를 반환�
 
 이슈가 없으면 `"error": "issue not found"`를 사용합니다. 트레이스 요약이 없으면 `"error": "trace not found"`를 사용합니다. 알 수 없는 ID와 계정이 읽을 수 없는 ID는 같은 응답을 반환합니다.
 
-계정이 읽을 수 없는 `project_id` 1개로 목록을 요청하면 빈 목록과 함께 `200`을 반환합니다. 데이터가 없다고 보고하기 전에 프로젝트 ID를 확인하세요.
+계정이 읽을 수 없는 `project_id` 1개로 목록을 요청하면 `404`와 `"error": "project selection not found"`를 반환합니다. 알 수 없는 프로젝트 ID도 같은 응답을 받습니다. [거부된 프로젝트 선택](#rejected-project-selections)을 참고하세요.
 
-### 거부된 프로젝트 선택
+### <span id="rejected-project-selections">거부된 프로젝트 선택</span>
 
 로그, 이슈, 액션, 메트릭, 릴리스, 트레이스 목록은 `project_id`로 프로젝트 1개를, 또는 `project_ids`로 프로젝트 2~50개를 받습니다. 로그 속성 카탈로그도 같은 선택자를 받습니다. 이슈 발생 기록은 이 선택자를 받지 않습니다.
 
@@ -500,7 +502,7 @@ SDK 배치가 거부되면 `code: validation_failed`와 함께 `422`를 반환�
 
 `project_ids`에 잘못된 UUID나 중복된 ID가 있거나, ID가 2개보다 적거나 50개보다 많아도 `code: validation_failed`와 함께 `422`를 반환합니다.
 
-`project_ids` 중 프로젝트 1개라도 계정이 읽을 수 없으면 요청 전체가 `404`를 반환합니다. 나머지 프로젝트를 부분 결과로 반환하지 않습니다.
+`project_id` 프로젝트나 `project_ids` 중 프로젝트 1개라도 계정이 읽을 수 없으면 요청 전체가 `404`를 반환합니다. 나머지 프로젝트를 부분 결과로 반환하지 않습니다.
 
 ```json
 {
@@ -578,6 +580,7 @@ SDK 배치가 거부되면 `code: validation_failed`와 함께 `422`를 반환�
 | 커서 필드를 1개만 보내거나 `cursor_trace_id`가 비어 있음 | `cursor_time and cursor_trace_id must be sent together` |
 | `cursor_time`이 RFC3339 타임스탬프가 아님 | `cursor_time must be an RFC3339 timestamp` |
 | `pagination=cursor` 없이 커서 필드를 보냄 | `pagination must be cursor when cursor pagination is requested` |
+| `response_version`이 `1`이나 `2`가 아님 | `trace response_version must be 1 or 2` |
 
 두 트레이스 상태를 모두 포함하려면 `status`를 생략하세요. 다음 페이지를 읽을 때는 `next_cursor.time`을 `cursor_time`으로, `next_cursor.trace_id`를 `cursor_trace_id`로 복사하세요. 트레이스 페이지에는 `cursor_id`를 보내지 마세요. [트레이스 필터](/ko/reference/telemetry-api-filters#trace-filters)를 참고하세요.
 
@@ -967,7 +970,7 @@ WebSocket 클라이언트를 `wss://api.logbrew.co/api/feed/live?ticket=<feed-ti
 
 이미 요청한 값과 같은 필드는 바뀌지 않습니다. 시간 초과가 났거나 응답을 받지 못했다면 같은 요청을 다시 보내거나 먼저 이슈를 읽으세요. 현재 상태를 읽기 전에 다른 변경을 보내지 마세요. [쓰기 요청](/ko/reference/api-errors#writes)을 참고하세요.
 
-`POST /api/telemetry/issues/bulk`는 요청한 이슈 ID마다 결과 1개를 요청 순서대로 담아 `200 OK`를 반환합니다. 찾은 이슈는 모두 버전 3 형식을 사용합니다. `not_found` 결과는 `issue: null`입니다.
+`POST /api/telemetry/issues/bulk`는 요청한 이슈 ID마다 결과 1개를 요청 순서대로 담아 `200 OK`를 반환합니다. 찾은 이슈는 모두 버전 3 형식을 사용합니다. 본문에 `"response_version": 2`를 추가하면 각 이슈를 버전 4 형식으로 받습니다. `not_found` 결과는 `issue: null`입니다.
 
 ```json
 {
@@ -2672,6 +2675,8 @@ curl --get "https://api.logbrew.co/api/telemetry/analytics/properties" \
 ## 시그널 양 응답
 
 `GET /api/telemetry/summary/volume`은 프로젝트 1개와 기간 1개에 대해 보존된 시그널을 셉니다. `project_id`와 `since`가 필요합니다. `project_ids`는 받지 않습니다.
+
+프로젝트 1~50개를 합쳐서 세려면 `project_ids`와 `since`를 `GET /api/telemetry/summary/volume/combined`로 보내세요. 응답 형태는 같습니다. `query`에는 `project_id` 대신 `project_ids`가 들어 있습니다. 선택한 여러 프로젝트에 스팬이 있는 트레이스는 한 번만 셉니다. 계정이 프로젝트 중 하나라도 읽을 수 없으면 이 라우트는 `404`와 `"error": "project selection not found"`를 반환합니다.
 
 `until`은 미래 시각일 수 없습니다. 생략하면 요청 시각이 끝 시각이 됩니다. `24h` 같은 짧은 `since` 표기는 `until`부터 거꾸로 셉니다. `interval`은 `auto`, `1m`, `5m`, `15m`, `1h`, `6h`, `1d` 중 하나입니다. 기본값 `auto`는 시간 구간이 120개 이하인 가장 작은 간격을 선택합니다. 요청에 시간 구간이 500개보다 많이 필요하면 안 됩니다. `response_version`은 `1`만 있습니다.
 
@@ -4429,7 +4434,7 @@ curl --request PUT "https://api.logbrew.co/api/telemetry/issues/$ISSUE_ID/triage
 }
 ```
 
-이 발췌는 일부 필드만 보여 줍니다. 규칙은 이슈를 해결하거나, 보관하거나, 다시 열지 않습니다. 그런 작업에는 [상태 변경](#issue-status-response-examples)을 사용하세요. 파생된 우선순위는 새로 실제 적용된 심각도를 따릅니다. 이 값을 보려면 `response_version=2`나 `3`으로 이슈를 읽으세요.
+이 발췌는 일부 필드만 보여 줍니다. 규칙은 이슈를 해결하거나, 보관하거나, 다시 열지 않습니다. 그런 작업에는 [상태 변경](#issue-status-response-examples)을 사용하세요. 파생된 우선순위는 새로 실제 적용된 심각도를 따릅니다. 이 값을 보려면 `response_version=2` 이상으로 이슈를 읽으세요.
 
 지원하지 않는 심각도는 `422`를 반환합니다.
 

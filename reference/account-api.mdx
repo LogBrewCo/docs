@@ -56,7 +56,7 @@ sent only logs in the current period:
   "usage": { "events": 27000, "bytes": 10485760, "projects": 1 },
   "state": "ok",
   "warning_threshold": 0.8,
-  "percent_used": 0.2,
+  "percent_used": 0.02,
   "warning": false,
   "blocked": false,
   "limit": null,
@@ -84,7 +84,7 @@ sent only logs in the current period:
 | `plan.tier` | Plan identifier: `free`, `pro`, or `scale`. |
 | `plan.status` | `free`, `trial`, `active`, `past_due`, or `disabled`. |
 | `limits.events`, `limits.bytes`, `limits.projects` | Compatibility fields. They are `null`. `null` does not mean unlimited. Use `state`, `limit`, and `percent_used` for quota state. |
-| `limits.retention_days` | Data retention for the plan, in days, or `null`. An active beta offer sets the retention of its plan. |
+| `limits.retention_days` | The account's data retention, in days. It is the larger of the plan and an active beta offer. It is `null` for an Enterprise plan, whose contract sets the retention. See [Data retention](#data-retention). |
 | `usage.events`, `usage.bytes` | Totals for all telemetry streams in the period. |
 | `usage.projects` | The number of projects that the account owns. |
 | `state` | `ok`, `warning`, or `blocked`. |
@@ -176,6 +176,10 @@ Use `state` for the main branch. `limit` is `null` only when `state` is `ok`.
 | `warning` | `true` | `false` | `events` or `bytes` | `reduce_usage_or_upgrade` | `pricing` |
 | `blocked` | `false` | `true` | `events` or `bytes` | `wait_until_reset_or_upgrade` | `pricing` |
 
+This table applies to versions 2 and 3. Version 1, the default, has 2
+differences: `warning` is also `true` in the `blocked` state, and in the
+`warning` state `next_action.target` is `account_usage`.
+
 `next_action.state`, `next_action.limit`, and `next_action.reset_at` repeat
 the top-level values. The `next_action.code` values also include
 `check_usage_limits` with the target `account_usage`. If a client gets that
@@ -236,7 +240,7 @@ curl --get "https://api.logbrew.co/api/account/usage/history" \
 | --- | --- |
 | `interval` | The requested interval. |
 | `period_start`, `period_end` | The start and the exclusive end of the history window. |
-| `current` | The complete `GET /api/account/usage` response for the current period. |
+| `current` | The complete `GET /api/account/usage` response for the current period, in version 3. It always has `sdk_dropped_events` and `offer`. |
 | `buckets` | Buckets in time order, oldest first. Each bucket has `period_start`, `period_end`, `usage`, `by_project`, and `by_stream`. |
 
 This `yearly` response uses synthetic data for a request in June 2026. All
@@ -256,7 +260,7 @@ usage occurred in June:
     "usage": { "events": 27000, "bytes": 10485760, "projects": 1 },
     "state": "ok",
     "warning_threshold": 0.8,
-    "percent_used": 0.2,
+    "percent_used": 0.02,
     "warning": false,
     "blocked": false,
     "limit": null,
@@ -271,7 +275,9 @@ usage occurred in June:
     "by_project": [
       { "project_id": "00000000-0000-4000-8000-000000000001", "events": 27000, "bytes": 10485760 }
     ],
-    "by_stream": [{ "kind": "logs", "events": 27000, "bytes": 10485760 }]
+    "by_stream": [{ "kind": "logs", "events": 27000, "bytes": 10485760 }],
+    "sdk_dropped_events": [],
+    "offer": null
   },
   "buckets": [
     { "period_start": "2022-01-01T00:00:00Z", "period_end": "2023-01-01T00:00:00Z", "usage": { "events": 0, "bytes": 0, "projects": 0 }, "by_project": [], "by_stream": [] },
@@ -326,9 +332,13 @@ An unknown query key also returns `422` with `validation_failed`.
 ## Plans and allowances
 
 `GET /api/billing/catalog` lists the plans. It needs no authentication.
-Every plan has every feature, and every plan has unlimited teammates and
-projects. Plans differ in volume and retention. Allowances reset each billing
-month. 1 GB is 1,000,000,000 bytes.
+Every plan has every feature. Every plan has unlimited members and projects.
+Plans differ in volume and retention. Allowances reset each billing month.
+1 GB is 1,000,000,000 bytes.
+
+Paid checkout is not open yet. You cannot buy a paid plan, and
+`checkout_available` is `false`. During the public beta, accounts get the Pro
+allowances free. See [Beta offer](#beta-offer).
 
 | Plan | `tier` | Price per month | Logs | Metrics | Spans | Issue events | Retention |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -374,10 +384,23 @@ The response lists the plans in this order. This example shows the Pro plan:
 
 | Field | Meaning |
 | --- | --- |
-| `checkout_available` | `true` when you can buy a paid plan. |
+| `checkout_available` | `true` when you can buy a paid plan. It is `false` while paid checkout is not open. |
 | `monthly_price_cents` | The price in US cents. It is `null` for a quoted plan. |
 | `activation` | `included`, `checkout`, or `quote`. |
+| `quote_email` | The email address that you write to for a quote. It is `null` for the other plans. |
 | `limits` | The allowances for 1 billing month. A value of `null` is set by contract. |
+
+### Data retention
+
+Retention is the number of days that LogBrew keeps an account's telemetry. The
+account's retention is the larger of its plan and an active beta offer. An
+Enterprise contract sets its own retention.
+
+- Reads return only telemetry inside the retention.
+- Each day, LogBrew deletes the account's telemetry that is older than the
+  retention plus 1 day.
+- After a downgrade or the end of an offer, the shorter retention applies at
+  the next daily deletion.
 
 ## Subscription readiness
 
@@ -418,9 +441,8 @@ A free account returns this response. The `account_id` is synthetic:
 }
 ```
 
-Every plan can create an organization, invite teammates, and add projects.
-An organization has no limit on members or projects. The value
-`9007199254740991` means unlimited. It is the largest integer that JSON
+The value `9007199254740991` in `members_per_organization` and
+`projects_per_organization` means unlimited. It is the largest integer that JSON
 clients read exactly. Show "Unlimited" for it. Only the number of
 organizations that an account owns can block organization creation.
 

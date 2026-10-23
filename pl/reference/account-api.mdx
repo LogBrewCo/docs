@@ -58,7 +58,7 @@ projekt i w bieżącym okresie wysłało tylko logi:
   "usage": { "events": 27000, "bytes": 10485760, "projects": 1 },
   "state": "ok",
   "warning_threshold": 0.8,
-  "percent_used": 0.2,
+  "percent_used": 0.02,
   "warning": false,
   "blocked": false,
   "limit": null,
@@ -86,7 +86,7 @@ projekt i w bieżącym okresie wysłało tylko logi:
 | `plan.tier` | Identyfikator planu: `free`, `pro` lub `scale`. |
 | `plan.status` | `free`, `trial`, `active`, `past_due` lub `disabled`. |
 | `limits.events`, `limits.bytes`, `limits.projects` | Pola zgodności wstecznej. Mają wartość `null`. `null` nie oznacza braku limitu. Stan limitu odczytuj z `state`, `limit` i `percent_used`. |
-| `limits.retention_days` | Czas przechowywania danych w planie, w dniach, albo `null`. Aktywna oferta beta ustala czas przechowywania danych według swojego planu. |
+| `limits.retention_days` | Czas przechowywania danych konta, w dniach. To dłuższy z czasów: planu i aktywnej oferty beta. Dla planu Enterprise to `null`, bo czas przechowywania ustala umowa. Zobacz [Czas przechowywania danych](#data-retention). |
 | `usage.events`, `usage.bytes` | Sumy dla wszystkich strumieni telemetrii w okresie. |
 | `usage.projects` | Liczba projektów, których właścicielem jest konto. |
 | `state` | `ok`, `warning` lub `blocked`. |
@@ -125,7 +125,7 @@ curl "https://api.logbrew.co/api/account/usage?response_version=2" \
 
 Odrzucone zdarzenia nigdy nie dotarły do LogBrew. Nie są rozliczane i nie wliczają się do `usage`, `by_project` ani `by_stream`. Tablica jest pusta, gdy żadne SDK nie zgłosiło odrzuceń.
 
-### Oferta beta
+### <span id="beta-offer">Oferta beta</span>
 
 Konta zakładane podczas publicznej bety dostają przydziały planu Pro za darmo na 6 miesięcy. Konta, które istniały 2026-10-22, liczą te 6 miesięcy od tego dnia. Wyślij `response_version=3`, aby dostać także `offer`. Wersje 1 i 2 nie mają tego pola. Wersja 3 ma też `sdk_dropped_events`.
 
@@ -165,6 +165,10 @@ wtedy, gdy `state` ma wartość `ok`.
 | `ok` | `false` | `false` | `null` | `continue_sending_telemetry` | `telemetry_ingest` |
 | `warning` | `true` | `false` | `events` lub `bytes` | `reduce_usage_or_upgrade` | `pricing` |
 | `blocked` | `false` | `true` | `events` lub `bytes` | `wait_until_reset_or_upgrade` | `pricing` |
+
+Ta tabela dotyczy wersji 2 i 3. Wersja 1, domyślna, ma 2 różnice: `warning` ma
+wartość `true` także w stanie `blocked`, a w stanie `warning` wartość
+`next_action.target` to `account_usage`.
 
 `next_action.state`, `next_action.limit` i `next_action.reset_at` powtarzają
 wartości z najwyższego poziomu. Wartości `next_action.code` obejmują też
@@ -227,7 +231,7 @@ curl --get "https://api.logbrew.co/api/account/usage/history" \
 | --- | --- |
 | `interval` | Żądany interwał. |
 | `period_start`, `period_end` | Początek i koniec okna historii. Koniec nie należy do okna. |
-| `current` | Pełna odpowiedź `GET /api/account/usage` dla bieżącego okresu. |
+| `current` | Pełna odpowiedź `GET /api/account/usage` dla bieżącego okresu, w wersji 3. Zawsze zawiera `sdk_dropped_events` i `offer`. |
 | `buckets` | Przedziały w kolejności czasu, od najstarszego. Każdy przedział ma `period_start`, `period_end`, `usage`, `by_project` i `by_stream`. |
 
 Ta odpowiedź `yearly` używa syntetycznych danych dla żądania z czerwca 2026.
@@ -247,7 +251,7 @@ Całe wykorzystanie przypadło na czerwiec:
     "usage": { "events": 27000, "bytes": 10485760, "projects": 1 },
     "state": "ok",
     "warning_threshold": 0.8,
-    "percent_used": 0.2,
+    "percent_used": 0.02,
     "warning": false,
     "blocked": false,
     "limit": null,
@@ -262,7 +266,9 @@ Całe wykorzystanie przypadło na czerwiec:
     "by_project": [
       { "project_id": "00000000-0000-4000-8000-000000000001", "events": 27000, "bytes": 10485760 }
     ],
-    "by_stream": [{ "kind": "logs", "events": 27000, "bytes": 10485760 }]
+    "by_stream": [{ "kind": "logs", "events": 27000, "bytes": 10485760 }],
+    "sdk_dropped_events": [],
+    "offer": null
   },
   "buckets": [
     { "period_start": "2022-01-01T00:00:00Z", "period_end": "2023-01-01T00:00:00Z", "usage": { "events": 0, "bytes": 0, "projects": 0 }, "by_project": [], "by_stream": [] },
@@ -317,7 +323,9 @@ Nieznany parametr zapytania też zwraca `422` z `validation_failed`.
 
 ## Plany i przydziały
 
-`GET /api/billing/catalog` wyświetla listę planów. Nie wymaga uwierzytelnienia. Każdy plan ma wszystkie funkcje oraz nieograniczoną liczbę współpracowników i projektów. Plany różnią się wolumenem i czasem przechowywania danych. Przydziały resetują się w każdym miesiącu rozliczeniowym. 1 GB to 1 000 000 000 bajtów.
+`GET /api/billing/catalog` wyświetla listę planów. Nie wymaga uwierzytelnienia. Każdy plan ma wszystkie funkcje. Każdy plan ma nieograniczoną liczbę członków i projektów. Plany różnią się wolumenem i czasem przechowywania danych. Przydziały resetują się w każdym miesiącu rozliczeniowym. 1 GB to 1 000 000 000 bajtów.
+
+Realizacja zakupu płatnego planu nie jest jeszcze otwarta. Nie możesz kupić płatnego planu, a `checkout_available` ma wartość `false`. Podczas publicznej bety konta dostają przydziały planu Pro za darmo. Zobacz [Oferta beta](#beta-offer).
 
 | Plan | `tier` | Cena miesięczna | Logi | Metryki aplikacji | Spany śladów | Zdarzenia problemów | Przechowywanie danych |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -361,10 +369,23 @@ Odpowiedź wymienia plany w tej kolejności. Ten przykład pokazuje plan Pro:
 
 | Pole | Znaczenie |
 | --- | --- |
-| `checkout_available` | `true`, gdy możesz kupić płatny plan. |
+| `checkout_available` | `true`, gdy możesz kupić płatny plan. Ma wartość `false`, dopóki realizacja zakupu płatnego planu nie jest otwarta. |
 | `monthly_price_cents` | Cena w amerykańskich centach. Dla planu na zapytanie to `null`. |
 | `activation` | `included`, `checkout` lub `quote`. |
+| `quote_email` | Adres e-mail, na który piszesz po wycenę. W pozostałych planach ma wartość `null`. |
 | `limits` | Przydziały na 1 miesiąc rozliczeniowy. Wartość `null` ustala umowa. |
+
+### <span id="data-retention">Czas przechowywania danych</span>
+
+Czas przechowywania danych to liczba dni, przez które LogBrew trzyma telemetrię
+konta. Czas konta to dłuższy z czasów: planu i aktywnej oferty beta. Umowa
+Enterprise ustala własny czas przechowywania.
+
+- Odczyty zwracają tylko telemetrię z tego okresu.
+- Codziennie LogBrew usuwa telemetrię konta starszą niż czas przechowywania
+  plus 1 dzień.
+- Po obniżeniu planu lub zakończeniu oferty krótszy czas obowiązuje od
+  następnego codziennego usuwania.
 
 ## Gotowość subskrypcji
 
@@ -404,7 +425,7 @@ Darmowe konto zwraca taką odpowiedź. `account_id` jest syntetyczne:
 }
 ```
 
-Każdy plan może utworzyć organizację, zaprosić współpracowników i dodać projekty. Organizacja nie ma limitu członków ani projektów. Wartość `9007199254740991` oznacza brak limitu. To największa liczba całkowita, którą klienty JSON odczytują dokładnie. Dla tej wartości pokaż „Bez limitu”. Tworzenie organizacji może zablokować tylko liczba organizacji należących do konta.
+Wartość `9007199254740991` w polach `members_per_organization` i `projects_per_organization` oznacza brak limitu. To największa liczba całkowita, którą klienty JSON odczytują dokładnie. Dla tej wartości pokaż „Bez limitu”. Tworzenie organizacji może zablokować tylko liczba organizacji należących do konta.
 
 `next` to tekst do wyświetlenia. Pokaż zwrócony tekst albo zlokalizuj go na podstawie `next_action`. Nie zapisuj na stałe w kodzie nazwy planu z `next`.
 
