@@ -59,7 +59,7 @@ progetto e nel periodo corrente ha inviato solo log:
   "usage": { "events": 27000, "bytes": 10485760, "projects": 1 },
   "state": "ok",
   "warning_threshold": 0.8,
-  "percent_used": 0.2,
+  "percent_used": 0.02,
   "warning": false,
   "blocked": false,
   "limit": null,
@@ -87,7 +87,7 @@ progetto e nel periodo corrente ha inviato solo log:
 | `plan.tier` | Identificatore del piano: `free`, `pro` o `scale`. |
 | `plan.status` | `free`, `trial`, `active`, `past_due` o `disabled`. |
 | `limits.events`, `limits.bytes`, `limits.projects` | Campi di compatibilità. Valgono `null`. `null` non significa illimitato. Usa `state`, `limit` e `percent_used` per lo stato della quota. |
-| `limits.retention_days` | La conservazione dei dati del piano, in giorni, oppure `null`. Un'offerta beta attiva imposta la conservazione del suo piano. |
+| `limits.retention_days` | La conservazione dei dati dell'account, in giorni. È la maggiore tra quella del piano e quella di un'offerta beta attiva. È `null` per un piano Enterprise, il cui contratto stabilisce la conservazione. Vedi [Conservazione dei dati](#data-retention). |
 | `usage.events`, `usage.bytes` | I totali di tutti i flussi di telemetria nel periodo. |
 | `usage.projects` | Il numero di progetti di proprietà dell'account. |
 | `state` | `ok`, `warning` o `blocked`. |
@@ -126,7 +126,7 @@ curl "https://api.logbrew.co/api/account/usage?response_version=2" \
 
 Gli eventi scartati non sono mai arrivati a LogBrew. Non vengono fatturati e non contano in `usage`, `by_project` o `by_stream`. L'array è vuoto quando nessun SDK ha segnalato eventi scartati.
 
-### Offerta beta
+### <span id="beta-offer">Offerta beta</span>
 
 Gli account che si registrano durante la beta pubblica ricevono gratis le quote di Pro per 6 mesi. Gli account che esistevano il 2026-10-22 contano i 6 mesi da quella data. Invia `response_version=3` per ricevere anche `offer`. Le versioni 1 e 2 non hanno questo campo. La versione 3 ha anche `sdk_dropped_events`.
 
@@ -166,6 +166,10 @@ Usa `state` per la scelta principale. `limit` vale `null` solo quando `state`
 | `ok` | `false` | `false` | `null` | `continue_sending_telemetry` | `telemetry_ingest` |
 | `warning` | `true` | `false` | `events` o `bytes` | `reduce_usage_or_upgrade` | `pricing` |
 | `blocked` | `false` | `true` | `events` o `bytes` | `wait_until_reset_or_upgrade` | `pricing` |
+
+Questa tabella vale per le versioni 2 e 3. La versione 1, quella predefinita, ha
+2 differenze: `warning` è `true` anche nello stato `blocked`, e nello stato
+`warning` il valore di `next_action.target` è `account_usage`.
 
 `next_action.state`, `next_action.limit` e `next_action.reset_at` ripetono i
 valori di primo livello. I valori di `next_action.code` includono anche
@@ -228,7 +232,7 @@ curl --get "https://api.logbrew.co/api/account/usage/history" \
 | --- | --- |
 | `interval` | La granularità richiesta. |
 | `period_start`, `period_end` | L'inizio e la fine esclusa dell'intervallo della cronologia. |
-| `current` | La risposta completa di `GET /api/account/usage` per il periodo corrente. |
+| `current` | La risposta completa di `GET /api/account/usage` per il periodo corrente, nella versione 3. Contiene sempre `sdk_dropped_events` e `offer`. |
 | `buckets` | Le fasce in ordine di tempo, dalla più vecchia. Ogni fascia ha `period_start`, `period_end`, `usage`, `by_project` e `by_stream`. |
 
 Questa risposta `yearly` usa dati sintetici per una richiesta di giugno 2026.
@@ -248,7 +252,7 @@ Tutto l'utilizzo è avvenuto a giugno:
     "usage": { "events": 27000, "bytes": 10485760, "projects": 1 },
     "state": "ok",
     "warning_threshold": 0.8,
-    "percent_used": 0.2,
+    "percent_used": 0.02,
     "warning": false,
     "blocked": false,
     "limit": null,
@@ -263,7 +267,9 @@ Tutto l'utilizzo è avvenuto a giugno:
     "by_project": [
       { "project_id": "00000000-0000-4000-8000-000000000001", "events": 27000, "bytes": 10485760 }
     ],
-    "by_stream": [{ "kind": "logs", "events": 27000, "bytes": 10485760 }]
+    "by_stream": [{ "kind": "logs", "events": 27000, "bytes": 10485760 }],
+    "sdk_dropped_events": [],
+    "offer": null
   },
   "buckets": [
     { "period_start": "2022-01-01T00:00:00Z", "period_end": "2023-01-01T00:00:00Z", "usage": { "events": 0, "bytes": 0, "projects": 0 }, "by_project": [], "by_stream": [] },
@@ -319,7 +325,9 @@ Anche una chiave di query sconosciuta restituisce `422` con
 
 ## Piani e quote
 
-`GET /api/billing/catalog` elenca i piani. Non richiede autenticazione. Ogni piano ha tutte le funzioni, con colleghi e progetti illimitati. I piani differiscono per volume e conservazione. Le quote si azzerano a ogni mese di fatturazione. 1 GB sono 1.000.000.000 di byte.
+`GET /api/billing/catalog` elenca i piani. Non richiede autenticazione. Ogni piano ha tutte le funzioni. Ogni piano ha membri e progetti illimitati. I piani differiscono per volume e conservazione. Le quote si azzerano a ogni mese di fatturazione. 1 GB sono 1.000.000.000 di byte.
+
+Il pagamento dei piani a pagamento non è ancora aperto. Non puoi acquistare un piano a pagamento e `checkout_available` è `false`. Durante la beta pubblica gli account ricevono gratis le quote di Pro. Vedi [Offerta beta](#beta-offer).
 
 | Piano | `tier` | Prezzo al mese | Log | Metriche delle app | Span delle tracce | Eventi dei problemi | Conservazione |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -363,10 +371,21 @@ La risposta elenca i piani in quest'ordine. Questo esempio mostra il piano Pro:
 
 | Campo | Significato |
 | --- | --- |
-| `checkout_available` | `true` quando puoi acquistare un piano a pagamento. |
+| `checkout_available` | `true` quando puoi acquistare un piano a pagamento. È `false` finché il pagamento dei piani a pagamento non è aperto. |
 | `monthly_price_cents` | Il prezzo in centesimi di dollaro. È `null` per un piano su preventivo. |
 | `activation` | `included`, `checkout` o `quote`. |
+| `quote_email` | L'indirizzo email a cui scrivi per ottenere un preventivo. È `null` per gli altri piani. |
 | `limits` | Le quote di 1 mese di fatturazione. Un valore `null` è stabilito dal contratto. |
+
+### <span id="data-retention">Conservazione dei dati</span>
+
+La conservazione è il numero di giorni per cui LogBrew conserva la telemetria di un account. La conservazione dell'account è la maggiore tra quella del suo piano e quella di un'offerta beta attiva. Un contratto Enterprise stabilisce la propria conservazione.
+
+- Le letture restituiscono solo la telemetria compresa nella conservazione.
+- Ogni giorno LogBrew elimina la telemetria dell'account più vecchia della
+  conservazione più 1 giorno.
+- Dopo un downgrade o la fine di un'offerta, la conservazione più breve si
+  applica alla successiva eliminazione giornaliera.
 
 ## Stato dell'abbonamento
 
@@ -406,7 +425,7 @@ Un account gratuito restituisce questa risposta. L'`account_id` è sintetico:
 }
 ```
 
-Ogni piano può creare un'organizzazione, invitare colleghi e aggiungere progetti. Un'organizzazione non ha limiti di membri né di progetti. Il valore `9007199254740991` significa illimitato. È il numero intero più grande che i client JSON leggono con esattezza. Mostra «Illimitato» per questo valore. Solo il numero di organizzazioni possedute da un account può bloccare la creazione di un'organizzazione.
+Il valore `9007199254740991` in `members_per_organization` e `projects_per_organization` significa illimitato. È il numero intero più grande che i client JSON leggono con esattezza. Mostra «Illimitato» per questo valore. Solo il numero di organizzazioni possedute da un account può bloccare la creazione di un'organizzazione.
 
 `next` è testo da mostrare. Mostra il testo restituito, oppure localizza a partire da `next_action`. Non fissare nel codice il nome di un piano ricavato da `next`.
 

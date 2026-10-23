@@ -526,6 +526,12 @@ tem um nome genérico, uma rota sem correspondência ou uma operação genérica
 `next_cursor` contém `time` e `trace_id`. Envie-os como `cursor_time` e
 `cursor_trace_id`.
 
+Com `response_version=2`, cada trace também tem `capture_span_count` e
+`capture_error_count`. Nesse caso, `span_count` e `error_span_count` não contam
+os [spans de captura](/pt-BR/concepts/distributed-tracing#capture-spans). A
+versão 1 os conta. `status=error` corresponde a um trace quando
+`error_span_count` ou `capture_error_count` é maior que `0`.
+
 `GET /api/telemetry/traces/{trace_id}` retorna os spans de um trace.
 `GET /api/telemetry/traces/{trace_id}/summary` retorna o span raiz, os spans
 de erro, os serviços, a duração e o caminho mais lento, sem os atributos
@@ -564,10 +570,12 @@ Um problema inexistente usa `"error": "issue not found"`. Um resumo de trace
 inexistente usa `"error": "trace not found"`. Um ID desconhecido e um ID que a
 conta não pode ler retornam a mesma resposta.
 
-Uma lista com um `project_id` que a conta não pode ler retorna `200` com uma
-lista vazia. Confira o ID do projeto antes de informar que não há dados.
+Uma lista com um `project_id` que a conta não pode ler retorna `404` com
+`"error": "project selection not found"`. Um ID de projeto desconhecido retorna
+a mesma resposta. Veja
+[seleções de projetos rejeitadas](#rejected-project-selections).
 
-### Seleções de projetos rejeitadas
+### <span id="rejected-project-selections">Seleções de projetos rejeitadas</span>
 
 As listas de logs, problemas, ações, métricas, versões e traces aceitam um
 projeto com `project_id` ou de 2 a 50 projetos com `project_ids`. O catálogo
@@ -591,8 +599,8 @@ Uma requisição com `project_id` e `project_ids` ao mesmo tempo retorna `422`:
 `project_ids` com um UUID inválido, um ID repetido, ou com menos de 2 ou mais
 de 50 IDs também retorna `422` com `code: validation_failed`.
 
-Se a conta não puder ler um dos projetos de um conjunto `project_ids`, a
-requisição inteira retorna `404`. Ela não retorna os outros projetos como
+Se a conta não puder ler o projeto de `project_id` ou um dos projetos de um
+conjunto `project_ids`, a requisição inteira retorna `404`. Ela não retorna os outros projetos como
 resultado parcial:
 
 ```json
@@ -688,6 +696,7 @@ Estes erros valem para `GET /api/telemetry/traces`. Cada um retorna `422` com
 | Só 1 campo de cursor, ou um `cursor_trace_id` em branco | `cursor_time and cursor_trace_id must be sent together` |
 | `cursor_time` que não é um timestamp RFC3339 | `cursor_time must be an RFC3339 timestamp` |
 | Campos de cursor sem `pagination=cursor` | `pagination must be cursor when cursor pagination is requested` |
+| `response_version` diferente de `1` ou `2` | `trace response_version must be 1 or 2` |
 
 Para incluir traces com os dois status, omita `status`. Para a próxima página,
 copie `next_cursor.time` para `cursor_time` e `next_cursor.trace_id` para
@@ -1141,7 +1150,7 @@ Não envie uma alteração diferente antes de ler o estado atual. Consulte
 
 `POST /api/telemetry/issues/bulk` retorna `200 OK` com 1 resultado para cada
 ID de problema solicitado, na ordem da requisição. Cada problema encontrado usa
-o formato da versão 3. Um resultado `not_found` tem `issue: null`:
+o formato da versão 3. Adicione `"response_version": 2` ao corpo para receber cada problema no formato da versão 4. Um resultado `not_found` tem `issue: null`:
 
 ```json
 {
@@ -3118,6 +3127,12 @@ Uma requisição `GET` retorna `405`:
 `GET /api/telemetry/summary/volume` conta os sinais retidos de um projeto em um
 período. A rota exige `project_id` e `since`. Ela não aceita `project_ids`.
 
+Para contar de 1 a 50 projetos juntos, envie `project_ids` e `since` para
+`GET /api/telemetry/summary/volume/combined`. A resposta tem o mesmo formato.
+O `query` dela tem `project_ids` em vez de `project_id`. Um trace com spans em
+vários projetos selecionados conta uma vez. Se a conta não puder ler um dos
+projetos, esta rota retorna `404` com `"error": "project selection not found"`.
+
 `until` não pode estar no futuro. Se você o omitir, o fim é o horário da
 requisição. Um `since` compacto, como `24h`, conta para trás a partir de
 `until`. `interval` é `auto`, `1m`, `5m`, `15m`, `1h`, `6h` ou `1d`. O padrão
@@ -5027,7 +5042,7 @@ Este trecho mostra só alguns campos. Uma regra não resolve, não arquiva nem
 reabre um problema. Para isso, use a
 [mudança de status](#issue-status-response-examples). Uma prioridade derivada
 acompanha a nova gravidade efetiva. Para vê-la, leia o problema com
-`response_version=2` ou `3`.
+`response_version=2` ou posterior.
 
 Uma gravidade não aceita retorna `422`:
 

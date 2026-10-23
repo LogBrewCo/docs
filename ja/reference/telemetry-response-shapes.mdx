@@ -448,6 +448,8 @@ SDK のバッチが拒否されると、`code: validation_failed` 付きの `422
 
 `next_cursor` には `time` と `trace_id` が入ります。これらを `cursor_time` と `cursor_trace_id` として送信します。
 
+`response_version=2` を指定すると、各トレースに `capture_span_count` と `capture_error_count` も入ります。その場合、`span_count` と `error_span_count` には[取得用のスパン](/ja/concepts/distributed-tracing#capture-spans)が含まれません。バージョン1では含まれます。`status=error` は、`error_span_count` または `capture_error_count` が `0` より大きいトレースに一致します。
+
 `GET /api/telemetry/traces/{trace_id}` は、1つのトレースのスパンを返します。`GET /api/telemetry/traces/{trace_id}/summary` は、ルートスパン、エラーのスパン、サービス、所要時間、最も遅い経路を返します。スパンの生の属性は返しません。概要の `404` は、指定した範囲全体に一致するトレースがなかったことを示します。フィルターを外して再試行しないでください。[トレースのスパンと概要のレスポンス](#trace-spans-and-summary-responses)を参照してください。
 
 ### 空の一覧と存在しないレコード
@@ -478,9 +480,9 @@ SDK のバッチが拒否されると、`code: validation_failed` 付きの `422
 
 課題が存在しない場合は `"error": "issue not found"`、トレースの概要が存在しない場合は `"error": "trace not found"` が返ります。存在しない ID と、アカウントが読み取れない ID には、同じレスポンスが返ります。
 
-アカウントが読み取れない `project_id` を1つ指定した一覧は、空の一覧とともに `200` を返します。データがないと報告する前に、プロジェクト ID を確認してください。
+アカウントが読み取れない `project_id` を1つ指定した一覧は、`404` と `"error": "project selection not found"` を返します。存在しないプロジェクト ID にも、同じレスポンスが返ります。[拒否されるプロジェクトの指定](#rejected-project-selections)を参照してください。
 
-### 拒否されるプロジェクトの指定
+### <span id="rejected-project-selections">拒否されるプロジェクトの指定</span>
 
 ログ、課題、アクション、メトリクス、リリース、トレースの一覧では、`project_id` で1つのプロジェクトを指定するか、`project_ids` で2〜50個のプロジェクトを指定できます。ログの属性カタログも、同じ指定方法を受け付けます。課題の発生事象の履歴は、これらを受け付けません。
 
@@ -500,7 +502,7 @@ SDK のバッチが拒否されると、`code: validation_failed` 付きの `422
 
 `project_ids` に無効な UUID や重複した ID が含まれる場合や、ID の数が2個未満または50個を超える場合も、`code: validation_failed` 付きの `422` が返ります。
 
-`project_ids` の中にアカウントが読み取れないプロジェクトが1つでもあると、リクエスト全体が `404` を返します。ほかのプロジェクトの結果を一部だけ返すことはありません。
+アカウントが `project_id` のプロジェクトを読み取れない場合、または `project_ids` の中に読み取れないプロジェクトが1つでもある場合、リクエスト全体が `404` を返します。ほかのプロジェクトの結果を一部だけ返すことはありません。
 
 ```json
 {
@@ -578,6 +580,7 @@ SDK のバッチが拒否されると、`code: validation_failed` 付きの `422
 | カーソルフィールドが1つだけ、または `cursor_trace_id` が空 | `cursor_time and cursor_trace_id must be sent together` |
 | `cursor_time` が RFC3339 形式のタイムスタンプではない | `cursor_time must be an RFC3339 timestamp` |
 | `pagination=cursor` なしでカーソルフィールドを送信した | `pagination must be cursor when cursor pagination is requested` |
+| `response_version` が `1` でも `2` でもない | `trace response_version must be 1 or 2` |
 
 トレースの両方の状態を含めるには、`status` を省略します。次のページを読むには、`next_cursor.time` を `cursor_time` に、`next_cursor.trace_id` を `cursor_trace_id` にコピーします。トレースのページでは `cursor_id` を送信しないでください。[トレースのフィルター](/ja/reference/telemetry-api-filters#trace-filters)を参照してください。
 
@@ -967,7 +970,7 @@ LogBrew の理由がないまま切断されることもあります。再接続
 
 すでにリクエストした値になっているフィールドは変わりません。タイムアウトした場合やレスポンスを受け取れなかった場合は、同じリクエストをもう一度送信するか、先に課題を読み取ってください。現在の状態を読み取る前に、別の変更を送信しないでください。[書き込み](/ja/reference/api-errors#writes)を参照してください。
 
-`POST /api/telemetry/issues/bulk` は、リクエストした課題 ID ごとに1件の結果を、リクエストの順で `200 OK` とともに返します。見つかった課題は、どれもバージョン3の形です。`not_found` の結果では `issue: null` になります。
+`POST /api/telemetry/issues/bulk` は、リクエストした課題 ID ごとに1件の結果を、リクエストの順で `200 OK` とともに返します。見つかった課題は、どれもバージョン3の形です。本文に `"response_version": 2` を追加すると、各課題がバージョン4の形で返ります。`not_found` の結果では `issue: null` になります。
 
 ```json
 {
@@ -2672,6 +2675,8 @@ curl --get "https://api.logbrew.co/api/telemetry/analytics/properties" \
 ## シグナル量のレスポンス
 
 `GET /api/telemetry/summary/volume` は、1つのプロジェクトと期間について、保持済みのシグナルを数えます。`project_id` と `since` が必要です。`project_ids` は受け付けません。
+
+1〜50件のプロジェクトをまとめて数えるには、`project_ids` と `since` を `GET /api/telemetry/summary/volume/combined` に送信します。レスポンスの形は同じです。`query` には `project_id` の代わりに `project_ids` が入ります。選んだ複数のプロジェクトにスパンがあるトレースは、1件として数えます。アカウントがそのうち1つのプロジェクトでも読み取れない場合、このルートは `404` と `"error": "project selection not found"` を返します。
 
 `until` に未来の時刻は指定できません。省略すると、リクエストの時刻が終了になります。`24h` のような短い形式の `since` は、`until` からさかのぼって数えます。`interval` は、`auto`、`1m`、`5m`、`15m`、`1h`、`6h`、`1d` のいずれかです。デフォルトの `auto` は、時間バケットが120個以下で済む最小の間隔を選びます。リクエストで500個を超える時間バケットが必要になってはいけません。`response_version` は `1` だけです。
 
@@ -4429,7 +4434,7 @@ curl --request PUT "https://api.logbrew.co/api/telemetry/issues/$ISSUE_ID/triage
 }
 ```
 
-この抜粋は、一部のフィールドだけを示しています。ルールで課題を解決、アーカイブ、再開することはできません。それには[ステータスの変更](#issue-status-response-examples)を使ってください。導出された優先度は、新しく実際に適用された重大度に従います。それを確認するには、`response_version=2` または `3` で課題を読み取ります。
+この抜粋は、一部のフィールドだけを示しています。ルールで課題を解決、アーカイブ、再開することはできません。それには[ステータスの変更](#issue-status-response-examples)を使ってください。導出された優先度は、新しく実際に適用された重大度に従います。それを確認するには、`response_version=2` 以降で課題を読み取ります。
 
 対応していない重大度には `422` が返ります。
 

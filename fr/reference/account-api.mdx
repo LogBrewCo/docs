@@ -61,7 +61,7 @@ et n’a envoyé que des logs pendant la période en cours :
   "usage": { "events": 27000, "bytes": 10485760, "projects": 1 },
   "state": "ok",
   "warning_threshold": 0.8,
-  "percent_used": 0.2,
+  "percent_used": 0.02,
   "warning": false,
   "blocked": false,
   "limit": null,
@@ -89,7 +89,7 @@ et n’a envoyé que des logs pendant la période en cours :
 | `plan.tier` | L’identifiant du forfait : `free`, `pro` ou `scale`. |
 | `plan.status` | `free`, `trial`, `active`, `past_due` ou `disabled`. |
 | `limits.events`, `limits.bytes`, `limits.projects` | Champs de compatibilité. Ils valent `null`. `null` ne signifie pas illimité. Utilisez `state`, `limit` et `percent_used` pour l’état des quotas. |
-| `limits.retention_days` | La durée de conservation des données du forfait, en jours, ou `null`. Une offre bêta active fixe la durée de conservation de son forfait. |
+| `limits.retention_days` | La durée de conservation des données du compte, en jours. C’est la plus longue entre celle du forfait et celle d’une offre bêta active. Elle vaut `null` pour un forfait Enterprise, dont le contrat fixe la durée de conservation. Consultez [Conservation des données](#data-retention). |
 | `usage.events`, `usage.bytes` | Les totaux de tous les flux de télémétrie sur la période. |
 | `usage.projects` | Le nombre de projets que possède le compte. |
 | `state` | `ok`, `warning` ou `blocked`. |
@@ -128,7 +128,7 @@ curl "https://api.logbrew.co/api/account/usage?response_version=2" \
 
 Les événements abandonnés ne sont jamais arrivés chez LogBrew. Ils ne sont pas facturés et ne comptent pas dans `usage`, `by_project` ou `by_stream`. Le tableau est vide quand aucun SDK n’a signalé d’abandon.
 
-### Offre bêta
+### <span id="beta-offer">Offre bêta</span>
 
 Les comptes qui s’inscrivent pendant la bêta publique reçoivent gratuitement les quotas de Pro pendant 6 mois. Les comptes qui existaient le 2026-10-22 comptent les 6 mois à partir de cette date. Envoyez `response_version=3` pour obtenir aussi `offer`. Les versions 1 et 2 n’ont pas ce champ. La version 3 a aussi `sdk_dropped_events`.
 
@@ -168,6 +168,10 @@ quand `state` vaut `ok`.
 | `ok` | `false` | `false` | `null` | `continue_sending_telemetry` | `telemetry_ingest` |
 | `warning` | `true` | `false` | `events` ou `bytes` | `reduce_usage_or_upgrade` | `pricing` |
 | `blocked` | `false` | `true` | `events` ou `bytes` | `wait_until_reset_or_upgrade` | `pricing` |
+
+Ce tableau s’applique aux versions 2 et 3. La version 1, par défaut, a 2
+différences : `warning` vaut aussi `true` dans l’état `blocked`, et dans l’état
+`warning`, `next_action.target` vaut `account_usage`.
 
 `next_action.state`, `next_action.limit` et `next_action.reset_at` reprennent
 les valeurs de premier niveau. Les valeurs de `next_action.code` incluent aussi
@@ -231,7 +235,7 @@ curl --get "https://api.logbrew.co/api/account/usage/history" \
 | --- | --- |
 | `interval` | L’intervalle demandé. |
 | `period_start`, `period_end` | Le début et la fin exclue de la période de l’historique. |
-| `current` | La réponse complète de `GET /api/account/usage` pour la période en cours. |
+| `current` | La réponse complète de `GET /api/account/usage` pour la période en cours, dans la version 3. Elle contient toujours `sdk_dropped_events` et `offer`. |
 | `buckets` | Les intervalles dans l’ordre chronologique, du plus ancien au plus récent. Chaque intervalle contient `period_start`, `period_end`, `usage`, `by_project` et `by_stream`. |
 
 Cette réponse `yearly` utilise des données synthétiques pour une requête faite
@@ -251,7 +255,7 @@ en juin 2026. Toute l’utilisation a eu lieu en juin :
     "usage": { "events": 27000, "bytes": 10485760, "projects": 1 },
     "state": "ok",
     "warning_threshold": 0.8,
-    "percent_used": 0.2,
+    "percent_used": 0.02,
     "warning": false,
     "blocked": false,
     "limit": null,
@@ -266,7 +270,9 @@ en juin 2026. Toute l’utilisation a eu lieu en juin :
     "by_project": [
       { "project_id": "00000000-0000-4000-8000-000000000001", "events": 27000, "bytes": 10485760 }
     ],
-    "by_stream": [{ "kind": "logs", "events": 27000, "bytes": 10485760 }]
+    "by_stream": [{ "kind": "logs", "events": 27000, "bytes": 10485760 }],
+    "sdk_dropped_events": [],
+    "offer": null
   },
   "buckets": [
     { "period_start": "2022-01-01T00:00:00Z", "period_end": "2023-01-01T00:00:00Z", "usage": { "events": 0, "bytes": 0, "projects": 0 }, "by_project": [], "by_stream": [] },
@@ -323,7 +329,9 @@ Un paramètre de requête inconnu renvoie aussi `422` avec `validation_failed`.
 
 ## Forfaits et quotas
 
-`GET /api/billing/catalog` liste les forfaits. Il ne demande aucune authentification. Chaque forfait inclut toutes les fonctionnalités, avec des collègues et des projets illimités. Les forfaits diffèrent par le volume et la durée de conservation. Les quotas se réinitialisent chaque mois de facturation. 1 Go correspond à 1 000 000 000 octets.
+`GET /api/billing/catalog` liste les forfaits. Il ne demande aucune authentification. Chaque forfait inclut toutes les fonctionnalités. Chaque forfait a un nombre illimité de membres et de projets. Les forfaits diffèrent par le volume et la durée de conservation. Les quotas se réinitialisent chaque mois de facturation. 1 Go correspond à 1 000 000 000 octets.
+
+Le paiement des forfaits payants n’est pas encore ouvert. Vous ne pouvez pas acheter de forfait payant, et `checkout_available` vaut `false`. Pendant la bêta publique, les comptes reçoivent gratuitement les quotas de Pro. Consultez [Offre bêta](#beta-offer).
 
 | Forfait | `tier` | Prix par mois | Logs | Métriques d’application | Spans de traces | Événements de problèmes | Rétention |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -367,10 +375,22 @@ La réponse liste les forfaits dans cet ordre. Cet exemple montre le forfait Pro
 
 | Champ | Signification |
 | --- | --- |
-| `checkout_available` | `true` quand vous pouvez acheter un forfait payant. |
+| `checkout_available` | `true` quand vous pouvez acheter un forfait payant. Vaut `false` tant que le paiement des forfaits payants n’est pas ouvert. |
 | `monthly_price_cents` | Le prix en cents américains. Il vaut `null` pour un forfait sur devis. |
 | `activation` | `included`, `checkout` ou `quote`. |
+| `quote_email` | L’adresse e-mail à laquelle vous écrivez pour obtenir un devis. Vaut `null` pour les autres forfaits. |
 | `limits` | Les quotas pour 1 mois de facturation. Une valeur `null` est fixée par contrat. |
+
+### <span id="data-retention">Conservation des données</span>
+
+La durée de conservation est le nombre de jours pendant lesquels LogBrew conserve la télémétrie d’un compte. La durée de conservation du compte est la plus longue entre celle de son forfait et celle d’une offre bêta active. Un contrat Enterprise fixe sa propre durée de conservation.
+
+- Les lectures ne renvoient que la télémétrie comprise dans la durée de
+  conservation.
+- Chaque jour, LogBrew supprime la télémétrie du compte plus ancienne que la
+  durée de conservation plus 1 jour.
+- Après un passage à un forfait inférieur ou la fin d’une offre, la durée de
+  conservation la plus courte s’applique à la prochaine suppression quotidienne.
 
 ## État de l’abonnement
 
@@ -410,7 +430,7 @@ Un compte gratuit renvoie cette réponse. L’`account_id` est synthétique :
 }
 ```
 
-Chaque forfait peut créer une organisation, inviter des collègues et ajouter des projets. Une organisation n’a pas de limite de membres ni de projets. La valeur `9007199254740991` signifie illimité. C’est le plus grand entier que les clients JSON lisent exactement. Affichez « Illimité » pour cette valeur. Seul le nombre d’organisations qu’un compte possède peut bloquer la création d’une organisation.
+La valeur `9007199254740991` dans `members_per_organization` et `projects_per_organization` signifie illimité. C’est le plus grand entier que les clients JSON lisent exactement. Affichez « Illimité » pour cette valeur. Seul le nombre d’organisations qu’un compte possède peut bloquer la création d’une organisation.
 
 `next` est un texte d’affichage. Affichez le texte renvoyé, ou localisez à partir de `next_action`. Ne codez pas en dur un nom de forfait à partir de `next`.
 

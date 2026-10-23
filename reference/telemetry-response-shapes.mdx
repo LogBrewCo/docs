@@ -516,6 +516,12 @@ generic name, an unmatched route, or a generic operation, `next_action` is
 `next_cursor` holds `time` and `trace_id`. Send them as `cursor_time` and
 `cursor_trace_id`.
 
+With `response_version=2`, each trace also has `capture_span_count` and
+`capture_error_count`. Then `span_count` and `error_span_count` do not count
+[capture spans](/concepts/distributed-tracing#capture-spans). Version 1
+counts them. `status=error` matches a trace when `error_span_count` or
+`capture_error_count` is above `0`.
+
 `GET /api/telemetry/traces/{trace_id}` returns the spans of one trace.
 `GET /api/telemetry/traces/{trace_id}/summary` returns the root span, error
 spans, services, duration, and slowest path without raw span attributes. A
@@ -552,8 +558,9 @@ A missing issue uses `"error": "issue not found"`. A missing trace summary uses
 `"error": "trace not found"`. An unknown ID and an ID that the account cannot
 read return the same response.
 
-A list with one `project_id` that the account cannot read returns `200` with
-an empty list. Check the project ID before you report that no data exists.
+A list with one `project_id` that the account cannot read returns `404` with
+`"error": "project selection not found"`. An unknown project ID returns the
+same response. See [rejected project selections](#rejected-project-selections).
 
 ### Rejected project selections
 
@@ -579,9 +586,9 @@ A request with both `project_id` and `project_ids` returns `422`:
 `project_ids` with an invalid UUID, a repeated ID, or fewer than 2 or more than
 50 IDs also returns `422` with `code: validation_failed`.
 
-If the account cannot read one project in a `project_ids` set, the complete
-request returns `404`. It does not return the other projects as a partial
-result:
+If the account cannot read the `project_id` project or one project in a
+`project_ids` set, the complete request returns `404`. It does not return the
+other projects as a partial result:
 
 ```json
 {
@@ -676,6 +683,7 @@ These errors apply to `GET /api/telemetry/traces`. Each returns `422` with
 | Only 1 cursor field, or a blank `cursor_trace_id` | `cursor_time and cursor_trace_id must be sent together` |
 | `cursor_time` that is not an RFC3339 timestamp | `cursor_time must be an RFC3339 timestamp` |
 | Cursor fields without `pagination=cursor` | `pagination must be cursor when cursor pagination is requested` |
+| `response_version` other than `1` or `2` | `trace response_version must be 1 or 2` |
 
 To include both trace states, omit `status`. For the next page, copy
 `next_cursor.time` to `cursor_time` and `next_cursor.trace_id` to
@@ -1122,7 +1130,8 @@ not send a different change before you read the current state. See
 
 `POST /api/telemetry/issues/bulk` returns `200 OK` with 1 result for each
 requested issue ID, in the request order. Each found issue uses the version 3
-shape. A `not_found` result has `issue: null`:
+shape. Add `"response_version": 2` to the body to get each issue in the
+version 4 shape. A `not_found` result has `issue: null`:
 
 ```json
 {
@@ -3079,6 +3088,13 @@ A `GET` request returns `405`:
 and time range. It requires `project_id` and `since`. It does not accept
 `project_ids`.
 
+To count 1 to 50 projects together, send `project_ids` and `since` to
+`GET /api/telemetry/summary/volume/combined`. The response has the same shape.
+Its `query` has `project_ids` instead of `project_id`. A trace with spans in
+several selected projects counts once. If the account cannot read one of the
+projects, this route returns `404` with
+`"error": "project selection not found"`.
+
 `until` cannot be in the future. If you omit it, the end is the request time.
 A compact `since` such as `24h` counts back from `until`. `interval` is
 `auto`, `1m`, `5m`, `15m`, `1h`, `6h`, or `1d`. The default `auto` selects
@@ -4975,7 +4991,7 @@ version 1. The captured `severity` and `status` do not change:
 This excerpt shows only some fields. A rule does not resolve, archive, or
 reopen an issue. Use the [status change](#issue-status-response-examples) for
 that. A derived priority follows the new effective severity. Read the issue
-with `response_version=2` or `3` to see it.
+with `response_version=2` or later to see it.
 
 An unsupported severity returns `422`:
 

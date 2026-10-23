@@ -43,7 +43,7 @@ curl "https://api.logbrew.co/api/account/usage" \
   "usage": { "events": 27000, "bytes": 10485760, "projects": 1 },
   "state": "ok",
   "warning_threshold": 0.8,
-  "percent_used": 0.2,
+  "percent_used": 0.02,
   "warning": false,
   "blocked": false,
   "limit": null,
@@ -71,7 +71,7 @@ curl "https://api.logbrew.co/api/account/usage" \
 | `plan.tier` | 套餐标识符：`free`、`pro` 或 `scale`。 |
 | `plan.status` | `free`、`trial`、`active`、`past_due` 或 `disabled`。 |
 | `limits.events`、`limits.bytes`、`limits.projects` | 兼容字段，值为 `null`。`null` 不表示无限制。配额状态请使用 `state`、`limit` 和 `percent_used`。 |
-| `limits.retention_days` | 该套餐的数据保留天数，或 `null`。生效的测试期优惠会采用其套餐的数据保留期。 |
+| `limits.retention_days` | 账号的数据保留天数，取套餐与生效的测试期优惠中较大的一方。Enterprise 套餐为 `null`，其数据保留期由合同约定。参见[数据保留期](#data-retention)。 |
 | `usage.events`、`usage.bytes` | 该周期内所有遥测数据流的总数。 |
 | `usage.projects` | 该账号拥有的项目数。 |
 | `state` | `ok`、`warning` 或 `blocked`。 |
@@ -110,7 +110,7 @@ curl "https://api.logbrew.co/api/account/usage?response_version=2" \
 
 被丢弃的事件从未到达 LogBrew。这些事件不计费，也不计入 `usage`、`by_project` 或 `by_stream`。如果没有 SDK 报告丢弃事件，该数组为空。
 
-### 测试期优惠
+### <span id="beta-offer">测试期优惠</span>
 
 在公开测试期间注册的账号，可免费使用 Pro 额度 6 个月。2026-10-22 已存在的账号，从这一天起算 6 个月。发送 `response_version=3` 可同时获得 `offer`。版本 1 和 2 没有此字段。版本 3 也包含 `sdk_dropped_events`。
 
@@ -149,6 +149,8 @@ curl "https://api.logbrew.co/api/account/usage?response_version=3" \
 | `ok` | `false` | `false` | `null` | `continue_sending_telemetry` | `telemetry_ingest` |
 | `warning` | `true` | `false` | `events` 或 `bytes` | `reduce_usage_or_upgrade` | `pricing` |
 | `blocked` | `false` | `true` | `events` 或 `bytes` | `wait_until_reset_or_upgrade` | `pricing` |
+
+此表适用于第 2 版和第 3 版。默认的第 1 版有 2 处不同：在 `blocked` 状态下 `warning` 也为 `true`；在 `warning` 状态下 `next_action.target` 为 `account_usage`。
 
 `next_action.state`、`next_action.limit` 和 `next_action.reset_at` 重复顶层的值。`next_action.code` 的值还包括 `check_usage_limits`，其目标为 `account_usage`。如果客户端收到这一组值，重新读取用量并显示 `next`。
 
@@ -190,7 +192,7 @@ curl --get "https://api.logbrew.co/api/account/usage/history" \
 | --- | --- |
 | `interval` | 请求的间隔。 |
 | `period_start`、`period_end` | 历史窗口的开始时间和结束时间，结束时间不包含在内。 |
-| `current` | 当前周期完整的 `GET /api/account/usage` 响应。 |
+| `current` | 当前周期完整的 `GET /api/account/usage` 响应（第 3 版）。它始终包含 `sdk_dropped_events` 和 `offer`。 |
 | `buckets` | 按时间排序的时间桶，最早的在前。每个时间桶包含 `period_start`、`period_end`、`usage`、`by_project` 和 `by_stream`。 |
 
 这个 `yearly` 响应使用模拟数据，请求时间为 2026 年 6 月。所有用量都发生在 6 月：
@@ -209,7 +211,7 @@ curl --get "https://api.logbrew.co/api/account/usage/history" \
     "usage": { "events": 27000, "bytes": 10485760, "projects": 1 },
     "state": "ok",
     "warning_threshold": 0.8,
-    "percent_used": 0.2,
+    "percent_used": 0.02,
     "warning": false,
     "blocked": false,
     "limit": null,
@@ -224,7 +226,9 @@ curl --get "https://api.logbrew.co/api/account/usage/history" \
     "by_project": [
       { "project_id": "00000000-0000-4000-8000-000000000001", "events": 27000, "bytes": 10485760 }
     ],
-    "by_stream": [{ "kind": "logs", "events": 27000, "bytes": 10485760 }]
+    "by_stream": [{ "kind": "logs", "events": 27000, "bytes": 10485760 }],
+    "sdk_dropped_events": [],
+    "offer": null
   },
   "buckets": [
     { "period_start": "2022-01-01T00:00:00Z", "period_end": "2023-01-01T00:00:00Z", "usage": { "events": 0, "bytes": 0, "projects": 0 }, "by_project": [], "by_stream": [] },
@@ -270,7 +274,9 @@ curl --get "https://api.logbrew.co/api/account/usage/history" \
 
 ## 套餐与额度
 
-`GET /api/billing/catalog` 列出所有套餐。它无需身份验证。每个套餐都包含全部功能，同事和项目数量不限。套餐的区别在于用量和数据保留期。额度每个计费月重置一次。1 GB 是 1,000,000,000 字节。
+`GET /api/billing/catalog` 列出所有套餐。它无需身份验证。每个套餐都包含全部功能。每个套餐的成员和项目数量都不限。套餐的区别在于用量和数据保留期。额度每个计费月重置一次。1 GB 是 1,000,000,000 字节。
+
+付费购买尚未开放。你无法购买付费套餐，`checkout_available` 为 `false`。公开测试期间，账号可免费获得 Pro 额度。参见[测试期优惠](#beta-offer)。
 
 | 套餐 | `tier` | 月价 | 日志 | 应用指标 | 链路 Span | 问题事件 | 数据保留 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -314,10 +320,19 @@ curl "https://api.logbrew.co/api/billing/catalog"
 
 | 字段 | 含义 |
 | --- | --- |
-| `checkout_available` | 可以购买付费套餐时为 `true`。 |
+| `checkout_available` | 可以购买付费套餐时为 `true`。付费购买尚未开放时为 `false`。 |
 | `monthly_price_cents` | 以美分计的价格。按报价的套餐为 `null`。 |
 | `activation` | `included`、`checkout` 或 `quote`。 |
+| `quote_email` | 获取报价时要写信的邮箱地址。其他套餐为 `null`。 |
 | `limits` | 1 个计费月的额度。值为 `null` 时由合同约定。 |
+
+### <span id="data-retention">数据保留期</span>
+
+数据保留期是 LogBrew 保存账号遥测数据的天数。账号的数据保留期取其套餐与生效的测试期优惠中较大的一方。Enterprise 合同自行约定数据保留期。
+
+- 读取只返回数据保留期内的遥测数据。
+- LogBrew 每天删除账号中早于数据保留期再加 1 天的遥测数据。
+- 降级套餐或优惠结束后，较短的数据保留期从下一次每日删除起生效。
 
 ## 订阅就绪状态
 
@@ -357,7 +372,7 @@ curl "https://api.logbrew.co/api/account/subscription" \
 }
 ```
 
-每个套餐都可以创建组织、邀请同事和添加项目。组织的成员数和项目数不设上限。值 `9007199254740991` 表示不限。它是 JSON 客户端能精确读取的最大整数。请对该值显示“不限”。只有账号拥有的组织数量会阻止创建组织。
+`members_per_organization` 和 `projects_per_organization` 中的值 `9007199254740991` 表示不限。它是 JSON 客户端能精确读取的最大整数。请对该值显示“不限”。只有账号拥有的组织数量会阻止创建组织。
 
 `next` 是展示文本。显示返回的文本，或根据 `next_action` 本地化。不要根据 `next` 硬编码套餐名称。
 
