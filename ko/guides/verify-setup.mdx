@@ -1,0 +1,101 @@
+---
+title: "프로젝트 읽기 키로 LogBrew 설정 확인하기"
+sidebarTitle: "설정 확인"
+description: "프로젝트 읽기 키로 LogBrew에서 테스트 이벤트를 다시 읽으세요. 프로젝트 키 종류별로 할 수 있는 일과 할 수 없는 일을 알아보세요."
+---
+
+SDK 전송이 성공하면 LogBrew가 요청을 받았다는 뜻입니다. LogBrew가 이벤트를 저장했고 그 이벤트를 읽을 수 있다는 뜻은 아닙니다. 설정을 확인하려면 테스트 이벤트 1개를 보내고 다시 읽으세요.
+
+프로젝트 읽기 키가 있으면 사람, CI 작업, 코딩 에이전트가 계정에 로그인하지 않고 프로젝트 1개를 읽을 수 있습니다. 읽기 키는 프로젝트 키이며 계정 자격 증명이 아닙니다.
+
+## <span id="project-key-kinds">프로젝트 키 종류</span>
+
+프로젝트 키는 각각 프로젝트 1개에 속합니다. 키로 할 수 있는 일은 종류에 따라 정해집니다. 종류는 `logbrew projects keys create`를 실행할 때 `--kind`로 고르세요.
+
+| 종류 | 토큰 접두사 | 할 수 있는 일 | 할 수 없는 일 |
+| --- | --- | --- | --- |
+| `sdk`(기본값), `server`, `cli`, `browser` | `lbw_ingest_` | 소속 프로젝트로 텔레메트리를 보냅니다. | 텔레메트리 읽기, 이슈 변경, 프로젝트나 키 관리, 다른 프로젝트 읽기 |
+| `artifact` | `lbw_ingest_` | 소속 프로젝트의 소스맵과 네이티브 디버그 파일을 업로드합니다. | 텔레메트리 보내기와 읽기 |
+| `read` | `lbw_read_` | 소속 프로젝트의 이슈, 트레이스, 로그, 액션, 메트릭, 릴리스, 제품 분석을 읽습니다. | 텔레메트리 보내기, 이슈 변경, 프로젝트나 키 관리, 계정 데이터 읽기, 다른 프로젝트 읽기 |
+
+`sdk`, `server`, `cli`, `browser` 종류는 수집 키입니다. 키가 실행되는 곳에 맞는 종류를 고르세요. 브라우저에서 실행되는 코드에는 `browser`를 사용하세요. 읽기 키는 브라우저 코드, 모바일 앱, 공개 번들에 절대 넣지 마세요.
+
+계정 접근 권한은 이와 다릅니다. `logbrew login`은 CLI에 계정의 접근 권한을 줍니다. 계정 접근 권한을 SDK 설정으로 절대 쓰지 마세요. 읽기 키로는 CLI나 대시보드에 로그인할 수 없습니다.
+
+## <span id="verify-telemetry-arrival">테스트 이벤트 다시 읽기</span>
+
+<Steps>
+  <Step title="읽기 키 만들기">
+    이 단계에는 계정 접근 권한이 필요합니다. `logbrew status --json`을 실행하고 인증된 계정 접근 권한이 표시되는지 확인하세요.
+
+    ```bash
+    : "${LOGBREW_PROJECT_ID:?set the project UUID}"
+    install -d -m 700 "$HOME/.logbrew"
+
+    logbrew projects keys create "$LOGBREW_PROJECT_ID" \
+      --kind read \
+      --label "setup check" \
+      --ingest-key-file "$HOME/.logbrew/setup-check.read" \
+      --json
+    ```
+
+    CLI는 소유자만 접근할 수 있는 새 파일에 키를 씁니다. 키나 파일 경로는 출력하지 않습니다. `--ingest-key-file`은 모든 키 종류에 쓰는 파일 옵션입니다. 대상 파일이 이미 있으면 안 됩니다.
+
+    **확인:** 결과에 `status: "created"`와 `ingest_key.kind: "read"`가 있습니다. `ingest_key.id`를 기록하세요. 키를 해지할 때 필요합니다.
+  </Step>
+
+  <Step title="테스트 이벤트 보내기">
+    애플리케이션에서 프로젝트 수집 키로 안전한 테스트 로그 1개를 보내세요. 런타임에 맞는 단계는 [빠른 시작](/ko/quickstart)이나 [SDK 연동](/ko/guides/sdk-ingestion)을 따르세요. 이슈도 테스트하려면 처리된 테스트 오류 1개를 보내세요.
+
+    **확인:** SDK가 `2xx` 상태를 보고합니다. LogBrew가 요청을 받았다는 뜻입니다. 다음 단계로 넘어가세요.
+  </Step>
+
+  <Step title="이벤트 다시 읽기">
+    현재 셸에서만 읽기 키를 `LOGBREW_TOKEN`에 넣으세요. 그다음 프로젝트를 읽으세요.
+
+    ```bash
+    export LOGBREW_TOKEN="$(< "$HOME/.logbrew/setup-check.read")"
+
+    logbrew read logs --since 1h --json
+    logbrew issues --since 1h --json
+    logbrew read traces --since 1h --json
+    ```
+
+    모든 조회는 키가 속한 프로젝트의 데이터만 반환하므로 `--project`는 필요 없습니다. 테스트 이벤트에 맞게 `--service`, `--environment`, `--release`를 추가하세요.
+
+    **확인:** 테스트 로그가 서비스, 환경, 릴리스와 함께 나타납니다. 테스트 오류는 이슈로 나타납니다. LogBrew가 이벤트를 저장했고 그 이벤트를 읽을 수 있다는 뜻입니다.
+
+    작업이 끝나면 `unset LOGBREW_TOKEN`을 실행하세요. 그러면 CLI가 다시 계정 접근 권한을 사용합니다.
+  </Step>
+
+  <Step title="읽기 키 해지하기">
+    더 이상 필요 없는 키는 해지하세요. 이 단계에는 계정 접근 권한이 필요하므로 먼저 `LOGBREW_TOKEN` 설정을 해제하세요.
+
+    ```bash
+    unset LOGBREW_TOKEN
+
+    logbrew projects keys revoke "$LOGBREW_PROJECT_ID" "<key_id>" --yes --json
+    ```
+
+    **확인:** 결과에 `status: "revoked"`가 있습니다. 키는 다음 요청부터 작동하지 않습니다.
+  </Step>
+</Steps>
+
+## CI 작업이나 에이전트에 읽기 권한 주기
+
+프로젝트 1개를 읽는 CI 작업이나 코딩 에이전트에는 전용 읽기 키를 두세요. 키는 CI 시스템이나 에이전트 환경의 시크릿 저장소에 보관하세요. 키를 `LOGBREW_TOKEN`으로 쓸 수 있게 하세요. 키를 프롬프트, 저장소, 명령어 출력에 넣지 마세요.
+
+그러면 작업이나 에이전트가 `logbrew issues --json`, `logbrew issue "<issue_id>" --json`, `logbrew read trace "<trace_id>"` 같은 조회를 실행할 수 있습니다. 프로젝트, 키, 계정 명령어에는 계정 접근 권한이 필요합니다. API 클라이언트는 [텔레메트리 API](/ko/reference/telemetry-api)의 텔레메트리 조회에 키를 Bearer 토큰으로 보냅니다.
+
+작업이나 에이전트마다 키를 하나씩 쓰세요. 그러면 키 하나를 해지해도 다른 키에는 영향이 없습니다.
+
+## 조회 실패 해결하기
+
+| 결과 | 다음 단계 |
+| --- | --- |
+| 목록이 비어 있음 | 몇 초 기다린 뒤 다시 읽으세요. 기간에 테스트 이벤트가 포함되는지 확인하세요. 읽기 키와 애플리케이션의 수집 키가 같은 프로젝트에 속하는지 확인하세요. 로그로는 이슈가 생기지 않습니다. |
+| `401`, `code: "unauthorized"` | 읽기 키가 해지되었거나 만료되었거나 유효하지 않습니다. 새 읽기 키를 만드세요. |
+| `403`, `code: "forbidden"` | 명령어에 계정 접근 권한이 필요하거나, 명령어가 다른 프로젝트를 지정했습니다. `--project`를 빼거나, `LOGBREW_TOKEN` 설정을 해제하고 계정 접근 권한을 사용하세요. |
+| `logbrew status`에 계정 접근 권한이 없다고 나옴 | `status`는 계정 접근 권한만 확인합니다. 읽기 키를 테스트하려면 조회 명령어를 실행하세요. |
+
+그래도 텔레메트리가 보이지 않으면 [첫 텔레메트리 확인](/ko/guides/troubleshooting#recover-missing-first-telemetry)을 진행하세요. 수집 키를 바꾸려면 [수집 키 교체하기](/ko/guides/rotate-ingest-key)를 참고하세요.

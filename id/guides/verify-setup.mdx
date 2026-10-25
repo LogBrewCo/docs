@@ -1,0 +1,140 @@
+---
+title: "Verifikasi penyiapan LogBrew dengan kunci baca proyek"
+sidebarTitle: "Verifikasi penyiapan"
+description: "Baca kembali peristiwa uji Anda dari LogBrew dengan kunci baca proyek. Pelajari apa yang bisa dan tidak bisa dilakukan setiap jenis kunci proyek."
+---
+
+Pengiriman SDK yang berhasil menunjukkan bahwa LogBrew menerima permintaan.
+Itu tidak menunjukkan bahwa LogBrew menyimpan peristiwa tersebut dan bahwa
+Anda bisa membacanya. Untuk memverifikasi penyiapan, kirim satu peristiwa uji
+lalu baca kembali.
+
+Dengan kunci baca proyek, seseorang, job CI, atau agen coding bisa membaca
+satu proyek tanpa masuk ke akun. Kunci ini adalah kunci proyek, bukan
+kredensial akun.
+
+## <span id="project-key-kinds">Jenis kunci proyek</span>
+
+Setiap kunci proyek milik satu proyek. Jenisnya menentukan apa yang bisa
+dilakukan kunci itu. Pilih jenisnya dengan `--kind` saat menjalankan
+`logbrew projects keys create`.
+
+| Jenis | Prefiks token | Bisa | Tidak bisa |
+| --- | --- | --- | --- |
+| `sdk` (default), `server`, `cli`, `browser` | `lbw_ingest_` | Mengirim telemetri ke proyeknya. | Membaca telemetri, mengubah masalah, mengelola proyek atau kunci, atau membaca proyek lain. |
+| `artifact` | `lbw_ingest_` | Mengunggah source map dan file debug native untuk proyeknya. | Mengirim atau membaca telemetri. |
+| `read` | `lbw_read_` | Membaca masalah, trace, log, aksi, metrik, rilis, dan analitik produk dari proyeknya. | Mengirim telemetri, mengubah masalah, mengelola proyek atau kunci, membaca data akun, atau membaca proyek lain. |
+
+Jenis `sdk`, `server`, `cli`, dan `browser` adalah kunci ingest. Pilih jenis
+yang menyebutkan tempat kunci itu berjalan. Gunakan `browser` untuk kode yang
+berjalan di browser. Jangan pernah memasukkan kunci baca ke kode browser,
+aplikasi seluler, atau bundle publik.
+
+Akses akun berbeda. `logbrew login` memberi CLI akses akun Anda. Jangan pernah
+memakai akses akun sebagai konfigurasi SDK. Kunci baca tidak bisa dipakai
+untuk masuk ke CLI atau dasbor.
+
+## <span id="verify-telemetry-arrival">Baca kembali peristiwa uji Anda</span>
+
+<Steps>
+  <Step title="Buat kunci baca">
+    Langkah ini memerlukan akses akun. Jalankan `logbrew status --json` dan
+    pastikan hasilnya melaporkan akses akun yang sudah diautentikasi.
+
+    ```bash
+    : "${LOGBREW_PROJECT_ID:?set the project UUID}"
+    install -d -m 700 "$HOME/.logbrew"
+
+    logbrew projects keys create "$LOGBREW_PROJECT_ID" \
+      --kind read \
+      --label "setup check" \
+      --ingest-key-file "$HOME/.logbrew/setup-check.read" \
+      --json
+    ```
+
+    CLI menulis kunci ke file baru yang hanya bisa dibaca pemiliknya. CLI
+    tidak pernah menampilkan kunci atau path file-nya. `--ingest-key-file`
+    adalah opsi file untuk semua jenis kunci. File tujuan belum boleh ada.
+
+    **Titik periksa:** hasilnya berisi `status: "created"` dan
+    `ingest_key.kind: "read"`. Catat `ingest_key.id`. Anda memerlukannya untuk
+    mencabut kunci.
+  </Step>
+
+  <Step title="Kirim peristiwa uji">
+    Kirim satu log uji yang aman dari aplikasi Anda dengan kunci ingest
+    proyeknya. Ikuti langkah untuk runtime Anda di [Mulai cepat](/id/quickstart)
+    atau [Integrasi SDK](/id/guides/sdk-ingestion). Untuk menguji masalah juga,
+    kirim satu error uji yang ditangani.
+
+    **Titik periksa:** SDK melaporkan status `2xx`. Ini menunjukkan bahwa
+    LogBrew menerima permintaan. Lanjutkan ke langkah berikutnya.
+  </Step>
+
+  <Step title="Baca kembali peristiwa itu">
+    Muat kunci baca ke `LOGBREW_TOKEN` hanya untuk shell ini. Lalu baca
+    proyeknya:
+
+    ```bash
+    export LOGBREW_TOKEN="$(< "$HOME/.logbrew/setup-check.read")"
+
+    logbrew read logs --since 1h --json
+    logbrew issues --since 1h --json
+    logbrew read traces --since 1h --json
+    ```
+
+    Setiap pembacaan hanya mengembalikan data dari proyek kunci itu, jadi Anda
+    tidak perlu `--project`. Tambahkan `--service`, `--environment`, atau
+    `--release` agar cocok dengan peristiwa uji.
+
+    **Titik periksa:** log uji muncul dengan layanan, lingkungan, dan rilis
+    Anda. Error uji muncul sebagai masalah. Ini menunjukkan bahwa LogBrew
+    menyimpan peristiwa itu dan Anda bisa membacanya.
+
+    Setelah selesai, jalankan `unset LOGBREW_TOKEN`. CLI lalu kembali memakai
+    akses akun Anda.
+  </Step>
+
+  <Step title="Cabut kunci baca">
+    Cabut kunci saat Anda tidak memerlukannya lagi. Langkah ini memerlukan
+    akses akun, jadi hapus `LOGBREW_TOKEN` terlebih dahulu.
+
+    ```bash
+    unset LOGBREW_TOKEN
+
+    logbrew projects keys revoke "$LOGBREW_PROJECT_ID" "<key_id>" --yes --json
+    ```
+
+    **Titik periksa:** hasilnya berisi `status: "revoked"`. Kunci berhenti
+    berfungsi pada permintaan berikutnya.
+  </Step>
+</Steps>
+
+## Beri akses baca ke job CI atau agen
+
+Sediakan kunci baca untuk job CI atau agen coding yang membaca satu proyek.
+Simpan kunci di penyimpanan rahasia sistem CI atau lingkungan agen. Sediakan
+kunci itu sebagai `LOGBREW_TOKEN`. Jangan masukkan kunci ke prompt,
+repositori, atau output perintah.
+
+Job atau agen itu lalu bisa menjalankan pembacaan seperti
+`logbrew issues --json`, `logbrew issue "<issue_id>" --json`, dan
+`logbrew read trace "<trace_id>"`. Perintah proyek, kunci, dan akun memerlukan
+akses akun. Klien API mengirim kunci sebagai bearer token ke pembacaan
+telemetri di [API Telemetri](/id/reference/telemetry-api).
+
+Gunakan satu kunci untuk setiap job atau agen. Dengan begitu, Anda bisa
+mencabut satu kunci tanpa memengaruhi yang lain.
+
+## Pulihkan pembacaan yang gagal
+
+| Hasil | Langkah berikutnya |
+| --- | --- |
+| Daftar kosong | Tunggu beberapa detik, lalu baca lagi. Pastikan rentang waktu mencakup peristiwa uji. Pastikan kunci baca dan kunci ingest aplikasi milik proyek yang sama. Log tidak membuat masalah. |
+| `401`, `code: "unauthorized"` | Kunci baca sudah dicabut, kedaluwarsa, atau tidak valid. Buat kunci baca baru. |
+| `403`, `code: "forbidden"` | Perintah memerlukan akses akun, atau menyebut proyek lain. Hapus `--project`, atau hapus `LOGBREW_TOKEN` dan gunakan akses akun. |
+| `logbrew status` melaporkan tidak ada akses akun | `status` hanya memeriksa akses akun. Jalankan perintah baca untuk menguji kunci baca. |
+
+Jika telemetri masih tidak ada, gunakan
+[pemeriksaan telemetri pertama](/id/guides/troubleshooting#recover-missing-first-telemetry).
+Untuk mengganti kunci ingest, lihat [Rotasikan kunci ingest](/id/guides/rotate-ingest-key).

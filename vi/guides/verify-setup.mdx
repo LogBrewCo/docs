@@ -1,0 +1,138 @@
+---
+title: "Kiểm tra thiết lập LogBrew bằng khóa đọc dữ liệu của dự án"
+sidebarTitle: "Kiểm tra thiết lập"
+description: "Đọc lại sự kiện thử từ LogBrew bằng khóa đọc dữ liệu của dự án. Tìm hiểu mỗi loại khóa dự án làm được và không làm được gì."
+---
+
+Một lần gửi thành công từ SDK cho thấy LogBrew đã nhận yêu cầu. Nó không cho
+thấy LogBrew đã lưu sự kiện và bạn đọc được sự kiện đó. Để kiểm tra thiết lập,
+gửi một sự kiện thử rồi đọc lại.
+
+Khóa đọc dữ liệu của dự án cho phép một người, một job CI hoặc một agent lập
+trình đọc một dự án mà không cần đăng nhập tài khoản. Đây là khóa dự án, không
+phải thông tin xác thực của tài khoản.
+
+## <span id="project-key-kinds">Các loại khóa dự án</span>
+
+Mỗi khóa dự án thuộc về một dự án. Loại khóa quyết định khóa làm được gì. Chọn
+loại bằng `--kind` khi chạy `logbrew projects keys create`.
+
+| Loại | Tiền tố token | Làm được | Không làm được |
+| --- | --- | --- | --- |
+| `sdk` (mặc định), `server`, `cli`, `browser` | `lbw_ingest_` | Gửi telemetry đến dự án của khóa. | Đọc telemetry, thay đổi vấn đề, quản lý dự án hoặc khóa, hay đọc dự án khác. |
+| `artifact` | `lbw_ingest_` | Tải lên source map và tệp gỡ lỗi của mã native cho dự án của khóa. | Gửi hoặc đọc telemetry. |
+| `read` | `lbw_read_` | Đọc vấn đề, trace, log, hành động, chỉ số, bản phát hành và phân tích sản phẩm của dự án của khóa. | Gửi telemetry, thay đổi vấn đề, quản lý dự án hoặc khóa, đọc dữ liệu tài khoản, hay đọc dự án khác. |
+
+Các loại `sdk`, `server`, `cli` và `browser` là khóa gửi dữ liệu. Chọn loại
+nêu đúng nơi khóa chạy. Dùng `browser` cho mã chạy trong trình duyệt. Không bao
+giờ đặt khóa đọc dữ liệu trong mã trình duyệt, ứng dụng di động hoặc bundle
+công khai.
+
+Quyền truy cập tài khoản là chuyện khác. `logbrew login` cấp cho CLI quyền truy
+cập của tài khoản bạn. Không bao giờ dùng quyền truy cập tài khoản làm cấu hình
+SDK. Khóa đọc dữ liệu không đăng nhập được vào CLI hay bảng điều khiển.
+
+## <span id="verify-telemetry-arrival">Đọc lại sự kiện thử</span>
+
+<Steps>
+  <Step title="Tạo khóa đọc dữ liệu">
+    Bước này cần quyền truy cập tài khoản. Chạy `logbrew status --json` và
+    kiểm tra rằng lệnh báo quyền truy cập tài khoản đã xác thực.
+
+    ```bash
+    : "${LOGBREW_PROJECT_ID:?set the project UUID}"
+    install -d -m 700 "$HOME/.logbrew"
+
+    logbrew projects keys create "$LOGBREW_PROJECT_ID" \
+      --kind read \
+      --label "setup check" \
+      --ingest-key-file "$HOME/.logbrew/setup-check.read" \
+      --json
+    ```
+
+    CLI ghi khóa vào một tệp mới mà chỉ chủ sở hữu đọc được. CLI không bao giờ
+    in khóa hay đường dẫn tệp. `--ingest-key-file` là tùy chọn tệp cho mọi loại
+    khóa. Tệp đích không được tồn tại sẵn.
+
+    **Điểm kiểm tra:** kết quả có `status: "created"` và
+    `ingest_key.kind: "read"`. Ghi lại `ingest_key.id`. Bạn cần giá trị này để
+    thu hồi khóa.
+  </Step>
+
+  <Step title="Gửi một sự kiện thử">
+    Gửi một log thử an toàn từ ứng dụng bằng khóa gửi dữ liệu của dự án. Làm
+    theo các bước cho runtime của bạn trong [Bắt đầu nhanh](/vi/quickstart)
+    hoặc [Tích hợp SDK](/vi/guides/sdk-ingestion). Để thử cả vấn đề, gửi một
+    lỗi thử đã xử lý.
+
+    **Điểm kiểm tra:** SDK báo trạng thái `2xx`. Điều này cho thấy LogBrew đã
+    nhận yêu cầu. Chuyển sang bước tiếp theo.
+  </Step>
+
+  <Step title="Đọc lại sự kiện">
+    Nạp khóa đọc dữ liệu vào `LOGBREW_TOKEN` chỉ cho shell này. Sau đó đọc dự
+    án:
+
+    ```bash
+    export LOGBREW_TOKEN="$(< "$HOME/.logbrew/setup-check.read")"
+
+    logbrew read logs --since 1h --json
+    logbrew issues --since 1h --json
+    logbrew read traces --since 1h --json
+    ```
+
+    Mỗi lệnh đọc chỉ trả về dữ liệu của dự án mà khóa thuộc về, nên bạn không
+    cần `--project`. Thêm `--service`, `--environment` hoặc `--release` để khớp
+    với sự kiện thử.
+
+    **Điểm kiểm tra:** log thử xuất hiện với dịch vụ, môi trường và bản phát
+    hành của bạn. Lỗi thử xuất hiện dưới dạng vấn đề. Điều này cho thấy LogBrew
+    đã lưu các sự kiện và bạn đọc được chúng.
+
+    Khi xong, chạy `unset LOGBREW_TOKEN`. Sau đó CLI dùng lại quyền truy cập
+    tài khoản của bạn.
+  </Step>
+
+  <Step title="Thu hồi khóa đọc dữ liệu">
+    Thu hồi khóa khi không cần nữa. Bước này cần quyền truy cập tài khoản, nên
+    bỏ `LOGBREW_TOKEN` trước.
+
+    ```bash
+    unset LOGBREW_TOKEN
+
+    logbrew projects keys revoke "$LOGBREW_PROJECT_ID" "<key_id>" --yes --json
+    ```
+
+    **Điểm kiểm tra:** kết quả có `status: "revoked"`. Khóa ngừng hoạt động từ
+    yêu cầu tiếp theo.
+  </Step>
+</Steps>
+
+## Cấp quyền đọc cho job CI hoặc agent
+
+Dành một khóa đọc dữ liệu cho job CI hoặc agent lập trình đọc một dự án. Lưu
+khóa trong trình quản lý bí mật của hệ thống CI hoặc môi trường của agent. Cung
+cấp khóa dưới dạng `LOGBREW_TOKEN`. Không đặt khóa trong prompt, repository
+hoặc đầu ra của lệnh.
+
+Sau đó job hoặc agent có thể chạy các lệnh đọc như `logbrew issues --json`,
+`logbrew issue "<issue_id>" --json` và `logbrew read trace "<trace_id>"`. Các
+lệnh về dự án, khóa và tài khoản cần quyền truy cập tài khoản. Client API gửi
+khóa dưới dạng bearer token đến các thao tác đọc telemetry trong
+[Telemetry API](/vi/reference/telemetry-api).
+
+Dùng một khóa riêng cho mỗi job hoặc agent. Khi đó bạn có thể thu hồi một khóa
+mà không ảnh hưởng đến các khóa khác.
+
+## Xử lý khi đọc thất bại
+
+| Kết quả | Bước tiếp theo |
+| --- | --- |
+| Danh sách trống | Chờ vài giây rồi đọc lại. Kiểm tra rằng khoảng thời gian có chứa sự kiện thử. Kiểm tra rằng khóa đọc dữ liệu và khóa gửi dữ liệu của ứng dụng thuộc cùng một dự án. Log không tạo ra vấn đề. |
+| `401`, `code: "unauthorized"` | Khóa đọc dữ liệu đã bị thu hồi, đã hết hạn hoặc không hợp lệ. Tạo khóa đọc dữ liệu mới. |
+| `403`, `code: "forbidden"` | Lệnh cần quyền truy cập tài khoản, hoặc lệnh chỉ định một dự án khác. Bỏ `--project`, hoặc bỏ `LOGBREW_TOKEN` và dùng quyền truy cập tài khoản. |
+| `logbrew status` báo không có quyền truy cập tài khoản | `status` chỉ kiểm tra quyền truy cập tài khoản. Chạy một lệnh đọc để thử khóa đọc dữ liệu. |
+
+Nếu vẫn thiếu telemetry, dùng
+[các bước kiểm tra telemetry đầu tiên](/vi/guides/troubleshooting#recover-missing-first-telemetry).
+Để thay khóa gửi dữ liệu, xem [Xoay vòng khóa gửi dữ liệu](/vi/guides/rotate-ingest-key).

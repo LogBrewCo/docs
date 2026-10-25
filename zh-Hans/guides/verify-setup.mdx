@@ -1,0 +1,101 @@
+---
+title: "用项目只读密钥验证 LogBrew 接入"
+sidebarTitle: "验证接入"
+description: "用项目只读密钥从 LogBrew 读回测试信号，并了解每种项目密钥能做什么、不能做什么。"
+---
+
+SDK 发送成功，只能说明 LogBrew 接受了请求。它不能说明 LogBrew 已存储该信号，也不能说明你能读取它。要验证接入，发送一个测试信号，再把它读回来。
+
+有了项目只读密钥，人、CI 任务或编程智能体无需登录账号，就能读取一个项目。它是项目密钥，不是账号凭据。
+
+## <span id="project-key-kinds">项目密钥类型</span>
+
+每个项目密钥属于一个项目。密钥的类型决定它能做什么。运行 `logbrew projects keys create` 时，用 `--kind` 选择类型。
+
+| 类型 | 令牌前缀 | 能做 | 不能做 |
+| --- | --- | --- | --- |
+| `sdk`（默认）、`server`、`cli`、`browser` | `lbw_ingest_` | 向所属项目发送遥测数据。 | 读取遥测数据、更改问题、管理项目或密钥、读取其他项目。 |
+| `artifact` | `lbw_ingest_` | 为所属项目上传 Source Map 和原生调试文件。 | 发送或读取遥测数据。 |
+| `read` | `lbw_read_` | 读取所属项目的问题、链路、日志、产品操作、指标、版本和产品分析。 | 发送遥测数据、更改问题、管理项目或密钥、读取账号数据、读取其他项目。 |
+
+`sdk`、`server`、`cli` 和 `browser` 类型都是接入密钥。选择与密钥运行位置对应的类型。在浏览器中运行的代码使用 `browser`。切勿把只读密钥放进浏览器代码、移动应用或公开的包中。
+
+账号访问是另一回事。`logbrew login` 让 CLI 获得你账号的访问权限。切勿把账号访问用作 SDK 配置。只读密钥不能登录 CLI 或控制台。
+
+## <span id="verify-telemetry-arrival">读回测试信号</span>
+
+<Steps>
+  <Step title="创建只读密钥">
+    这一步需要账号访问。运行 `logbrew status --json`，确认它显示账号访问已通过认证。
+
+    ```bash
+    : "${LOGBREW_PROJECT_ID:?set the project UUID}"
+    install -d -m 700 "$HOME/.logbrew"
+
+    logbrew projects keys create "$LOGBREW_PROJECT_ID" \
+      --kind read \
+      --label "setup check" \
+      --ingest-key-file "$HOME/.logbrew/setup-check.read" \
+      --json
+    ```
+
+    CLI 会把密钥写入一个仅所有者可访问的新文件。它从不打印密钥或文件路径。`--ingest-key-file` 是所有密钥类型通用的文件选项。目标文件必须不存在。
+
+    **检查点**：结果包含 `status: "created"` 和 `ingest_key.kind: "read"`。记下 `ingest_key.id`。撤销密钥时需要用到它。
+  </Step>
+
+  <Step title="发送测试信号">
+    用项目接入密钥，从应用发送一条安全的测试日志。按[快速入门](/zh-Hans/quickstart)或 [SDK 接入](/zh-Hans/guides/sdk-ingestion)中对应运行时的步骤操作。如果还要测试问题，再发送一个已处理的测试错误。
+
+    **检查点**：SDK 报告 `2xx` 状态。这说明 LogBrew 接受了请求。继续下一步。
+  </Step>
+
+  <Step title="读回信号">
+    把只读密钥加载到 `LOGBREW_TOKEN`，只在当前 shell 中生效。然后读取项目：
+
+    ```bash
+    export LOGBREW_TOKEN="$(< "$HOME/.logbrew/setup-check.read")"
+
+    logbrew read logs --since 1h --json
+    logbrew issues --since 1h --json
+    logbrew read traces --since 1h --json
+    ```
+
+    每次读取只返回密钥所属项目的数据，所以不需要 `--project`。添加 `--service`、`--environment` 或 `--release`，与测试信号保持一致。
+
+    **检查点**：测试日志出现，并带有你的服务、环境和版本。测试错误显示为问题。这说明 LogBrew 已存储这些信号，并且你能读取它们。
+
+    完成后，运行 `unset LOGBREW_TOKEN`。CLI 会重新使用你的账号访问。
+  </Step>
+
+  <Step title="撤销只读密钥">
+    不再需要时，撤销该密钥。这一步需要账号访问，所以先取消设置 `LOGBREW_TOKEN`。
+
+    ```bash
+    unset LOGBREW_TOKEN
+
+    logbrew projects keys revoke "$LOGBREW_PROJECT_ID" "<key_id>" --yes --json
+    ```
+
+    **检查点**：结果包含 `status: "revoked"`。密钥在下一次请求时失效。
+  </Step>
+</Steps>
+
+## 为 CI 任务或智能体提供读取权限
+
+为读取一个项目的 CI 任务或编程智能体单独准备一个只读密钥。把密钥存放在 CI 系统或智能体环境的机密存储中，并以 `LOGBREW_TOKEN` 的形式提供。不要把密钥放进提示词、代码仓库或命令输出。
+
+之后，任务或智能体就可以运行 `logbrew issues --json`、`logbrew issue "<issue_id>" --json` 和 `logbrew read trace "<trace_id>"` 等读取命令。项目、密钥和账号命令需要账号访问。API 客户端调用[遥测 API](/zh-Hans/reference/telemetry-api) 中的遥测读取接口时，把密钥作为 Bearer 令牌发送。
+
+每个任务或智能体使用一个密钥。这样撤销一个密钥时，不会影响其他密钥。
+
+## 读取失败时如何恢复
+
+| 结果 | 下一步 |
+| --- | --- |
+| 列表为空 | 等几秒后再读取一次。确认时间范围包含测试信号。确认只读密钥和应用的接入密钥属于同一个项目。日志不会生成问题。 |
+| `401` 和 `code: "unauthorized"` | 只读密钥已撤销、已过期或无效。创建一个新的只读密钥。 |
+| `403` 和 `code: "forbidden"` | 该命令需要账号访问，或者指定了其他项目。去掉 `--project`，或者取消设置 `LOGBREW_TOKEN` 并使用账号访问。 |
+| `logbrew status` 显示没有账号访问 | `status` 只检查账号访问。要测试只读密钥，运行一条读取命令。 |
+
+如果遥测数据仍然缺失，按[首次遥测检查](/zh-Hans/guides/troubleshooting#recover-missing-first-telemetry)排查。要替换接入密钥，参见[轮换接入密钥](/zh-Hans/guides/rotate-ingest-key)。

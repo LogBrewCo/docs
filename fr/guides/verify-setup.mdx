@@ -1,0 +1,145 @@
+---
+title: "Vérifier la configuration de LogBrew avec une clé de lecture"
+sidebarTitle: "Vérifier la configuration"
+description: "Relisez votre signal de test dans LogBrew avec une clé de lecture du projet. Découvrez ce que chaque type de clé de projet peut faire ou non."
+---
+
+Un envoi réussi par le SDK montre que LogBrew a accepté la requête. Il ne
+montre pas que LogBrew a stocké le signal ni que vous pouvez le lire. Pour
+vérifier votre configuration, envoyez un signal de test et relisez-le.
+
+Une clé de lecture du projet permet à une personne, à un job de CI ou à un
+agent de codage de lire un projet sans connexion au compte. C’est une clé de
+projet, pas un identifiant de compte.
+
+## <span id="project-key-kinds">Types de clés de projet</span>
+
+Chaque clé de projet appartient à un seul projet. Son type définit ce qu’elle
+peut faire. Vous choisissez le type avec `--kind` quand vous exécutez
+`logbrew projects keys create`.
+
+| Type | Préfixe du jeton | Elle peut | Elle ne peut pas |
+| --- | --- | --- | --- |
+| `sdk` (par défaut), `server`, `cli`, `browser` | `lbw_ingest_` | Envoyer de la télémétrie à son projet. | Lire la télémétrie, modifier des problèmes, gérer des projets ou des clés, ni lire un autre projet. |
+| `artifact` | `lbw_ingest_` | Importer des source maps et des fichiers de débogage natifs pour son projet. | Envoyer ou lire de la télémétrie. |
+| `read` | `lbw_read_` | Lire les problèmes, traces, logs, actions, métriques, versions et analyses produit de son projet. | Envoyer de la télémétrie, modifier des problèmes, gérer des projets ou des clés, lire les données du compte, ni lire un autre projet. |
+
+Les types `sdk`, `server`, `cli` et `browser` sont des clés d’ingestion.
+Choisissez le type qui indique où la clé s’exécute. Utilisez `browser` pour du
+code qui s’exécute dans un navigateur. Ne placez jamais une clé de lecture dans
+du code de navigateur, une application mobile ou un bundle public.
+
+L’accès au compte est différent. `logbrew login` donne à la CLI l’accès de
+votre compte. N’utilisez jamais l’accès au compte comme configuration du SDK.
+Une clé de lecture ne permet pas de se connecter à la CLI ni au tableau de
+bord.
+
+## <span id="verify-telemetry-arrival">Relire votre signal de test</span>
+
+<Steps>
+  <Step title="Créer une clé de lecture">
+    Cette étape nécessite l’accès au compte. Exécutez `logbrew status --json`
+    et vérifiez qu’il indique un accès authentifié au compte.
+
+    ```bash
+    : "${LOGBREW_PROJECT_ID:?set the project UUID}"
+    install -d -m 700 "$HOME/.logbrew"
+
+    logbrew projects keys create "$LOGBREW_PROJECT_ID" \
+      --kind read \
+      --label "setup check" \
+      --ingest-key-file "$HOME/.logbrew/setup-check.read" \
+      --json
+    ```
+
+    La CLI écrit la clé dans un nouveau fichier lisible par son seul
+    propriétaire. Elle n’affiche jamais la clé ni le chemin du fichier.
+    `--ingest-key-file` est l’option de fichier pour tous les types de clé.
+    Le fichier de destination ne doit pas exister.
+
+    **Point de contrôle :** le résultat contient `status: "created"` et
+    `ingest_key.kind: "read"`. Notez `ingest_key.id`. Vous en avez besoin pour
+    révoquer la clé.
+  </Step>
+
+  <Step title="Envoyer un signal de test">
+    Envoyez un log de test sûr depuis votre application avec la clé
+    d’ingestion du projet. Suivez les étapes pour votre runtime dans le
+    [démarrage rapide](/fr/quickstart) ou le
+    [guide d’intégration du SDK](/fr/guides/sdk-ingestion). Pour tester aussi
+    les problèmes, envoyez une erreur de test gérée.
+
+    **Point de contrôle :** le SDK renvoie un statut `2xx`. Cela montre que
+    LogBrew a accepté la requête. Passez à l’étape suivante.
+  </Step>
+
+  <Step title="Relire le signal">
+    Chargez la clé de lecture dans `LOGBREW_TOKEN` pour ce shell uniquement.
+    Lisez ensuite le projet :
+
+    ```bash
+    export LOGBREW_TOKEN="$(< "$HOME/.logbrew/setup-check.read")"
+
+    logbrew read logs --since 1h --json
+    logbrew issues --since 1h --json
+    logbrew read traces --since 1h --json
+    ```
+
+    Chaque lecture renvoie uniquement les données du projet de la clé. Vous
+    n’avez donc pas besoin de `--project`. Ajoutez `--service`,
+    `--environment` ou `--release` pour cibler le signal de test.
+
+    **Point de contrôle :** le log de test apparaît avec votre service, votre
+    environnement et votre version. Une erreur de test apparaît comme un
+    problème. Cela montre que LogBrew a stocké les signaux et que vous pouvez
+    les lire.
+
+    Quand vous avez terminé, exécutez `unset LOGBREW_TOKEN`. La CLI utilise
+    alors de nouveau l’accès de votre compte.
+  </Step>
+
+  <Step title="Révoquer la clé de lecture">
+    Révoquez la clé quand vous n’en avez plus besoin. Cette étape nécessite
+    l’accès au compte. Retirez donc d’abord `LOGBREW_TOKEN`.
+
+    ```bash
+    unset LOGBREW_TOKEN
+
+    logbrew projects keys revoke "$LOGBREW_PROJECT_ID" "<key_id>" --yes --json
+    ```
+
+    **Point de contrôle :** le résultat contient `status: "revoked"`. La clé
+    cesse de fonctionner à sa prochaine requête.
+  </Step>
+</Steps>
+
+## Donner un accès en lecture à un job de CI ou à un agent
+
+Réservez une clé de lecture à un job de CI ou à un agent de codage qui lit un
+projet. Stockez la clé dans le gestionnaire de secrets du système de CI ou de
+l’environnement de l’agent. Rendez-la disponible sous `LOGBREW_TOKEN`. Ne
+mettez pas la clé dans un prompt, un dépôt ou la sortie d’une commande.
+
+Le job ou l’agent peut alors exécuter des lectures comme
+`logbrew issues --json`, `logbrew issue "<issue_id>" --json` et
+`logbrew read trace "<trace_id>"`. Les commandes de projet, de clé et de
+compte nécessitent l’accès au compte. Les clients de l’API envoient la clé
+comme jeton bearer aux lectures de télémétrie de
+l’[API de télémétrie](/fr/reference/telemetry-api).
+
+Utilisez une clé par job ou par agent. Vous pouvez alors révoquer une clé sans
+effet sur les autres.
+
+## Corriger une lecture qui échoue
+
+| Résultat | Étape suivante |
+| --- | --- |
+| La liste est vide | Attendez quelques secondes et relisez. Vérifiez que la période inclut le signal de test. Vérifiez que la clé de lecture et la clé d’ingestion de l’application appartiennent au même projet. Un log ne crée pas de problème. |
+| `401`, `code: "unauthorized"` | La clé de lecture est révoquée, expirée ou non valide. Créez une nouvelle clé de lecture. |
+| `403`, `code: "forbidden"` | La commande nécessite l’accès au compte, ou elle désigne un autre projet. Retirez `--project`, ou retirez `LOGBREW_TOKEN` et utilisez l’accès au compte. |
+| `logbrew status` n’indique aucun accès au compte | `status` vérifie uniquement l’accès au compte. Exécutez une commande de lecture pour tester la clé de lecture. |
+
+Si la télémétrie manque toujours, utilisez les
+[vérifications de la première télémétrie](/fr/guides/troubleshooting#recover-missing-first-telemetry).
+Pour remplacer une clé d’ingestion, consultez
+[Renouveler une clé d’ingestion](/fr/guides/rotate-ingest-key).
