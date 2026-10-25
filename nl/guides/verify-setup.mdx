@@ -1,0 +1,143 @@
+---
+title: "Je LogBrew-installatie controleren met een leessleutel"
+sidebarTitle: "Je installatie controleren"
+description: "Lees je testevent terug uit LogBrew met een leessleutel van je project. Bekijk wat elk soort projectsleutel wel en niet kan."
+---
+
+Een geslaagde verzending vanuit de SDK laat zien dat LogBrew het request heeft
+geaccepteerd. Het laat niet zien dat LogBrew het event heeft opgeslagen en dat
+je het kunt lezen. Verzend één testevent en lees het terug om je installatie
+te controleren.
+
+Met een leessleutel van een project kan een persoon, een CI-job of een coding
+agent één project lezen zonder in te loggen op een account. Het is een
+projectsleutel, geen toegangsgegevens van je account.
+
+## <span id="project-key-kinds">Soorten projectsleutels</span>
+
+Elke projectsleutel hoort bij één project. Het soort bepaalt wat de sleutel
+kan. Je kiest het soort met `--kind` als je `logbrew projects keys create`
+uitvoert.
+
+| Soort | Tokenprefix | Kan | Kan niet |
+| --- | --- | --- | --- |
+| `sdk` (standaard), `server`, `cli`, `browser` | `lbw_ingest_` | Telemetrie verzenden naar het eigen project. | Telemetrie lezen, issues wijzigen, projecten of sleutels beheren, of een ander project lezen. |
+| `artifact` | `lbw_ingest_` | Source maps en native debugbestanden uploaden voor het eigen project. | Telemetrie verzenden of lezen. |
+| `read` | `lbw_read_` | De issues, traces, logs, acties, metrics, releases en productanalyse van het eigen project lezen. | Telemetrie verzenden, issues wijzigen, projecten of sleutels beheren, accountgegevens lezen, of een ander project lezen. |
+
+De soorten `sdk`, `server`, `cli` en `browser` zijn ingest-sleutels. Kies het
+soort dat aangeeft waar de sleutel draait. Gebruik `browser` voor code die in
+een browser draait. Zet een leessleutel nooit in browsercode, een mobiele app
+of een openbare bundle.
+
+Accounttoegang is iets anders. `logbrew login` geeft de CLI de toegang van je
+account. Gebruik accounttoegang nooit als SDK-configuratie. Met een
+leessleutel kun je niet inloggen op de CLI of het dashboard.
+
+## <span id="verify-telemetry-arrival">Je testevent teruglezen</span>
+
+<Steps>
+  <Step title="Maak een leessleutel">
+    Voor deze stap heb je accounttoegang nodig. Voer `logbrew status --json`
+    uit en controleer of het geauthenticeerde accounttoegang meldt.
+
+    ```bash
+    : "${LOGBREW_PROJECT_ID:?set the project UUID}"
+    install -d -m 700 "$HOME/.logbrew"
+
+    logbrew projects keys create "$LOGBREW_PROJECT_ID" \
+      --kind read \
+      --label "setup check" \
+      --ingest-key-file "$HOME/.logbrew/setup-check.read" \
+      --json
+    ```
+
+    De CLI schrijft de sleutel naar een nieuw bestand dat alleen de eigenaar
+    kan lezen. De CLI toont nooit de sleutel of het bestandspad.
+    `--ingest-key-file` is de bestandsoptie voor elk soort sleutel. Het
+    doelbestand mag nog niet bestaan.
+
+    **Controlepunt:** het resultaat bevat `status: "created"` en
+    `ingest_key.kind: "read"`. Noteer `ingest_key.id`. Die heb je nodig om de
+    sleutel in te trekken.
+  </Step>
+
+  <Step title="Verzend een testevent">
+    Verzend één veilige testlog vanuit je app met de ingest-sleutel van het
+    project. Volg de stappen voor je runtime in de [snelstart](/nl/quickstart)
+    of de [handleiding voor SDK-integratie](/nl/guides/sdk-ingestion). Wil je
+    ook issues testen? Verzend dan één afgehandelde testfout.
+
+    **Controlepunt:** de SDK meldt een `2xx`-status. Dit laat zien dat LogBrew
+    het request heeft geaccepteerd. Ga door naar de volgende stap.
+  </Step>
+
+  <Step title="Lees het event terug">
+    Laad de leessleutel in `LOGBREW_TOKEN`, alleen voor deze shell. Lees daarna
+    het project:
+
+    ```bash
+    export LOGBREW_TOKEN="$(< "$HOME/.logbrew/setup-check.read")"
+
+    logbrew read logs --since 1h --json
+    logbrew issues --since 1h --json
+    logbrew read traces --since 1h --json
+    ```
+
+    Elke leesopdracht geeft alleen gegevens van het project van de sleutel
+    terug. Je hebt `--project` dus niet nodig. Voeg `--service`,
+    `--environment` of `--release` toe zodat het resultaat bij het testevent
+    past.
+
+    **Controlepunt:** de testlog verschijnt met je service, omgeving en
+    release. Een testfout verschijnt als issue. Dit laat zien dat LogBrew de
+    events heeft opgeslagen en dat je ze kunt lezen.
+
+    Voer `unset LOGBREW_TOKEN` uit als je klaar bent. De CLI gebruikt dan weer
+    je accounttoegang.
+  </Step>
+
+  <Step title="Trek de leessleutel in">
+    Trek de sleutel in als je hem niet meer nodig hebt. Voor deze stap heb je
+    accounttoegang nodig. Verwijder `LOGBREW_TOKEN` dus eerst.
+
+    ```bash
+    unset LOGBREW_TOKEN
+
+    logbrew projects keys revoke "$LOGBREW_PROJECT_ID" "<key_id>" --yes --json
+    ```
+
+    **Controlepunt:** het resultaat bevat `status: "revoked"`. De sleutel werkt
+    niet meer vanaf het volgende request.
+  </Step>
+</Steps>
+
+## Een CI-job of agent leestoegang geven
+
+Houd een leessleutel aan voor een CI-job of een coding agent die één project
+leest. Bewaar de sleutel in de secretmanager van het CI-systeem of de
+agentomgeving. Stel hem beschikbaar als `LOGBREW_TOKEN`. Zet de sleutel niet
+in een prompt, een repository of de uitvoer van een opdracht.
+
+De job of agent kan dan leesopdrachten uitvoeren zoals
+`logbrew issues --json`, `logbrew issue "<issue_id>" --json` en
+`logbrew read trace "<trace_id>"`. Opdrachten voor projecten, sleutels en
+accounts hebben accounttoegang nodig. API-clients sturen de sleutel als
+bearer-token mee naar de telemetrie-leesroutes in de
+[Telemetrie-API](/nl/reference/telemetry-api).
+
+Gebruik één sleutel per job of agent. Dan kun je één sleutel intrekken zonder
+dat de andere er last van hebben.
+
+## Een mislukte leesopdracht oplossen
+
+| Resultaat | Volgende stap |
+| --- | --- |
+| De lijst is leeg | Wacht een paar seconden en lees opnieuw. Controleer of het tijdsbereik het testevent bevat. Controleer of de leessleutel en de ingest-sleutel van de app bij hetzelfde project horen. Een log maakt geen issue aan. |
+| `401`, `code: "unauthorized"` | De leessleutel is ingetrokken, verlopen of ongeldig. Maak een nieuwe leessleutel. |
+| `403`, `code: "forbidden"` | De opdracht heeft accounttoegang nodig, of noemt een ander project. Verwijder `--project`, of verwijder `LOGBREW_TOKEN` en gebruik accounttoegang. |
+| `logbrew status` meldt geen accounttoegang | `status` controleert alleen accounttoegang. Voer een leesopdracht uit om de leessleutel te testen. |
+
+Ontbreekt de telemetrie nog steeds? Gebruik dan de
+[controles voor de eerste telemetrie](/nl/guides/troubleshooting#recover-missing-first-telemetry).
+Zie [Een ingest-sleutel roteren](/nl/guides/rotate-ingest-key) om een ingest-sleutel te vervangen.

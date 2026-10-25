@@ -1,0 +1,140 @@
+---
+title: "Sprawdź konfigurację LogBrew kluczem odczytu projektu"
+sidebarTitle: "Sprawdź konfigurację"
+description: "Odczytaj z LogBrew zdarzenie testowe za pomocą klucza odczytu projektu. Zobacz, co może, a czego nie może każdy rodzaj klucza projektu."
+---
+
+Udane wysłanie z SDK pokazuje, że LogBrew przyjął żądanie. Nie pokazuje, że
+LogBrew zapisał zdarzenie i że możesz je odczytać. Aby sprawdzić konfigurację,
+wyślij jedno zdarzenie testowe i odczytaj je.
+
+Klucz odczytu projektu pozwala osobie, zadaniu CI lub agentowi kodującemu
+czytać jeden projekt bez logowania do konta. To klucz projektu, a nie
+poświadczenie konta.
+
+## <span id="project-key-kinds">Rodzaje kluczy projektu</span>
+
+Każdy klucz projektu należy do jednego projektu. Rodzaj klucza określa, co
+klucz może zrobić. Rodzaj wybierasz flagą `--kind` podczas uruchamiania
+`logbrew projects keys create`.
+
+| Rodzaj | Prefiks tokena | Może | Nie może |
+| --- | --- | --- | --- |
+| `sdk` (domyślnie), `server`, `cli`, `browser` | `lbw_ingest_` | Wysyłać telemetrię do swojego projektu. | Czytać telemetrii, zmieniać problemów, zarządzać projektami ani kluczami, ani czytać innego projektu. |
+| `artifact` | `lbw_ingest_` | Przesyłać mapy źródeł (source maps) i natywne pliki debugowania swojego projektu. | Wysyłać ani czytać telemetrii. |
+| `read` | `lbw_read_` | Czytać problemy, ślady, logi, akcje, metryki, wydania i analitykę produktową swojego projektu. | Wysyłać telemetrii, zmieniać problemów, zarządzać projektami ani kluczami, czytać danych konta, ani czytać innego projektu. |
+
+Rodzaje `sdk`, `server`, `cli` i `browser` to klucze wysyłania. Wybierz
+rodzaj, który wskazuje, gdzie działa klucz. Dla kodu działającego w
+przeglądarce użyj `browser`. Nigdy nie umieszczaj klucza odczytu w kodzie
+przeglądarki, aplikacji mobilnej ani publicznym pakiecie.
+
+Dostęp do konta to coś innego. `logbrew login` daje CLI dostęp twojego konta.
+Nigdy nie używaj dostępu do konta jako konfiguracji SDK. Kluczem odczytu nie
+można zalogować się do CLI ani do pulpitu.
+
+## <span id="verify-telemetry-arrival">Odczytaj zdarzenie testowe</span>
+
+<Steps>
+  <Step title="Utwórz klucz odczytu">
+    Ten krok wymaga dostępu do konta. Uruchom `logbrew status --json` i
+    upewnij się, że polecenie zgłasza uwierzytelniony dostęp do konta.
+
+    ```bash
+    : "${LOGBREW_PROJECT_ID:?set the project UUID}"
+    install -d -m 700 "$HOME/.logbrew"
+
+    logbrew projects keys create "$LOGBREW_PROJECT_ID" \
+      --kind read \
+      --label "setup check" \
+      --ingest-key-file "$HOME/.logbrew/setup-check.read" \
+      --json
+    ```
+
+    CLI zapisuje klucz w nowym pliku, który może czytać tylko właściciel.
+    Nigdy nie wypisuje klucza ani ścieżki pliku. `--ingest-key-file` to opcja
+    pliku dla każdego rodzaju klucza. Plik docelowy nie może istnieć.
+
+    **Punkt kontrolny:** wynik zawiera `status: "created"` i
+    `ingest_key.kind: "read"`. Zapisz `ingest_key.id`. Potrzebujesz go, aby
+    unieważnić klucz.
+  </Step>
+
+  <Step title="Wyślij zdarzenie testowe">
+    Wyślij jeden bezpieczny log testowy z aplikacji, używając klucza wysyłania
+    projektu. Wykonaj kroki dla swojego środowiska uruchomieniowego z
+    [szybkiego startu](/pl/quickstart) lub
+    [przewodnika po integracji SDK](/pl/guides/sdk-ingestion). Aby sprawdzić
+    też problemy, wyślij jeden obsłużony błąd testowy.
+
+    **Punkt kontrolny:** SDK zgłasza status `2xx`. To pokazuje, że LogBrew
+    przyjął żądanie. Przejdź do następnego kroku.
+  </Step>
+
+  <Step title="Odczytaj zdarzenie">
+    Wczytaj klucz odczytu do `LOGBREW_TOKEN` tylko w tej powłoce. Następnie
+    odczytaj projekt:
+
+    ```bash
+    export LOGBREW_TOKEN="$(< "$HOME/.logbrew/setup-check.read")"
+
+    logbrew read logs --since 1h --json
+    logbrew issues --since 1h --json
+    logbrew read traces --since 1h --json
+    ```
+
+    Każdy odczyt zwraca dane tylko z projektu klucza, więc nie potrzebujesz
+    `--project`. Dodaj `--service`, `--environment` lub `--release`, aby
+    dopasować wynik do zdarzenia testowego.
+
+    **Punkt kontrolny:** log testowy pojawia się z twoją usługą, środowiskiem
+    i wydaniem. Błąd testowy pojawia się jako problem. To pokazuje, że LogBrew
+    zapisał zdarzenia i że możesz je odczytać.
+
+    Na koniec uruchom `unset LOGBREW_TOKEN`. CLI znowu użyje wtedy dostępu
+    twojego konta.
+  </Step>
+
+  <Step title="Unieważnij klucz odczytu">
+    Unieważnij klucz, gdy nie jest już potrzebny. Ten krok wymaga dostępu do
+    konta, więc najpierw usuń `LOGBREW_TOKEN`.
+
+    ```bash
+    unset LOGBREW_TOKEN
+
+    logbrew projects keys revoke "$LOGBREW_PROJECT_ID" "<key_id>" --yes --json
+    ```
+
+    **Punkt kontrolny:** wynik zawiera `status: "revoked"`. Klucz przestaje
+    działać przy następnym żądaniu.
+  </Step>
+</Steps>
+
+## Daj zadaniu CI lub agentowi dostęp do odczytu
+
+Przeznacz klucz odczytu dla zadania CI lub agenta kodującego, który czyta
+jeden projekt. Zapisz klucz w menedżerze sekretów systemu CI lub środowiska
+agenta. Udostępnij go jako `LOGBREW_TOKEN`. Nie umieszczaj klucza w prompcie,
+repozytorium ani w wyniku polecenia.
+
+Zadanie lub agent może wtedy uruchamiać odczyty, takie jak
+`logbrew issues --json`, `logbrew issue "<issue_id>" --json` i
+`logbrew read trace "<trace_id>"`. Polecenia dotyczące projektów, kluczy i
+kont wymagają dostępu do konta. Klienci API wysyłają klucz jako token bearer
+do odczytów telemetrii w [API telemetrii](/pl/reference/telemetry-api).
+
+Używaj osobnego klucza dla każdego zadania lub agenta. Wtedy możesz
+unieważnić jeden klucz bez wpływu na pozostałe.
+
+## Napraw nieudany odczyt
+
+| Wynik | Następny krok |
+| --- | --- |
+| Lista jest pusta | Odczekaj kilka sekund i odczytaj ponownie. Upewnij się, że zakres czasu obejmuje zdarzenie testowe. Upewnij się, że klucz odczytu i klucz wysyłania aplikacji należą do tego samego projektu. Log nie tworzy problemu. |
+| `401`, `code: "unauthorized"` | Klucz odczytu jest unieważniony, wygasł lub jest nieprawidłowy. Utwórz nowy klucz odczytu. |
+| `403`, `code: "forbidden"` | Polecenie wymaga dostępu do konta albo wskazuje inny projekt. Usuń `--project` albo usuń `LOGBREW_TOKEN` i użyj dostępu do konta. |
+| `logbrew status` zgłasza brak dostępu do konta | `status` sprawdza tylko dostęp do konta. Aby przetestować klucz odczytu, uruchom polecenie odczytu. |
+
+Jeśli telemetrii nadal brakuje, użyj
+[sprawdzeń pierwszej telemetrii](/pl/guides/troubleshooting#recover-missing-first-telemetry).
+Aby wymienić klucz wysyłania, zobacz [Wymień klucz wysyłania](/pl/guides/rotate-ingest-key).

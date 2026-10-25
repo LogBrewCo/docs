@@ -1,0 +1,138 @@
+---
+title: "Verify LogBrew setup with a project read key"
+sidebarTitle: "Verify your setup"
+description: "Read your test event back from LogBrew with a project read key. Learn what each project key kind can and cannot do."
+---
+
+A successful SDK send shows that LogBrew accepted the request. It does not
+show that LogBrew stored the event and that you can read it. To verify your
+setup, send one test event and read it back.
+
+A project read key lets a person, a CI job, or a coding agent read one
+project without account sign-in. It is a project key, not an account
+credential.
+
+## <span id="project-key-kinds">Project key kinds</span>
+
+Each project key belongs to one project. Its kind sets what it can do. You
+choose the kind with `--kind` when you run `logbrew projects keys create`.
+
+| Kind | Token prefix | It can | It cannot |
+| --- | --- | --- | --- |
+| `sdk` (default), `server`, `cli`, `browser` | `lbw_ingest_` | Send telemetry to its project. | Read telemetry, change issues, manage projects or keys, or read another project. |
+| `artifact` | `lbw_ingest_` | Upload source maps and native debug files for its project. | Send or read telemetry. |
+| `read` | `lbw_read_` | Read the issues, traces, logs, actions, metrics, releases, and product analytics of its project. | Send telemetry, change issues, manage projects or keys, read account data, or read another project. |
+
+The `sdk`, `server`, `cli`, and `browser` kinds are ingest keys. Select the
+kind that names where the key runs. Use `browser` for code that runs in a
+browser. Never put a read key in browser code, a mobile app, or a public
+bundle.
+
+Account access is different. `logbrew login` gives the CLI the access of your
+account. Never use account access as SDK configuration. A read key cannot
+sign in to the CLI or the dashboard.
+
+## <span id="verify-telemetry-arrival">Read your test event back</span>
+
+<Steps>
+  <Step title="Create a read key">
+    You need account access for this step. Run `logbrew status --json` and
+    make sure that it reports authenticated account access.
+
+    ```bash
+    : "${LOGBREW_PROJECT_ID:?set the project UUID}"
+    install -d -m 700 "$HOME/.logbrew"
+
+    logbrew projects keys create "$LOGBREW_PROJECT_ID" \
+      --kind read \
+      --label "setup check" \
+      --ingest-key-file "$HOME/.logbrew/setup-check.read" \
+      --json
+    ```
+
+    The CLI writes the key to a new owner-only file. It never prints the key
+    or the file path. `--ingest-key-file` is the file option for every key
+    kind. The destination file must not exist.
+
+    **Checkpoint:** the result has `status: "created"` and
+    `ingest_key.kind: "read"`. Record `ingest_key.id`. You need it to revoke
+    the key.
+  </Step>
+
+  <Step title="Send a test event">
+    Send one safe test log from your application with its project ingest key.
+    Use the steps for your runtime in the [Quickstart](/quickstart) or the
+    [SDK ingestion guide](/guides/sdk-ingestion). To also test issues, send
+    one handled test error.
+
+    **Checkpoint:** the SDK reports a `2xx` status. This shows that LogBrew
+    accepted the request. Continue to the next step.
+  </Step>
+
+  <Step title="Read the event back">
+    Load the read key into `LOGBREW_TOKEN` for this shell only. Then read the
+    project:
+
+    ```bash
+    export LOGBREW_TOKEN="$(< "$HOME/.logbrew/setup-check.read")"
+
+    logbrew read logs --since 1h --json
+    logbrew issues --since 1h --json
+    logbrew read traces --since 1h --json
+    ```
+
+    Each read returns data from the key's project only, so you do not need
+    `--project`. Add `--service`, `--environment`, or `--release` to match
+    the test event.
+
+    **Checkpoint:** the test log appears with your service, environment, and
+    release. A test error appears as an issue. This shows that LogBrew stored
+    the events and that you can read them.
+
+    When you finish, run `unset LOGBREW_TOKEN`. The CLI then uses your account
+    access again.
+  </Step>
+
+  <Step title="Revoke the read key">
+    Revoke the key when you no longer need it. This step needs account
+    access, so unset `LOGBREW_TOKEN` first.
+
+    ```bash
+    unset LOGBREW_TOKEN
+
+    logbrew projects keys revoke "$LOGBREW_PROJECT_ID" "<key_id>" --yes --json
+    ```
+
+    **Checkpoint:** the result has `status: "revoked"`. The key stops working
+    at its next request.
+  </Step>
+</Steps>
+
+## Give a CI job or an agent read access
+
+Keep a read key for a CI job or a coding agent that reads one project. Store
+the key in the secret store of the CI system or the agent environment. Make
+it available as `LOGBREW_TOKEN`. Do not put the key in a prompt, a
+repository, or command output.
+
+The job or agent can then run reads such as `logbrew issues --json`,
+`logbrew issue "<issue_id>" --json`, and `logbrew read trace "<trace_id>"`.
+Project, key, and account commands need account access. API clients send the
+key as a bearer token to the telemetry reads in the
+[Telemetry API](/reference/telemetry-api).
+
+Use one key for each job or agent. Then you can revoke one key without an
+effect on the others.
+
+## Recover from a failed read
+
+| Result | Next step |
+| --- | --- |
+| The list is empty | Wait a few seconds and read again. Make sure that the time range includes the test event. Make sure that the read key and the application's ingest key belong to the same project. A log does not create an issue. |
+| `401`, `code: "unauthorized"` | The read key is revoked, expired, or not valid. Create a new read key. |
+| `403`, `code: "forbidden"` | The command needs account access, or it names a different project. Remove `--project`, or unset `LOGBREW_TOKEN` and use account access. |
+| `logbrew status` reports no account access | `status` checks account access only. Run a read command to test the read key. |
+
+If telemetry is still missing, use the
+[first telemetry checks](/guides/troubleshooting#recover-missing-first-telemetry).
+To replace an ingest key, see [Rotate an ingest key](/guides/rotate-ingest-key).

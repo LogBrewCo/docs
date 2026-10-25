@@ -1,0 +1,148 @@
+---
+title: "LogBrew-Einrichtung mit einem Projekt-Leseschlüssel prüfen"
+sidebarTitle: "Einrichtung prüfen"
+description: "Lesen Sie Ihr Testereignis mit einem Projekt-Leseschlüssel aus LogBrew zurück. Erfahren Sie, was jede Art von Projektschlüssel kann und was nicht."
+---
+
+Ein erfolgreicher Versand durch das SDK zeigt, dass LogBrew die Anfrage
+angenommen hat. Er zeigt nicht, dass LogBrew das Ereignis gespeichert hat und
+dass Sie es lesen können. Um Ihre Einrichtung zu prüfen, senden Sie ein
+Testereignis und lesen Sie es zurück.
+
+Mit einem Projekt-Leseschlüssel kann eine Person, ein CI-Job oder ein
+Coding-Agent ein Projekt ohne Kontoanmeldung lesen. Er ist ein
+Projektschlüssel, keine Zugangsdaten für ein Konto.
+
+## <span id="project-key-kinds">Arten von Projektschlüsseln</span>
+
+Jeder Projektschlüssel gehört zu genau einem Projekt. Seine Art legt fest, was
+er kann. Sie wählen die Art mit `--kind`, wenn Sie
+`logbrew projects keys create` ausführen.
+
+| Art | Token-Präfix | Er kann | Er kann nicht |
+| --- | --- | --- | --- |
+| `sdk` (Standard), `server`, `cli`, `browser` | `lbw_ingest_` | Telemetrie an sein Projekt senden. | Telemetrie lesen, Issues ändern, Projekte oder Schlüssel verwalten oder ein anderes Projekt lesen. |
+| `artifact` | `lbw_ingest_` | Source Maps und native Debug-Dateien für sein Projekt hochladen. | Telemetrie senden oder lesen. |
+| `read` | `lbw_read_` | Issues, Traces, Logs, Aktionen, Metriken, Releases und Produktanalysen seines Projekts lesen. | Telemetrie senden, Issues ändern, Projekte oder Schlüssel verwalten, Kontodaten lesen oder ein anderes Projekt lesen. |
+
+Die Arten `sdk`, `server`, `cli` und `browser` sind Ingest-Schlüssel. Wählen
+Sie die Art, die nennt, wo der Schlüssel läuft. Verwenden Sie `browser` für
+Code, der im Browser läuft. Legen Sie einen Leseschlüssel nie in Browser-Code,
+eine mobile App oder ein öffentliches Bundle.
+
+Kontozugriff ist etwas anderes. `logbrew login` gibt der CLI den Zugriff Ihres
+Kontos. Verwenden Sie Kontozugriff nie als SDK-Konfiguration. Ein
+Leseschlüssel kann sich nicht bei der CLI oder im Dashboard anmelden.
+
+## <span id="verify-telemetry-arrival">Testereignis zurücklesen</span>
+
+<Steps>
+  <Step title="Leseschlüssel erstellen">
+    Für diesen Schritt brauchen Sie Kontozugriff. Führen Sie
+    `logbrew status --json` aus. Prüfen Sie, dass der Status einen
+    authentifizierten Kontozugriff meldet.
+
+    ```bash
+    : "${LOGBREW_PROJECT_ID:?set the project UUID}"
+    install -d -m 700 "$HOME/.logbrew"
+
+    logbrew projects keys create "$LOGBREW_PROJECT_ID" \
+      --kind read \
+      --label "setup check" \
+      --ingest-key-file "$HOME/.logbrew/setup-check.read" \
+      --json
+    ```
+
+    Die CLI schreibt den Schlüssel in eine neue Datei, die nur der Eigentümer
+    lesen kann. Sie gibt weder den Schlüssel noch den Dateipfad aus.
+    `--ingest-key-file` ist die Dateioption für jede Schlüsselart. Die
+    Zieldatei darf noch nicht existieren.
+
+    **Kontrollpunkt:** Das Ergebnis enthält `status: "created"` und
+    `ingest_key.kind: "read"`. Notieren Sie `ingest_key.id`. Sie brauchen
+    den Wert, um den Schlüssel zu widerrufen.
+  </Step>
+
+  <Step title="Testereignis senden">
+    Senden Sie aus Ihrer Anwendung ein sicheres Test-Log mit dem
+    Ingest-Schlüssel des Projekts. Folgen Sie den Schritten für Ihre Laufzeit
+    im [Schnellstart](/de/quickstart) oder im
+    [Leitfaden zur SDK-Integration](/de/guides/sdk-ingestion). Um auch Issues
+    zu testen, senden Sie einen behandelten Testfehler.
+
+    **Kontrollpunkt:** Das SDK meldet einen `2xx`-Status. Das zeigt, dass
+    LogBrew die Anfrage angenommen hat. Fahren Sie mit dem nächsten Schritt
+    fort.
+  </Step>
+
+  <Step title="Ereignis zurücklesen">
+    Laden Sie den Leseschlüssel nur für diese Shell in `LOGBREW_TOKEN`. Lesen
+    Sie dann das Projekt:
+
+    ```bash
+    export LOGBREW_TOKEN="$(< "$HOME/.logbrew/setup-check.read")"
+
+    logbrew read logs --since 1h --json
+    logbrew issues --since 1h --json
+    logbrew read traces --since 1h --json
+    ```
+
+    Jeder Lesezugriff liefert nur Daten aus dem Projekt des Schlüssels. Sie
+    brauchen also kein `--project`. Fügen Sie `--service`, `--environment`
+    oder `--release` hinzu, damit das Ergebnis zum Testereignis passt.
+
+    **Kontrollpunkt:** Das Test-Log erscheint mit Ihrem Dienst, Ihrer
+    Umgebung und Ihrem Release. Ein Testfehler erscheint als Issue. Das
+    zeigt, dass LogBrew die Ereignisse gespeichert hat und dass Sie sie lesen
+    können.
+
+    Führen Sie danach `unset LOGBREW_TOKEN` aus. Die CLI verwendet dann
+    wieder Ihren Kontozugriff.
+  </Step>
+
+  <Step title="Leseschlüssel widerrufen">
+    Widerrufen Sie den Schlüssel, wenn Sie ihn nicht mehr brauchen. Dieser
+    Schritt braucht Kontozugriff. Entfernen Sie deshalb zuerst
+    `LOGBREW_TOKEN`.
+
+    ```bash
+    unset LOGBREW_TOKEN
+
+    logbrew projects keys revoke "$LOGBREW_PROJECT_ID" "<key_id>" --yes --json
+    ```
+
+    **Kontrollpunkt:** Das Ergebnis enthält `status: "revoked"`. Der
+    Schlüssel funktioniert ab seiner nächsten Anfrage nicht mehr.
+  </Step>
+</Steps>
+
+## Einem CI-Job oder Agent Lesezugriff geben
+
+Verwenden Sie einen eigenen Leseschlüssel für einen CI-Job oder einen
+Coding-Agenten, der ein Projekt liest. Speichern Sie den Schlüssel im
+Secret-Speicher des CI-Systems oder der Agent-Umgebung. Stellen Sie ihn als
+`LOGBREW_TOKEN` bereit. Legen Sie den Schlüssel nicht in einen Prompt, ein
+Repository oder eine Befehlsausgabe.
+
+Der Job oder Agent kann dann Lesebefehle wie `logbrew issues --json`,
+`logbrew issue "<issue_id>" --json` und `logbrew read trace "<trace_id>"`
+ausführen. Projekt-, Schlüssel- und Kontobefehle brauchen Kontozugriff.
+API-Clients senden den Schlüssel als Bearer-Token an die Telemetrie-Lesezugriffe
+der [Telemetrie-API](/de/reference/telemetry-api).
+
+Verwenden Sie einen Schlüssel pro Job oder Agent. Dann können Sie einen
+Schlüssel widerrufen, ohne die anderen zu beeinträchtigen.
+
+## Fehlgeschlagenen Lesezugriff beheben
+
+| Ergebnis | Nächster Schritt |
+| --- | --- |
+| Die Liste ist leer | Warten Sie einige Sekunden und lesen Sie erneut. Prüfen Sie, dass der Zeitraum das Testereignis enthält. Prüfen Sie, dass der Leseschlüssel und der Ingest-Schlüssel der Anwendung zum selben Projekt gehören. Ein Log erzeugt kein Issue. |
+| `401`, `code: "unauthorized"` | Der Leseschlüssel ist widerrufen, abgelaufen oder ungültig. Erstellen Sie einen neuen Leseschlüssel. |
+| `403`, `code: "forbidden"` | Der Befehl braucht Kontozugriff, oder er nennt ein anderes Projekt. Entfernen Sie `--project`, oder entfernen Sie `LOGBREW_TOKEN` und verwenden Sie Kontozugriff. |
+| `logbrew status` meldet keinen Kontozugriff | `status` prüft nur den Kontozugriff. Führen Sie einen Lesebefehl aus, um den Leseschlüssel zu testen. |
+
+Fehlt die Telemetrie weiterhin, nutzen Sie die
+[Prüfungen für die erste Telemetrie](/de/guides/troubleshooting#recover-missing-first-telemetry).
+Wie Sie einen Ingest-Schlüssel ersetzen, steht unter
+[Ingest-Schlüssel rotieren](/de/guides/rotate-ingest-key).

@@ -1,0 +1,143 @@
+---
+title: "LogBrew kurulumunu proje okuma anahtarıyla doğrulayın"
+sidebarTitle: "Kurulumunuzu doğrulayın"
+description: "Test olayınızı bir proje okuma anahtarıyla LogBrew'den geri okuyun. Her proje anahtarı türünün neyi yapıp neyi yapamadığını öğrenin."
+---
+
+Başarılı bir SDK gönderimi, LogBrew'ün isteği kabul ettiğini gösterir.
+LogBrew'ün olayı sakladığını ve onu okuyabildiğinizi göstermez. Kurulumunuzu
+doğrulamak için bir test olayı gönderin ve onu geri okuyun.
+
+Proje okuma anahtarı (read key), bir kişinin, bir CI işinin veya bir kodlama
+asistanının hesap girişi olmadan tek bir projeyi okumasını sağlar. Bu bir hesap
+kimlik bilgisi değil, bir proje anahtarıdır.
+
+## <span id="project-key-kinds">Proje anahtarı türleri</span>
+
+Her proje anahtarı tek bir projeye aittir. Anahtarın türü neler
+yapabileceğini belirler. Türü, `logbrew projects keys create` komutunu
+çalıştırırken `--kind` seçeneğiyle seçersiniz.
+
+| Tür | Token ön eki | Yapabildikleri | Yapamadıkları |
+| --- | --- | --- | --- |
+| `sdk` (varsayılan), `server`, `cli`, `browser` | `lbw_ingest_` | Kendi projesine telemetri gönderir. | Telemetri okuyamaz, sorunları değiştiremez, projeleri veya anahtarları yönetemez, başka bir projeyi okuyamaz. |
+| `artifact` | `lbw_ingest_` | Kendi projesi için source map'leri ve yerel hata ayıklama dosyalarını yükler. | Telemetri gönderemez veya okuyamaz. |
+| `read` | `lbw_read_` | Kendi projesinin sorunlarını, izlerini, loglarını, aksiyonlarını, metriklerini, sürümlerini ve ürün analizlerini okur. | Telemetri gönderemez, sorunları değiştiremez, projeleri veya anahtarları yönetemez, hesap verilerini veya başka bir projeyi okuyamaz. |
+
+`sdk`, `server`, `cli` ve `browser` türleri alım anahtarıdır (ingest key).
+Anahtarın çalıştığı yeri adlandıran türü seçin. Tarayıcıda çalışan kod için
+`browser` kullanın. Okuma anahtarını asla tarayıcı koduna, mobil uygulamaya
+veya herkese açık bir pakete koymayın.
+
+Hesap erişimi farklıdır. `logbrew login`, CLI'a hesabınızın erişimini verir.
+Hesap erişimini asla SDK yapılandırması olarak kullanmayın. Okuma anahtarıyla
+CLI'a veya panele giriş yapılamaz.
+
+## <span id="verify-telemetry-arrival">Test olayınızı geri okuyun</span>
+
+<Steps>
+  <Step title="Okuma anahtarı oluşturun">
+    Bu adım için hesap erişimi gerekir. `logbrew status --json` komutunu
+    çalıştırın. Kimliği doğrulanmış hesap erişimi bildirdiğinden emin olun.
+
+    ```bash
+    : "${LOGBREW_PROJECT_ID:?set the project UUID}"
+    install -d -m 700 "$HOME/.logbrew"
+
+    logbrew projects keys create "$LOGBREW_PROJECT_ID" \
+      --kind read \
+      --label "setup check" \
+      --ingest-key-file "$HOME/.logbrew/setup-check.read" \
+      --json
+    ```
+
+    CLI anahtarı, yalnızca sahibinin okuyabildiği yeni bir dosyaya yazar.
+    Anahtarı veya dosya yolunu asla yazdırmaz. `--ingest-key-file`, her
+    anahtar türü için kullanılan dosya seçeneğidir. Hedef dosya önceden var
+    olmamalıdır.
+
+    **Kontrol noktası:** sonuçta `status: "created"` ve
+    `ingest_key.kind: "read"` bulunur. `ingest_key.id` değerini not edin.
+    Anahtarı iptal etmek için bu değer gerekir.
+  </Step>
+
+  <Step title="Bir test olayı gönderin">
+    Uygulamanızdan, projenin alım anahtarıyla güvenli bir test logu gönderin.
+    [Hızlı başlangıç](/tr/quickstart) veya
+    [SDK entegrasyonu rehberi](/tr/guides/sdk-ingestion) içinde çalışma
+    ortamınıza uygun adımları izleyin. Sorunları da test etmek için ele
+    alınmış bir test hatası gönderin.
+
+    **Kontrol noktası:** SDK bir `2xx` durumu bildirir. Bu, LogBrew'ün isteği
+    kabul ettiğini gösterir. Sonraki adıma geçin.
+  </Step>
+
+  <Step title="Olayı geri okuyun">
+    Okuma anahtarını yalnızca bu kabuk oturumu için `LOGBREW_TOKEN`
+    değişkenine yükleyin. Ardından projeyi okuyun:
+
+    ```bash
+    export LOGBREW_TOKEN="$(< "$HOME/.logbrew/setup-check.read")"
+
+    logbrew read logs --since 1h --json
+    logbrew issues --since 1h --json
+    logbrew read traces --since 1h --json
+    ```
+
+    Her okuma yalnızca anahtarın projesinden veri döndürür. Bu yüzden
+    `--project` gerekmez. Test olayıyla eşleşmek için `--service`,
+    `--environment` veya `--release` ekleyin.
+
+    **Kontrol noktası:** test logu hizmetiniz, ortamınız ve sürümünüzle
+    görünür. Test hatası bir sorun olarak görünür. Bu, LogBrew'ün olayları
+    sakladığını ve onları okuyabildiğinizi gösterir.
+
+    İşiniz bitince `unset LOGBREW_TOKEN` komutunu çalıştırın. CLI bundan
+    sonra yeniden hesap erişiminizi kullanır.
+  </Step>
+
+  <Step title="Okuma anahtarını iptal edin">
+    Artık gerekmediğinde anahtarı iptal edin. Bu adım hesap erişimi
+    gerektirir. Bu yüzden önce `LOGBREW_TOKEN` değişkenini kaldırın.
+
+    ```bash
+    unset LOGBREW_TOKEN
+
+    logbrew projects keys revoke "$LOGBREW_PROJECT_ID" "<key_id>" --yes --json
+    ```
+
+    **Kontrol noktası:** sonuçta `status: "revoked"` bulunur. Anahtar bir
+    sonraki isteğinde çalışmayı bırakır.
+  </Step>
+</Steps>
+
+## Bir CI işine veya agent'a okuma erişimi verin
+
+Tek bir projeyi okuyan bir CI işi veya kodlama asistanı için ayrı bir okuma
+anahtarı kullanın. Anahtarı CI sisteminin veya agent ortamının gizli bilgi
+deposunda saklayın. Anahtarı `LOGBREW_TOKEN` olarak kullanılabilir yapın.
+Anahtarı bir prompta, bir kod deposuna veya komut çıktısına koymayın.
+
+İş veya agent bundan sonra `logbrew issues --json`,
+`logbrew issue "<issue_id>" --json` ve `logbrew read trace "<trace_id>"` gibi
+okumaları çalıştırabilir. Proje, anahtar ve hesap komutları hesap erişimi
+gerektirir. API istemcileri anahtarı,
+[Telemetri API'si](/tr/reference/telemetry-api) içindeki telemetri okumalarına
+bearer token olarak gönderir.
+
+Her iş veya agent için ayrı bir anahtar kullanın. Böylece bir anahtarı
+diğerlerini etkilemeden iptal edebilirsiniz.
+
+## Okuma başarısız olursa
+
+| Sonuç | Sonraki adım |
+| --- | --- |
+| Liste boş | Birkaç saniye bekleyin ve yeniden okuyun. Zaman aralığının test olayını kapsadığından emin olun. Okuma anahtarının ve uygulamanın alım anahtarının aynı projeye ait olduğundan emin olun. Bir log sorun oluşturmaz. |
+| `401`, `code: "unauthorized"` | Okuma anahtarı iptal edilmiş, süresi dolmuş veya geçersiz. Yeni bir okuma anahtarı oluşturun. |
+| `403`, `code: "forbidden"` | Komut hesap erişimi gerektiriyor veya başka bir projeyi belirtiyor. `--project` seçeneğini kaldırın ya da `LOGBREW_TOKEN` değişkenini kaldırıp hesap erişimini kullanın. |
+| `logbrew status` hesap erişimi olmadığını bildiriyor | `status` yalnızca hesap erişimini kontrol eder. Okuma anahtarını test etmek için bir okuma komutu çalıştırın. |
+
+Telemetri hâlâ eksikse
+[ilk telemetri kontrollerini](/tr/guides/troubleshooting#recover-missing-first-telemetry)
+kullanın. Bir alım anahtarını değiştirmek için
+[Alım anahtarını yenileyin](/tr/guides/rotate-ingest-key) sayfasına bakın.
