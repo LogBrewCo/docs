@@ -21,7 +21,6 @@ before proposing code changes.
 - Connect logs, traces, issues, and actions with release and environment
   filters.
 - Triage grouped issues from the terminal.
-- Keep humans aware with mobile companion workflows while agents use the CLI.
 
 ## Start here
 
