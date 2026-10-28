@@ -1,0 +1,159 @@
+---
+title: "OpenTelemetry verilerini OTLP ile LogBrew'e gönderin"
+sidebarTitle: "OpenTelemetry (OTLP)"
+description: "Bir OpenTelemetry SDK'sından veya Collector'dan logları, izleri ve metrikleri OTLP/HTTP ile LogBrew'e gönderin. LogBrew SDK'sı gerekmez."
+---
+
+LogBrew, HTTP üzerinden OpenTelemetry protokolünü (OTLP) kabul eder. Herhangi
+bir OpenTelemetry SDK'sı, OpenTelemetry Collector veya başka bir OTLP
+exporter'ı LogBrew'e log, iz ve metrik gönderebilir. LogBrew SDK'sına ihtiyacınız
+yoktur.
+
+LogBrew, OTLP verilerini SDK verileri gibi saklar. Bu verileri panelde, CLI'da
+ve MCP sunucusunda aynı şekilde okursunuz. Veriler kullanıma aynı şekilde
+sayılır. Aynı plan limitleri ve hız sınırları geçerlidir.
+
+## Uç noktalar
+
+| Sinyal | Uç nokta |
+| --- | --- |
+| Loglar | `POST https://api.logbrew.co/v1/logs` |
+| İzler | `POST https://api.logbrew.co/v1/traces` |
+| Metrikler | `POST https://api.logbrew.co/v1/metrics` |
+
+İstek gövdesini `application/x-protobuf` veya `application/json` olarak
+gönderin. Gövdeyi `Content-Encoding: gzip` ile sıkıştırabilirsiniz.
+
+Proje alım anahtarını (ingest key) şu 2 başlıktan birinde gönderin:
+
+- `x-logbrew-key: lbw_ingest_...`
+- `Authorization: Bearer lbw_ingest_...`
+
+Bir hizmet için `server` anahtarı kullanın. Anahtar türleri için
+[Proje anahtarı türleri](/tr/guides/verify-setup#project-key-kinds) bölümüne
+bakın.
+
+## OpenTelemetry SDK'sını yapılandırın
+
+OpenTelemetry SDK'ları standart `OTEL_*` ortam değişkenlerini okur. Temel uç
+noktayı ayarlayın. SDK, `/v1/logs`, `/v1/traces` ve `/v1/metrics` yollarını
+kendisi ekler.
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT="https://api.logbrew.co"
+export OTEL_EXPORTER_OTLP_PROTOCOL="http/protobuf"
+export OTEL_EXPORTER_OTLP_COMPRESSION="gzip"
+export OTEL_EXPORTER_OTLP_HEADERS="x-logbrew-key=${LOGBREW_INGEST_KEY}"
+export OTEL_SERVICE_NAME="checkout-api"
+export OTEL_RESOURCE_ATTRIBUTES="service.version=checkout@1.4.2,deployment.environment.name=production"
+```
+
+Anahtarı gizli bilgi deponuzda saklayın. Anahtarı kaynak kontrolüne koymayın.
+
+## OpenTelemetry Collector'ı yapılandırın
+
+Bir `otlphttp` exporter'ı ekleyin. Temel uç noktayı ayarlayın. Exporter, sinyal
+yolunu kendisi ekler.
+
+```yaml
+exporters:
+  otlphttp/logbrew:
+    endpoint: https://api.logbrew.co
+    compression: gzip
+    headers:
+      x-logbrew-key: ${env:LOGBREW_INGEST_KEY}
+
+service:
+  pipelines:
+    logs:
+      receivers: [otlp]
+      exporters: [otlphttp/logbrew]
+    traces:
+      receivers: [otlp]
+      exporters: [otlphttp/logbrew]
+    metrics:
+      receivers: [otlp]
+      exporters: [otlphttp/logbrew]
+```
+
+## LogBrew OTLP verilerini nasıl okur
+
+LogBrew şu kaynak özniteliklerini olay bağlamına aktarır:
+
+| Kaynak özniteliği | LogBrew alanı | Eksik olduğunda |
+| --- | --- | --- |
+| `service.name` | Hizmet | `unknown_service` |
+| `service.version` | Sürüm | `unversioned` |
+| `deployment.environment.name` veya `deployment.environment` | Ortam | `production` |
+
+Diğer kaynak öznitelikleri ve enstrümantasyon kapsamı (instrumentation scope)
+her olayın meta verisinde kalır.
+
+| OTLP verisi | LogBrew verisi |
+| --- | --- |
+| Log kaydı | 1 log. Kaydın önem düzeyi, log düzeyini belirler. `exception.type` veya `exception.message` özniteliklerine sahip bir kayıt ayrıca 1 sorun oluşturur. |
+| Span | Ait olduğu izde 1 span. Her `exception` span olayı, o span için 1 sorun oluşturur. LogBrew ilk 8 span olayını ve ilk 8 bağlantıyı saklar. |
+| Gauge | Her veri noktası için 1 gauge değeri. |
+| Monoton toplam | Her veri noktası için 1 sayaç değeri; delta veya kümülatif. |
+| Monoton olmayan kümülatif toplam | Her veri noktası için 1 gauge değeri. |
+| Histogram, üstel histogram veya özet | Her veri noktası için 2 sayaç: `<name>.count` ve `<name>.sum`. |
+
+LogBrew, monoton olmayan delta toplamlarını reddeder. Log kaydı veya span, iz
+kimliğini ve span kimliğini korur. Böylece loglar kendi izlerinde görünür.
+
+LogBrew, verileri saklamadan önce kimlik bilgilerini `[redacted]` ile
+değiştirir. Bu kural, anahtarı bir kimlik bilgisine işaret eden öznitelik
+değerlerine uygulanır. Örnekler: `authorization`, `cookie`, `password`,
+`secret`, `api_key` veya sonu `token` ile biten bir anahtar. Kural ayrıca
+`process.command_args`, `process.command_line`, bir URL'deki kullanıcı adı ve
+parola ile `token`, `code`, `key` ve `signature` gibi URL sorgu değerleri için
+geçerlidir. Başka gizli bilgiler göndermeyin.
+
+## Sınırlar
+
+| Sınır | Değer |
+| --- | --- |
+| İstek gövdesi | Sıkıştırma açıldıktan sonra 4 MiB |
+| Bir istekteki kayıtlar | 16.384 log kaydı, span veya metrik veri noktası |
+
+SDK verilerinin hız sınırları ve plan limitleri de geçerlidir. Bir istekte çok
+fazla kayıt varsa LogBrew ilk kayıtları saklar ve kalanları reddeder. Daha
+küçük toplu gönderimler kullanın.
+
+## Yanıtlar
+
+LogBrew, isteğin kodlamasıyla yanıt verir.
+
+| Durum | Anlamı | Exporter ne yapar |
+| --- | --- | --- |
+| Boş gövde veya `{}` içeren `200` | LogBrew her kaydı kabul etti. | Hiçbir şey yapmaz. |
+| `partialSuccess` içeren `200` | LogBrew bazı kayıtları reddetti. Yanıt, kayıt sayısını ve ilk nedeni verir. | Nedeni loga yazar. Kayıtları yeniden göndermez. |
+| `400` | Gövde, bu uç nokta için bir OTLP dışa aktarma isteği değil. | İsteği düşürür. |
+| `401` | Alım anahtarı eksik veya geçersiz. | İsteği düşürür. |
+| `413` | Gövde çok büyük. | İsteği düşürür. Daha küçük toplu gönderimler kullanın. |
+| `415` | `Content-Type` değeri protobuf veya JSON değil. | İsteği düşürür. |
+| `429` | Bir hız sınırı uygulanıyor. `Retry-After` başlığı bekleme süresini saniye olarak verir. | İsteği daha sonra yeniden gönderir. |
+| `503` | LogBrew isteği şu anda saklayamadı. | İsteği daha sonra yeniden gönderir. |
+
+Hesabınız plan limitine ulaştığında LogBrew `200` ile yanıt verir ve her kaydı
+reddeder. Mesaj, limitin sıfırlanacağı zamanı verir. Exporter, limit
+sıfırlanmadan önce yeniden denemez.
+
+LogBrew, reddedilen kayıtları
+[Hesap kullanımı](/tr/reference/account-api#account-usage) içinde sayar. Bu
+kayıtlar `sdk_dropped_events` içinde `otlp_rejected_record` nedeniyle, plan
+limitine ulaşıldığında ise `usage_limit_exceeded` nedeniyle görünür. Reddedilen
+kayıtlar kullanıma sayılmaz.
+
+Yeniden gönderilen bir istek, kayıtlarını tekrar saklamaz. LogBrew yeniden
+gönderilen bir kaydı içeriğinden tanır.
+
+## Verilerin geldiğini doğrulayın
+
+1 log, span veya metrik gönderin. Ardından bunu bir okuma anahtarıyla (read
+key) geri okuyun.
+[Test olayınızı geri okuyun](/tr/guides/verify-setup#verify-telemetry-arrival)
+bölümündeki adımları izleyin.
+
+Hiçbir şey gelmezse exporter loglarını okuyun. OTLP yanıtı, reddedilen her
+istek veya kayıt için nedeni verir.

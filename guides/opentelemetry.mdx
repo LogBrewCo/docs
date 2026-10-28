@@ -1,0 +1,153 @@
+---
+title: "Send OpenTelemetry data to LogBrew with OTLP"
+sidebarTitle: "OpenTelemetry (OTLP)"
+description: "Send logs, traces, and metrics from an OpenTelemetry SDK or Collector to LogBrew over OTLP/HTTP, with no LogBrew SDK."
+---
+
+LogBrew accepts the OpenTelemetry protocol (OTLP) over HTTP. Any OpenTelemetry
+SDK, the OpenTelemetry Collector, or another OTLP exporter can send logs,
+traces, and metrics to LogBrew. You do not need a LogBrew SDK.
+
+LogBrew stores OTLP data as SDK data. You read it in the dashboard, the CLI,
+and the MCP server in the same way. The same usage, plan limits, and rate
+limits apply.
+
+## Endpoints
+
+| Signal | Endpoint |
+| --- | --- |
+| Logs | `POST https://api.logbrew.co/v1/logs` |
+| Traces | `POST https://api.logbrew.co/v1/traces` |
+| Metrics | `POST https://api.logbrew.co/v1/metrics` |
+
+Send the request body as `application/x-protobuf` or `application/json`. You
+can compress the body with `Content-Encoding: gzip`.
+
+Send a project ingest key in 1 of these 2 headers:
+
+- `x-logbrew-key: lbw_ingest_...`
+- `Authorization: Bearer lbw_ingest_...`
+
+Use a `server` key for a service. The key kinds are in
+[Project key kinds](/guides/verify-setup#project-key-kinds).
+
+## Configure an OpenTelemetry SDK
+
+OpenTelemetry SDKs read the standard `OTEL_*` environment variables. Set the
+base endpoint. The SDK adds `/v1/logs`, `/v1/traces`, and `/v1/metrics`.
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT="https://api.logbrew.co"
+export OTEL_EXPORTER_OTLP_PROTOCOL="http/protobuf"
+export OTEL_EXPORTER_OTLP_COMPRESSION="gzip"
+export OTEL_EXPORTER_OTLP_HEADERS="x-logbrew-key=${LOGBREW_INGEST_KEY}"
+export OTEL_SERVICE_NAME="checkout-api"
+export OTEL_RESOURCE_ATTRIBUTES="service.version=checkout@1.4.2,deployment.environment.name=production"
+```
+
+Keep the key in your secret store. Do not put it in source control.
+
+## Configure the OpenTelemetry Collector
+
+Add an `otlphttp` exporter. Set the base endpoint. The exporter adds the
+signal path.
+
+```yaml
+exporters:
+  otlphttp/logbrew:
+    endpoint: https://api.logbrew.co
+    compression: gzip
+    headers:
+      x-logbrew-key: ${env:LOGBREW_INGEST_KEY}
+
+service:
+  pipelines:
+    logs:
+      receivers: [otlp]
+      exporters: [otlphttp/logbrew]
+    traces:
+      receivers: [otlp]
+      exporters: [otlphttp/logbrew]
+    metrics:
+      receivers: [otlp]
+      exporters: [otlphttp/logbrew]
+```
+
+## How LogBrew reads OTLP data
+
+LogBrew reads these resource attributes into the event context:
+
+| Resource attribute | LogBrew field | When it is missing |
+| --- | --- | --- |
+| `service.name` | Service | `unknown_service` |
+| `service.version` | Release | `unversioned` |
+| `deployment.environment.name` or `deployment.environment` | Environment | `production` |
+
+Other resource attributes and the instrumentation scope stay in the metadata
+of each event.
+
+| OTLP data | LogBrew data |
+| --- | --- |
+| Log record | 1 log. The severity sets the level. A record with `exception.type` or `exception.message` attributes also makes 1 issue. |
+| Span | 1 span in its trace. Each `exception` span event makes 1 issue for that span. LogBrew keeps the first 8 span events and the first 8 links. |
+| Gauge | 1 gauge value for each data point. |
+| Monotonic sum | 1 counter value for each data point, delta or cumulative. |
+| Non-monotonic cumulative sum | 1 gauge value for each data point. |
+| Histogram, exponential histogram, or summary | 2 counters for each data point: `<name>.count` and `<name>.sum`. |
+
+LogBrew rejects non-monotonic delta sums. A log record or span keeps its trace
+ID and span ID, so logs show in their trace.
+
+LogBrew replaces credentials with `[redacted]` before it stores the data. This
+applies to attribute values whose keys name a credential, such as
+`authorization`, `cookie`, `password`, `secret`, `api_key`, or a key that ends
+in `token`. It also applies to `process.command_args`, `process.command_line`,
+the user and password in a URL, and URL query values such as `token`, `code`,
+`key`, and `signature`. Do not send other secrets.
+
+## Limits
+
+| Limit | Value |
+| --- | --- |
+| Request body | 4 MiB after decompression |
+| Records in a request | 16,384 log records, spans, or metric data points |
+
+The rate limits and plan limits of SDK data also apply. If a request has too
+many records, LogBrew stores the first records and rejects the rest. Send
+smaller batches.
+
+## Responses
+
+LogBrew answers in the encoding of the request.
+
+| Status | Meaning | What the exporter does |
+| --- | --- | --- |
+| `200` with an empty body or `{}` | LogBrew accepted every record. | Nothing. |
+| `200` with `partialSuccess` | LogBrew rejected some records. The response gives the count and the first reason. | Logs the reason. It does not send the records again. |
+| `400` | The body is not an OTLP export request for this endpoint. | Drops the request. |
+| `401` | The ingest key is missing or not valid. | Drops the request. |
+| `413` | The body is too large. | Drops the request. Send smaller batches. |
+| `415` | The `Content-Type` is not protobuf or JSON. | Drops the request. |
+| `429` | A rate limit applies. The `Retry-After` header gives the wait in seconds. | Sends the request again later. |
+| `503` | LogBrew could not store the request at this time. | Sends the request again later. |
+
+When your account reaches its plan limit, LogBrew answers `200` with every
+record rejected. The message gives the reset time. The exporter does not try
+again before the reset.
+
+LogBrew reports rejected records in
+[account usage](/reference/account-api#account-usage). They show in
+`sdk_dropped_events` with the reason `otlp_rejected_record`, or
+`usage_limit_exceeded` at the plan limit. Rejected records do not count
+toward usage.
+
+LogBrew does not store the records of a resent request again. It finds a
+resent record by its content.
+
+## Check that data arrives
+
+Send 1 log, span, or metric. Then read it back with a read key. Follow
+[Read your test event back](/guides/verify-setup#verify-telemetry-arrival).
+
+If nothing arrives, read the exporter logs. The OTLP response gives the
+reason for each rejected request or record.

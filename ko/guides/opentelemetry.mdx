@@ -1,0 +1,127 @@
+---
+title: "OTLP로 OpenTelemetry 데이터를 LogBrew에 보내기"
+sidebarTitle: "OpenTelemetry (OTLP)"
+description: "OpenTelemetry SDK나 Collector에서 OTLP/HTTP로 로그, 트레이스, 메트릭을 LogBrew에 보내세요. LogBrew SDK는 필요하지 않습니다."
+---
+
+LogBrew는 HTTP 기반 OpenTelemetry 프로토콜(OTLP)을 받습니다. 모든 OpenTelemetry SDK, OpenTelemetry Collector, 그 밖의 OTLP 익스포터가 로그, 트레이스, 메트릭을 LogBrew에 보낼 수 있습니다. LogBrew SDK는 필요하지 않습니다.
+
+LogBrew는 OTLP 데이터를 SDK 데이터와 똑같이 저장합니다. 대시보드, CLI, MCP 서버에서도 같은 방식으로 읽을 수 있습니다. 사용량, 요금제 한도, 속도 제한도 똑같이 적용됩니다.
+
+## 엔드포인트
+
+| 시그널 | 엔드포인트 |
+| --- | --- |
+| 로그 | `POST https://api.logbrew.co/v1/logs` |
+| 트레이스 | `POST https://api.logbrew.co/v1/traces` |
+| 메트릭 | `POST https://api.logbrew.co/v1/metrics` |
+
+요청 본문은 `application/x-protobuf` 또는 `application/json`으로 보내세요. `Content-Encoding: gzip`으로 본문을 압축할 수 있습니다.
+
+프로젝트 수집 키는 다음 헤더 2개 중 하나에 넣어 보내세요.
+
+- `x-logbrew-key: lbw_ingest_...`
+- `Authorization: Bearer lbw_ingest_...`
+
+서비스에는 `server` 키를 사용하세요. 키 종류는 [프로젝트 키 종류](/ko/guides/verify-setup#project-key-kinds)를 참고하세요.
+
+## OpenTelemetry SDK 설정하기
+
+OpenTelemetry SDK는 표준 `OTEL_*` 환경 변수를 읽습니다. 기본 엔드포인트를 설정하세요. `/v1/logs`, `/v1/traces`, `/v1/metrics`는 SDK가 붙입니다.
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT="https://api.logbrew.co"
+export OTEL_EXPORTER_OTLP_PROTOCOL="http/protobuf"
+export OTEL_EXPORTER_OTLP_COMPRESSION="gzip"
+export OTEL_EXPORTER_OTLP_HEADERS="x-logbrew-key=${LOGBREW_INGEST_KEY}"
+export OTEL_SERVICE_NAME="checkout-api"
+export OTEL_RESOURCE_ATTRIBUTES="service.version=checkout@1.4.2,deployment.environment.name=production"
+```
+
+키는 시크릿 저장소에 보관하세요. 소스 관리에 넣지 마세요.
+
+## OpenTelemetry Collector 설정하기
+
+`otlphttp` 익스포터를 추가하세요. 기본 엔드포인트를 설정하세요. 시그널 경로는 익스포터가 붙입니다.
+
+```yaml
+exporters:
+  otlphttp/logbrew:
+    endpoint: https://api.logbrew.co
+    compression: gzip
+    headers:
+      x-logbrew-key: ${env:LOGBREW_INGEST_KEY}
+
+service:
+  pipelines:
+    logs:
+      receivers: [otlp]
+      exporters: [otlphttp/logbrew]
+    traces:
+      receivers: [otlp]
+      exporters: [otlphttp/logbrew]
+    metrics:
+      receivers: [otlp]
+      exporters: [otlphttp/logbrew]
+```
+
+## LogBrew가 OTLP 데이터를 읽는 방식
+
+LogBrew는 다음 리소스 속성을 이벤트 컨텍스트로 읽습니다.
+
+| 리소스 속성 | LogBrew 필드 | 속성이 없을 때 |
+| --- | --- | --- |
+| `service.name` | 서비스 | `unknown_service` |
+| `service.version` | 릴리스 | `unversioned` |
+| `deployment.environment.name` 또는 `deployment.environment` | 환경 | `production` |
+
+그 밖의 리소스 속성과 계측 범위는 각 이벤트의 메타데이터에 남습니다.
+
+| OTLP 데이터 | LogBrew 데이터 |
+| --- | --- |
+| 로그 레코드 | 로그 1개입니다. 심각도가 레벨을 정합니다. `exception.type` 또는 `exception.message` 속성이 있는 레코드는 이슈 1개도 만듭니다. |
+| 스팬 | 트레이스 안의 스팬 1개입니다. `exception` 스팬 이벤트마다 해당 스팬의 이슈가 1개 만들어집니다. LogBrew는 스팬 이벤트와 링크를 각각 처음 8개까지 저장합니다. |
+| 게이지 | 데이터 포인트마다 게이지 값 1개입니다. |
+| 단조 증가 합계 | 데이터 포인트마다 카운터 값 1개입니다. 델타와 누적 모두 해당합니다. |
+| 단조 증가가 아닌 누적 합계 | 데이터 포인트마다 게이지 값 1개입니다. |
+| 히스토그램, 지수 히스토그램, 요약 | 데이터 포인트마다 카운터 2개입니다. `<name>.count`와 `<name>.sum`입니다. |
+
+LogBrew는 단조 증가가 아닌 델타 합계를 거부합니다. 로그 레코드와 스팬은 트레이스 ID와 스팬 ID를 유지하므로, 로그가 해당 트레이스에 표시됩니다.
+
+LogBrew는 데이터를 저장하기 전에 자격 증명을 `[redacted]`로 바꿉니다. 키 이름이 자격 증명을 나타내는 속성 값이 대상입니다. 예를 들어 `authorization`, `cookie`, `password`, `secret`, `api_key`, 또는 `token`으로 끝나는 키입니다. `process.command_args`, `process.command_line`, URL의 사용자와 비밀번호, `token`, `code`, `key`, `signature` 같은 URL 쿼리 값도 대상입니다. 그 밖의 시크릿은 보내지 마세요.
+
+## 한도
+
+| 한도 | 값 |
+| --- | --- |
+| 요청 본문 | 압축 해제 후 4 MiB |
+| 요청 1개의 레코드 수 | 로그 레코드, 스팬, 메트릭 데이터 포인트 16,384개 |
+
+SDK 데이터의 속도 제한과 요금제 한도도 적용됩니다. 요청에 레코드가 너무 많으면 LogBrew는 앞쪽 레코드를 저장하고 나머지를 거부합니다. 더 작은 배치로 나눠 보내세요.
+
+## 응답
+
+LogBrew는 요청과 같은 인코딩으로 응답합니다.
+
+| 상태 | 의미 | 익스포터 동작 |
+| --- | --- | --- |
+| 본문이 비어 있거나 `{}`인 `200` | LogBrew가 모든 레코드를 받았습니다. | 아무것도 하지 않습니다. |
+| `partialSuccess`가 있는 `200` | LogBrew가 일부 레코드를 거부했습니다. 응답에 거부된 개수와 첫 번째 사유가 있습니다. | 사유를 로그에 남깁니다. 레코드를 다시 보내지 않습니다. |
+| `400` | 본문이 이 엔드포인트용 OTLP 내보내기 요청이 아닙니다. | 요청을 버립니다. |
+| `401` | 수집 키가 없거나 유효하지 않습니다. | 요청을 버립니다. |
+| `413` | 본문이 너무 큽니다. | 요청을 버립니다. 더 작은 배치로 나눠 보내세요. |
+| `415` | `Content-Type`이 protobuf나 JSON이 아닙니다. | 요청을 버립니다. |
+| `429` | 속도 제한에 걸렸습니다. `Retry-After` 헤더가 기다릴 시간을 초 단위로 알려 줍니다. | 나중에 요청을 다시 보냅니다. |
+| `503` | LogBrew가 지금은 요청을 저장할 수 없습니다. | 나중에 요청을 다시 보냅니다. |
+
+계정이 요금제 한도에 도달하면 LogBrew는 모든 레코드를 거부하고 `200`으로 응답합니다. 메시지에 초기화 시각이 있습니다. 익스포터는 초기화 전에는 다시 시도하지 않습니다.
+
+LogBrew는 거부된 레코드를 [계정 사용량](/ko/reference/account-api#account-usage)에 집계합니다. 거부된 레코드는 `sdk_dropped_events`에 사유 `otlp_rejected_record`로 표시되고, 요금제 한도에 도달했을 때는 `usage_limit_exceeded`로 표시됩니다. 거부된 레코드는 사용량에 포함되지 않습니다.
+
+다시 보낸 요청의 레코드는 다시 저장되지 않습니다. LogBrew는 다시 보낸 레코드를 내용으로 알아봅니다.
+
+## 데이터 도착 확인하기
+
+로그, 스팬, 메트릭 중 1개를 보내세요. 그다음 읽기 키로 다시 읽으세요. [테스트 이벤트 다시 읽기](/ko/guides/verify-setup#verify-telemetry-arrival)를 따르세요.
+
+아무것도 도착하지 않으면 익스포터 로그를 확인하세요. OTLP 응답에 거부된 요청이나 레코드마다 사유가 있습니다.

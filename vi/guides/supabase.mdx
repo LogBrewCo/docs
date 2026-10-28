@@ -1,0 +1,148 @@
+---
+title: "Log drain của Supabase và ghi log Edge Functions với LogBrew"
+sidebarTitle: "Supabase"
+description: "Gửi log nền tảng của Supabase đến LogBrew bằng log drain, và ghi nhận log và lỗi từ Supabase Edge Functions bằng SDK JavaScript."
+---
+
+Bạn có thể gửi 2 loại dữ liệu Supabase đến LogBrew:
+
+- Log drain gửi log nền tảng của dự án Supabase, chẳng hạn log của Postgres,
+  Auth, Storage và Edge Functions.
+- SDK JavaScript của LogBrew gửi log và lỗi mà mã Edge Function của chính bạn
+  ghi nhận.
+
+Bạn có thể dùng một cách hoặc cả hai. Cả hai đều cần khóa gửi dữ liệu của dự
+án. Tạo một khóa `server` riêng cho mỗi cách dùng. Các loại khóa có trong
+[Các loại khóa dự án](/vi/guides/verify-setup#project-key-kinds).
+
+## <span id="log-drain">Gửi log nền tảng bằng log drain</span>
+
+Log drain của Supabase có trong các gói Pro, Team và Enterprise của Supabase.
+Supabase tính phí cho mỗi drain và cho các sự kiện mà drain gửi đi. Xem bảng
+giá của Supabase trước khi thêm drain.
+
+<Steps>
+  <Step title="Mở phần cài đặt log drain">
+    Trong bảng điều khiển Supabase, mở dự án của bạn. Vào
+    **Project Settings**, rồi vào **Log Drains**.
+  </Step>
+
+  <Step title="Thêm đích OpenTelemetry">
+    Thêm một đích có loại **OpenTelemetry (OTLP)**. Đặt các giá trị sau:
+
+    | Trường | Giá trị |
+    | --- | --- |
+    | Endpoint | `https://api.logbrew.co/v1/logs` |
+    | Protocol | `http/protobuf` |
+    | Gzip | On |
+    | Headers | `x-logbrew-key` với giá trị là khóa gửi dữ liệu của bạn |
+
+    Thay cho `x-logbrew-key`, bạn có thể dùng header `Authorization` với giá
+    trị `Bearer lbw_ingest_...`.
+  </Step>
+
+  <Step title="Lưu đích">
+    Lưu đích. Supabase bắt đầu gửi log đến LogBrew.
+
+    **Điểm kiểm tra:** log mới của Supabase hiện trong phần log của dự án
+    LogBrew. Để đọc các log này từ CLI, làm theo
+    [Đọc lại sự kiện thử](/vi/guides/verify-setup#verify-telemetry-arrival).
+  </Step>
+</Steps>
+
+LogBrew đọc drain dưới dạng log OTLP. Thuộc tính resource `service.name` xác
+định dịch vụ của từng log. Các thuộc tính resource khác được giữ trong
+metadata của log. LogBrew xóa thông tin xác thực khỏi URL và khỏi các thuộc
+tính như `authorization` trước khi lưu log. Cách ánh xạ đầy đủ có trong
+[OpenTelemetry (OTLP)](/vi/guides/opentelemetry).
+
+Nếu không có log nào đến, kiểm tra endpoint, giao thức và header. Khóa gửi
+dữ liệu phải thuộc dự án LogBrew mà bạn đọc.
+
+## <span id="edge-functions">Ghi nhận log và lỗi trong Edge Functions</span>
+
+Supabase Edge Functions chạy trên Deno. Dùng `@logbrew/node` từ npm. Cách
+thiết lập này hoạt động với Deno 2.9, `@logbrew/node` 0.1.20 và
+`@logbrew/sdk` 0.1.35.
+
+<Steps>
+  <Step title="Lưu khóa gửi dữ liệu làm thông tin bí mật của hàm">
+    Dùng Supabase CLI. Thay giá trị giữ chỗ bằng khóa của bạn:
+
+    ```bash
+    supabase secrets set LOGBREW_SERVER_API_KEY=lbw_ingest_placeholder
+    ```
+  </Step>
+
+  <Step title="Tạo client và flush trước khi trả về">
+    Tạo client một lần, bên ngoài request handler. Ghi nhận sự kiện trong
+    handler. Gọi `flush()` trước khi trả về phản hồi, vì hàm có thể dừng sau
+    khi trả về.
+
+    ```ts
+    import { createIssueAttributesFromError, SdkError } from "npm:@logbrew/sdk@^0.1.35";
+    import { createLogBrewNodeClient } from "npm:@logbrew/node@^0.1.20";
+
+    const logbrew = createLogBrewNodeClient({
+      serverApiKey: Deno.env.get("LOGBREW_SERVER_API_KEY"),
+      captureRuntimeContext: false,
+      context: {
+        schemaVersion: 1,
+        resource: {
+          service: { name: "checkout-function", version: "checkout@1" },
+          runtime: { name: "deno", version: Deno.version.deno },
+        },
+      },
+    });
+
+    Deno.serve(async (request) => {
+      const occurredAt = new Date().toISOString();
+      logbrew.log(crypto.randomUUID(), occurredAt, {
+        message: "checkout request",
+        level: "info",
+        metadata: { method: request.method },
+      });
+      let response = new Response("ok");
+      try {
+        await checkout(request);
+      } catch (error) {
+        logbrew.issue(
+          crypto.randomUUID(),
+          occurredAt,
+          createIssueAttributesFromError(error, { service: "checkout-function" }),
+        );
+        response = new Response("checkout failed", { status: 500 });
+      }
+      try {
+        await logbrew.flush();
+      } catch (error) {
+        console.error(error instanceof SdkError ? error.code : "logbrew_delivery_failed");
+      }
+      return response;
+    });
+
+    async function checkout(_request: Request) {
+      // Your function code.
+    }
+    ```
+
+    `captureRuntimeContext: false` và ngữ cảnh `runtime` giúp LogBrew hiển
+    thị Deno là runtime. Nếu không có hai thiết lập này, SDK báo phiên bản
+    Node.js mà Deno giả lập.
+
+    Nếu gửi thất bại, `flush()` ném ra `SdkError`, ví dụ với mã
+    `network_failure`. Ví dụ này chỉ ghi mã lỗi vào log của hàm, và hàm vẫn
+    trả về phản hồi.
+  </Step>
+
+  <Step title="Triển khai và gọi hàm">
+    Triển khai hàm bằng `supabase functions deploy checkout`. Gọi hàm một
+    lần.
+
+    **Điểm kiểm tra:** log `checkout request` hiện trong dự án LogBrew của
+    bạn.
+  </Step>
+</Steps>
+
+Không đưa thông tin xác thực, body của yêu cầu hoặc dữ liệu khách hàng vào
+metadata của sự kiện.

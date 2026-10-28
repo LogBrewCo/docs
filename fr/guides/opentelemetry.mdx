@@ -1,0 +1,161 @@
+---
+title: "Envoyer des données OpenTelemetry à LogBrew avec OTLP"
+sidebarTitle: "OpenTelemetry (OTLP)"
+description: "Envoyez des logs, des traces et des métriques depuis un SDK ou le Collector OpenTelemetry vers LogBrew via OTLP/HTTP, sans SDK LogBrew."
+---
+
+LogBrew accepte le protocole OpenTelemetry (OTLP) sur HTTP. Tout SDK
+OpenTelemetry, l’OpenTelemetry Collector ou un autre exportateur OTLP peut
+envoyer des logs, des traces et des métriques à LogBrew. Vous n’avez pas besoin
+d’un SDK LogBrew.
+
+LogBrew stocke les données OTLP comme les données des SDK. Vous les lisez de la
+même manière dans le tableau de bord, la CLI et le serveur MCP. Elles comptent
+dans l’utilisation de la même façon. Les mêmes limites du forfait et limites de
+débit s’appliquent.
+
+## Points de terminaison
+
+| Signal | Point de terminaison |
+| --- | --- |
+| Logs | `POST https://api.logbrew.co/v1/logs` |
+| Traces | `POST https://api.logbrew.co/v1/traces` |
+| Métriques | `POST https://api.logbrew.co/v1/metrics` |
+
+Envoyez le corps de la requête au format `application/x-protobuf` ou
+`application/json`. Vous pouvez compresser le corps avec
+`Content-Encoding: gzip`.
+
+Envoyez une clé d’ingestion du projet dans l’un de ces 2 en-têtes :
+
+- `x-logbrew-key: lbw_ingest_...`
+- `Authorization: Bearer lbw_ingest_...`
+
+Utilisez une clé `server` pour un service. Les types de clés sont décrits dans
+[Types de clés de projet](/fr/guides/verify-setup#project-key-kinds).
+
+## Configurer un SDK OpenTelemetry
+
+Les SDK OpenTelemetry lisent les variables d’environnement standard `OTEL_*`.
+Définissez le point de terminaison de base. Le SDK ajoute `/v1/logs`,
+`/v1/traces` et `/v1/metrics`.
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT="https://api.logbrew.co"
+export OTEL_EXPORTER_OTLP_PROTOCOL="http/protobuf"
+export OTEL_EXPORTER_OTLP_COMPRESSION="gzip"
+export OTEL_EXPORTER_OTLP_HEADERS="x-logbrew-key=${LOGBREW_INGEST_KEY}"
+export OTEL_SERVICE_NAME="checkout-api"
+export OTEL_RESOURCE_ATTRIBUTES="service.version=checkout@1.4.2,deployment.environment.name=production"
+```
+
+Conservez la clé dans votre gestionnaire de secrets. Ne la placez pas dans le
+dépôt de code.
+
+## Configurer l’OpenTelemetry Collector
+
+Ajoutez un exportateur `otlphttp`. Définissez le point de terminaison de base.
+L’exportateur ajoute le chemin du signal.
+
+```yaml
+exporters:
+  otlphttp/logbrew:
+    endpoint: https://api.logbrew.co
+    compression: gzip
+    headers:
+      x-logbrew-key: ${env:LOGBREW_INGEST_KEY}
+
+service:
+  pipelines:
+    logs:
+      receivers: [otlp]
+      exporters: [otlphttp/logbrew]
+    traces:
+      receivers: [otlp]
+      exporters: [otlphttp/logbrew]
+    metrics:
+      receivers: [otlp]
+      exporters: [otlphttp/logbrew]
+```
+
+## Comment LogBrew lit les données OTLP
+
+LogBrew place ces attributs de ressource dans le contexte du signal :
+
+| Attribut de ressource | Champ LogBrew | En son absence |
+| --- | --- | --- |
+| `service.name` | Service | `unknown_service` |
+| `service.version` | Version | `unversioned` |
+| `deployment.environment.name` ou `deployment.environment` | Environnement | `production` |
+
+Les autres attributs de ressource et la portée d’instrumentation restent dans
+les métadonnées de chaque signal.
+
+| Données OTLP | Données LogBrew |
+| --- | --- |
+| Enregistrement de log | 1 log. La gravité définit le niveau. Un enregistrement avec les attributs `exception.type` ou `exception.message` crée aussi 1 problème. |
+| Span | 1 span dans sa trace. Chaque événement de span `exception` crée 1 problème pour ce span. LogBrew conserve les 8 premiers événements de span et les 8 premiers liens. |
+| Jauge | 1 valeur de jauge pour chaque point de données. |
+| Somme monotone | 1 valeur de compteur pour chaque point de données, delta ou cumulative. |
+| Somme cumulative non monotone | 1 valeur de jauge pour chaque point de données. |
+| Histogramme, histogramme exponentiel ou résumé | 2 compteurs pour chaque point de données : `<name>.count` et `<name>.sum`. |
+
+LogBrew rejette les sommes delta non monotones. Un enregistrement de log ou un
+span garde son ID de trace et son ID de span. Les logs s’affichent donc dans
+leur trace.
+
+LogBrew remplace les identifiants par `[redacted]` avant de stocker les
+données. Cela s’applique aux valeurs d’attributs dont la clé désigne un
+identifiant, comme `authorization`, `cookie`, `password`, `secret`, `api_key`
+ou une clé qui se termine par `token`. Cela s’applique aussi à
+`process.command_args`, `process.command_line`, à l’utilisateur et au mot de
+passe d’une URL, et aux valeurs des paramètres de requête d’une URL comme
+`token`, `code`, `key` et `signature`. N’envoyez pas d’autres secrets.
+
+## Limites
+
+| Limite | Valeur |
+| --- | --- |
+| Corps de la requête | 4 MiB après décompression |
+| Enregistrements par requête | 16 384 enregistrements de log, spans ou points de données de métriques |
+
+Les limites de débit et les limites du forfait des données des SDK s’appliquent
+aussi. Si une requête contient trop d’enregistrements, LogBrew stocke les
+premiers et rejette les autres. Envoyez des lots plus petits.
+
+## Réponses
+
+LogBrew répond dans le même encodage que la requête.
+
+| Statut | Signification | Action de l’exportateur |
+| --- | --- | --- |
+| `200` avec un corps vide ou `{}` | LogBrew a accepté tous les enregistrements. | Rien. |
+| `200` avec `partialSuccess` | LogBrew a rejeté certains enregistrements. La réponse donne leur nombre et le premier motif. | Écrit le motif dans ses logs. Ne renvoie pas les enregistrements. |
+| `400` | Le corps n’est pas une requête d’export OTLP pour ce point de terminaison. | Abandonne la requête. |
+| `401` | La clé d’ingestion est absente ou n’est pas valide. | Abandonne la requête. |
+| `413` | Le corps est trop volumineux. | Abandonne la requête. Envoyez des lots plus petits. |
+| `415` | Le `Content-Type` n’est ni protobuf ni JSON. | Abandonne la requête. |
+| `429` | Une limite de débit s’applique. L’en-tête `Retry-After` donne l’attente en secondes. | Renvoie la requête plus tard. |
+| `503` | LogBrew n’a pas pu stocker la requête à ce moment-là. | Renvoie la requête plus tard. |
+
+Quand votre compte atteint la limite de son forfait, LogBrew répond `200` et
+rejette tous les enregistrements. Le message donne l’heure de réinitialisation.
+L’exportateur ne réessaie pas avant la réinitialisation.
+
+LogBrew compte les enregistrements rejetés dans
+l’[utilisation du compte](/fr/reference/account-api#account-usage). Ils
+apparaissent dans `sdk_dropped_events` avec le motif `otlp_rejected_record`, ou
+`usage_limit_exceeded` à la limite du forfait. Les enregistrements rejetés ne
+comptent pas dans l’utilisation.
+
+Une requête renvoyée ne stocke pas ses enregistrements une seconde fois.
+LogBrew reconnaît un enregistrement renvoyé à son contenu.
+
+## Vérifier l’arrivée des données
+
+Envoyez 1 log, span ou métrique. Relisez-le ensuite avec une clé de lecture.
+Suivez
+[Relire votre signal de test](/fr/guides/verify-setup#verify-telemetry-arrival).
+
+Si rien n’arrive, lisez les logs de l’exportateur. La réponse OTLP donne le
+motif de chaque requête ou enregistrement rejeté.

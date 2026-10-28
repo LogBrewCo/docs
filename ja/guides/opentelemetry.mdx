@@ -1,0 +1,127 @@
+---
+title: "OTLP で OpenTelemetry のデータを LogBrew に送信する"
+sidebarTitle: "OpenTelemetry（OTLP）"
+description: "OpenTelemetry SDK や Collector から、OTLP/HTTP でログ、トレース、メトリクスを LogBrew に送信します。LogBrew SDK は必要ありません。"
+---
+
+LogBrew は、HTTP 経由の OpenTelemetry プロトコル（OTLP）を受け付けます。OpenTelemetry SDK、OpenTelemetry Collector、その他の OTLP エクスポーターから、ログ、トレース、メトリクスを LogBrew に送信できます。LogBrew SDK は必要ありません。
+
+LogBrew は、OTLP のデータを SDK のデータと同じように保存します。ダッシュボード、CLI、MCP サーバーでも同じように読み取れます。使用量、プランの上限、レート制限も同じように適用されます。
+
+## エンドポイント
+
+| シグナル | エンドポイント |
+| --- | --- |
+| ログ | `POST https://api.logbrew.co/v1/logs` |
+| トレース | `POST https://api.logbrew.co/v1/traces` |
+| メトリクス | `POST https://api.logbrew.co/v1/metrics` |
+
+リクエストの本文は `application/x-protobuf` または `application/json` で送信します。本文は `Content-Encoding: gzip` で圧縮できます。
+
+プロジェクトの取り込みキーは、次の2つのヘッダーのどちらかで送信します。
+
+- `x-logbrew-key: lbw_ingest_...`
+- `Authorization: Bearer lbw_ingest_...`
+
+サービスには `server` キーを使います。キーの種類については、[プロジェクトキーの種類](/ja/guides/verify-setup#project-key-kinds)を参照してください。
+
+## OpenTelemetry SDK を設定する
+
+OpenTelemetry SDK は、標準の `OTEL_*` 環境変数を読み取ります。ベースのエンドポイントを設定します。`/v1/logs`、`/v1/traces`、`/v1/metrics` は SDK が追加します。
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT="https://api.logbrew.co"
+export OTEL_EXPORTER_OTLP_PROTOCOL="http/protobuf"
+export OTEL_EXPORTER_OTLP_COMPRESSION="gzip"
+export OTEL_EXPORTER_OTLP_HEADERS="x-logbrew-key=${LOGBREW_INGEST_KEY}"
+export OTEL_SERVICE_NAME="checkout-api"
+export OTEL_RESOURCE_ATTRIBUTES="service.version=checkout@1.4.2,deployment.environment.name=production"
+```
+
+キーはシークレットストアに保管します。ソース管理には入れないでください。
+
+## OpenTelemetry Collector を設定する
+
+`otlphttp` エクスポーターを追加します。ベースのエンドポイントを設定します。シグナルのパスはエクスポーターが追加します。
+
+```yaml
+exporters:
+  otlphttp/logbrew:
+    endpoint: https://api.logbrew.co
+    compression: gzip
+    headers:
+      x-logbrew-key: ${env:LOGBREW_INGEST_KEY}
+
+service:
+  pipelines:
+    logs:
+      receivers: [otlp]
+      exporters: [otlphttp/logbrew]
+    traces:
+      receivers: [otlp]
+      exporters: [otlphttp/logbrew]
+    metrics:
+      receivers: [otlp]
+      exporters: [otlphttp/logbrew]
+```
+
+## LogBrew での OTLP データの扱い
+
+LogBrew は、次のリソース属性をイベントのコンテキストとして読み取ります。
+
+| リソース属性 | LogBrew のフィールド | 属性がない場合 |
+| --- | --- | --- |
+| `service.name` | サービス | `unknown_service` |
+| `service.version` | リリース | `unversioned` |
+| `deployment.environment.name` または `deployment.environment` | 環境 | `production` |
+
+その他のリソース属性と計装スコープは、各イベントのメタデータに残ります。
+
+| OTLP のデータ | LogBrew のデータ |
+| --- | --- |
+| ログレコード | 1件のログ。重大度でレベルが決まります。`exception.type` または `exception.message` 属性を持つレコードからは、1件の課題も作成されます。 |
+| スパン | トレース内の1つのスパン。`exception` スパンイベントごとに、そのスパンの課題が1件作成されます。LogBrew は、最初の8件のスパンイベントと最初の8件のリンクを保持します。 |
+| ゲージ | データポイントごとに1つのゲージの値。 |
+| 単調増加の合計 | データポイントごとに1つのカウンターの値。デルタと累積のどちらも対象です。 |
+| 単調増加ではない累積の合計 | データポイントごとに1つのゲージの値。 |
+| ヒストグラム、指数ヒストグラム、サマリー | データポイントごとに2つのカウンター（`<name>.count` と `<name>.sum`）。 |
+
+LogBrew は、単調増加ではないデルタの合計を拒否します。ログレコードとスパンはトレース ID とスパン ID を保持するため、ログはそのトレースの中に表示されます。
+
+LogBrew は、データを保存する前に認証情報を `[redacted]` に置き換えます。対象は、キーが認証情報を表す属性の値です。たとえば、`authorization`、`cookie`、`password`、`secret`、`api_key`、または末尾が `token` のキーです。`process.command_args`、`process.command_line`、URL 内のユーザーとパスワード、`token`、`code`、`key`、`signature` などの URL のクエリの値も対象です。その他のシークレットは送信しないでください。
+
+## 上限
+
+| 上限 | 値 |
+| --- | --- |
+| リクエストの本文 | 展開後に 4 MiB |
+| 1回のリクエストのレコード数 | 16,384件（ログレコード、スパン、またはメトリクスのデータポイント） |
+
+SDK のデータと同じレート制限とプランの上限も適用されます。リクエストのレコードが多すぎる場合、LogBrew は先頭のレコードを保存し、残りを拒否します。バッチを小さくして送信してください。
+
+## レスポンス
+
+LogBrew は、リクエストと同じエンコーディングでレスポンスを返します。
+
+| ステータス | 意味 | エクスポーターの動作 |
+| --- | --- | --- |
+| 本文が空または `{}` の `200` | LogBrew がすべてのレコードを受け付けました。 | 何もしません。 |
+| `partialSuccess` を含む `200` | LogBrew が一部のレコードを拒否しました。レスポンスには件数と最初の理由が含まれます。 | 理由をログに記録します。レコードは再送しません。 |
+| `400` | 本文が、このエンドポイント向けの OTLP エクスポートリクエストではありません。 | リクエストを破棄します。 |
+| `401` | 取り込みキーがないか、有効ではありません。 | リクエストを破棄します。 |
+| `413` | 本文が大きすぎます。 | リクエストを破棄します。バッチを小さくして送信してください。 |
+| `415` | `Content-Type` が protobuf でも JSON でもありません。 | リクエストを破棄します。 |
+| `429` | レート制限に達しています。`Retry-After` ヘッダーに待ち時間が秒単位で示されます。 | 後でリクエストを再送します。 |
+| `503` | LogBrew が現時点でリクエストを保存できませんでした。 | 後でリクエストを再送します。 |
+
+アカウントがプランの上限に達すると、LogBrew はすべてのレコードを拒否し、`200` を返します。メッセージにはリセットの時刻が含まれます。エクスポーターは、リセットまで再試行しません。
+
+LogBrew は、拒否したレコードを[アカウントの使用量](/ja/reference/account-api#account-usage)で数えます。拒否したレコードは `sdk_dropped_events` に表示され、理由は `otlp_rejected_record`、プランの上限に達した場合は `usage_limit_exceeded` です。拒否されたレコードは使用量に含まれません。
+
+再送されたリクエストのレコードは、再び保存されません。LogBrew は、再送されたレコードを内容で見分けます。
+
+## データが届いたことを確認する
+
+ログ、スパン、メトリクスのいずれかを1件送信します。次に、読み取りキーで読み戻します。[テストイベントを読み戻す](/ja/guides/verify-setup#verify-telemetry-arrival)の手順に従います。
+
+何も届かない場合は、エクスポーターのログを確認します。OTLP のレスポンスには、拒否されたリクエストやレコードごとの理由が示されます。

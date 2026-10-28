@@ -1,0 +1,127 @@
+---
+title: "通过 OTLP 把 OpenTelemetry 数据发送到 LogBrew"
+sidebarTitle: "OpenTelemetry（OTLP）"
+description: "通过 OTLP/HTTP 把 OpenTelemetry SDK 或 Collector 的日志、链路和指标发送到 LogBrew，无需 LogBrew SDK。"
+---
+
+LogBrew 支持基于 HTTP 的 OpenTelemetry 协议（OTLP）。任何 OpenTelemetry SDK、OpenTelemetry Collector 或其他 OTLP 导出器都可以把日志、链路和指标发送到 LogBrew。你不需要 LogBrew SDK。
+
+LogBrew 像存储 SDK 数据一样存储 OTLP 数据。你可以用同样的方式在控制台、CLI 和 MCP 服务器中读取这些数据。用量、套餐限额和速率限制也同样适用。
+
+## 端点
+
+| 信号 | 端点 |
+| --- | --- |
+| 日志 | `POST https://api.logbrew.co/v1/logs` |
+| 链路 | `POST https://api.logbrew.co/v1/traces` |
+| 指标 | `POST https://api.logbrew.co/v1/metrics` |
+
+请求体使用 `application/x-protobuf` 或 `application/json` 格式。你可以用 `Content-Encoding: gzip` 压缩请求体。
+
+在以下 2 个请求头中任选 1 个，发送项目接入密钥：
+
+- `x-logbrew-key: lbw_ingest_...`
+- `Authorization: Bearer lbw_ingest_...`
+
+服务使用 `server` 密钥。密钥类型见[项目密钥类型](/zh-Hans/guides/verify-setup#project-key-kinds)。
+
+## 配置 OpenTelemetry SDK
+
+OpenTelemetry SDK 会读取标准的 `OTEL_*` 环境变量。设置基础端点。SDK 会自动加上 `/v1/logs`、`/v1/traces` 和 `/v1/metrics`。
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT="https://api.logbrew.co"
+export OTEL_EXPORTER_OTLP_PROTOCOL="http/protobuf"
+export OTEL_EXPORTER_OTLP_COMPRESSION="gzip"
+export OTEL_EXPORTER_OTLP_HEADERS="x-logbrew-key=${LOGBREW_INGEST_KEY}"
+export OTEL_SERVICE_NAME="checkout-api"
+export OTEL_RESOURCE_ATTRIBUTES="service.version=checkout@1.4.2,deployment.environment.name=production"
+```
+
+把密钥保存在你的机密存储中。不要把它提交到版本控制。
+
+## 配置 OpenTelemetry Collector
+
+添加一个 `otlphttp` 导出器。设置基础端点。导出器会自动加上信号路径。
+
+```yaml
+exporters:
+  otlphttp/logbrew:
+    endpoint: https://api.logbrew.co
+    compression: gzip
+    headers:
+      x-logbrew-key: ${env:LOGBREW_INGEST_KEY}
+
+service:
+  pipelines:
+    logs:
+      receivers: [otlp]
+      exporters: [otlphttp/logbrew]
+    traces:
+      receivers: [otlp]
+      exporters: [otlphttp/logbrew]
+    metrics:
+      receivers: [otlp]
+      exporters: [otlphttp/logbrew]
+```
+
+## LogBrew 如何读取 OTLP 数据
+
+LogBrew 把以下资源属性读入每条信号的上下文：
+
+| 资源属性 | LogBrew 字段 | 缺失时的值 |
+| --- | --- | --- |
+| `service.name` | 服务 | `unknown_service` |
+| `service.version` | 版本 | `unversioned` |
+| `deployment.environment.name` 或 `deployment.environment` | 环境 | `production` |
+
+其他资源属性和插桩作用域保留在每条信号的元数据中。
+
+| OTLP 数据 | LogBrew 数据 |
+| --- | --- |
+| 日志记录 | 1 条日志。严重程度决定日志级别。带有 `exception.type` 或 `exception.message` 属性的记录还会生成 1 个问题。 |
+| Span | 所属链路中的 1 个 Span（一次计时操作）。每个 `exception` Span 事件会为该 Span 生成 1 个问题。LogBrew 保留前 8 个 Span 事件和前 8 个 Span 关联。 |
+| Gauge | 每个数据点生成 1 个 gauge 值。 |
+| 单调递增的 Sum | 每个数据点生成 1 个计数器值，增量和累积均可。 |
+| 非单调的累积 Sum | 每个数据点生成 1 个 gauge 值。 |
+| Histogram、指数 Histogram 或 Summary | 每个数据点生成 2 个计数器：`<name>.count` 和 `<name>.sum`。 |
+
+LogBrew 会拒绝非单调的增量 Sum。日志记录和 Span 会保留各自的 Trace ID 和 Span ID，因此日志会显示在所属链路中。
+
+LogBrew 在存储数据前，会把凭据替换为 `[redacted]`。这适用于键名表示凭据的属性值，例如 `authorization`、`cookie`、`password`、`secret`、`api_key`，或以 `token` 结尾的键。它也适用于 `process.command_args`、`process.command_line`、URL 中的用户名和密码，以及 `token`、`code`、`key`、`signature` 等 URL 查询参数的值。不要发送其他机密信息。
+
+## 限制
+
+| 限制 | 值 |
+| --- | --- |
+| 请求体 | 解压后 4 MiB |
+| 单个请求中的记录数 | 16,384 条日志记录、Span 或指标数据点 |
+
+SDK 数据的速率限制和套餐限额同样适用。如果一个请求中的记录过多，LogBrew 会存储前面的记录，拒绝其余记录。改用更小的批次发送。
+
+## 响应
+
+LogBrew 使用与请求相同的编码返回响应。
+
+| 状态 | 含义 | 导出器的处理 |
+| --- | --- | --- |
+| `200`，响应体为空或为 `{}` | LogBrew 接受了所有记录。 | 不做任何处理。 |
+| `200`，带有 `partialSuccess` | LogBrew 拒绝了部分记录。响应会给出被拒绝的数量和第一个原因。 | 在日志中记录原因，不会重新发送这些记录。 |
+| `400` | 请求体不是此端点的 OTLP 导出请求。 | 丢弃请求。 |
+| `401` | 接入密钥缺失或无效。 | 丢弃请求。 |
+| `413` | 请求体过大。 | 丢弃请求。改用更小的批次发送。 |
+| `415` | `Content-Type` 既不是 protobuf，也不是 JSON。 | 丢弃请求。 |
+| `429` | 触发了速率限制。`Retry-After` 响应头给出需要等待的秒数。 | 稍后重新发送请求。 |
+| `503` | LogBrew 暂时无法存储该请求。 | 稍后重新发送请求。 |
+
+账号达到套餐限额后，LogBrew 会拒绝所有记录，并返回 `200`。消息中会给出重置时间。导出器在重置前不会重试。
+
+LogBrew 会在[账号用量](/zh-Hans/reference/account-api#account-usage)中统计被拒绝的记录。这些记录显示在 `sdk_dropped_events` 中，原因为 `otlp_rejected_record`；达到套餐限额时，原因为 `usage_limit_exceeded`。被拒绝的记录不计入用量。
+
+重新发送的请求不会再次存储其中的记录。LogBrew 根据内容识别重新发送的记录。
+
+## 确认数据已到达
+
+发送 1 条日志、1 个 Span 或 1 个指标。然后用只读密钥把它读回来。按照[读回测试信号](/zh-Hans/guides/verify-setup#verify-telemetry-arrival)中的步骤操作。
+
+如果没有数据到达，查看导出器的日志。OTLP 响应会给出每个被拒绝的请求或记录的原因。

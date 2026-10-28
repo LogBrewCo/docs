@@ -1,0 +1,156 @@
+---
+title: "OpenTelemetry-gegevens via OTLP naar LogBrew verzenden"
+sidebarTitle: "OpenTelemetry (OTLP)"
+description: "Verzend logs, traces en metrics vanuit een OpenTelemetry-SDK of de Collector via OTLP/HTTP naar LogBrew, zonder LogBrew-SDK."
+---
+
+LogBrew accepteert het OpenTelemetry-protocol (OTLP) via HTTP. Elke
+OpenTelemetry-SDK, de OpenTelemetry Collector of een andere OTLP-exporter kan
+logs, traces en metrics naar LogBrew verzenden. Je hebt geen LogBrew-SDK
+nodig.
+
+LogBrew slaat OTLP-gegevens op als SDK-gegevens. Je leest ze op dezelfde
+manier in het dashboard, de CLI en de MCP-server. Er gelden dezelfde regels
+voor gebruik, dezelfde limieten van je abonnement en dezelfde rate limits.
+
+## Endpoints
+
+| Signaal | Endpoint |
+| --- | --- |
+| Logs | `POST https://api.logbrew.co/v1/logs` |
+| Traces | `POST https://api.logbrew.co/v1/traces` |
+| Metrics | `POST https://api.logbrew.co/v1/metrics` |
+
+Verzend de requestbody als `application/x-protobuf` of `application/json`. Je
+kunt de body comprimeren met `Content-Encoding: gzip`.
+
+Verzend een ingest-sleutel van het project in 1 van deze 2 headers:
+
+- `x-logbrew-key: lbw_ingest_...`
+- `Authorization: Bearer lbw_ingest_...`
+
+Gebruik een `server`-sleutel voor een service. De soorten sleutels staan in
+[Soorten projectsleutels](/nl/guides/verify-setup#project-key-kinds).
+
+## Een OpenTelemetry-SDK configureren
+
+OpenTelemetry-SDK's lezen de standaard omgevingsvariabelen `OTEL_*`. Stel het
+basis-endpoint in. De SDK voegt `/v1/logs`, `/v1/traces` en `/v1/metrics`
+toe.
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT="https://api.logbrew.co"
+export OTEL_EXPORTER_OTLP_PROTOCOL="http/protobuf"
+export OTEL_EXPORTER_OTLP_COMPRESSION="gzip"
+export OTEL_EXPORTER_OTLP_HEADERS="x-logbrew-key=${LOGBREW_INGEST_KEY}"
+export OTEL_SERVICE_NAME="checkout-api"
+export OTEL_RESOURCE_ATTRIBUTES="service.version=checkout@1.4.2,deployment.environment.name=production"
+```
+
+Bewaar de sleutel in je secretmanager. Zet hem niet in versiebeheer.
+
+## De OpenTelemetry Collector configureren
+
+Voeg een `otlphttp`-exporter toe. Stel het basis-endpoint in. De exporter
+voegt het pad van het signaal toe.
+
+```yaml
+exporters:
+  otlphttp/logbrew:
+    endpoint: https://api.logbrew.co
+    compression: gzip
+    headers:
+      x-logbrew-key: ${env:LOGBREW_INGEST_KEY}
+
+service:
+  pipelines:
+    logs:
+      receivers: [otlp]
+      exporters: [otlphttp/logbrew]
+    traces:
+      receivers: [otlp]
+      exporters: [otlphttp/logbrew]
+    metrics:
+      receivers: [otlp]
+      exporters: [otlphttp/logbrew]
+```
+
+## Hoe LogBrew OTLP-gegevens leest
+
+LogBrew zet deze resource-attributen in de context van het event:
+
+| Resource-attribuut | LogBrew-veld | Als het ontbreekt |
+| --- | --- | --- |
+| `service.name` | Service | `unknown_service` |
+| `service.version` | Release | `unversioned` |
+| `deployment.environment.name` of `deployment.environment` | Omgeving | `production` |
+
+Andere resource-attributen en de instrumentatiescope blijven in de metadata
+van elk event.
+
+| OTLP-gegevens | LogBrew-gegevens |
+| --- | --- |
+| Logrecord | 1 log. De ernst bepaalt het niveau. Een record met de attributen `exception.type` of `exception.message` maakt ook 1 issue aan. |
+| Span | 1 span in de bijbehorende trace. Elk span-event `exception` maakt 1 issue aan voor die span. LogBrew bewaart de eerste 8 span-events en de eerste 8 links. |
+| Gauge | 1 gaugewaarde per datapunt. |
+| Monotone som | 1 counterwaarde per datapunt, of de som nu delta of cumulatief is. |
+| Niet-monotone cumulatieve som | 1 gaugewaarde per datapunt. |
+| Histogram, exponentieel histogram of summary | 2 counters per datapunt: `<name>.count` en `<name>.sum`. |
+
+LogBrew weigert niet-monotone deltasommen. Een logrecord of span behoudt zijn
+trace-ID en span-ID, zodat logs in hun trace verschijnen.
+
+LogBrew vervangt toegangsgegevens door `[redacted]` voordat het de gegevens
+opslaat. Dat geldt voor attribuutwaarden waarvan de sleutel naar
+toegangsgegevens verwijst, zoals `authorization`, `cookie`, `password`,
+`secret`, `api_key` of een sleutel die op `token` eindigt. Het geldt ook voor
+`process.command_args`, `process.command_line`, de gebruikersnaam en het
+wachtwoord in een URL, en de waarden van queryparameters in een URL, zoals
+`token`, `code`, `key` en `signature`. Verzend geen andere geheimen.
+
+## Limieten
+
+| Limiet | Waarde |
+| --- | --- |
+| Requestbody | 4 MiB na decompressie |
+| Records per request | 16.384 logrecords, spans of datapunten van metrics |
+
+De rate limits en de limieten van je abonnement voor SDK-gegevens gelden
+ook. Bevat een request te veel records, dan slaat LogBrew de eerste records
+op en weigert het de rest. Verzend kleinere batches.
+
+## Responses
+
+LogBrew antwoordt in dezelfde codering als het request.
+
+| Status | Betekenis | Wat de exporter doet |
+| --- | --- | --- |
+| `200` met een lege body of `{}` | LogBrew heeft elk record geaccepteerd. | Niets. |
+| `200` met `partialSuccess` | LogBrew heeft een deel van de records geweigerd. De response geeft het aantal en de eerste reden. | Logt de reden. Verzendt de records niet opnieuw. |
+| `400` | De body is geen OTLP-exportrequest voor dit endpoint. | Gooit het request weg. |
+| `401` | De ingest-sleutel ontbreekt of is ongeldig. | Gooit het request weg. |
+| `413` | De body is te groot. | Gooit het request weg. Verzend kleinere batches. |
+| `415` | Het `Content-Type` is geen protobuf of JSON. | Gooit het request weg. |
+| `429` | Er geldt een rate limit. De header `Retry-After` geeft de wachttijd in seconden. | Verzendt het request later opnieuw. |
+| `503` | LogBrew kon het request op dit moment niet opslaan. | Verzendt het request later opnieuw. |
+
+Bereikt je account de limiet van je abonnement, dan antwoordt LogBrew `200`
+en weigert het elk record. Het bericht noemt het resetmoment. De exporter
+probeert het niet opnieuw vóór de reset.
+
+LogBrew telt geweigerde records in
+[accountgebruik](/nl/reference/account-api#account-usage). Ze staan in
+`sdk_dropped_events` met de reden `otlp_rejected_record`, of
+`usage_limit_exceeded` bij de limiet van je abonnement. Geweigerde records
+tellen niet mee voor het gebruik.
+
+Een opnieuw verzonden request slaat de records niet nog een keer op. LogBrew
+herkent een opnieuw verzonden record aan de inhoud.
+
+## Controleren of gegevens aankomen
+
+Verzend 1 log, span of metric. Lees die daarna terug met een leessleutel.
+Volg [Je testevent teruglezen](/nl/guides/verify-setup#verify-telemetry-arrival).
+
+Komt er niets aan? Lees dan de logs van de exporter. De OTLP-response geeft de
+reden voor elk geweigerd request of record.
