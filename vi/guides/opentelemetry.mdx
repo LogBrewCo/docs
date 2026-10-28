@@ -1,0 +1,155 @@
+---
+title: "Gửi dữ liệu OpenTelemetry đến LogBrew qua OTLP"
+sidebarTitle: "OpenTelemetry (OTLP)"
+description: "Gửi log, trace và chỉ số từ SDK hoặc Collector của OpenTelemetry đến LogBrew qua OTLP/HTTP mà không cần SDK LogBrew."
+---
+
+LogBrew nhận giao thức OpenTelemetry (OTLP) qua HTTP. Mọi SDK OpenTelemetry,
+OpenTelemetry Collector hoặc exporter OTLP khác đều có thể gửi log, trace và
+chỉ số đến LogBrew. Bạn không cần SDK LogBrew.
+
+LogBrew lưu dữ liệu OTLP giống như dữ liệu từ SDK. Bạn đọc dữ liệu này theo
+cùng cách trong bảng điều khiển, CLI và máy chủ MCP. Cách tính mức sử dụng,
+hạn mức của gói và giới hạn tốc độ cũng giống nhau.
+
+## Endpoint
+
+| Tín hiệu | Endpoint |
+| --- | --- |
+| Log | `POST https://api.logbrew.co/v1/logs` |
+| Trace | `POST https://api.logbrew.co/v1/traces` |
+| Chỉ số | `POST https://api.logbrew.co/v1/metrics` |
+
+Gửi body của yêu cầu dưới dạng `application/x-protobuf` hoặc
+`application/json`. Bạn có thể nén body bằng `Content-Encoding: gzip`.
+
+Gửi khóa gửi dữ liệu của dự án trong 1 trong 2 header sau:
+
+- `x-logbrew-key: lbw_ingest_...`
+- `Authorization: Bearer lbw_ingest_...`
+
+Dùng khóa `server` cho một dịch vụ. Các loại khóa có trong
+[Các loại khóa dự án](/vi/guides/verify-setup#project-key-kinds).
+
+## Cấu hình SDK OpenTelemetry
+
+Các SDK OpenTelemetry đọc các biến môi trường chuẩn `OTEL_*`. Đặt endpoint
+gốc. SDK tự thêm `/v1/logs`, `/v1/traces` và `/v1/metrics`.
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT="https://api.logbrew.co"
+export OTEL_EXPORTER_OTLP_PROTOCOL="http/protobuf"
+export OTEL_EXPORTER_OTLP_COMPRESSION="gzip"
+export OTEL_EXPORTER_OTLP_HEADERS="x-logbrew-key=${LOGBREW_INGEST_KEY}"
+export OTEL_SERVICE_NAME="checkout-api"
+export OTEL_RESOURCE_ATTRIBUTES="service.version=checkout@1.4.2,deployment.environment.name=production"
+```
+
+Giữ khóa trong trình quản lý bí mật. Không đưa khóa vào hệ thống quản lý mã
+nguồn.
+
+## Cấu hình OpenTelemetry Collector
+
+Thêm exporter `otlphttp`. Đặt endpoint gốc. Exporter tự thêm đường dẫn của
+tín hiệu.
+
+```yaml
+exporters:
+  otlphttp/logbrew:
+    endpoint: https://api.logbrew.co
+    compression: gzip
+    headers:
+      x-logbrew-key: ${env:LOGBREW_INGEST_KEY}
+
+service:
+  pipelines:
+    logs:
+      receivers: [otlp]
+      exporters: [otlphttp/logbrew]
+    traces:
+      receivers: [otlp]
+      exporters: [otlphttp/logbrew]
+    metrics:
+      receivers: [otlp]
+      exporters: [otlphttp/logbrew]
+```
+
+## Cách LogBrew đọc dữ liệu OTLP
+
+LogBrew đọc các thuộc tính resource sau vào ngữ cảnh của sự kiện:
+
+| Thuộc tính resource | Trường trong LogBrew | Khi thiếu thuộc tính |
+| --- | --- | --- |
+| `service.name` | Dịch vụ | `unknown_service` |
+| `service.version` | Bản phát hành | `unversioned` |
+| `deployment.environment.name` hoặc `deployment.environment` | Môi trường | `production` |
+
+Các thuộc tính resource khác và instrumentation scope được giữ trong metadata
+của từng sự kiện.
+
+| Dữ liệu OTLP | Dữ liệu LogBrew |
+| --- | --- |
+| Bản ghi log | 1 log. Mức độ nghiêm trọng của bản ghi quyết định mức của log. Bản ghi có thuộc tính `exception.type` hoặc `exception.message` cũng tạo 1 vấn đề. |
+| Span | 1 span trong trace chứa nó. Mỗi sự kiện span `exception` tạo 1 vấn đề cho span đó. LogBrew giữ 8 sự kiện span đầu tiên và 8 liên kết đầu tiên. |
+| Gauge | 1 giá trị gauge cho mỗi điểm dữ liệu. |
+| Sum đơn điệu | 1 giá trị counter cho mỗi điểm dữ liệu, dù sum là delta hay cumulative. |
+| Sum cumulative không đơn điệu | 1 giá trị gauge cho mỗi điểm dữ liệu. |
+| Histogram, exponential histogram hoặc summary | 2 counter cho mỗi điểm dữ liệu: `<name>.count` và `<name>.sum`. |
+
+LogBrew từ chối các sum delta không đơn điệu. Bản ghi log hoặc span giữ
+nguyên trace ID và span ID, nên log hiện trong trace của nó.
+
+LogBrew thay thông tin xác thực bằng `[redacted]` trước khi lưu dữ liệu. Quy
+tắc này áp dụng cho giá trị của các thuộc tính có tên cho thấy đó là thông
+tin xác thực, chẳng hạn `authorization`, `cookie`, `password`, `secret`,
+`api_key`, hoặc tên kết thúc bằng `token`. Quy tắc này cũng áp dụng cho
+`process.command_args`, `process.command_line`, tên người dùng và mật khẩu
+trong URL, và giá trị tham số truy vấn trong URL như `token`, `code`, `key`
+và `signature`. Không gửi các thông tin bí mật khác.
+
+## Giới hạn
+
+| Giới hạn | Giá trị |
+| --- | --- |
+| Body của yêu cầu | 4 MiB sau khi giải nén |
+| Số bản ghi trong một yêu cầu | 16.384 bản ghi log, span hoặc điểm dữ liệu chỉ số |
+
+Giới hạn tốc độ và hạn mức của gói cho dữ liệu SDK cũng áp dụng. Nếu một yêu
+cầu có quá nhiều bản ghi, LogBrew lưu các bản ghi đầu tiên và từ chối phần
+còn lại. Gửi các batch nhỏ hơn.
+
+## Phản hồi
+
+LogBrew trả lời bằng cùng định dạng với yêu cầu.
+
+| Trạng thái | Ý nghĩa | Exporter làm gì |
+| --- | --- | --- |
+| `200` với body rỗng hoặc `{}` | LogBrew đã chấp nhận mọi bản ghi. | Không làm gì. |
+| `200` với `partialSuccess` | LogBrew đã từ chối một số bản ghi. Phản hồi cho biết số lượng và lý do đầu tiên. | Ghi lý do vào log. Không gửi lại các bản ghi đó. |
+| `400` | Body không phải yêu cầu export OTLP cho endpoint này. | Loại bỏ yêu cầu. |
+| `401` | Thiếu khóa gửi dữ liệu hoặc khóa không hợp lệ. | Loại bỏ yêu cầu. |
+| `413` | Body quá lớn. | Loại bỏ yêu cầu. Gửi các batch nhỏ hơn. |
+| `415` | `Content-Type` không phải protobuf hoặc JSON. | Loại bỏ yêu cầu. |
+| `429` | Yêu cầu chạm giới hạn tốc độ. Header `Retry-After` cho biết thời gian chờ tính bằng giây. | Gửi lại yêu cầu sau. |
+| `503` | LogBrew tạm thời không lưu được yêu cầu. | Gửi lại yêu cầu sau. |
+
+Khi tài khoản đạt hạn mức của gói, LogBrew trả lời `200` và từ chối mọi bản
+ghi. Thông điệp cho biết thời điểm đặt lại. Exporter không thử lại trước thời
+điểm đó.
+
+LogBrew đếm các bản ghi bị từ chối trong
+[mức sử dụng của tài khoản](/vi/reference/account-api#account-usage). Các bản
+ghi này xuất hiện trong `sdk_dropped_events` với lý do `otlp_rejected_record`,
+hoặc `usage_limit_exceeded` khi đạt hạn mức của gói. Bản ghi bị từ chối không
+được tính vào mức sử dụng.
+
+Yêu cầu được gửi lại không lưu các bản ghi thêm lần nữa. LogBrew nhận ra bản
+ghi được gửi lại dựa trên nội dung của nó.
+
+## Kiểm tra dữ liệu đã đến
+
+Gửi 1 log, span hoặc chỉ số. Sau đó đọc lại bằng khóa đọc dữ liệu. Làm theo
+[Đọc lại sự kiện thử](/vi/guides/verify-setup#verify-telemetry-arrival).
+
+Nếu không có gì đến, đọc log của exporter. Phản hồi OTLP cho biết lý do của
+từng yêu cầu hoặc bản ghi bị từ chối.

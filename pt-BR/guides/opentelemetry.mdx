@@ -1,0 +1,159 @@
+---
+title: "Envie dados do OpenTelemetry para o LogBrew com OTLP"
+sidebarTitle: "OpenTelemetry (OTLP)"
+description: "Envie logs, traces e métricas de um SDK ou do Collector do OpenTelemetry para o LogBrew via OTLP/HTTP, sem um SDK do LogBrew."
+---
+
+O LogBrew aceita o protocolo do OpenTelemetry (OTLP) via HTTP. Qualquer SDK
+do OpenTelemetry, o OpenTelemetry Collector ou outro exportador OTLP pode
+enviar logs, traces e métricas para o LogBrew. Você não precisa de um SDK do
+LogBrew.
+
+O LogBrew armazena os dados OTLP como dados de SDK. Você lê esses dados do
+mesmo jeito no painel, na CLI e no servidor MCP. Valem as mesmas regras de
+uso, os mesmos limites do plano e os mesmos limites de requisições.
+
+## Endpoints
+
+| Sinal | Endpoint |
+| --- | --- |
+| Logs | `POST https://api.logbrew.co/v1/logs` |
+| Traces | `POST https://api.logbrew.co/v1/traces` |
+| Métricas | `POST https://api.logbrew.co/v1/metrics` |
+
+Envie o corpo da requisição como `application/x-protobuf` ou
+`application/json`. Você pode compactar o corpo com `Content-Encoding: gzip`.
+
+Envie uma chave de ingestão do projeto em 1 destes 2 cabeçalhos:
+
+- `x-logbrew-key: lbw_ingest_...`
+- `Authorization: Bearer lbw_ingest_...`
+
+Use uma chave `server` para um serviço. Os tipos de chave estão em
+[Tipos de chave de projeto](/pt-BR/guides/verify-setup#project-key-kinds).
+
+## Configure um SDK do OpenTelemetry
+
+Os SDKs do OpenTelemetry leem as variáveis de ambiente padrão `OTEL_*`.
+Defina o endpoint base. O SDK adiciona `/v1/logs`, `/v1/traces` e
+`/v1/metrics`.
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT="https://api.logbrew.co"
+export OTEL_EXPORTER_OTLP_PROTOCOL="http/protobuf"
+export OTEL_EXPORTER_OTLP_COMPRESSION="gzip"
+export OTEL_EXPORTER_OTLP_HEADERS="x-logbrew-key=${LOGBREW_INGEST_KEY}"
+export OTEL_SERVICE_NAME="checkout-api"
+export OTEL_RESOURCE_ATTRIBUTES="service.version=checkout@1.4.2,deployment.environment.name=production"
+```
+
+Guarde a chave no seu gerenciador de segredos. Não coloque a chave no
+controle de versão.
+
+## Configure o OpenTelemetry Collector
+
+Adicione um exportador `otlphttp`. Defina o endpoint base. O exportador
+adiciona o caminho do sinal.
+
+```yaml
+exporters:
+  otlphttp/logbrew:
+    endpoint: https://api.logbrew.co
+    compression: gzip
+    headers:
+      x-logbrew-key: ${env:LOGBREW_INGEST_KEY}
+
+service:
+  pipelines:
+    logs:
+      receivers: [otlp]
+      exporters: [otlphttp/logbrew]
+    traces:
+      receivers: [otlp]
+      exporters: [otlphttp/logbrew]
+    metrics:
+      receivers: [otlp]
+      exporters: [otlphttp/logbrew]
+```
+
+## Como o LogBrew lê os dados OTLP
+
+O LogBrew leva estes atributos de recurso para o contexto do evento:
+
+| Atributo de recurso | Campo do LogBrew | Quando está ausente |
+| --- | --- | --- |
+| `service.name` | Serviço | `unknown_service` |
+| `service.version` | Versão | `unversioned` |
+| `deployment.environment.name` ou `deployment.environment` | Ambiente | `production` |
+
+Os outros atributos de recurso e o escopo de instrumentação ficam nos
+metadados de cada evento.
+
+| Dados OTLP | Dados do LogBrew |
+| --- | --- |
+| Registro de log | 1 log. A gravidade define o nível. Um registro com os atributos `exception.type` ou `exception.message` também gera 1 problema. |
+| Span | 1 span no trace a que ele pertence. Cada evento de span `exception` gera 1 problema para esse span. O LogBrew mantém os 8 primeiros eventos de span e os 8 primeiros links. |
+| Gauge | 1 valor de gauge para cada ponto de dados. |
+| Soma monotônica | 1 valor de contador para cada ponto de dados, seja a soma delta ou cumulativa. |
+| Soma cumulativa não monotônica | 1 valor de gauge para cada ponto de dados. |
+| Histograma, histograma exponencial ou summary | 2 contadores para cada ponto de dados: `<name>.count` e `<name>.sum`. |
+
+O LogBrew rejeita somas delta não monotônicas. Um registro de log ou um span
+mantém o ID de trace e o ID de span, por isso os logs aparecem no trace a
+que pertencem.
+
+O LogBrew substitui credenciais por `[redacted]` antes de armazenar os dados.
+Isso vale para valores de atributos cujas chaves indicam uma credencial, como
+`authorization`, `cookie`, `password`, `secret`, `api_key` ou uma chave que
+termina em `token`. Também vale para `process.command_args`,
+`process.command_line`, o usuário e a senha em uma URL e os valores dos
+parâmetros de consulta da URL, como `token`, `code`, `key` e `signature`. Não
+envie outros segredos.
+
+## Limites
+
+| Limite | Valor |
+| --- | --- |
+| Corpo da requisição | 4 MiB depois da descompactação |
+| Registros em uma requisição | 16.384 registros de log, spans ou pontos de dados de métricas |
+
+Os limites de requisições e os limites do plano dos dados de SDK também
+valem. Se uma requisição tiver registros demais, o LogBrew armazena os
+primeiros registros e rejeita o restante. Envie lotes menores.
+
+## Respostas
+
+O LogBrew responde na mesma codificação da requisição.
+
+| Status | Significado | O que o exportador faz |
+| --- | --- | --- |
+| `200` com corpo vazio ou `{}` | O LogBrew aceitou todos os registros. | Nada. |
+| `200` com `partialSuccess` | O LogBrew rejeitou alguns registros. A resposta informa a quantidade e o primeiro motivo. | Grava o motivo no log. Não envia esses registros de novo. |
+| `400` | O corpo não é uma requisição de exportação OTLP para este endpoint. | Descarta a requisição. |
+| `401` | A chave de ingestão está ausente ou não é válida. | Descarta a requisição. |
+| `413` | O corpo é grande demais. | Descarta a requisição. Envie lotes menores. |
+| `415` | O `Content-Type` não é protobuf nem JSON. | Descarta a requisição. |
+| `429` | A requisição atingiu um limite de requisições. O cabeçalho `Retry-After` informa a espera em segundos. | Envia a requisição de novo mais tarde. |
+| `503` | O LogBrew não conseguiu armazenar a requisição agora. | Envia a requisição de novo mais tarde. |
+
+Quando a sua conta atinge o limite do plano, o LogBrew responde `200` e
+rejeita todos os registros. A mensagem informa o horário de reinício. O
+exportador não tenta de novo antes do reinício.
+
+O LogBrew conta os registros rejeitados no
+[uso da conta](/pt-BR/reference/account-api#account-usage). Eles aparecem em
+`sdk_dropped_events` com o motivo `otlp_rejected_record`, ou
+`usage_limit_exceeded` no limite do plano. Registros rejeitados não contam no
+uso.
+
+Uma requisição reenviada não armazena os registros de novo. O LogBrew
+reconhece um registro reenviado pelo conteúdo.
+
+## Confira se os dados chegam
+
+Envie 1 log, span ou métrica. Depois, leia o dado de volta com uma chave de
+leitura. Siga
+[Leia de volta o seu evento de teste](/pt-BR/guides/verify-setup#verify-telemetry-arrival).
+
+Se nada chegar, leia os logs do exportador. A resposta OTLP informa o motivo
+de cada requisição ou registro rejeitado.

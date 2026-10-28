@@ -1,0 +1,157 @@
+---
+title: "Kirim data OpenTelemetry ke LogBrew dengan OTLP"
+sidebarTitle: "OpenTelemetry (OTLP)"
+description: "Kirim log, trace, dan metrik dari SDK atau Collector OpenTelemetry ke LogBrew melalui OTLP/HTTP, tanpa SDK LogBrew."
+---
+
+LogBrew menerima protokol OpenTelemetry (OTLP) melalui HTTP. SDK
+OpenTelemetry apa pun, OpenTelemetry Collector, atau exporter OTLP lain dapat
+mengirim log, trace, dan metrik ke LogBrew. Anda tidak memerlukan SDK
+LogBrew.
+
+LogBrew menyimpan data OTLP sebagai data SDK. Anda membacanya dengan cara
+yang sama di dasbor, CLI, dan server MCP. Aturan penggunaan, batas paket, dan
+batas laju yang sama juga berlaku.
+
+## Endpoint
+
+| Sinyal | Endpoint |
+| --- | --- |
+| Log | `POST https://api.logbrew.co/v1/logs` |
+| Trace | `POST https://api.logbrew.co/v1/traces` |
+| Metrik | `POST https://api.logbrew.co/v1/metrics` |
+
+Kirim body permintaan sebagai `application/x-protobuf` atau
+`application/json`. Anda dapat mengompresi body dengan
+`Content-Encoding: gzip`.
+
+Kirim kunci ingest proyek di 1 dari 2 header berikut:
+
+- `x-logbrew-key: lbw_ingest_...`
+- `Authorization: Bearer lbw_ingest_...`
+
+Gunakan kunci `server` untuk layanan. Jenis kunci dijelaskan di
+[Jenis kunci proyek](/id/guides/verify-setup#project-key-kinds).
+
+## Konfigurasikan SDK OpenTelemetry
+
+SDK OpenTelemetry membaca variabel lingkungan standar `OTEL_*`. Atur endpoint
+dasar. SDK menambahkan `/v1/logs`, `/v1/traces`, dan `/v1/metrics`.
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT="https://api.logbrew.co"
+export OTEL_EXPORTER_OTLP_PROTOCOL="http/protobuf"
+export OTEL_EXPORTER_OTLP_COMPRESSION="gzip"
+export OTEL_EXPORTER_OTLP_HEADERS="x-logbrew-key=${LOGBREW_INGEST_KEY}"
+export OTEL_SERVICE_NAME="checkout-api"
+export OTEL_RESOURCE_ATTRIBUTES="service.version=checkout@1.4.2,deployment.environment.name=production"
+```
+
+Simpan kunci di penyimpanan rahasia Anda. Jangan masukkan kunci ke source
+control.
+
+## Konfigurasikan OpenTelemetry Collector
+
+Tambahkan exporter `otlphttp`. Atur endpoint dasar. Exporter menambahkan path
+sinyal.
+
+```yaml
+exporters:
+  otlphttp/logbrew:
+    endpoint: https://api.logbrew.co
+    compression: gzip
+    headers:
+      x-logbrew-key: ${env:LOGBREW_INGEST_KEY}
+
+service:
+  pipelines:
+    logs:
+      receivers: [otlp]
+      exporters: [otlphttp/logbrew]
+    traces:
+      receivers: [otlp]
+      exporters: [otlphttp/logbrew]
+    metrics:
+      receivers: [otlp]
+      exporters: [otlphttp/logbrew]
+```
+
+## Cara LogBrew membaca data OTLP
+
+LogBrew membaca atribut resource berikut ke dalam konteks peristiwa:
+
+| Atribut resource | Kolom LogBrew | Jika tidak ada |
+| --- | --- | --- |
+| `service.name` | Layanan | `unknown_service` |
+| `service.version` | Rilis | `unversioned` |
+| `deployment.environment.name` atau `deployment.environment` | Lingkungan | `production` |
+
+Atribut resource lain dan instrumentation scope tetap tersimpan di metadata
+setiap peristiwa.
+
+| Data OTLP | Data LogBrew |
+| --- | --- |
+| Record log | 1 log. Tingkat keparahan menentukan level. Record dengan atribut `exception.type` atau `exception.message` juga membuat 1 masalah. |
+| Span | 1 span di trace-nya. Setiap peristiwa span `exception` membuat 1 masalah untuk span itu. LogBrew menyimpan 8 peristiwa span pertama dan 8 tautan pertama. |
+| Gauge | 1 nilai gauge untuk setiap titik data. |
+| Sum monoton | 1 nilai counter untuk setiap titik data, baik sum delta maupun kumulatif. |
+| Sum kumulatif yang tidak monoton | 1 nilai gauge untuk setiap titik data. |
+| Histogram, histogram eksponensial, atau summary | 2 counter untuk setiap titik data: `<name>.count` dan `<name>.sum`. |
+
+LogBrew menolak sum delta yang tidak monoton. Record log atau span tetap
+memiliki ID trace dan ID span-nya, sehingga log muncul di trace-nya.
+
+LogBrew mengganti kredensial dengan `[redacted]` sebelum menyimpan data. Ini
+berlaku untuk nilai atribut yang kuncinya menunjukkan kredensial, seperti
+`authorization`, `cookie`, `password`, `secret`, `api_key`, atau kunci yang
+berakhiran `token`. Ini juga berlaku untuk `process.command_args`,
+`process.command_line`, nama pengguna dan kata sandi di URL, serta nilai
+parameter kueri di URL seperti `token`, `code`, `key`, dan `signature`.
+Jangan kirim rahasia lain.
+
+## Batas
+
+| Batas | Nilai |
+| --- | --- |
+| Body permintaan | 4 MiB setelah dekompresi |
+| Record dalam 1 permintaan | 16.384 record log, span, atau titik data metrik |
+
+Batas laju dan batas paket untuk data SDK juga berlaku. Jika permintaan berisi
+terlalu banyak record, LogBrew menyimpan record di bagian awal dan menolak
+sisanya. Kirim batch yang lebih kecil.
+
+## Respons
+
+LogBrew menjawab dengan encoding yang sama dengan permintaan.
+
+| Status | Arti | Yang dilakukan exporter |
+| --- | --- | --- |
+| `200` dengan body kosong atau `{}` | LogBrew menerima semua record. | Tidak melakukan apa pun. |
+| `200` dengan `partialSuccess` | LogBrew menolak sebagian record. Respons memberi jumlahnya dan alasan pertama. | Mencatat alasan ke log. Tidak mengirim ulang record tersebut. |
+| `400` | Body bukan permintaan ekspor OTLP untuk endpoint ini. | Membuang permintaan. |
+| `401` | Kunci ingest tidak ada atau tidak valid. | Membuang permintaan. |
+| `413` | Body terlalu besar. | Membuang permintaan. Kirim batch yang lebih kecil. |
+| `415` | `Content-Type` bukan protobuf atau JSON. | Membuang permintaan. |
+| `429` | Permintaan terkena batas laju. Header `Retry-After` memberi waktu tunggu dalam detik. | Mengirim ulang permintaan nanti. |
+| `503` | LogBrew tidak dapat menyimpan permintaan saat ini. | Mengirim ulang permintaan nanti. |
+
+Saat akun Anda mencapai batas paket, LogBrew menjawab `200` dan menolak semua
+record. Pesannya memberi waktu reset. Exporter tidak mencoba lagi sebelum
+waktu reset.
+
+LogBrew menghitung record yang ditolak di
+[penggunaan akun](/id/reference/account-api#account-usage). Record itu muncul
+di `sdk_dropped_events` dengan alasan `otlp_rejected_record`, atau
+`usage_limit_exceeded` saat batas paket tercapai. Record yang ditolak tidak
+dihitung dalam penggunaan.
+
+Permintaan yang dikirim ulang tidak menyimpan record-nya lagi. LogBrew
+mengenali record yang dikirim ulang dari isinya.
+
+## Periksa apakah data sampai
+
+Kirim 1 log, span, atau metrik. Lalu baca kembali dengan kunci baca. Ikuti
+[Baca kembali peristiwa uji Anda](/id/guides/verify-setup#verify-telemetry-arrival).
+
+Jika tidak ada yang sampai, baca log exporter. Respons OTLP memberi alasan
+untuk setiap permintaan atau record yang ditolak.

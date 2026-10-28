@@ -1,0 +1,148 @@
+---
+title: "Log drain Supabase dan logging Edge Functions dengan LogBrew"
+sidebarTitle: "Supabase"
+description: "Kirim log platform Supabase ke LogBrew dengan log drain, lalu rekam log dan error dari Supabase Edge Functions dengan SDK JavaScript."
+---
+
+Anda dapat mengirim 2 jenis data Supabase ke LogBrew:
+
+- Log drain mengirim log platform dari proyek Supabase Anda, seperti log
+  Postgres, Auth, Storage, dan Edge Functions.
+- SDK JavaScript LogBrew mengirim log dan error yang direkam oleh kode Edge
+  Function Anda sendiri.
+
+Anda dapat memakai salah satunya atau keduanya. Keduanya memerlukan kunci
+ingest proyek. Buat kunci `server` untuk setiap penggunaan. Jenis kunci
+dijelaskan di [Jenis kunci proyek](/id/guides/verify-setup#project-key-kinds).
+
+## <span id="log-drain">Kirim log platform dengan log drain</span>
+
+Log drain Supabase tersedia di paket Pro, Team, dan Enterprise Supabase.
+Supabase mengenakan biaya untuk setiap drain dan untuk peristiwa yang
+dikirimnya. Baca harga Supabase sebelum menambahkan drain.
+
+<Steps>
+  <Step title="Buka pengaturan log drain">
+    Di dasbor Supabase, buka proyek Anda. Buka **Project Settings**, lalu
+    **Log Drains**.
+  </Step>
+
+  <Step title="Tambahkan tujuan OpenTelemetry">
+    Tambahkan tujuan dengan jenis **OpenTelemetry (OTLP)**. Atur nilai
+    berikut:
+
+    | Kolom | Nilai |
+    | --- | --- |
+    | Endpoint | `https://api.logbrew.co/v1/logs` |
+    | Protocol | `http/protobuf` |
+    | Gzip | On |
+    | Headers | `x-logbrew-key` dengan kunci ingest Anda sebagai nilainya |
+
+    Sebagai pengganti `x-logbrew-key`, Anda dapat memakai header
+    `Authorization` dengan nilai `Bearer lbw_ingest_...`.
+  </Step>
+
+  <Step title="Simpan tujuan">
+    Simpan tujuan. Supabase mulai mengirim log ke LogBrew.
+
+    **Titik periksa:** log Supabase baru muncul di log proyek LogBrew Anda.
+    Untuk membacanya dari CLI, ikuti
+    [Baca kembali peristiwa uji Anda](/id/guides/verify-setup#verify-telemetry-arrival).
+  </Step>
+</Steps>
+
+LogBrew membaca drain sebagai log OTLP. Atribut resource `service.name`
+menentukan layanan setiap log. Atribut resource lain tetap tersimpan di
+metadata log. LogBrew menghapus kredensial dari URL dan dari atribut seperti
+`authorization` sebelum menyimpan log. Pemetaan lengkapnya ada di
+[OpenTelemetry (OTLP)](/id/guides/opentelemetry).
+
+Jika tidak ada log yang sampai, periksa endpoint, protokol, dan header. Kunci
+ingest harus milik proyek LogBrew yang Anda baca.
+
+## <span id="edge-functions">Rekam log dan error di Edge Functions</span>
+
+Supabase Edge Functions berjalan di Deno. Gunakan `@logbrew/node` dari npm.
+Penyiapan ini berfungsi dengan Deno 2.9, `@logbrew/node` 0.1.20, dan
+`@logbrew/sdk` 0.1.35.
+
+<Steps>
+  <Step title="Simpan kunci ingest sebagai rahasia fungsi">
+    Gunakan Supabase CLI. Ganti placeholder dengan kunci Anda:
+
+    ```bash
+    supabase secrets set LOGBREW_SERVER_API_KEY=lbw_ingest_placeholder
+    ```
+  </Step>
+
+  <Step title="Buat klien dan lakukan flush sebelum mengembalikan respons">
+    Buat klien satu kali, di luar handler permintaan. Rekam peristiwa di
+    handler. Panggil `flush()` sebelum mengembalikan respons, karena fungsi
+    bisa berhenti setelah respons dikembalikan.
+
+    ```ts
+    import { createIssueAttributesFromError, SdkError } from "npm:@logbrew/sdk@^0.1.35";
+    import { createLogBrewNodeClient } from "npm:@logbrew/node@^0.1.20";
+
+    const logbrew = createLogBrewNodeClient({
+      serverApiKey: Deno.env.get("LOGBREW_SERVER_API_KEY"),
+      captureRuntimeContext: false,
+      context: {
+        schemaVersion: 1,
+        resource: {
+          service: { name: "checkout-function", version: "checkout@1" },
+          runtime: { name: "deno", version: Deno.version.deno },
+        },
+      },
+    });
+
+    Deno.serve(async (request) => {
+      const occurredAt = new Date().toISOString();
+      logbrew.log(crypto.randomUUID(), occurredAt, {
+        message: "checkout request",
+        level: "info",
+        metadata: { method: request.method },
+      });
+      let response = new Response("ok");
+      try {
+        await checkout(request);
+      } catch (error) {
+        logbrew.issue(
+          crypto.randomUUID(),
+          occurredAt,
+          createIssueAttributesFromError(error, { service: "checkout-function" }),
+        );
+        response = new Response("checkout failed", { status: 500 });
+      }
+      try {
+        await logbrew.flush();
+      } catch (error) {
+        console.error(error instanceof SdkError ? error.code : "logbrew_delivery_failed");
+      }
+      return response;
+    });
+
+    async function checkout(_request: Request) {
+      // Your function code.
+    }
+    ```
+
+    `captureRuntimeContext: false` dan konteks `runtime` membuat LogBrew
+    menampilkan Deno sebagai runtime. Tanpa keduanya, SDK melaporkan versi
+    Node.js yang diemulasikan Deno.
+
+    Jika pengiriman gagal, `flush()` melempar `SdkError`, misalnya dengan
+    kode `network_failure`. Contoh ini hanya menulis kode error ke log
+    fungsi, dan fungsi tetap mengembalikan responsnya.
+  </Step>
+
+  <Step title="Deploy dan panggil fungsi">
+    Deploy fungsi dengan `supabase functions deploy checkout`. Panggil fungsi
+    itu satu kali.
+
+    **Titik periksa:** log `checkout request` muncul di proyek LogBrew Anda.
+  </Step>
+</Steps>
+
+Jangan masukkan kredensial, body permintaan, atau data pelanggan ke metadata
+peristiwa.

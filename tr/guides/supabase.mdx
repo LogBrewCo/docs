@@ -1,0 +1,150 @@
+---
+title: "LogBrew ile Supabase log drain ve Edge Functions loglaması"
+sidebarTitle: "Supabase"
+description: "Supabase platform loglarını bir log drain ile LogBrew'e gönderin. Supabase Edge Functions'taki logları ve hataları JavaScript SDK'sıyla yakalayın."
+---
+
+LogBrew'e 2 tür Supabase verisi gönderebilirsiniz:
+
+- Log drain, Supabase projenizin Postgres, Auth, Storage ve Edge Functions
+  logları gibi platform loglarını gönderir.
+- LogBrew JavaScript SDK'sı, kendi Edge Function kodunuzun yakaladığı logları
+  ve hataları gönderir.
+
+Birini veya ikisini birden kullanabilirsiniz. İkisi de bir proje alım anahtarı
+(ingest key) gerektirir. Her kullanım için ayrı bir `server` anahtarı
+oluşturun. Anahtar türleri için
+[Proje anahtarı türleri](/tr/guides/verify-setup#project-key-kinds) bölümüne
+bakın.
+
+## <span id="log-drain">Platform loglarını log drain ile gönderin</span>
+
+Supabase log drain'leri Supabase Pro, Team ve Enterprise planlarında
+kullanılabilir. Supabase her drain için ve drain'in gönderdiği olaylar için
+ücret alır. Drain eklemeden önce Supabase fiyatlandırmasını okuyun.
+
+<Steps>
+  <Step title="Log drain ayarlarını açın">
+    Supabase panelinde projenizi açın. **Project Settings** bölümüne, ardından
+    **Log Drains** bölümüne gidin.
+  </Step>
+
+  <Step title="OpenTelemetry hedefi ekleyin">
+    **OpenTelemetry (OTLP)** türünde bir hedef ekleyin. Şu değerleri ayarlayın:
+
+    | Alan | Değer |
+    | --- | --- |
+    | Endpoint | `https://api.logbrew.co/v1/logs` |
+    | Protocol | `http/protobuf` |
+    | Gzip | On |
+    | Headers | Değeri alım anahtarınız olan `x-logbrew-key` |
+
+    `x-logbrew-key` yerine, `Bearer lbw_ingest_...` değeriyle `Authorization`
+    başlığını da kullanabilirsiniz.
+  </Step>
+
+  <Step title="Hedefi kaydedin">
+    Hedefi kaydedin. Supabase, logları LogBrew'e göndermeye başlar.
+
+    **Kontrol noktası:** yeni Supabase logları, LogBrew projenizin loglarında
+    görünür. Bunları CLI'dan okumak için
+    [Test olayınızı geri okuyun](/tr/guides/verify-setup#verify-telemetry-arrival)
+    bölümündeki adımları izleyin.
+  </Step>
+</Steps>
+
+LogBrew, drain'i OTLP logları olarak okur. `service.name` kaynak özniteliği her
+logun hizmetini belirler. Diğer kaynak öznitelikleri logun meta verisinde
+kalır. LogBrew, logu saklamadan önce URL'lerden ve `authorization` gibi
+özniteliklerden kimlik bilgilerini kaldırır. Eşlemenin tamamı için
+[OpenTelemetry (OTLP)](/tr/guides/opentelemetry) sayfasına bakın.
+
+Log gelmezse uç noktayı, protokolü ve başlığı kontrol edin. Alım anahtarı,
+okuduğunuz LogBrew projesine ait olmalıdır.
+
+## <span id="edge-functions">Edge Functions'ta logları ve hataları yakalayın</span>
+
+Supabase Edge Functions, Deno üzerinde çalışır. npm'den `@logbrew/node`
+paketini kullanın. Bu kurulum Deno 2.9, `@logbrew/node` 0.1.20 ve
+`@logbrew/sdk` 0.1.35 ile çalışır.
+
+<Steps>
+  <Step title="Alım anahtarını fonksiyon gizli bilgisi olarak kaydedin">
+    Supabase CLI'ı kullanın. Yer tutucuyu kendi anahtarınızla değiştirin:
+
+    ```bash
+    supabase secrets set LOGBREW_SERVER_API_KEY=lbw_ingest_placeholder
+    ```
+  </Step>
+
+  <Step title="İstemciyi oluşturun ve yanıt vermeden önce flush edin">
+    İstemciyi istek handler'ının dışında bir kez oluşturun. Olayları
+    handler'da yakalayın. Yanıtı döndürmeden önce `flush()` çağırın, çünkü
+    fonksiyon yanıt döndürdükten sonra durabilir.
+
+    ```ts
+    import { createIssueAttributesFromError, SdkError } from "npm:@logbrew/sdk@^0.1.35";
+    import { createLogBrewNodeClient } from "npm:@logbrew/node@^0.1.20";
+
+    const logbrew = createLogBrewNodeClient({
+      serverApiKey: Deno.env.get("LOGBREW_SERVER_API_KEY"),
+      captureRuntimeContext: false,
+      context: {
+        schemaVersion: 1,
+        resource: {
+          service: { name: "checkout-function", version: "checkout@1" },
+          runtime: { name: "deno", version: Deno.version.deno },
+        },
+      },
+    });
+
+    Deno.serve(async (request) => {
+      const occurredAt = new Date().toISOString();
+      logbrew.log(crypto.randomUUID(), occurredAt, {
+        message: "checkout request",
+        level: "info",
+        metadata: { method: request.method },
+      });
+      let response = new Response("ok");
+      try {
+        await checkout(request);
+      } catch (error) {
+        logbrew.issue(
+          crypto.randomUUID(),
+          occurredAt,
+          createIssueAttributesFromError(error, { service: "checkout-function" }),
+        );
+        response = new Response("checkout failed", { status: 500 });
+      }
+      try {
+        await logbrew.flush();
+      } catch (error) {
+        console.error(error instanceof SdkError ? error.code : "logbrew_delivery_failed");
+      }
+      return response;
+    });
+
+    async function checkout(_request: Request) {
+      // Your function code.
+    }
+    ```
+
+    `captureRuntimeContext: false` ve `runtime` bağlamı sayesinde LogBrew,
+    çalışma zamanı olarak Deno'yu gösterir. Bunlar olmadan SDK, Deno'nun emüle
+    ettiği Node.js sürümünü bildirir.
+
+    Gönderim başarısız olursa `flush()` bir `SdkError` fırlatır. Örneğin hata
+    kodu `network_failure` olabilir. Örnek, fonksiyon loguna yalnızca hata
+    kodunu yazar. Fonksiyon yine de yanıtını döndürür.
+  </Step>
+
+  <Step title="Fonksiyonu dağıtın ve çağırın">
+    Fonksiyonu `supabase functions deploy checkout` komutuyla dağıtın.
+    Fonksiyonu bir kez çağırın.
+
+    **Kontrol noktası:** `checkout request` logu LogBrew projenizde görünür.
+  </Step>
+</Steps>
+
+Olay meta verisine kimlik bilgileri, istek gövdeleri veya müşteri verileri
+koymayın.

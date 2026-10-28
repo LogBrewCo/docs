@@ -1,0 +1,122 @@
+---
+title: "用 LogBrew 接收 Supabase Log Drain 和 Edge Functions 日志"
+sidebarTitle: "Supabase"
+description: "通过 Log Drain 把 Supabase 平台日志发送到 LogBrew，并用 JavaScript SDK 采集 Supabase Edge Functions 中的日志和错误。"
+---
+
+你可以把 2 类 Supabase 数据发送到 LogBrew：
+
+- Log Drain（日志导出）发送 Supabase 项目的平台日志，例如 Postgres、Auth、Storage 和 Edge Functions 日志。
+- LogBrew JavaScript SDK 发送你自己的 Edge Function 代码采集到的日志和错误。
+
+两者可以任选其一，也可以同时使用。两者都需要项目接入密钥。为每种用途各创建一个 `server` 密钥。密钥类型见[项目密钥类型](/zh-Hans/guides/verify-setup#project-key-kinds)。
+
+## <span id="log-drain">通过 Log Drain 发送平台日志</span>
+
+Supabase 的 Pro、Team 和 Enterprise 套餐提供 Log Drain。Supabase 会对每个 Log Drain 及其发送的事件收费。添加 Log Drain 前，先查看 Supabase 的价格说明。
+
+<Steps>
+  <Step title="打开 Log Drain 设置">
+    在 Supabase 控制台中打开你的项目。依次进入 **Project Settings** 和 **Log Drains**。
+  </Step>
+
+  <Step title="添加 OpenTelemetry 目标">
+    添加一个类型为 **OpenTelemetry (OTLP)** 的目标。设置以下值：
+
+    | 字段 | 值 |
+    | --- | --- |
+    | Endpoint | `https://api.logbrew.co/v1/logs` |
+    | Protocol | `http/protobuf` |
+    | Gzip | On |
+    | Headers | `x-logbrew-key`，值为你的接入密钥 |
+
+    你也可以不用 `x-logbrew-key`，改用请求头 `Authorization`，值为 `Bearer lbw_ingest_...`。
+  </Step>
+
+  <Step title="保存目标">
+    保存目标。Supabase 开始向 LogBrew 发送日志。
+
+    **检查点**：新的 Supabase 日志出现在 LogBrew 项目的日志中。如需用 CLI 读取，按照[读回测试信号](/zh-Hans/guides/verify-setup#verify-telemetry-arrival)操作。
+  </Step>
+</Steps>
+
+LogBrew 把 Log Drain 的数据作为 OTLP 日志读取。`service.name` 资源属性决定每条日志的服务。其他资源属性保留在日志元数据中。LogBrew 在存储日志前，会从 URL 和 `authorization` 等属性中移除凭据。完整的映射规则见 [OpenTelemetry（OTLP）](/zh-Hans/guides/opentelemetry)。
+
+如果没有日志到达，检查端点、协议和请求头。接入密钥必须属于你要读取的 LogBrew 项目。
+
+## <span id="edge-functions">在 Edge Functions 中采集日志和错误</span>
+
+Supabase Edge Functions 运行在 Deno 上。使用 npm 上的 `@logbrew/node`。此接入方式适用于 Deno 2.9、`@logbrew/node` 0.1.20 和 `@logbrew/sdk` 0.1.35。
+
+<Steps>
+  <Step title="把接入密钥保存为函数机密">
+    使用 Supabase CLI。把占位符替换为你的密钥：
+
+    ```bash
+    supabase secrets set LOGBREW_SERVER_API_KEY=lbw_ingest_placeholder
+    ```
+  </Step>
+
+  <Step title="创建客户端，返回前先 flush">
+    在请求处理函数外部创建一次客户端。在处理函数中采集信号。返回响应前调用 `flush()`，因为函数在返回后可能会停止运行。
+
+    ```ts
+    import { createIssueAttributesFromError, SdkError } from "npm:@logbrew/sdk@^0.1.35";
+    import { createLogBrewNodeClient } from "npm:@logbrew/node@^0.1.20";
+
+    const logbrew = createLogBrewNodeClient({
+      serverApiKey: Deno.env.get("LOGBREW_SERVER_API_KEY"),
+      captureRuntimeContext: false,
+      context: {
+        schemaVersion: 1,
+        resource: {
+          service: { name: "checkout-function", version: "checkout@1" },
+          runtime: { name: "deno", version: Deno.version.deno },
+        },
+      },
+    });
+
+    Deno.serve(async (request) => {
+      const occurredAt = new Date().toISOString();
+      logbrew.log(crypto.randomUUID(), occurredAt, {
+        message: "checkout request",
+        level: "info",
+        metadata: { method: request.method },
+      });
+      let response = new Response("ok");
+      try {
+        await checkout(request);
+      } catch (error) {
+        logbrew.issue(
+          crypto.randomUUID(),
+          occurredAt,
+          createIssueAttributesFromError(error, { service: "checkout-function" }),
+        );
+        response = new Response("checkout failed", { status: 500 });
+      }
+      try {
+        await logbrew.flush();
+      } catch (error) {
+        console.error(error instanceof SdkError ? error.code : "logbrew_delivery_failed");
+      }
+      return response;
+    });
+
+    async function checkout(_request: Request) {
+      // Your function code.
+    }
+    ```
+
+    设置 `captureRuntimeContext: false` 和 `runtime` 上下文后，LogBrew 会把 Deno 显示为运行时。如果不设置，SDK 会报告 Deno 所模拟的 Node.js 版本。
+
+    投递失败时，`flush()` 会抛出 `SdkError`，例如错误码为 `network_failure`。示例只把错误码写入函数日志，函数仍会返回响应。
+  </Step>
+
+  <Step title="部署并调用函数">
+    使用 `supabase functions deploy checkout` 部署函数。调用一次。
+
+    **检查点**：你的 LogBrew 项目中出现 `checkout request` 日志。
+  </Step>
+</Steps>
+
+不要在信号元数据中放入凭据、请求体或客户数据。

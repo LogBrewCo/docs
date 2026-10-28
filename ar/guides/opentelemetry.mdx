@@ -1,0 +1,127 @@
+---
+title: "أرسل بيانات OpenTelemetry إلى LogBrew عبر OTLP"
+sidebarTitle: "OpenTelemetry (OTLP)"
+description: "أرسل السجلات والتتبّعات والمقاييس من OpenTelemetry SDK أو Collector إلى LogBrew عبر OTLP/HTTP، دون حزمة LogBrew SDK."
+---
+
+يقبل LogBrew بروتوكول OpenTelemetry (OTLP) عبر HTTP. يمكن لأي حزمة OpenTelemetry SDK، أو OpenTelemetry Collector، أو أي أداة تصدير (exporter) أخرى تدعم OTLP أن ترسل السجلات والتتبّعات والمقاييس إلى LogBrew. ولا تحتاج إلى حزمة LogBrew SDK.
+
+يخزّن LogBrew بيانات OTLP كما يخزّن بيانات SDK. وتقرؤها بالطريقة نفسها في لوحة التحكم وCLI وخادم MCP. ويُحتسب استخدامها بالطريقة نفسها، وتنطبق عليها حدود الخطة وحدود المعدّل نفسها.
+
+## نقاط النهاية
+
+| الإشارة | نقطة النهاية |
+| --- | --- |
+| السجلات | `POST https://api.logbrew.co/v1/logs` |
+| التتبّعات | `POST https://api.logbrew.co/v1/traces` |
+| المقاييس | `POST https://api.logbrew.co/v1/metrics` |
+
+أرسل نص الطلب بتنسيق `application/x-protobuf` أو `application/json`. يمكنك ضغط نص الطلب باستخدام `Content-Encoding: gzip`.
+
+أرسل مفتاح الاستيعاب الخاص بالمشروع في إحدى هاتين الترويستين:
+
+- `x-logbrew-key: lbw_ingest_...`
+- `Authorization: Bearer lbw_ingest_...`
+
+استخدم مفتاح `server` للخدمة. أنواع المفاتيح موضّحة في [أنواع مفاتيح المشروع](/ar/guides/verify-setup#project-key-kinds).
+
+## اضبط OpenTelemetry SDK
+
+تقرأ حزم OpenTelemetry SDK متغيرات البيئة القياسية `OTEL_*`. اضبط نقطة النهاية الأساسية. وتضيف الحزمة `/v1/logs` و`/v1/traces` و`/v1/metrics` بنفسها.
+
+```bash
+export OTEL_EXPORTER_OTLP_ENDPOINT="https://api.logbrew.co"
+export OTEL_EXPORTER_OTLP_PROTOCOL="http/protobuf"
+export OTEL_EXPORTER_OTLP_COMPRESSION="gzip"
+export OTEL_EXPORTER_OTLP_HEADERS="x-logbrew-key=${LOGBREW_INGEST_KEY}"
+export OTEL_SERVICE_NAME="checkout-api"
+export OTEL_RESOURCE_ATTRIBUTES="service.version=checkout@1.4.2,deployment.environment.name=production"
+```
+
+احفظ المفتاح في مخزن الأسرار. لا تضعه في نظام التحكم في المصدر.
+
+## اضبط OpenTelemetry Collector
+
+أضف أداة تصدير `otlphttp`. اضبط نقطة النهاية الأساسية. وتضيف أداة التصدير مسار الإشارة بنفسها.
+
+```yaml
+exporters:
+  otlphttp/logbrew:
+    endpoint: https://api.logbrew.co
+    compression: gzip
+    headers:
+      x-logbrew-key: ${env:LOGBREW_INGEST_KEY}
+
+service:
+  pipelines:
+    logs:
+      receivers: [otlp]
+      exporters: [otlphttp/logbrew]
+    traces:
+      receivers: [otlp]
+      exporters: [otlphttp/logbrew]
+    metrics:
+      receivers: [otlp]
+      exporters: [otlphttp/logbrew]
+```
+
+## كيف يقرأ LogBrew بيانات OTLP
+
+يقرأ LogBrew سمات المورد التالية ويضعها في سياق الحدث:
+
+| سمة المورد | حقل LogBrew | عند غيابها |
+| --- | --- | --- |
+| `service.name` | الخدمة | `unknown_service` |
+| `service.version` | الإصدار | `unversioned` |
+| `deployment.environment.name` أو `deployment.environment` | البيئة | `production` |
+
+تبقى سمات المورد الأخرى ونطاق أداة القياس (instrumentation scope) في البيانات الوصفية لكل حدث.
+
+| بيانات OTLP | بيانات LogBrew |
+| --- | --- |
+| قيد سجل (log record) | سجل واحد. تحدّد الخطورة مستوى السجل. وإذا احتوى القيد على السمة `exception.type` أو `exception.message`، فإنه يُنشئ أيضًا مشكلة واحدة. |
+| Span | Span واحد في التتبّع الذي ينتمي إليه. ينشئ كل حدث Span من نوع `exception` مشكلة واحدة لذلك الـ Span. ويحتفظ LogBrew بأول 8 أحداث للـ Span وأول 8 روابط. |
+| Gauge | قيمة gauge واحدة لكل نقطة بيانات. |
+| مجموع رتيب (monotonic sum) | قيمة عدّاد واحدة لكل نقطة بيانات، سواء أكان المجموع من نوع التغيّر (delta) أم تراكميًا (cumulative). |
+| مجموع تراكمي غير رتيب | قيمة gauge واحدة لكل نقطة بيانات. |
+| مدرّج تكراري (histogram)، أو مدرّج تكراري أسّي، أو ملخّص (summary) | عدّادان لكل نقطة بيانات: `<name>.count` و`<name>.sum`. |
+
+يرفض LogBrew مجاميع التغيّر (delta) غير الرتيبة. ويحتفظ قيد السجل والـ Span بمعرّف التتبّع ومعرّف الـ Span، لذلك تظهر السجلات داخل تتبّعها.
+
+يستبدل LogBrew بيانات الاعتماد بالقيمة `[redacted]` قبل تخزين البيانات. ينطبق ذلك على قيم السمات التي تدل مفاتيحها على بيانات اعتماد، مثل `authorization` و`cookie` و`password` و`secret` و`api_key`، أو أي مفتاح ينتهي بـ `token`. وينطبق أيضًا على `process.command_args` و`process.command_line`، وعلى اسم المستخدم وكلمة المرور في عنوان URL، وعلى قيم الاستعلام في عنوان URL مثل `token` و`code` و`key` و`signature`. لا ترسل أسرارًا أخرى.
+
+## الحدود
+
+| الحد | القيمة |
+| --- | --- |
+| نص الطلب | 4 MiB بعد فك الضغط |
+| القيود في الطلب الواحد | 16,384 من قيود السجلات أو Spans أو نقاط بيانات المقاييس |
+
+تنطبق أيضًا حدود المعدّل وحدود الخطة الخاصة ببيانات SDK. إذا احتوى الطلب على عدد كبير جدًا من القيود، يخزّن LogBrew القيود الأولى ويرفض الباقي. أرسل دفعات أصغر.
+
+## الاستجابات
+
+يرد LogBrew بترميز الطلب نفسه.
+
+| الحالة | المعنى | ما تفعله أداة التصدير |
+| --- | --- | --- |
+| `200` مع نص فارغ أو `{}` | قبل LogBrew كل القيود. | لا شيء. |
+| `200` مع `partialSuccess` | رفض LogBrew بعض القيود. تذكر الاستجابة عددها وأول سبب للرفض. | تسجّل السبب. ولا تعيد إرسال القيود. |
+| `400` | النص ليس طلب تصدير OTLP لنقطة النهاية هذه. | تُسقط الطلب. |
+| `401` | مفتاح الاستيعاب مفقود أو غير صالح. | تُسقط الطلب. |
+| `413` | النص كبير جدًا. | تُسقط الطلب. أرسل دفعات أصغر. |
+| `415` | قيمة `Content-Type` ليست protobuf أو JSON. | تُسقط الطلب. |
+| `429` | ينطبق حد المعدّل. تذكر الترويسة `Retry-After` مدة الانتظار بالثواني. | تعيد إرسال الطلب لاحقًا. |
+| `503` | تعذّر على LogBrew تخزين الطلب في الوقت الحالي. | تعيد إرسال الطلب لاحقًا. |
+
+عندما يبلغ حسابك حد خطته، يرد LogBrew بالحالة `200` ويرفض كل القيود. وتذكر الرسالة وقت إعادة الضبط. ولا تعيد أداة التصدير المحاولة قبل إعادة الضبط.
+
+يحتسب LogBrew القيود المرفوضة في [استخدام الحساب](/ar/reference/account-api#account-usage). وتظهر في `sdk_dropped_events` بالسبب `otlp_rejected_record`، أو `usage_limit_exceeded` عند بلوغ حد الخطة. ولا تُحتسب القيود المرفوضة ضمن الاستخدام.
+
+لا يخزّن LogBrew قيود الطلب المعاد إرساله مرة أخرى. ويتعرّف على القيد المعاد إرساله من محتواه.
+
+## تحقّق من وصول البيانات
+
+أرسل سجلًا واحدًا أو Span واحدًا أو مقياسًا واحدًا. ثم اقرأه باستخدام مفتاح قراءة. اتبع [اقرأ الحدث التجريبي](/ar/guides/verify-setup#verify-telemetry-arrival).
+
+إذا لم يصل أي شيء، فاقرأ سجلات أداة التصدير. تذكر استجابة OTLP سبب رفض كل طلب أو قيد مرفوض.

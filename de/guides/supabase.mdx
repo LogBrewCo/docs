@@ -1,0 +1,153 @@
+---
+title: "Supabase-Log-Drain und Logging für Edge Functions mit LogBrew"
+sidebarTitle: "Supabase"
+description: "Senden Sie Supabase-Plattform-Logs per Log-Drain an LogBrew. Erfassen Sie Logs und Fehler aus Supabase Edge Functions mit dem JavaScript-SDK."
+---
+
+Sie können 2 Arten von Supabase-Daten an LogBrew senden:
+
+- Ein Log-Drain sendet die Plattform-Logs Ihres Supabase-Projekts, zum
+  Beispiel Logs von Postgres, Auth, Storage und Edge Functions.
+- Das LogBrew-JavaScript-SDK sendet die Logs und Fehler, die Ihr eigener Code
+  in Edge Functions erfasst.
+
+Sie können einen der beiden Wege nutzen oder beide. Beide brauchen einen
+Projekt-Ingest-Schlüssel. Erstellen Sie für jeden Weg einen eigenen
+`server`-Schlüssel. Die Schlüsselarten finden Sie unter
+[Arten von Projektschlüsseln](/de/guides/verify-setup#project-key-kinds).
+
+## <span id="log-drain">Plattform-Logs per Log-Drain senden</span>
+
+Supabase bietet Log-Drains in den Supabase-Tarifen Pro, Team und Enterprise
+an. Supabase stellt jeden Drain und die Ereignisse, die er sendet, in Rechnung.
+Lesen Sie die Supabase-Preise, bevor Sie einen Drain hinzufügen.
+
+<Steps>
+  <Step title="Log-Drain-Einstellungen öffnen">
+    Öffnen Sie im Supabase-Dashboard Ihr Projekt. Gehen Sie zu
+    **Project Settings** und dann zu **Log Drains**.
+  </Step>
+
+  <Step title="OpenTelemetry-Ziel hinzufügen">
+    Fügen Sie ein Ziel vom Typ **OpenTelemetry (OTLP)** hinzu. Setzen Sie
+    diese Werte:
+
+    | Feld | Wert |
+    | --- | --- |
+    | Endpoint | `https://api.logbrew.co/v1/logs` |
+    | Protocol | `http/protobuf` |
+    | Gzip | On |
+    | Headers | `x-logbrew-key` mit Ihrem Ingest-Schlüssel als Wert |
+
+    Statt `x-logbrew-key` können Sie auch den Header `Authorization` mit dem
+    Wert `Bearer lbw_ingest_...` verwenden.
+  </Step>
+
+  <Step title="Ziel speichern">
+    Speichern Sie das Ziel. Supabase beginnt, Logs an LogBrew zu senden.
+
+    **Kontrollpunkt:** Neue Supabase-Logs erscheinen in den Logs Ihres
+    LogBrew-Projekts. Um sie mit der CLI zu lesen, folgen Sie
+    [Testereignis zurücklesen](/de/guides/verify-setup#verify-telemetry-arrival).
+  </Step>
+</Steps>
+
+LogBrew liest den Drain als OTLP-Logs. Das Ressourcenattribut `service.name`
+bestimmt den Dienst jedes Logs. Die anderen Ressourcenattribute bleiben in den
+Metadaten des Logs. LogBrew entfernt Zugangsdaten aus URLs und aus Attributen
+wie `authorization`, bevor es das Log speichert. Die vollständige Zuordnung
+finden Sie unter [OpenTelemetry (OTLP)](/de/guides/opentelemetry).
+
+Wenn keine Logs ankommen, prüfen Sie den Endpunkt, das Protokoll und den
+Header. Der Ingest-Schlüssel muss zu dem LogBrew-Projekt gehören, das Sie
+lesen.
+
+## <span id="edge-functions">Logs und Fehler in Edge Functions erfassen</span>
+
+Supabase Edge Functions laufen auf Deno. Verwenden Sie `@logbrew/node` aus
+npm. Diese Einrichtung funktioniert mit Deno 2.9, `@logbrew/node` 0.1.20 und
+`@logbrew/sdk` 0.1.35.
+
+<Steps>
+  <Step title="Ingest-Schlüssel als Funktions-Secret speichern">
+    Verwenden Sie die Supabase-CLI. Ersetzen Sie den Platzhalter durch Ihren
+    Schlüssel:
+
+    ```bash
+    supabase secrets set LOGBREW_SERVER_API_KEY=lbw_ingest_placeholder
+    ```
+  </Step>
+
+  <Step title="Client erstellen und vor der Antwort flushen">
+    Erstellen Sie den Client einmal, außerhalb des Anfrage-Handlers. Erfassen
+    Sie Ereignisse im Handler. Rufen Sie `flush()` auf, bevor Sie die Antwort
+    zurückgeben. Die Funktion kann nach der Rückgabe beendet werden.
+
+    ```ts
+    import { createIssueAttributesFromError, SdkError } from "npm:@logbrew/sdk@^0.1.35";
+    import { createLogBrewNodeClient } from "npm:@logbrew/node@^0.1.20";
+
+    const logbrew = createLogBrewNodeClient({
+      serverApiKey: Deno.env.get("LOGBREW_SERVER_API_KEY"),
+      captureRuntimeContext: false,
+      context: {
+        schemaVersion: 1,
+        resource: {
+          service: { name: "checkout-function", version: "checkout@1" },
+          runtime: { name: "deno", version: Deno.version.deno },
+        },
+      },
+    });
+
+    Deno.serve(async (request) => {
+      const occurredAt = new Date().toISOString();
+      logbrew.log(crypto.randomUUID(), occurredAt, {
+        message: "checkout request",
+        level: "info",
+        metadata: { method: request.method },
+      });
+      let response = new Response("ok");
+      try {
+        await checkout(request);
+      } catch (error) {
+        logbrew.issue(
+          crypto.randomUUID(),
+          occurredAt,
+          createIssueAttributesFromError(error, { service: "checkout-function" }),
+        );
+        response = new Response("checkout failed", { status: 500 });
+      }
+      try {
+        await logbrew.flush();
+      } catch (error) {
+        console.error(error instanceof SdkError ? error.code : "logbrew_delivery_failed");
+      }
+      return response;
+    });
+
+    async function checkout(_request: Request) {
+      // Your function code.
+    }
+    ```
+
+    Mit `captureRuntimeContext: false` und dem `runtime`-Kontext zeigt LogBrew
+    Deno als Laufzeit an. Ohne diese Angaben meldet das SDK die
+    Node.js-Version, die Deno emuliert.
+
+    Wenn die Zustellung fehlschlägt, wirft `flush()` einen `SdkError`, zum
+    Beispiel mit dem Code `network_failure`. Das Beispiel schreibt nur den
+    Fehlercode in das Log der Funktion. Die Funktion gibt ihre Antwort
+    trotzdem zurück.
+  </Step>
+
+  <Step title="Funktion bereitstellen und aufrufen">
+    Stellen Sie die Funktion mit `supabase functions deploy checkout` bereit.
+    Rufen Sie sie einmal auf.
+
+    **Kontrollpunkt:** Das Log `checkout request` erscheint in Ihrem
+    LogBrew-Projekt.
+  </Step>
+</Steps>
+
+Legen Sie keine Zugangsdaten, Anfrage-Bodys oder Kundendaten in die Metadaten
+von Ereignissen.

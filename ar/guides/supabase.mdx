@@ -1,0 +1,122 @@
+---
+title: "تصريف سجلات Supabase وسجلات Edge Functions باستخدام LogBrew"
+sidebarTitle: "Supabase"
+description: "أرسل سجلات منصة Supabase إلى LogBrew عبر تصريف السجلات، والتقط السجلات والأخطاء من Supabase Edge Functions باستخدام JavaScript SDK."
+---
+
+يمكنك إرسال نوعين من بيانات Supabase إلى LogBrew:
+
+- يرسل تصريف السجلات (log drain) سجلات المنصة لمشروعك في Supabase، مثل سجلات Postgres وAuth وStorage وEdge Functions.
+- ترسل حزمة LogBrew JavaScript SDK السجلات والأخطاء التي تلتقطها شيفرة Edge Function الخاصة بك.
+
+يمكنك استخدام أحدهما أو كليهما. يحتاج كلاهما إلى مفتاح استيعاب للمشروع. أنشئ مفتاح `server` لكل استخدام. أنواع المفاتيح موضّحة في [أنواع مفاتيح المشروع](/ar/guides/verify-setup#project-key-kinds).
+
+## <span id="log-drain">أرسل سجلات المنصة عبر تصريف السجلات</span>
+
+يتوفر تصريف السجلات في خطط Pro وTeam وEnterprise من Supabase. وتحتسب Supabase رسومًا على كل تصريف تضيفه وعلى الأحداث التي يرسلها. اقرأ أسعار Supabase قبل أن تضيف تصريفًا.
+
+<Steps>
+  <Step title="افتح إعدادات تصريف السجلات">
+    افتح مشروعك في لوحة تحكم Supabase. انتقل إلى **Project Settings** ثم إلى **Log Drains**.
+  </Step>
+
+  <Step title="أضف وجهة OpenTelemetry">
+    أضف وجهة من النوع **OpenTelemetry (OTLP)**. اضبط هذه القيم:
+
+    | الحقل | القيمة |
+    | --- | --- |
+    | Endpoint | `https://api.logbrew.co/v1/logs` |
+    | Protocol | `http/protobuf` |
+    | Gzip | On |
+    | Headers | `x-logbrew-key`، وقيمتها مفتاح الاستيعاب الخاص بك |
+
+    يمكنك استخدام الترويسة `Authorization` بالقيمة `Bearer lbw_ingest_...` بدلًا من `x-logbrew-key`.
+  </Step>
+
+  <Step title="احفظ الوجهة">
+    احفظ الوجهة. تبدأ Supabase بإرسال السجلات إلى LogBrew.
+
+    **نقطة تحقق:** تظهر سجلات Supabase الجديدة في سجلات مشروعك في LogBrew. لقراءتها من CLI، اتبع [اقرأ الحدث التجريبي](/ar/guides/verify-setup#verify-telemetry-arrival).
+  </Step>
+</Steps>
+
+يقرأ LogBrew بيانات التصريف على أنها سجلات OTLP. تحدّد سمة المورد `service.name` خدمة كل سجل. وتبقى سمات المورد الأخرى في البيانات الوصفية للسجل. ويزيل LogBrew بيانات الاعتماد من عناوين URL ومن سمات مثل `authorization` قبل تخزين السجل. التفاصيل الكاملة للمطابقة موضّحة في [OpenTelemetry (OTLP)](/ar/guides/opentelemetry).
+
+إذا لم تصل أي سجلات، فتحقّق من نقطة النهاية والبروتوكول والترويسة. يجب أن ينتمي مفتاح الاستيعاب إلى مشروع LogBrew الذي تقرأ منه.
+
+## <span id="edge-functions">التقط السجلات والأخطاء في Edge Functions</span>
+
+تعمل Supabase Edge Functions على Deno. استخدم `@logbrew/node` من npm. يعمل هذا الإعداد مع Deno 2.9 و`@logbrew/node` 0.1.20 و`@logbrew/sdk` 0.1.35.
+
+<Steps>
+  <Step title="احفظ مفتاح الاستيعاب كسرّ للدالة">
+    استخدم Supabase CLI. استبدل القيمة النائبة بمفتاحك:
+
+    ```bash
+    supabase secrets set LOGBREW_SERVER_API_KEY=lbw_ingest_placeholder
+    ```
+  </Step>
+
+  <Step title="أنشئ العميل وفرّغ الأحداث قبل إعادة الاستجابة">
+    أنشئ العميل مرة واحدة خارج معالج الطلبات. والتقط الأحداث داخل المعالج. استدعِ `flush()` قبل أن تعيد الاستجابة، لأن الدالة قد تتوقف بعد أن تعيدها.
+
+    ```ts
+    import { createIssueAttributesFromError, SdkError } from "npm:@logbrew/sdk@^0.1.35";
+    import { createLogBrewNodeClient } from "npm:@logbrew/node@^0.1.20";
+
+    const logbrew = createLogBrewNodeClient({
+      serverApiKey: Deno.env.get("LOGBREW_SERVER_API_KEY"),
+      captureRuntimeContext: false,
+      context: {
+        schemaVersion: 1,
+        resource: {
+          service: { name: "checkout-function", version: "checkout@1" },
+          runtime: { name: "deno", version: Deno.version.deno },
+        },
+      },
+    });
+
+    Deno.serve(async (request) => {
+      const occurredAt = new Date().toISOString();
+      logbrew.log(crypto.randomUUID(), occurredAt, {
+        message: "checkout request",
+        level: "info",
+        metadata: { method: request.method },
+      });
+      let response = new Response("ok");
+      try {
+        await checkout(request);
+      } catch (error) {
+        logbrew.issue(
+          crypto.randomUUID(),
+          occurredAt,
+          createIssueAttributesFromError(error, { service: "checkout-function" }),
+        );
+        response = new Response("checkout failed", { status: 500 });
+      }
+      try {
+        await logbrew.flush();
+      } catch (error) {
+        console.error(error instanceof SdkError ? error.code : "logbrew_delivery_failed");
+      }
+      return response;
+    });
+
+    async function checkout(_request: Request) {
+      // Your function code.
+    }
+    ```
+
+    بفضل `captureRuntimeContext: false` وسياق `runtime`، يعرض LogBrew بيئة التشغيل على أنها Deno. وبدونهما، يُبلغ الـ SDK عن إصدار Node.js الذي يحاكيه Deno.
+
+    إذا فشل التسليم، يطرح `flush()` الخطأ `SdkError`، مثلًا بالرمز `network_failure`. يكتب المثال رمز الخطأ فقط في سجل الدالة، وتظل الدالة تعيد استجابتها.
+  </Step>
+
+  <Step title="انشر الدالة واستدعِها">
+    انشر الدالة باستخدام `supabase functions deploy checkout`. ثم استدعِها مرة واحدة.
+
+    **نقطة تحقق:** يظهر السجل `checkout request` في مشروعك في LogBrew.
+  </Step>
+</Steps>
+
+لا تضع بيانات الاعتماد أو نصوص الطلبات أو بيانات العملاء في البيانات الوصفية للأحداث.

@@ -1,0 +1,122 @@
+---
+title: "LogBrew로 Supabase 로그 드레인과 Edge Functions 로그 수집하기"
+sidebarTitle: "Supabase"
+description: "로그 드레인으로 Supabase 플랫폼 로그를 LogBrew에 보내고, JavaScript SDK로 Supabase Edge Functions의 로그와 오류를 수집하세요."
+---
+
+Supabase 데이터 2종류를 LogBrew에 보낼 수 있습니다.
+
+- 로그 드레인은 Supabase 프로젝트의 플랫폼 로그를 보냅니다. Postgres, Auth, Storage, Edge Functions 로그 등이 여기에 해당합니다.
+- LogBrew JavaScript SDK는 직접 작성한 Edge Function 코드에서 수집한 로그와 오류를 보냅니다.
+
+하나만 쓰거나 둘 다 쓸 수 있습니다. 둘 다 프로젝트 수집 키가 필요합니다. 용도마다 `server` 키를 만드세요. 키 종류는 [프로젝트 키 종류](/ko/guides/verify-setup#project-key-kinds)를 참고하세요.
+
+## <span id="log-drain">로그 드레인으로 플랫폼 로그 보내기</span>
+
+Supabase 로그 드레인은 Supabase Pro, Team, Enterprise 요금제에서 쓸 수 있습니다. Supabase는 드레인마다 요금을 청구하고, 드레인이 보내는 이벤트에도 요금을 청구합니다. 드레인을 추가하기 전에 Supabase 요금 안내를 확인하세요.
+
+<Steps>
+  <Step title="로그 드레인 설정 열기">
+    Supabase 대시보드에서 프로젝트를 여세요. **Project Settings**로 이동한 다음 **Log Drains**를 여세요.
+  </Step>
+
+  <Step title="OpenTelemetry 대상 추가하기">
+    **OpenTelemetry (OTLP)** 유형의 대상을 추가하세요. 다음 값을 설정하세요.
+
+    | 필드 | 값 |
+    | --- | --- |
+    | Endpoint | `https://api.logbrew.co/v1/logs` |
+    | Protocol | `http/protobuf` |
+    | Gzip | On |
+    | Headers | `x-logbrew-key`, 값은 수집 키 |
+
+    `x-logbrew-key` 대신 값이 `Bearer lbw_ingest_...`인 `Authorization` 헤더를 써도 됩니다.
+  </Step>
+
+  <Step title="대상 저장하기">
+    대상을 저장하세요. Supabase가 LogBrew로 로그를 보내기 시작합니다.
+
+    **확인:** 새 Supabase 로그가 LogBrew 프로젝트의 로그에 표시됩니다. CLI로 읽으려면 [테스트 이벤트 다시 읽기](/ko/guides/verify-setup#verify-telemetry-arrival)를 따르세요.
+  </Step>
+</Steps>
+
+LogBrew는 드레인 데이터를 OTLP 로그로 읽습니다. `service.name` 리소스 속성이 각 로그의 서비스를 정합니다. 그 밖의 리소스 속성은 로그 메타데이터에 남습니다. LogBrew는 로그를 저장하기 전에 URL과 `authorization` 같은 속성에서 자격 증명을 제거합니다. 전체 매핑은 [OpenTelemetry (OTLP)](/ko/guides/opentelemetry)를 참고하세요.
+
+로그가 도착하지 않으면 엔드포인트, 프로토콜, 헤더를 확인하세요. 수집 키는 읽으려는 LogBrew 프로젝트의 키여야 합니다.
+
+## <span id="edge-functions">Edge Functions에서 로그와 오류 수집하기</span>
+
+Supabase Edge Functions는 Deno에서 실행됩니다. npm의 `@logbrew/node`를 사용하세요. 이 설정은 Deno 2.9, `@logbrew/node` 0.1.20, `@logbrew/sdk` 0.1.35에서 작동합니다.
+
+<Steps>
+  <Step title="수집 키를 함수 시크릿으로 저장하기">
+    Supabase CLI를 사용하세요. 자리 표시자를 키로 바꾸세요.
+
+    ```bash
+    supabase secrets set LOGBREW_SERVER_API_KEY=lbw_ingest_placeholder
+    ```
+  </Step>
+
+  <Step title="클라이언트를 만들고 반환 전에 flush하기">
+    요청 핸들러 밖에서 클라이언트를 한 번 만드세요. 이벤트는 핸들러 안에서 수집하세요. 응답을 반환하기 전에 `flush()`를 호출하세요. 함수는 응답을 반환한 뒤 멈출 수 있기 때문입니다.
+
+    ```ts
+    import { createIssueAttributesFromError, SdkError } from "npm:@logbrew/sdk@^0.1.35";
+    import { createLogBrewNodeClient } from "npm:@logbrew/node@^0.1.20";
+
+    const logbrew = createLogBrewNodeClient({
+      serverApiKey: Deno.env.get("LOGBREW_SERVER_API_KEY"),
+      captureRuntimeContext: false,
+      context: {
+        schemaVersion: 1,
+        resource: {
+          service: { name: "checkout-function", version: "checkout@1" },
+          runtime: { name: "deno", version: Deno.version.deno },
+        },
+      },
+    });
+
+    Deno.serve(async (request) => {
+      const occurredAt = new Date().toISOString();
+      logbrew.log(crypto.randomUUID(), occurredAt, {
+        message: "checkout request",
+        level: "info",
+        metadata: { method: request.method },
+      });
+      let response = new Response("ok");
+      try {
+        await checkout(request);
+      } catch (error) {
+        logbrew.issue(
+          crypto.randomUUID(),
+          occurredAt,
+          createIssueAttributesFromError(error, { service: "checkout-function" }),
+        );
+        response = new Response("checkout failed", { status: 500 });
+      }
+      try {
+        await logbrew.flush();
+      } catch (error) {
+        console.error(error instanceof SdkError ? error.code : "logbrew_delivery_failed");
+      }
+      return response;
+    });
+
+    async function checkout(_request: Request) {
+      // Your function code.
+    }
+    ```
+
+    `captureRuntimeContext: false`와 `runtime` 컨텍스트를 설정하면 LogBrew에 런타임이 Deno로 표시됩니다. 이 설정이 없으면 SDK는 Deno가 에뮬레이션하는 Node.js 버전을 보고합니다.
+
+    전송에 실패하면 `flush()`가 `SdkError` 오류를 발생시킵니다. 예를 들어 오류 코드는 `network_failure`입니다. 예제는 함수 로그에 오류 코드만 기록하며, 함수는 그대로 응답을 반환합니다.
+  </Step>
+
+  <Step title="함수 배포하고 호출하기">
+    `supabase functions deploy checkout`으로 함수를 배포하세요. 함수를 한 번 호출하세요.
+
+    **확인:** LogBrew 프로젝트에 `checkout request` 로그가 표시됩니다.
+  </Step>
+</Steps>
+
+이벤트 메타데이터에 자격 증명, 요청 본문, 고객 데이터를 넣지 마세요.
