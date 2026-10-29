@@ -14,6 +14,27 @@ Mỗi kết quả thuộc về một dự án và một khoảng thời gian. T�
 để chọn dự án. Log và vấn đề là các tín hiệu riêng. Có log hoặc vấn đề không có
 nghĩa là có dữ liệu phân tích trong cùng khoảng thời gian.
 
+## Chọn lệnh theo câu hỏi
+
+| Câu hỏi | Lệnh |
+| --- | --- |
+| Người dùng đến từ đâu? | `logbrew analytics properties` |
+| Người dùng rời bỏ ở bước nào, và bao nhiêu người chuyển đổi? | `logbrew analytics funnel` |
+| Nguồn lưu lượng truy cập nào chuyển đổi tốt nhất? | `logbrew analytics funnel --breakdown tag.utm_source` |
+| Người dùng có quay lại không? | `logbrew analytics retention` |
+| Người dùng làm gì trước hoặc sau một trang? | `logbrew analytics paths` |
+| Trang và sự kiện nào được dùng nhiều nhất? | `logbrew analytics overview` |
+
+`logbrew read actions` chỉ liệt kê hành động sản phẩm. Lượt xem trang là span
+của trace, nên danh sách đó không bao giờ chứa lượt xem trang. Đếm lượt xem
+trang bằng các lệnh phân tích, và đọc lượt xem trang của một lượt truy cập
+bằng `logbrew read trace`.
+
+SDK trình duyệt thêm `tag.utm_source`, `tag.utm_medium`, `tag.utm_campaign`
+và `tag.referrer_domain` vào mọi sự kiện của một lượt truy cập. SDK đọc các
+giá trị này từ URL trang đích và trang giới thiệu. Bạn không cần thêm mã để
+ghi nhận nguồn truy cập. Lượt truy cập trực tiếp không có thẻ nào trong số này.
+
 ## Sự kiện, người dùng và phiên
 
 | Đơn vị | Ý nghĩa |
@@ -28,7 +49,35 @@ dụng. Tổng số sự kiện là số chính xác trong khoảng thời gian 
 dùng, phiên và chủ thể ẩn danh duy nhất là số ước tính.
 
 Dùng ID opaque. Không dùng tên, địa chỉ email hoặc dữ liệu cá nhân khác làm ID.
-Phản hồi phân tích không bao giờ trả về ID người dùng hoặc ID phiên thô.
+Các lệnh phân tích của CLI trả về tối đa 5 ID phiên hoặc ID người dùng mẫu
+đứng sau mỗi con số, đúng như ứng dụng đã gửi.
+
+## Đọc mức thay đổi, mẫu và ví dụ
+
+Mọi lệnh phân tích của CLI, trừ lệnh vòng đời, đều trả về một đối tượng
+`detail` kèm câu trả lời:
+
+| Trường | Ý nghĩa |
+| --- | --- |
+| `sample_size` | Số phiên hoặc người dùng đứng sau kết quả chính. |
+| `previous_since`, `previous_until` | Kỳ có cùng độ dài, ngay trước kỳ đã chọn. |
+| `groups[].units`, `groups[].previous_units` | Cùng một con số ở kỳ này và ở kỳ trước. |
+| `groups[].change`, `groups[].change_rate` | Mức chênh lệch và mức thay đổi tương đối. |
+| `groups[].rate_change_p_value`, `groups[].rate_change_significant` | Kiểm định hai tỷ lệ cho mức thay đổi của tỷ lệ: giá trị p và việc nó có nhỏ hơn 0,05 hay không. Chỉ tin vào một thay đổi khi nó có ý nghĩa thống kê. |
+| `groups[].rate`, `groups[].base_units` | Con số tính theo tỷ lệ trên tổng thể của nó. |
+| `groups[].breakdown` | Giá trị thuộc tính của một nhóm, ví dụ một nguồn lưu lượng truy cập. |
+| `groups[].examples` | Tối đa 5 phiên hoặc người dùng, mỗi mục có tối đa 3 ID hành động và 3 ID trace. |
+
+Đọc các sự kiện của một phiên mẫu và lượt xem trang trong trace của phiên đó:
+
+```bash
+logbrew read actions --session "<session_id>" --project "<project_id>" --since 24h --json
+logbrew read trace "<trace_id>" --project "<project_id>" --json
+```
+
+Với người dùng mẫu, dùng `--user "<user_id>"` thay cho `--session`. Mẫu nhỏ có
+thể thay đổi nhiều từ kỳ này sang kỳ sau. Luôn nêu kích thước mẫu kèm mỗi tỷ
+lệ.
 
 ## Mở trang tổng quan trên bảng điều khiển
 
@@ -142,8 +191,8 @@ cũ không chứng tỏ thay đổi đó đã có tác dụng.
 
 ### Gọi API trực tiếp
 
-Gửi bearer token của tài khoản. Gửi `response_version=3` để nhận cùng phản hồi
-mà CLI đọc. Nếu bỏ `response_version`, API trả về phiên bản `1`. Phiên bản này
+Gửi bearer token của tài khoản. Gửi `response_version=4` để nhận cùng phản hồi
+mà CLI đọc, có kèm `detail`. Nếu bỏ `response_version`, API trả về phiên bản `1`. Phiên bản này
 không có số đếm chủ thể ẩn danh và không có `subject_coverage`.
 
 ```bash
@@ -151,7 +200,7 @@ curl -sS -G "https://api.logbrew.co/api/telemetry/analytics/overview" \
   -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
   --data-urlencode "project_id=<project_id>" \
   --data-urlencode "since=7d" \
-  --data-urlencode "response_version=3"
+  --data-urlencode "response_version=4"
 ```
 
 `since` là một thời lượng dương, như `24h`, `7d` hoặc `30d`, hoặc một dấu thời
@@ -202,6 +251,12 @@ Bước cuối phải xảy ra trong cửa sổ chuyển đổi, tính từ bư�
 sổ này bằng `--conversion-window`, ví dụ `30m` hoặc `1h`. Mặc định là 24 giờ,
 hoặc toàn bộ khoảng thời gian nếu khoảng đó ngắn hơn. Cửa sổ không được dài hơn
 khoảng thời gian.
+
+Thêm `--breakdown tag.utm_source` để chia từng bước theo nguồn lưu lượng truy
+cập. Mỗi phiên hoặc người dùng được tính vào giá trị đầu tiên mà nó mang. Dùng
+`tag.referrer_domain` cho lượt truy cập từ trang web khác. Kết quả chia hiển
+thị 10 giá trị có nhiều lượt vào phễu nhất. Các phiên không có thuộc tính này
+được gộp thành một nhóm. Mọi giá trị còn lại được gộp thành thêm một nhóm.
 
 Route API là `POST /api/telemetry/analytics/funnel`. Mục
 [phản hồi phễu theo thứ tự](/vi/reference/telemetry-response-shapes#ordered-funnel-response)

@@ -14,6 +14,27 @@ Jedes Ergebnis gilt für ein Projekt und einen Zeitraum. Ein Dienstname wählt
 kein Projekt aus. Logs und Issues sind eigene Signale. Wenn es sie gibt,
 heißt das nicht, dass es für denselben Zeitraum auch Analysedaten gibt.
 
+## Befehl für die Frage wählen
+
+| Frage | Befehl |
+| --- | --- |
+| Woher kommen die Nutzer? | `logbrew analytics properties` |
+| Wo steigen Nutzer aus, und wie viele konvertieren? | `logbrew analytics funnel` |
+| Welche Traffic-Quelle konvertiert am besten? | `logbrew analytics funnel --breakdown tag.utm_source` |
+| Kehren Nutzer zurück? | `logbrew analytics retention` |
+| Was tun Nutzer vor oder nach einer Seite? | `logbrew analytics paths` |
+| Welche Seiten und Ereignisse werden am meisten genutzt? | `logbrew analytics overview` |
+
+`logbrew read actions` listet nur Produktaktionen. Seitenaufrufe sind
+Trace-Spans, deshalb stehen sie nie in dieser Liste. Zählen Sie Seitenaufrufe
+mit den Analysebefehlen. Die Seitenaufrufe eines Besuchs lesen Sie mit
+`logbrew read trace`.
+
+Das Browser-SDK fügt jedem Ereignis eines Besuchs `tag.utm_source`,
+`tag.utm_medium`, `tag.utm_campaign` und `tag.referrer_domain` hinzu. Es
+liest sie aus der Einstiegs-URL und dem Referrer. Für die Zuordnung der
+Herkunft brauchen Sie keinen Code. Ein direkter Besuch hat keines dieser Tags.
+
 ## Ereignisse, Nutzer und Sitzungen
 
 | Einheit | Bedeutung |
@@ -28,8 +49,37 @@ App genutzt haben. Ereignissummen sind für den gewählten Zeitraum exakt. Die
 Zahlen eindeutiger Nutzer, Sitzungen und anonymer Subjekte sind ungefähr.
 
 Verwenden Sie opake IDs. Verwenden Sie keine Namen,
-E-Mail-Adressen oder andere personenbezogene Daten als IDs. Antworten der
-Analysen geben nie rohe Nutzer- oder Sitzungs-IDs zurück.
+E-Mail-Adressen oder andere personenbezogene Daten als IDs. Die
+Analysebefehle der CLI geben zu jeder Zahl bis zu 5 Beispiel-IDs von
+Sitzungen oder Nutzern zurück, genau so, wie Ihre App sie gesendet hat.
+
+## Veränderung, Stichprobe und Beispiele lesen
+
+Jeder Analysebefehl der CLI außer dem Lebenszyklus liefert mit der Antwort
+ein `detail`-Objekt:
+
+| Feld | Bedeutung |
+| --- | --- |
+| `sample_size` | Sitzungen oder Nutzer hinter dem Hauptergebnis. |
+| `previous_since`, `previous_until` | Der gleich lange Zeitraum direkt vor dem gewählten. |
+| `groups[].units`, `groups[].previous_units` | Eine Zahl jetzt und im vorherigen Zeitraum. |
+| `groups[].change`, `groups[].change_rate` | Die Differenz und die relative Veränderung. |
+| `groups[].rate_change_p_value`, `groups[].rate_change_significant` | Ein Zwei-Stichproben-Test für Anteile zur Veränderung der Rate: der p-Wert und ob er unter 0,05 liegt. Vertrauen Sie einer Veränderung nur, wenn sie signifikant ist. |
+| `groups[].rate`, `groups[].base_units` | Die Zahl als Anteil ihrer Grundgesamtheit. |
+| `groups[].breakdown` | Der Eigenschaftswert einer Gruppe, etwa eine Traffic-Quelle. |
+| `groups[].examples` | Bis zu 5 Sitzungen oder Nutzer, jeweils mit bis zu 3 Aktions-IDs und 3 Trace-IDs. |
+
+Lesen Sie die Ereignisse einer Beispielsitzung und die Seitenaufrufe ihres
+Traces:
+
+```bash
+logbrew read actions --session "<session_id>" --project "<project_id>" --since 24h --json
+logbrew read trace "<trace_id>" --project "<project_id>" --json
+```
+
+Für einen Beispielnutzer verwenden Sie `--user "<user_id>"` statt
+`--session`. Eine kleine Stichprobe kann sich von einem Zeitraum zum nächsten
+stark ändern. Nennen Sie zu jeder Rate die Stichprobengröße.
 
 ## Übersicht im Dashboard öffnen
 
@@ -144,8 +194,8 @@ zeigt die wichtigste Erfassungslücke oder den nächsten Analyseschritt:
 
 ### API direkt aufrufen
 
-Senden Sie ein Konto-Bearer-Token. Senden Sie `response_version=3`, um
-dieselbe Antwort zu erhalten, die die CLI liest. Ohne `response_version`
+Senden Sie ein Konto-Bearer-Token. Senden Sie `response_version=4`, um
+dieselbe Antwort mit `detail` zu erhalten, die die CLI liest. Ohne `response_version`
 gibt die API Version `1` zurück. Sie enthält keine Zahlen anonymer Subjekte
 und kein `subject_coverage`.
 
@@ -154,7 +204,7 @@ curl -sS -G "https://api.logbrew.co/api/telemetry/analytics/overview" \
   -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
   --data-urlencode "project_id=<project_id>" \
   --data-urlencode "since=7d" \
-  --data-urlencode "response_version=3"
+  --data-urlencode "response_version=4"
 ```
 
 `since` ist eine positive Dauer wie `24h`, `7d` oder `30d` oder ein
@@ -209,6 +259,12 @@ dem ersten Schritt beginnt. Legen Sie es mit `--conversion-window` fest,
 zum Beispiel `30m` oder `1h`. Der Standardwert ist 24 Stunden oder der ganze
 Zeitraum, wenn dieser kürzer ist. Das Fenster darf nicht länger als der
 Zeitraum sein.
+
+Mit `--breakdown tag.utm_source` teilen Sie jeden Schritt nach Traffic-Quelle
+auf. Jede Sitzung und jeder Nutzer zählt unter dem ersten Wert, den sie
+mitbringen. Für Besuche von anderen Websites verwenden Sie
+`tag.referrer_domain`. Die Aufteilung zeigt die 10 Werte mit den meisten
+Einstiegen. Sitzungen ohne die Eigenschaft bilden eine eigene Gruppe. Alle übrigen Werte bilden eine weitere Gruppe.
 
 Die API-Route ist `POST /api/telemetry/analytics/funnel`. Die
 [Antwort für geordnete Trichter](/de/reference/telemetry-response-shapes#ordered-funnel-response)

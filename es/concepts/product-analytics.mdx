@@ -14,6 +14,27 @@ de servicio no selecciona un proyecto. Los logs y las incidencias son señales
 distintas. Que existan no significa que haya datos de analíticas para el mismo
 intervalo de tiempo.
 
+## Elige el comando según la pregunta
+
+| Pregunta | Comando |
+| --- | --- |
+| ¿De dónde vienen los usuarios? | `logbrew analytics properties` |
+| ¿Dónde abandonan los usuarios y cuántos convierten? | `logbrew analytics funnel` |
+| ¿Qué fuente de tráfico convierte mejor? | `logbrew analytics funnel --breakdown tag.utm_source` |
+| ¿Los usuarios regresan? | `logbrew analytics retention` |
+| ¿Qué hacen los usuarios antes o después de una página? | `logbrew analytics paths` |
+| ¿Qué páginas y eventos se usan más? | `logbrew analytics overview` |
+
+`logbrew read actions` solo enumera acciones de producto. Las vistas de página
+son spans de traza, así que esa lista nunca las incluye. Cuenta las vistas de
+página con los comandos de analíticas y lee las vistas de página de una visita
+con `logbrew read trace`.
+
+El SDK del navegador añade `tag.utm_source`, `tag.utm_medium`,
+`tag.utm_campaign` y `tag.referrer_domain` a cada evento de una visita. Los lee
+de la URL de entrada y del referente. No necesitas añadir código para la
+atribución. Una visita directa no tiene ninguna de estas etiquetas.
+
 ## Eventos, usuarios y sesiones
 
 | Unidad | Significado |
@@ -29,8 +50,36 @@ seleccionado. Los recuentos únicos de usuarios, sesiones y sujetos anónimos so
 aproximados.
 
 Usa ID opacos. No uses nombres, direcciones de correo electrónico ni otros
-datos personales como ID. Las respuestas de analíticas nunca devuelven ID de
-usuario ni de sesión sin procesar.
+datos personales como ID. Los comandos de analíticas de la CLI devuelven hasta
+5 ID de sesión o de usuario de ejemplo detrás de cada número, tal como los envió
+tu app.
+
+## Lee el cambio, la muestra y los ejemplos
+
+Todos los comandos de analíticas de la CLI, salvo el de ciclo de vida, dan un
+objeto `detail` con la respuesta:
+
+| Campo | Significado |
+| --- | --- |
+| `sample_size` | Sesiones o usuarios detrás del resultado principal. |
+| `previous_since`, `previous_until` | El periodo de la misma duración justo antes del seleccionado. |
+| `groups[].units`, `groups[].previous_units` | Un mismo número ahora y en el periodo anterior. |
+| `groups[].change`, `groups[].change_rate` | La diferencia y el cambio relativo. |
+| `groups[].rate_change_p_value`, `groups[].rate_change_significant` | Una prueba de dos proporciones sobre el cambio de la tasa: su valor p y si está por debajo de 0,05. Confía en un cambio solo si es significativo. |
+| `groups[].rate`, `groups[].base_units` | El número como proporción de su población. |
+| `groups[].breakdown` | El valor de la propiedad de un grupo, como una fuente de tráfico. |
+| `groups[].examples` | Hasta 5 sesiones o usuarios, cada uno con hasta 3 ID de acción y 3 ID de traza. |
+
+Lee los eventos de una sesión de ejemplo y las vistas de página de su traza:
+
+```bash
+logbrew read actions --session "<session_id>" --project "<project_id>" --since 24h --json
+logbrew read trace "<trace_id>" --project "<project_id>" --json
+```
+
+Para un usuario de ejemplo, usa `--user "<user_id>"` en lugar de `--session`.
+Una muestra pequeña puede cambiar mucho de un periodo al siguiente. Indica el
+tamaño de la muestra junto con cada tasa.
 
 ## Abre el resumen en el panel
 
@@ -145,8 +194,8 @@ anteriores no demuestran que el cambio funcione.
 
 ### Llama directamente a la API
 
-Envía un token bearer de cuenta. Envía `response_version=3` para obtener la
-misma respuesta que lee la CLI. Si omites `response_version`, la API devuelve
+Envía un token bearer de cuenta. Envía `response_version=4` para obtener la
+misma respuesta que lee la CLI, con `detail`. Si omites `response_version`, la API devuelve
 la versión `1`, que no tiene recuentos de sujetos anónimos ni
 `subject_coverage`.
 
@@ -155,7 +204,7 @@ curl -sS -G "https://api.logbrew.co/api/telemetry/analytics/overview" \
   -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
   --data-urlencode "project_id=<project_id>" \
   --data-urlencode "since=7d" \
-  --data-urlencode "response_version=3"
+  --data-urlencode "response_version=4"
 ```
 
 `since` es una duración positiva, como `24h`, `7d` o `30d`, o una marca de
@@ -208,6 +257,12 @@ El último paso debe ocurrir dentro de la ventana de conversión, que empieza en
 el primer paso. Defínela con `--conversion-window`, por ejemplo `30m` o `1h`.
 El valor predeterminado es 24 horas, o todo el intervalo de tiempo si es más
 corto. La ventana no puede ser más larga que el intervalo de tiempo.
+
+Añade `--breakdown tag.utm_source` para dividir cada paso por fuente de
+tráfico. Cada sesión o usuario cuenta en el primer valor que tuvo. Usa
+`tag.referrer_domain` para las visitas desde otros sitios. La división muestra
+los 10 valores con más entradas. Las sesiones sin la propiedad forman un solo
+grupo. Todos los demás valores forman un grupo más.
 
 La ruta de la API es `POST /api/telemetry/analytics/funnel`. La
 [respuesta del embudo ordenado](/es/reference/telemetry-response-shapes#ordered-funnel-response)

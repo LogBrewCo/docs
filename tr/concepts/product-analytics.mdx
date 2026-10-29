@@ -14,6 +14,27 @@ Her sonuç tek bir proje ve tek bir zaman aralığı içindir. Hizmet adı bir p
 seçmez. Loglar ve sorunlar ayrı sinyallerdir. Bunların bulunması, aynı aralık
 için analiz verisi olduğu anlamına gelmez.
 
+## Soruya uygun komutu seçin
+
+| Soru | Komut |
+| --- | --- |
+| Kullanıcılar nereden geliyor? | `logbrew analytics properties` |
+| Kullanıcılar hangi adımda ayrılıyor ve kaçı dönüşüm sağlıyor? | `logbrew analytics funnel` |
+| En çok dönüşümü hangi trafik kaynağı getiriyor? | `logbrew analytics funnel --breakdown tag.utm_source` |
+| Kullanıcılar geri geliyor mu? | `logbrew analytics retention` |
+| Kullanıcılar bir sayfadan önce veya sonra ne yapıyor? | `logbrew analytics paths` |
+| En çok hangi sayfalar ve olaylar kullanılıyor? | `logbrew analytics overview` |
+
+`logbrew read actions` yalnızca ürün aksiyonlarını listeler. Sayfa
+görüntülemeleri iz span'leridir, bu yüzden bu listede hiçbir zaman yer almaz.
+Sayfa görüntülemelerini analiz komutlarıyla sayın. Tek bir ziyaretin sayfa
+görüntülemelerini `logbrew read trace` ile okuyun.
+
+Tarayıcı SDK'sı bir ziyaretin her olayına `tag.utm_source`, `tag.utm_medium`,
+`tag.utm_campaign` ve `tag.referrer_domain` ekler. Bunları açılış URL'sinden
+ve yönlendiren sayfadan okur. Trafik kaynağını belirlemek için kod eklemeniz
+gerekmez. Doğrudan bir ziyarette bu etiketlerin hiçbiri olmaz.
+
 ## Olaylar, kullanıcılar ve oturumlar
 
 | Birim | Anlamı |
@@ -28,8 +49,36 @@ gelmez. Olay toplamları seçilen aralık için kesindir. Benzersiz kullanıcı,
 oturum ve anonim özne sayıları yaklaşıktır.
 
 Opak kimlikler kullanın. Adları, e-posta adreslerini veya diğer kişisel
-verileri kimlik olarak kullanmayın. Analiz yanıtları asla ham kullanıcı veya
-oturum kimliği döndürmez.
+verileri kimlik olarak kullanmayın. CLI analiz komutları her sayının
+arkasındaki en fazla 5 örnek oturum veya kullanıcı kimliğini, uygulamanızın
+gönderdiği haliyle döndürür.
+
+## Değişimi, örneklemi ve örnekleri okuyun
+
+Yaşam döngüsü dışındaki her CLI analiz komutu, yanıtla birlikte bir `detail`
+nesnesi verir:
+
+| Alan | Anlamı |
+| --- | --- |
+| `sample_size` | Ana sonucun arkasındaki oturumlar veya kullanıcılar. |
+| `previous_since`, `previous_until` | Seçilen dönemden hemen önceki, aynı uzunluktaki dönem. |
+| `groups[].units`, `groups[].previous_units` | Bir sayının şimdiki ve önceki dönemdeki değeri. |
+| `groups[].change`, `groups[].change_rate` | Fark ve göreli değişim. |
+| `groups[].rate_change_p_value`, `groups[].rate_change_significant` | Oran değişiminin iki oran testi: p değeri ve 0,05'in altında olup olmadığı. Bir değişime yalnızca anlamlıysa güvenin. |
+| `groups[].rate`, `groups[].base_units` | Sayının kendi kitlesi içindeki payı. |
+| `groups[].breakdown` | Bir grubun özellik değeri, örneğin tek bir trafik kaynağı. |
+| `groups[].examples` | En fazla 5 oturum veya kullanıcı. Her birinde en fazla 3 aksiyon kimliği ve 3 iz kimliği bulunur. |
+
+Örnek bir oturumun olaylarını ve izinin sayfa görüntülemelerini okuyun:
+
+```bash
+logbrew read actions --session "<session_id>" --project "<project_id>" --since 24h --json
+logbrew read trace "<trace_id>" --project "<project_id>" --json
+```
+
+Örnek bir kullanıcı için `--session` yerine `--user "<user_id>"` kullanın.
+Küçük bir örneklem bir dönemden diğerine çok değişebilir. Her oranla birlikte
+örneklem büyüklüğünü de verin.
 
 ## Paneldeki genel bakışı açın
 
@@ -146,8 +195,8 @@ Eski olaylar değişikliğin çalıştığını göstermez.
 
 ### API'yi doğrudan çağırın
 
-Bir hesap bearer tokenı gönderin. CLI'ın okuduğu yanıtın aynısını almak için
-`response_version=3` gönderin. `response_version` göndermezseniz API `1`
+Bir hesap bearer tokenı gönderin. CLI'ın okuduğu yanıtın aynısını `detail`
+ile birlikte almak için `response_version=4` gönderin. `response_version` göndermezseniz API `1`
 sürümünü döndürür. Bu sürümde anonim özne sayıları veya `subject_coverage`
 yoktur.
 
@@ -156,7 +205,7 @@ curl -sS -G "https://api.logbrew.co/api/telemetry/analytics/overview" \
   -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
   --data-urlencode "project_id=<project_id>" \
   --data-urlencode "since=7d" \
-  --data-urlencode "response_version=3"
+  --data-urlencode "response_version=4"
 ```
 
 `since`, `24h`, `7d` veya `30d` gibi pozitif bir süre ya da bir RFC3339 zaman
@@ -208,6 +257,12 @@ Son adım, ilk adımda başlayan dönüşüm süresi içinde gerçekleşmelidir.
 süreyi `--conversion-window` ile ayarlayın, örneğin `30m` veya `1h`.
 Varsayılan 24 saattir. Seçilen aralık daha kısaysa varsayılan, aralığın
 tamamıdır. Dönüşüm süresi seçilen aralıktan uzun olamaz.
+
+Her adımı trafik kaynağına göre ayırmak için `--breakdown tag.utm_source`
+ekleyin. Her oturum veya kullanıcı, taşıdığı ilk değerin altında sayılır. Başka
+sitelerden gelen ziyaretler için `tag.referrer_domain` kullanın. Ayrım, en çok
+girişi olan 10 değeri gösterir. Bu özelliği olmayan oturumlar tek bir grup
+oluşturur. Diğer tüm değerler bir grup daha oluşturur.
 
 API rotası `POST /api/telemetry/analytics/funnel` olur.
 [Sıralı dönüşüm hunisi yanıtı](/tr/reference/telemetry-response-shapes#ordered-funnel-response)

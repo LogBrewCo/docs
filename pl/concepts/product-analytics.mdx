@@ -14,6 +14,27 @@ Każdy wynik dotyczy jednego projektu i jednego zakresu czasu. Nazwa usługi nie
 wybiera projektu. Logi i problemy to osobne sygnały. To, że istnieją, nie
 oznacza, że w tym samym zakresie są dane analityczne.
 
+## Dobierz polecenie do pytania
+
+| Pytanie | Polecenie |
+| --- | --- |
+| Skąd przychodzą użytkownicy? | `logbrew analytics properties` |
+| Gdzie użytkownicy rezygnują i ilu z nich konwertuje? | `logbrew analytics funnel` |
+| Które źródło ruchu konwertuje najlepiej? | `logbrew analytics funnel --breakdown tag.utm_source` |
+| Czy użytkownicy wracają? | `logbrew analytics retention` |
+| Co robią użytkownicy przed stroną lub po niej? | `logbrew analytics paths` |
+| Które strony i zdarzenia są najczęściej używane? | `logbrew analytics overview` |
+
+`logbrew read actions` wyświetla tylko akcje produktowe. Wyświetlenia stron to
+spany śladu, więc ta lista nigdy ich nie zawiera. Licz wyświetlenia stron
+poleceniami analityki, a wyświetlenia stron z jednej wizyty odczytuj przez
+`logbrew read trace`.
+
+SDK dla przeglądarki dodaje `tag.utm_source`, `tag.utm_medium`,
+`tag.utm_campaign` i `tag.referrer_domain` do każdego zdarzenia wizyty.
+Odczytuje je z adresu URL wejścia i ze strony odsyłającej. Nie musisz dodawać
+kodu do atrybucji. Wizyta bezpośrednia nie ma żadnego z tych tagów.
+
 ## Zdarzenia, użytkownicy i sesje
 
 | Jednostka | Znaczenie |
@@ -28,8 +49,36 @@ osób. Sumy zdarzeń są dokładne dla wybranego okna czasowego. Liczby unikalny
 użytkowników, sesji i anonimowych podmiotów są przybliżone.
 
 Używaj nieprzezroczystych ID. Nie używaj jako ID imion i nazwisk, adresów
-e-mail ani innych danych osobowych. Odpowiedzi analityki nigdy nie zwracają
-surowych ID użytkowników ani sesji.
+e-mail ani innych danych osobowych. Polecenia analityki w CLI zwracają do 5
+przykładowych ID sesji lub użytkowników za każdą liczbą, dokładnie w takiej
+postaci, w jakiej wysłała je aplikacja.
+
+## Odczytaj zmianę, próbę i przykłady
+
+Każde polecenie analityki w CLI oprócz cyklu życia zwraca razem z odpowiedzią
+obiekt `detail`:
+
+| Pole | Znaczenie |
+| --- | --- |
+| `sample_size` | Sesje lub użytkownicy stojący za głównym wynikiem. |
+| `previous_since`, `previous_until` | Okres o tej samej długości tuż przed wybranym. |
+| `groups[].units`, `groups[].previous_units` | Ta sama liczba teraz i w poprzednim okresie. |
+| `groups[].change`, `groups[].change_rate` | Różnica i zmiana względna. |
+| `groups[].rate_change_p_value`, `groups[].rate_change_significant` | Test dwóch proporcji dla zmiany wskaźnika: wartość p i to, czy jest poniżej 0,05. Ufaj zmianie tylko wtedy, gdy jest istotna. |
+| `groups[].rate`, `groups[].base_units` | Liczba jako udział w jej populacji. |
+| `groups[].breakdown` | Wartość właściwości grupy, na przykład jedno źródło ruchu. |
+| `groups[].examples` | Do 5 sesji lub użytkowników, każdy z maksymalnie 3 ID akcji i 3 ID śladów. |
+
+Odczytaj zdarzenia jednej przykładowej sesji i wyświetlenia stron z jej śladu:
+
+```bash
+logbrew read actions --session "<session_id>" --project "<project_id>" --since 24h --json
+logbrew read trace "<trace_id>" --project "<project_id>" --json
+```
+
+Dla przykładowego użytkownika użyj `--user "<user_id>"` zamiast `--session`.
+Mała próba może się mocno zmieniać z okresu na okres. Przy każdym wskaźniku
+podawaj wielkość próby.
 
 ## Otwórz przegląd na pulpicie
 
@@ -143,8 +192,8 @@ zdarzenia nie pokażą, że zmiana działa.
 
 ### Wywołaj API bezpośrednio
 
-Wyślij token bearer konta. Wyślij `response_version=3`, aby dostać tę samą
-odpowiedź, którą odczytuje CLI. Jeśli pominiesz `response_version`, API zwróci
+Wyślij token bearer konta. Wyślij `response_version=4`, aby dostać tę samą
+odpowiedź, którą odczytuje CLI, razem z `detail`. Jeśli pominiesz `response_version`, API zwróci
 wersję `1`, która nie ma liczników anonimowych podmiotów ani
 `subject_coverage`.
 
@@ -153,7 +202,7 @@ curl -sS -G "https://api.logbrew.co/api/telemetry/analytics/overview" \
   -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
   --data-urlencode "project_id=<project_id>" \
   --data-urlencode "since=7d" \
-  --data-urlencode "response_version=3"
+  --data-urlencode "response_version=4"
 ```
 
 `since` to dodatni czas trwania, na przykład `24h`, `7d` lub `30d`, albo
@@ -206,6 +255,12 @@ Ostatni krok musi nastąpić w oknie konwersji, które zaczyna się od pierwszeg
 kroku. Ustaw je przez `--conversion-window`, na przykład `30m` lub `1h`.
 Domyślnie jest to 24 godziny albo cały zakres, jeśli zakres jest krótszy. Okno
 nie może być dłuższe niż zakres.
+
+Dodaj `--breakdown tag.utm_source`, aby podzielić każdy krok według źródła
+ruchu. Każda sesja lub użytkownik liczy się pod pierwszą wartością, którą
+miał. Dla wizyt z innych witryn użyj `tag.referrer_domain`. Podział pokazuje
+10 wartości z największą liczbą wejść. Sesje bez tej właściwości tworzą jedną
+grupę. Wszystkie pozostałe wartości tworzą jeszcze jedną grupę.
 
 Trasa API to `POST /api/telemetry/analytics/funnel`.
 [Odpowiedź uporządkowanego lejka](/pl/reference/telemetry-response-shapes#ordered-funnel-response)

@@ -8,6 +8,21 @@ description: "选择项目和日期，查看活动、漏斗、留存和生命周
 
 每个结果只对应一个项目和一个时间范围。服务名不能用来选择项目。日志和问题是独立的信号。即使它们存在，也不代表同一时间范围内有分析数据。
 
+## 按问题选择命令
+
+| 问题 | 命令 |
+| --- | --- |
+| 用户从哪里来？ | `logbrew analytics properties` |
+| 用户在哪一步流失，有多少人完成转化？ | `logbrew analytics funnel` |
+| 哪个流量来源的转化效果最好？ | `logbrew analytics funnel --breakdown tag.utm_source` |
+| 用户会回访吗？ | `logbrew analytics retention` |
+| 用户在某个页面之前或之后做了什么？ | `logbrew analytics paths` |
+| 哪些页面和事件使用最多？ | `logbrew analytics overview` |
+
+`logbrew read actions` 只列出产品操作。页面浏览是链路 Span，因此这个列表中永远不会出现页面浏览。使用分析命令统计页面浏览，使用 `logbrew read trace` 查看一次访问中的页面浏览。
+
+浏览器 SDK 会为一次访问中的每个事件添加 `tag.utm_source`、`tag.utm_medium`、`tag.utm_campaign` 和 `tag.referrer_domain`。这些值来自落地页 URL 和来源页面。你无需为来源归因编写代码。直接访问不带这些标签。
+
 ## 事件、用户和会话
 
 | 单位 | 含义 |
@@ -19,7 +34,31 @@ description: "选择项目和日期，查看活动、漏斗、留存和生命周
 
 例如，20 个会话中有 200 次操作，并不代表有 20 个人使用了应用。事件总数在所选时间范围内是精确值。去重后的用户数、会话数和匿名主体数都是近似值。
 
-使用不透明 ID。不要用姓名、电子邮件地址或其他个人信息作为 ID。分析响应从不返回原始用户 ID 或会话 ID。
+使用不透明 ID。不要用姓名、电子邮件地址或其他个人信息作为 ID。CLI 分析命令会为每个数字返回最多 5 个示例会话 ID 或用户 ID，与应用发送时完全一致。
+
+## 查看变化、样本和示例
+
+除生命周期外，每个 CLI 分析命令都会随结果返回一个 `detail` 对象：
+
+| 字段 | 含义 |
+| --- | --- |
+| `sample_size` | 主要结果背后的会话或用户。 |
+| `previous_since`、`previous_until` | 所选周期之前、长度相同的上一个周期。 |
+| `groups[].units`、`groups[].previous_units` | 同一个数字在当前周期和上一个周期的值。 |
+| `groups[].change`、`groups[].change_rate` | 差值和相对变化。 |
+| `groups[].rate_change_p_value`、`groups[].rate_change_significant` | 对比率变化做的双比例检验：p 值，以及它是否低于 0.05。只有显著的变化才值得相信。 |
+| `groups[].rate`、`groups[].base_units` | 该数字在其总体中所占的比例。 |
+| `groups[].breakdown` | 某个分组的属性值，例如一个流量来源。 |
+| `groups[].examples` | 最多 5 个会话或用户，每个附带最多 3 个操作 ID 和 3 个链路 ID。 |
+
+查看一个示例会话的事件，以及其链路中的页面浏览：
+
+```bash
+logbrew read actions --session "<session_id>" --project "<project_id>" --since 24h --json
+logbrew read trace "<trace_id>" --project "<project_id>" --json
+```
+
+对于示例用户，使用 `--user "<user_id>"` 代替 `--session`。样本较小时，数字在不同周期之间可能变化很大。给出每个比率时，都要同时给出样本量。
 
 ## 打开控制台概览
 
@@ -104,14 +143,14 @@ logbrew analytics overview --project "<project_id>" --since 7d --json
 
 ### 直接调用 API
 
-发送账号 Bearer 令牌。发送 `response_version=3`，即可获得与 CLI 读取内容相同的响应。如果省略 `response_version`，API 会返回版本 `1`，其中没有匿名主体计数，也没有 `subject_coverage`。
+发送账号 Bearer 令牌。发送 `response_version=4`，即可获得与 CLI 读取内容相同、包含 `detail` 的响应。如果省略 `response_version`，API 会返回版本 `1`，其中没有匿名主体计数，也没有 `subject_coverage`。
 
 ```bash
 curl -sS -G "https://api.logbrew.co/api/telemetry/analytics/overview" \
   -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
   --data-urlencode "project_id=<project_id>" \
   --data-urlencode "since=7d" \
-  --data-urlencode "response_version=3"
+  --data-urlencode "response_version=4"
 ```
 
 `since` 可以是正数时长（例如 `24h`、`7d` 或 `30d`），也可以是 RFC3339 时间戳。`until` 是可选的 RFC3339 时间戳。范围包含 `since`，不包含 `until`。如果省略 `until`，范围在请求时刻结束。范围不能超过 31 天。
@@ -148,6 +187,8 @@ logbrew analytics funnel --project "<project_id>" --since 7d \
 每个后续步骤的时间戳都必须晚于上一个步骤。一个事件不能同时完成两个步骤。默认单位是会话。使用 `--unit identified-user` 可跨会话统计用户。从概览中复制事件名称。两个不相关总数的比值不是转化率。
 
 最后一步必须发生在从第一步开始计算的转化窗口内。使用 `--conversion-window` 设置窗口，例如 `30m` 或 `1h`。默认值为 24 小时；如果范围更短，则为整个范围。窗口不能长于范围。
+
+添加 `--breakdown tag.utm_source` 可按流量来源拆分每个步骤。每个会话或用户计入它携带的第一个值。来自其他网站的访问使用 `tag.referrer_domain`。拆分结果显示进入漏斗次数最多的 10 个值。没有该属性的会话归为一组。其余所有值再合为一组。
 
 API 路由是 `POST /api/telemetry/analytics/funnel`。[有序漏斗响应](/zh-Hans/reference/telemetry-response-shapes#ordered-funnel-response)展示了请求体和响应。
 
