@@ -8,6 +8,21 @@ description: "プロジェクトと日付を選び、アクティビティ、フ
 
 結果はすべて、1つのプロジェクトと1つの期間に対するものです。サービス名ではプロジェクトを選べません。ログと課題は別のシグナルです。ログや課題があっても、同じ期間に分析データがあるとは限りません。
 
+## 問いに合うコマンドを選ぶ
+
+| 問い | コマンド |
+| --- | --- |
+| ユーザーはどこから来ていますか？ | `logbrew analytics properties` |
+| ユーザーはどこで離脱し、何人がコンバージョンしていますか？ | `logbrew analytics funnel` |
+| どの流入元が最もコンバージョンにつながっていますか？ | `logbrew analytics funnel --breakdown tag.utm_source` |
+| ユーザーは戻ってきていますか？ | `logbrew analytics retention` |
+| ユーザーはあるページの前後で何をしていますか？ | `logbrew analytics paths` |
+| よく使われているページとイベントはどれですか？ | `logbrew analytics overview` |
+
+`logbrew read actions` が一覧にするのはプロダクトアクションだけです。ページビューはトレースのスパンなので、この一覧には含まれません。ページビューは分析コマンドで数え、1回の訪問のページビューは `logbrew read trace` で読みます。
+
+ブラウザー SDK は、訪問中のすべてのイベントに `tag.utm_source`、`tag.utm_medium`、`tag.utm_campaign`、`tag.referrer_domain` を追加します。これらの値はランディング URL とリファラーから読み取ります。流入元を記録するためのコードを追加する必要はありません。直接の訪問には、これらのタグはありません。
+
 ## イベント、ユーザー、セッション
 
 | 単位 | 意味 |
@@ -19,7 +34,31 @@ description: "プロジェクトと日付を選び、アクティビティ、フ
 
 たとえば、20件のセッションで200件のアクションがあっても、20人がアプリを使ったことにはなりません。イベントの合計は、選んだ期間について正確な値です。ユニークユーザー数、セッション数、匿名サブジェクト数は概算です。
 
-不透明な ID を使ってください。氏名、メールアドレス、その他の個人データを ID に使わないでください。分析のレスポンスが生のユーザー ID やセッション ID を返すことはありません。
+不透明な ID を使ってください。氏名、メールアドレス、その他の個人データを ID に使わないでください。CLI の分析コマンドは、各数値の元になったセッション ID またはユーザー ID の例を最大5件、アプリが送信したとおりに返します。
+
+## 変化、サンプル、例を読む
+
+ライフサイクル以外の CLI の分析コマンドはすべて、回答とあわせて `detail` オブジェクトを返します。
+
+| フィールド | 意味 |
+| --- | --- |
+| `sample_size` | 主な結果の元になったセッションまたはユーザー。 |
+| `previous_since`、`previous_until` | 選んだ期間の直前にある、同じ長さの期間。 |
+| `groups[].units`、`groups[].previous_units` | 1つの数値の、現在と前の期間の値。 |
+| `groups[].change`、`groups[].change_rate` | 差と相対的な変化。 |
+| `groups[].rate_change_p_value`、`groups[].rate_change_significant` | 率の変化に対する 2 標本比率検定の p 値と、それが 0.05 未満かどうか。有意な変化だけを信頼してください。 |
+| `groups[].rate`、`groups[].base_units` | その数値が母集団に占める割合。 |
+| `groups[].breakdown` | グループのプロパティの値。たとえば1つの流入元。 |
+| `groups[].examples` | 最大5件のセッションまたはユーザー。それぞれに最大3件のアクション ID と3件のトレース ID が付きます。 |
+
+例のセッション1件のイベントと、そのトレースのページビューを読みます。
+
+```bash
+logbrew read actions --session "<session_id>" --project "<project_id>" --since 24h --json
+logbrew read trace "<trace_id>" --project "<project_id>" --json
+```
+
+例のユーザーには、`--session` の代わりに `--user "<user_id>"` を使います。サンプルが小さいと、期間ごとに大きく変わることがあります。率を示すときは、必ずサンプルサイズも示してください。
 
 ## ダッシュボードの概要を開く
 
@@ -104,14 +143,14 @@ logbrew analytics overview --project "<project_id>" --since 7d --json
 
 ### API を直接呼び出す
 
-アカウントの Bearer トークンを送信します。CLI が読むのと同じレスポンスを受け取るには `response_version=3` を送信します。`response_version` を省略すると、API はバージョン `1` を返します。このバージョンには匿名サブジェクトの件数も `subject_coverage` もありません。
+アカウントの Bearer トークンを送信します。CLI が読むのと同じ、`detail` を含むレスポンスを受け取るには `response_version=4` を送信します。`response_version` を省略すると、API はバージョン `1` を返します。このバージョンには匿名サブジェクトの件数も `subject_coverage` もありません。
 
 ```bash
 curl -sS -G "https://api.logbrew.co/api/telemetry/analytics/overview" \
   -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
   --data-urlencode "project_id=<project_id>" \
   --data-urlencode "since=7d" \
-  --data-urlencode "response_version=3"
+  --data-urlencode "response_version=4"
 ```
 
 `since` は `24h`、`7d`、`30d` などの正の期間、または RFC3339 タイムスタンプです。`until` は省略可能な RFC3339 タイムスタンプです。期間には `since` が含まれ、`until` は含まれません。`until` を省略すると、期間はリクエストの時刻で終わります。期間は31日より長くできません。
@@ -148,6 +187,8 @@ logbrew analytics funnel --project "<project_id>" --since 7d \
 後のステップは、直前のステップより後のタイムスタンプを持つ必要があります。1つのイベントで2つのステップを完了することはできません。デフォルトの単位はセッションです。セッションをまたいでユーザーを数えるには `--unit identified-user` を使います。イベント名は概要からコピーします。関係のない2つの合計の比率はコンバージョン率ではありません。
 
 最後のステップは、最初のステップから始まるコンバージョン期間の中で発生する必要があります。この期間は `--conversion-window` で設定します。たとえば `30m` や `1h` です。デフォルトは24時間で、全体の期間がそれより短い場合は全体の期間です。コンバージョン期間は全体の期間より長くできません。
+
+各ステップを流入元ごとに分けるには `--breakdown tag.utm_source` を追加します。各セッションまたはユーザーは、最初に持っていた値で数えます。ほかのサイトからの訪問には `tag.referrer_domain` を使います。分割結果には、ファネルに入った件数が多い上位10個の値を表示します。このプロパティがないセッションは、1つのグループにまとめます。それ以外の値は、もう1つのグループにまとめます。
 
 API ルートは `POST /api/telemetry/analytics/funnel` です。[順序付きファネルのレスポンス](/ja/reference/telemetry-response-shapes#ordered-funnel-response)に、リクエストボディとレスポンスがあります。
 
