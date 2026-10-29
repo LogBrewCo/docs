@@ -1,0 +1,132 @@
+---
+title: "Enregistrer les déploiements et importer les source maps avec GitHub Actions"
+sidebarTitle: "GitHub Action"
+description: "Utilisez l’action GitHub LogBrew pour importer les source maps JavaScript et les fichiers de débogage natifs, et enregistrer chaque déploiement depuis un workflow GitHub Actions."
+---
+
+L’action GitHub LogBrew s’exécute à la fin d’un job de déploiement. Elle
+importe les source maps JavaScript et les fichiers de débogage natifs de la
+version. Elle enregistre ensuite un marqueur de déploiement. LogBrew s’appuie
+sur les fichiers pour faire correspondre les frames de la pile à votre code
+source. Il s’appuie sur le marqueur de déploiement pour comparer une version à
+la précédente.
+
+L’action se trouve dans le dépôt `LogBrewCo/cli`. Elle installe la CLI LogBrew
+depuis npm, donc le runner doit disposer de Node.js. Les runners Linux, macOS
+et Windows hébergés par GitHub l’ont déjà.
+
+## Créer une clé d’artefact
+
+Connectez-vous avec la [CLI LogBrew](/fr/guides/cli) et trouvez l’ID du
+projet :
+
+```bash
+logbrew projects --json
+```
+
+Créez une clé d’artefact pour le projet. Utilisez un nouveau chemin de fichier
+dans un répertoire accessible à son seul propriétaire :
+
+```bash
+install -d -m 700 "$HOME/.logbrew" &&
+logbrew projects keys create "<project_id>" \
+  --ingest-key-file "$HOME/.logbrew/github-deploys.artifact" \
+  --label "GitHub deploys" \
+  --kind artifact \
+  --json
+```
+
+Une clé d’artefact est limitée au projet et sert uniquement à écrire. Elle
+peut importer les source maps et les fichiers de débogage, et enregistrer les
+déploiements de ce projet. Elle ne peut ni lire de données ni envoyer de
+télémétrie.
+
+Enregistrez le contenu du fichier de clé comme secret de dépôt nommé
+`LOGBREW_ARTIFACT_KEY`. Dans GitHub, allez dans **Settings**, puis **Secrets
+and variables**, puis **Actions**. Supprimez ensuite le fichier local.
+
+## Ajouter l’étape
+
+Ajoutez l’action après l’étape qui déploie votre application. Épinglez-la sur
+un tag de version de la CLI. Le tag choisit aussi la version de la CLI que
+l’action installe.
+
+```yaml
+- name: Report the deploy to LogBrew
+  if: always()
+  uses: LogBrewCo/cli@v<version>
+  with:
+    token: ${{ secrets.LOGBREW_ARTIFACT_KEY }}
+    project: <project_id>
+    release: web@${{ github.sha }}
+    environment: production
+    service: checkout-web
+    sourcemaps: dist
+    status: ${{ job.status == 'success' && 'succeeded' || 'failed' }}
+```
+
+Utilisez les mêmes valeurs `release`, `environment` et `service` que celles
+que votre application envoie à l’exécution. Consultez
+[Versions](/fr/concepts/releases) pour nommer les versions.
+
+Avec `if: always()`, l’étape s’exécute même si le déploiement échoue, et
+LogBrew enregistre le déploiement en échec. Dans ce cas, l’expression de
+`status` envoie `failed`.
+
+## Entrées
+
+| Entrée | Valeur par défaut | Rôle |
+|---|---|---|
+| `token` | Obligatoire | La clé d’artefact |
+| `project` | Obligatoire | L’ID du projet |
+| `release` | Obligatoire | Le nom de la version |
+| `environment` | Obligatoire | L’environnement, par exemple `production` |
+| `service` | Obligatoire | Le nom du service |
+| `sourcemaps` | Vide | Le répertoire de build qui contient le manifeste du plugin Vite |
+| `sourcemaps-manifest` | `logbrew-release-artifacts.json` dans le répertoire de build | Le chemin du manifeste |
+| `debug-files` | Vide | Le chemin d’un dSYM, d’un ZIP, d’un Mach-O ou d’un ELF Android |
+| `deploy` | `true` | Indiquez `false` pour importer uniquement les fichiers |
+| `deployment-id` | `github-<run_id>-<run_attempt>` | L’ID du déploiement |
+| `status` | `succeeded` | `succeeded` ou `failed` |
+| `started-at` | L’heure de début de l’étape | L’heure de début du déploiement au format RFC 3339 |
+| `commit-sha` | `github.sha` | Le commit du build déployé |
+| `cli-version` | La version du tag, ou `latest` | La version de la CLI à installer |
+| `working-directory` | `.` | Le répertoire d’exécution |
+
+L’action définit la sortie `deployment-id`.
+
+Pour une fenêtre de déploiement plus précise, réglez `started-at` sur l’heure
+de début de votre étape de déploiement.
+
+## Importer les source maps
+
+L’entrée `sourcemaps` importe le build préparé par le plugin Vite. Configurez
+d’abord le plugin, voir [Source maps JavaScript](/fr/guides/source-maps). Le
+projet doit installer `@logbrew/sdk`, car l’action exécute son outil d’import
+avec `npx --no-install`. Lancez `npm ci` avant l’action.
+
+Ne déployez pas les fichiers `.map` ni le manifeste sur le site public ou le
+CDN.
+
+## Importer les fichiers de débogage
+
+L’entrée `debug-files` exécute `logbrew debug-artifacts upload` avec le même
+projet, la même version, le même environnement et le même service. Pour les
+fichiers dSYM, consultez [Plantages et blocages
+Apple](/fr/guides/apple-crashes-and-hangs).
+
+## Relancer l’étape
+
+Vous pouvez renvoyer le même ID de déploiement avec les mêmes valeurs. LogBrew
+conserve un seul déploiement. Le même ID avec d’autres valeurs échoue. Quand
+vous relancez un workflow, GitHub incrémente `run_attempt`. L’ID par défaut
+change, donc l’action enregistre un nouveau déploiement.
+
+## Vérifier le déploiement
+
+Lisez la version avec la CLI une fois le workflow terminé :
+
+```bash
+logbrew explain release "web@<commit_sha>" --project "<project_id>" \
+  --environment production --service checkout-web
+```

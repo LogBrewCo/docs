@@ -1,0 +1,129 @@
+---
+title: "Deployments registreren en source maps uploaden met GitHub Actions"
+sidebarTitle: "GitHub Action"
+description: "Gebruik de LogBrew GitHub Action om source maps voor JavaScript en native debugbestanden te uploaden en elke deployment te registreren vanuit een GitHub Actions-workflow."
+---
+
+De LogBrew GitHub Action draait aan het einde van een deployjob. De action
+uploadt de source maps voor JavaScript en de native debugbestanden van de
+release. Daarna registreert hij een deploymentmarkering. LogBrew gebruikt de
+bestanden om stackframes terug te leiden naar je broncode. Met de
+deploymentmarkering vergelijkt LogBrew een release met de vorige release.
+
+De action staat in de repository `LogBrewCo/cli`. Hij installeert de LogBrew
+CLI vanuit npm, dus de runner heeft Node.js nodig. De door GitHub gehoste
+runners voor Linux, macOS en Windows hebben Node.js al.
+
+## Een artefactsleutel maken
+
+Log in met de [LogBrew CLI](/nl/guides/cli) en zoek het project-ID op:
+
+```bash
+logbrew projects --json
+```
+
+Maak een artefactsleutel voor het project. Gebruik een nieuw bestandspad in
+een map waar alleen de eigenaar bij kan:
+
+```bash
+install -d -m 700 "$HOME/.logbrew" &&
+logbrew projects keys create "<project_id>" \
+  --ingest-key-file "$HOME/.logbrew/github-deploys.artifact" \
+  --label "GitHub deploys" \
+  --kind artifact \
+  --json
+```
+
+Een artefactsleutel is projectgebonden en kan alleen schrijven. Met de sleutel
+upload je source maps en debugbestanden en registreer je deployments voor dat
+project. De sleutel kan geen data lezen en geen telemetrie verzenden.
+
+Sla de inhoud van het sleutelbestand op als repository secret met de naam
+`LOGBREW_ARTIFACT_KEY`. Ga in GitHub naar **Settings**, dan **Secrets and
+variables**, dan **Actions**. Verwijder daarna het lokale bestand.
+
+## De stap toevoegen
+
+Voeg de action toe na de stap die je app deployt. Pin de action op een
+releasetag van de CLI. De tag bepaalt ook welke CLI-versie de action
+installeert.
+
+```yaml
+- name: Report the deploy to LogBrew
+  if: always()
+  uses: LogBrewCo/cli@v<version>
+  with:
+    token: ${{ secrets.LOGBREW_ARTIFACT_KEY }}
+    project: <project_id>
+    release: web@${{ github.sha }}
+    environment: production
+    service: checkout-web
+    sourcemaps: dist
+    status: ${{ job.status == 'success' && 'succeeded' || 'failed' }}
+```
+
+Gebruik voor `release`, `environment` en `service` dezelfde waarden die je app
+tijdens runtime verstuurt. Zie [Releases](/nl/concepts/releases) voor
+releasenamen.
+
+Door `if: always()` draait de stap ook als de deployment mislukt. Zo
+registreert LogBrew ook de mislukte deployment. De expressie voor `status`
+stuurt in dat geval `failed`.
+
+## Invoer
+
+| Invoer | Standaard | Gebruik |
+|---|---|---|
+| `token` | Verplicht | De artefactsleutel |
+| `project` | Verplicht | Het project-ID |
+| `release` | Verplicht | De releasenaam |
+| `environment` | Verplicht | De omgeving, zoals `production` |
+| `service` | Verplicht | De servicenaam |
+| `sourcemaps` | Leeg | De buildmap met het manifest van de Vite-plug-in |
+| `sourcemaps-manifest` | `logbrew-release-artifacts.json` in de buildmap | Het pad naar het manifest |
+| `debug-files` | Leeg | Een pad naar een dSYM-, ZIP-, Mach-O- of Android-ELF-bestand |
+| `deploy` | `true` | Zet op `false` om alleen bestanden te uploaden |
+| `deployment-id` | `github-<run_id>-<run_attempt>` | Het deployment-ID |
+| `status` | `succeeded` | `succeeded` of `failed` |
+| `started-at` | Het moment waarop de stap begon | Het RFC 3339-tijdstip waarop de deployment begon |
+| `commit-sha` | `github.sha` | De commit van de gedeployde build |
+| `cli-version` | De versie in de tag, of `latest` | De CLI-versie die wordt geïnstalleerd |
+| `working-directory` | `.` | De map waarin de action draait |
+
+De action stelt de output `deployment-id` in.
+
+Voor een nauwkeuriger deploymentvenster zet je `started-at` op het moment
+waarop je deploystap begon.
+
+## Source maps uploaden
+
+De invoer `sourcemaps` uploadt de build die de Vite-plug-in heeft voorbereid.
+Stel eerst de plug-in in, zie [Source maps voor
+JavaScript](/nl/guides/source-maps). Het project moet `@logbrew/sdk`
+installeren, omdat de action de uploadhelper ervan uitvoert met `npx
+--no-install`. Voer `npm ci` uit vóór de action.
+
+Deploy geen `.map`-bestanden of het manifest naar de openbare website of het
+CDN.
+
+## Debugbestanden uploaden
+
+De invoer `debug-files` voert `logbrew debug-artifacts upload` uit met
+hetzelfde project en dezelfde release, omgeving en service. Zie [Apple-crashes
+en vastlopers](/nl/guides/apple-crashes-and-hangs) voor dSYM-bestanden.
+
+## De stap opnieuw uitvoeren
+
+Je kunt hetzelfde deployment-ID opnieuw sturen met dezelfde waarden. LogBrew
+bewaart dan één deployment. Hetzelfde ID met andere waarden mislukt. Als je
+een workflow opnieuw uitvoert, verhoogt GitHub `run_attempt`. Het standaard-ID
+verandert, dus de action registreert een nieuwe deployment.
+
+## De deployment controleren
+
+Lees de release met de CLI nadat de workflow klaar is:
+
+```bash
+logbrew explain release "web@<commit_sha>" --project "<project_id>" \
+  --environment production --service checkout-web
+```

@@ -1,0 +1,134 @@
+---
+title: "Bereitstellungen erfassen und Source Maps mit GitHub Actions hochladen"
+sidebarTitle: "GitHub Action"
+description: "Laden Sie mit der LogBrew GitHub Action JavaScript-Source-Maps und native Debug-Dateien aus einem GitHub-Actions-Workflow hoch, und erfassen Sie jede Bereitstellung."
+---
+
+Die LogBrew GitHub Action läuft am Ende eines Bereitstellungsjobs. Sie lädt
+die JavaScript-Source-Maps und die nativen Debug-Dateien des Release hoch.
+Danach erfasst sie eine Bereitstellungsmarkierung. Mit den Dateien ordnet
+LogBrew Stackframes Ihrem Quellcode zu. Mit der Markierung vergleicht LogBrew
+ein Release mit dem vorherigen Release.
+
+Die Action liegt im Repository `LogBrewCo/cli`. Sie installiert die
+LogBrew-CLI aus npm, daher braucht der Runner Node.js. Die von GitHub
+gehosteten Runner für Linux, macOS und Windows haben Node.js bereits.
+
+## Artefakt-Schlüssel erstellen
+
+Melden Sie sich mit der [LogBrew-CLI](/de/guides/cli) an, und suchen Sie die
+Projekt-ID:
+
+```bash
+logbrew projects --json
+```
+
+Erstellen Sie einen Artefakt-Schlüssel für das Projekt. Verwenden Sie einen
+neuen Dateipfad in einem Verzeichnis, auf das nur der Eigentümer zugreifen
+kann:
+
+```bash
+install -d -m 700 "$HOME/.logbrew" &&
+logbrew projects keys create "<project_id>" \
+  --ingest-key-file "$HOME/.logbrew/github-deploys.artifact" \
+  --label "GitHub deploys" \
+  --kind artifact \
+  --json
+```
+
+Ein Artefakt-Schlüssel ist auf das Projekt beschränkt und kann nur schreiben.
+Er kann für dieses Projekt Source Maps und Debug-Dateien hochladen und
+Bereitstellungen erfassen. Er kann keine Daten lesen und keine Telemetrie
+senden.
+
+Speichern Sie den Inhalt der Schlüsseldatei als Repository-Secret mit dem
+Namen `LOGBREW_ARTIFACT_KEY`. Öffnen Sie dazu in GitHub **Settings**, dann
+**Secrets and variables**, dann **Actions**. Löschen Sie danach die lokale
+Datei.
+
+## Schritt hinzufügen
+
+Fügen Sie die Action nach dem Schritt ein, der Ihre App bereitstellt. Pinnen
+Sie die Action auf einen Release-Tag der CLI. Der Tag legt auch fest, welche
+CLI-Version die Action installiert.
+
+```yaml
+- name: Report the deploy to LogBrew
+  if: always()
+  uses: LogBrewCo/cli@v<version>
+  with:
+    token: ${{ secrets.LOGBREW_ARTIFACT_KEY }}
+    project: <project_id>
+    release: web@${{ github.sha }}
+    environment: production
+    service: checkout-web
+    sourcemaps: dist
+    status: ${{ job.status == 'success' && 'succeeded' || 'failed' }}
+```
+
+Verwenden Sie für `release`, `environment` und `service` dieselben Werte, die
+Ihre App zur Laufzeit sendet. Release-Namen erklärt
+[Releases](/de/concepts/releases).
+
+Mit `if: always()` läuft der Schritt auch, wenn die Bereitstellung
+fehlschlägt. So erfasst LogBrew auch die fehlgeschlagene Bereitstellung. Der
+Ausdruck für `status` sendet in diesem Fall `failed`.
+
+## Eingaben
+
+| Eingabe | Standard | Zweck |
+|---|---|---|
+| `token` | Erforderlich | Der Artefakt-Schlüssel |
+| `project` | Erforderlich | Die Projekt-ID |
+| `release` | Erforderlich | Der Release-Name |
+| `environment` | Erforderlich | Die Umgebung, zum Beispiel `production` |
+| `service` | Erforderlich | Der Dienstname |
+| `sourcemaps` | Leer | Das Build-Verzeichnis mit dem Manifest des Vite-Plugins |
+| `sourcemaps-manifest` | `logbrew-release-artifacts.json` im Build-Verzeichnis | Der Pfad zum Manifest |
+| `debug-files` | Leer | Ein Pfad zu einer dSYM-, ZIP-, Mach-O- oder Android-ELF-Datei |
+| `deploy` | `true` | Auf `false` setzen, um nur Dateien hochzuladen |
+| `deployment-id` | `github-<run_id>-<run_attempt>` | Die Bereitstellungs-ID |
+| `status` | `succeeded` | `succeeded` oder `failed` |
+| `started-at` | Startzeit des Schritts | Startzeit der Bereitstellung im Format RFC 3339 |
+| `commit-sha` | `github.sha` | Der Commit des bereitgestellten Builds |
+| `cli-version` | Die Version im Tag oder `latest` | Die CLI-Version, die installiert wird |
+| `working-directory` | `.` | Das Verzeichnis, in dem die Action läuft |
+
+Die Action setzt die Ausgabe `deployment-id`.
+
+Für ein genaueres Bereitstellungsfenster setzen Sie `started-at` auf die
+Startzeit Ihres Bereitstellungsschritts.
+
+## Source Maps hochladen
+
+Die Eingabe `sourcemaps` lädt den Build hoch, den das Vite-Plugin vorbereitet
+hat. Richten Sie zuerst das Plugin ein, siehe
+[JavaScript-Source-Maps](/de/guides/source-maps). Das Projekt muss
+`@logbrew/sdk` installieren, weil die Action dessen Upload-Hilfsprogramm mit
+`npx --no-install` ausführt. Führen Sie vor der Action `npm ci` aus.
+
+Stellen Sie `.map`-Dateien und das Manifest nicht auf der öffentlichen Website
+oder im CDN bereit.
+
+## Debug-Dateien hochladen
+
+Die Eingabe `debug-files` führt `logbrew debug-artifacts upload` mit demselben
+Projekt, Release, derselben Umgebung und demselben Dienst aus. Zu dSYM-Dateien
+siehe [Apple-Abstürze und Hänger](/de/guides/apple-crashes-and-hangs).
+
+## Schritt erneut ausführen
+
+Sie können dieselbe Bereitstellungs-ID mit denselben Werten erneut senden.
+LogBrew behält dann eine einzige Bereitstellung. Dieselbe ID mit anderen
+Werten schlägt fehl. Wenn Sie einen Workflow erneut ausführen, erhöht GitHub
+`run_attempt`. Damit ändert sich die Standard-ID, und die Action erfasst eine
+neue Bereitstellung.
+
+## Bereitstellung prüfen
+
+Lesen Sie das Release mit der CLI, wenn der Workflow fertig ist:
+
+```bash
+logbrew explain release "web@<commit_sha>" --project "<project_id>" \
+  --environment production --service checkout-web
+```

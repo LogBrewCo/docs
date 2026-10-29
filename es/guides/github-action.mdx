@@ -1,0 +1,132 @@
+---
+title: "Registra despliegues y sube mapas de origen con GitHub Actions"
+sidebarTitle: "GitHub Action"
+description: "Usa la GitHub Action de LogBrew para subir mapas de origen de JavaScript y archivos de depuración nativos, y registrar cada despliegue desde un flujo de trabajo de GitHub Actions."
+---
+
+La GitHub Action de LogBrew se ejecuta al final de un trabajo de despliegue.
+Sube los mapas de origen de JavaScript y los archivos de depuración nativos
+del release. Después registra un marcador de despliegue. LogBrew usa los
+archivos para asociar los marcos de la pila con tu código fuente. Con el
+marcador de despliegue compara un release con el anterior.
+
+La acción está en el repositorio `LogBrewCo/cli`. Instala la CLI de LogBrew
+desde npm, así que el ejecutor necesita Node.js. Los ejecutores de Linux,
+macOS y Windows hospedados en GitHub ya lo tienen.
+
+## Crea una clave de artefactos
+
+Inicia sesión con la [CLI de LogBrew](/es/guides/cli) y busca el ID del
+proyecto:
+
+```bash
+logbrew projects --json
+```
+
+Crea una clave de artefactos para el proyecto. Usa una ruta de archivo nueva
+en un directorio al que solo pueda acceder su propietario:
+
+```bash
+install -d -m 700 "$HOME/.logbrew" &&
+logbrew projects keys create "<project_id>" \
+  --ingest-key-file "$HOME/.logbrew/github-deploys.artifact" \
+  --label "GitHub deploys" \
+  --kind artifact \
+  --json
+```
+
+Una clave de artefactos está limitada al proyecto y solo permite escribir.
+Puede subir mapas de origen y archivos de depuración, y registrar despliegues
+de ese proyecto. No puede leer datos ni enviar telemetría.
+
+Guarda el contenido del archivo de la clave como un secreto del repositorio
+llamado `LOGBREW_ARTIFACT_KEY`. En GitHub, ve a **Settings**, luego a
+**Secrets and variables** y luego a **Actions**. Después borra el archivo
+local.
+
+## Añade el paso
+
+Añade la acción después del paso que despliega tu app. Fíjala a una etiqueta
+de versión de la CLI. La etiqueta también elige la versión de la CLI que
+instala la acción.
+
+```yaml
+- name: Report the deploy to LogBrew
+  if: always()
+  uses: LogBrewCo/cli@v<version>
+  with:
+    token: ${{ secrets.LOGBREW_ARTIFACT_KEY }}
+    project: <project_id>
+    release: web@${{ github.sha }}
+    environment: production
+    service: checkout-web
+    sourcemaps: dist
+    status: ${{ job.status == 'success' && 'succeeded' || 'failed' }}
+```
+
+Usa los mismos valores de `release`, `environment` y `service` que tu app
+envía en tiempo de ejecución. Consulta [Releases](/es/concepts/releases) para
+los nombres de release.
+
+Con `if: always()`, el paso se ejecuta aunque falle el despliegue, así LogBrew
+registra el despliegue fallido. En ese caso, la expresión de `status` envía
+`failed`.
+
+## Entradas
+
+| Entrada | Valor predeterminado | Uso |
+|---|---|---|
+| `token` | Obligatorio | La clave de artefactos |
+| `project` | Obligatorio | El ID del proyecto |
+| `release` | Obligatorio | El nombre del release |
+| `environment` | Obligatorio | El entorno, como `production` |
+| `service` | Obligatorio | El nombre del servicio |
+| `sourcemaps` | Vacío | El directorio del build que contiene el manifiesto del plugin de Vite |
+| `sourcemaps-manifest` | `logbrew-release-artifacts.json` en el directorio del build | La ruta del manifiesto |
+| `debug-files` | Vacío | Una ruta a un dSYM, ZIP, Mach-O o ELF de Android |
+| `deploy` | `true` | Ponlo en `false` para subir solo archivos |
+| `deployment-id` | `github-<run_id>-<run_attempt>` | El ID del despliegue |
+| `status` | `succeeded` | `succeeded` o `failed` |
+| `started-at` | La hora en que empezó el paso | La hora de inicio del despliegue en formato RFC 3339 |
+| `commit-sha` | `github.sha` | El commit del build desplegado |
+| `cli-version` | La versión de la etiqueta, o `latest` | La versión de la CLI que se instala |
+| `working-directory` | `.` | El directorio donde se ejecuta |
+
+La acción define la salida `deployment-id`.
+
+Para una ventana de despliegue más exacta, pon en `started-at` la hora en que
+empezó tu paso de despliegue.
+
+## Sube los mapas de origen
+
+La entrada `sourcemaps` sube el build que preparó el plugin de Vite. Primero
+configura el plugin, consulta [Mapas de origen de
+JavaScript](/es/guides/source-maps). El proyecto debe instalar `@logbrew/sdk`,
+porque la acción ejecuta su herramienta de carga con `npx --no-install`.
+Ejecuta `npm ci` antes de la acción.
+
+No despliegues los archivos `.map` ni el manifiesto en el sitio web público ni
+en la CDN.
+
+## Sube los archivos de depuración
+
+La entrada `debug-files` ejecuta `logbrew debug-artifacts upload` con el mismo
+proyecto, release, entorno y servicio. Consulta [Fallos y bloqueos de
+Apple](/es/guides/apple-crashes-and-hangs) para los archivos dSYM.
+
+## Vuelve a ejecutar el paso
+
+Puedes enviar otra vez el mismo ID de despliegue con los mismos valores.
+LogBrew conserva un solo despliegue. El mismo ID con valores distintos falla.
+Cuando vuelves a ejecutar un flujo de trabajo, GitHub incrementa
+`run_attempt`. El ID predeterminado cambia, así que la acción registra un
+despliegue nuevo.
+
+## Comprueba el despliegue
+
+Lee el release con la CLI cuando termine el flujo de trabajo:
+
+```bash
+logbrew explain release "web@<commit_sha>" --project "<project_id>" \
+  --environment production --service checkout-web
+```

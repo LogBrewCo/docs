@@ -1,0 +1,129 @@
+---
+title: "Registre implantações e faça upload de source maps com o GitHub Actions"
+sidebarTitle: "GitHub Action"
+description: "Use a GitHub Action do LogBrew para fazer upload de source maps de JavaScript e arquivos de depuração nativos e registrar cada implantação a partir de um workflow do GitHub Actions."
+---
+
+A GitHub Action do LogBrew é executada no fim de um job de implantação. Ela
+faz upload dos source maps de JavaScript e dos arquivos de depuração nativos
+da versão. Depois, registra um marcador de implantação. O LogBrew usa os
+arquivos para ligar os frames da pilha ao seu código-fonte. O marcador de
+implantação permite comparar uma versão com a versão anterior.
+
+A action fica no repositório `LogBrewCo/cli`. Ela instala a CLI do LogBrew
+pelo npm, então o runner precisa ter Node.js. Os runners de Linux, macOS e
+Windows hospedados pelo GitHub já têm Node.js.
+
+## Crie uma chave de artefato
+
+Entre na conta com a [CLI do LogBrew](/pt-BR/guides/cli) e encontre o ID do
+projeto:
+
+```bash
+logbrew projects --json
+```
+
+Crie uma chave de artefato para o projeto. Use um novo caminho de arquivo em
+um diretório que só o dono pode acessar:
+
+```bash
+install -d -m 700 "$HOME/.logbrew" &&
+logbrew projects keys create "<project_id>" \
+  --ingest-key-file "$HOME/.logbrew/github-deploys.artifact" \
+  --label "GitHub deploys" \
+  --kind artifact \
+  --json
+```
+
+Uma chave de artefato tem escopo de projeto e só de escrita. Ela pode fazer
+upload de source maps e de arquivos de depuração e registrar implantações
+desse projeto. Ela não pode ler dados nem enviar telemetria.
+
+Salve o conteúdo do arquivo da chave como um segredo do repositório chamado
+`LOGBREW_ARTIFACT_KEY`. No GitHub, vá em **Settings**, depois em **Secrets and
+variables** e depois em **Actions**. Em seguida, apague o arquivo local.
+
+## Adicione a etapa
+
+Adicione a action depois da etapa que implanta o seu app. Fixe a action em uma
+tag de versão da CLI. A tag também define a versão da CLI que a action
+instala.
+
+```yaml
+- name: Report the deploy to LogBrew
+  if: always()
+  uses: LogBrewCo/cli@v<version>
+  with:
+    token: ${{ secrets.LOGBREW_ARTIFACT_KEY }}
+    project: <project_id>
+    release: web@${{ github.sha }}
+    environment: production
+    service: checkout-web
+    sourcemaps: dist
+    status: ${{ job.status == 'success' && 'succeeded' || 'failed' }}
+```
+
+Use os mesmos valores de `release`, `environment` e `service` que o seu app
+envia em runtime. Veja [Versões](/pt-BR/concepts/releases) para saber como
+nomear versões.
+
+Com `if: always()`, a etapa é executada mesmo quando a implantação falha, e o
+LogBrew registra a implantação que falhou. Nesse caso, a expressão de `status`
+envia `failed`.
+
+## Entradas
+
+| Entrada | Padrão | Uso |
+|---|---|---|
+| `token` | Obrigatório | A chave de artefato |
+| `project` | Obrigatório | O ID do projeto |
+| `release` | Obrigatório | O nome da versão |
+| `environment` | Obrigatório | O ambiente, como `production` |
+| `service` | Obrigatório | O nome do serviço |
+| `sourcemaps` | Vazio | O diretório do build que tem o manifesto do plugin do Vite |
+| `sourcemaps-manifest` | `logbrew-release-artifacts.json` no diretório do build | O caminho do manifesto |
+| `debug-files` | Vazio | Um caminho de dSYM, ZIP, Mach-O ou ELF do Android |
+| `deploy` | `true` | Use `false` para só fazer upload dos arquivos |
+| `deployment-id` | `github-<run_id>-<run_attempt>` | O ID da implantação |
+| `status` | `succeeded` | `succeeded` ou `failed` |
+| `started-at` | O horário em que a etapa começou | O horário de início da implantação em RFC 3339 |
+| `commit-sha` | `github.sha` | O commit do build implantado |
+| `cli-version` | A versão da tag, ou `latest` | A versão da CLI a instalar |
+| `working-directory` | `.` | O diretório em que a action é executada |
+
+A action define a saída `deployment-id`.
+
+Para uma janela de implantação mais exata, defina `started-at` com o horário
+em que sua etapa de implantação começou.
+
+## Faça upload dos source maps
+
+A entrada `sourcemaps` faz upload do build que o plugin do Vite preparou.
+Configure o plugin primeiro, veja [Source maps de
+JavaScript](/pt-BR/guides/source-maps). O projeto precisa instalar
+`@logbrew/sdk`, porque a action executa o helper de upload dele com `npx
+--no-install`. Execute `npm ci` antes da action.
+
+Não implante arquivos `.map` nem o manifesto no site público ou na CDN.
+
+## Faça upload dos arquivos de depuração
+
+A entrada `debug-files` executa `logbrew debug-artifacts upload` com o mesmo
+projeto, versão, ambiente e serviço. Veja [Crashes e travamentos da
+Apple](/pt-BR/guides/apple-crashes-and-hangs) para arquivos dSYM.
+
+## Execute a etapa de novo
+
+Você pode enviar o mesmo ID de implantação de novo com os mesmos valores. O
+LogBrew mantém uma única implantação. O mesmo ID com valores diferentes falha.
+Quando você executa um workflow de novo, o GitHub aumenta `run_attempt`. O ID
+padrão muda, então a action registra uma nova implantação.
+
+## Confira a implantação
+
+Leia a versão com a CLI depois que o workflow terminar:
+
+```bash
+logbrew explain release "web@<commit_sha>" --project "<project_id>" \
+  --environment production --service checkout-web
+```
