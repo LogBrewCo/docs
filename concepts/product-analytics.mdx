@@ -13,6 +13,26 @@ Every result is for one project and one time range. A service name does not
 select a project. Logs and issues are separate signals. Their presence does
 not mean that analytics data exists for the same range.
 
+## Choose the command for the question
+
+| Question | Command |
+| --- | --- |
+| Where do users come from? | `logbrew analytics properties` |
+| Where do users drop off, and how many convert? | `logbrew analytics funnel` |
+| Which traffic source converts best? | `logbrew analytics funnel --breakdown tag.utm_source` |
+| Do users come back? | `logbrew analytics retention` |
+| What do users do before or after a page? | `logbrew analytics paths` |
+| Which pages and events are most used? | `logbrew analytics overview` |
+
+`logbrew read actions` lists product actions only. Page views are trace
+spans, so that list never contains them. Count page views with the analytics
+commands, and read the page views of one visit with `logbrew read trace`.
+
+The browser SDK adds `tag.utm_source`, `tag.utm_medium`, `tag.utm_campaign`,
+and `tag.referrer_domain` to every event of a visit. It reads them from the
+landing URL and the referrer. You do not need to add code for attribution. A
+direct visit has none of these tags.
+
 ## Events, users, and sessions
 
 | Unit | Meaning |
@@ -27,7 +47,34 @@ app. Event totals are exact for the selected window. Unique user, session,
 and anonymous-subject counts are approximate.
 
 Use opaque IDs. Do not use names, email addresses, or other personal data as
-IDs. Analytics responses never return raw user or session IDs.
+IDs. The CLI analytics commands return up to 5 example session or user IDs
+behind each number, exactly as your app sent them.
+
+## Read the change, sample, and examples
+
+Every CLI analytics command except lifecycle gives a `detail` object with the
+answer:
+
+| Field | Meaning |
+| --- | --- |
+| `sample_size` | Sessions or users behind the headline result. |
+| `previous_since`, `previous_until` | The period of equal length just before the selected one. |
+| `groups[].units`, `groups[].previous_units` | One number now and in the previous period. |
+| `groups[].change`, `groups[].change_rate` | The difference and the relative change. |
+| `groups[].rate`, `groups[].base_units` | The number as a share of its population. |
+| `groups[].breakdown` | The property value of a group, such as one traffic source. |
+| `groups[].examples` | Up to 5 sessions or users, each with up to 3 action IDs and 3 trace IDs. |
+
+Read the events of one example session, and the page views of its trace:
+
+```bash
+logbrew read actions --session "<session_id>" --project "<project_id>" --since 24h --json
+logbrew read trace "<trace_id>" --project "<project_id>" --json
+```
+
+Use `--user "<user_id>"` instead of `--session` for an example user. A small
+sample can change a lot from one period to the next. Give the sample size
+with every rate.
 
 ## Open the dashboard overview
 
@@ -138,16 +185,17 @@ show that the change works.
 
 ### Call the API directly
 
-Send an account bearer. Send `response_version=3` to get the same response
-that the CLI reads. If you omit `response_version`, the API returns version
-`1`, which has no anonymous-subject counts or `subject_coverage`.
+Send an account bearer. Send `response_version=4` to get the same response
+that the CLI reads, with `detail`. If you omit `response_version`, the API
+returns version `1`, which has no anonymous-subject counts or
+`subject_coverage`.
 
 ```bash
 curl -sS -G "https://api.logbrew.co/api/telemetry/analytics/overview" \
   -H "Authorization: Bearer $LOGBREW_ACCOUNT_BEARER" \
   --data-urlencode "project_id=<project_id>" \
   --data-urlencode "since=7d" \
-  --data-urlencode "response_version=3"
+  --data-urlencode "response_version=4"
 ```
 
 `since` is a positive duration, such as `24h`, `7d`, or `30d`, or an RFC3339
@@ -197,6 +245,11 @@ The final step must occur inside the conversion window that starts at the
 first step. Set it with `--conversion-window`, for example `30m` or `1h`. The
 default is 24 hours, or the full range if the range is shorter. The window
 cannot be longer than the range.
+
+Add `--breakdown tag.utm_source` to split every step by traffic source. Each
+session or user counts under the first value that it carried. Use
+`tag.referrer_domain` for visits from other sites. The split shows the 10
+values with the most entries. Sessions without the property are one group.
 
 The API route is `POST /api/telemetry/analytics/funnel`. The
 [ordered funnel response](/reference/telemetry-response-shapes#ordered-funnel-response)
