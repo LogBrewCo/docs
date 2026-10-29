@@ -1,0 +1,101 @@
+---
+title: "使用 GitHub Actions 记录部署并上传 Source Map"
+sidebarTitle: "GitHub Action"
+description: "使用 LogBrew GitHub Action，从 GitHub Actions 工作流上传 JavaScript Source Map 和原生调试文件，并记录每次部署。"
+---
+
+LogBrew GitHub Action 在部署作业的最后运行。它上传该版本的 JavaScript Source Map 和原生调试文件，然后记录一个部署标记。LogBrew 用这些文件把堆栈帧映射回你的源代码，用部署标记把一个版本与上一个版本进行比较。
+
+该 Action 位于 `LogBrewCo/cli` 仓库中。它从 npm 安装 LogBrew CLI，因此运行器上必须有 Node.js。GitHub 托管的 Linux、macOS 和 Windows 运行器都已安装 Node.js。
+
+## 创建构建产物密钥
+
+使用 [LogBrew CLI](/zh-Hans/guides/cli) 登录，并找到项目 ID：
+
+```bash
+logbrew projects --json
+```
+
+为该项目创建构建产物密钥。在只有所有者可以访问的目录中，使用一个新的文件路径：
+
+```bash
+install -d -m 700 "$HOME/.logbrew" &&
+logbrew projects keys create "<project_id>" \
+  --ingest-key-file "$HOME/.logbrew/github-deploys.artifact" \
+  --label "GitHub deploys" \
+  --kind artifact \
+  --json
+```
+
+构建产物密钥限定于单个项目，并且只能写入。它可以为该项目上传 Source Map 和调试文件，并记录部署。它不能读取数据，也不能发送遥测数据。
+
+把密钥文件的内容保存为名为 `LOGBREW_ARTIFACT_KEY` 的仓库机密。在 GitHub 中，依次进入 **Settings**、**Secrets and variables**、**Actions**。然后删除本地文件。
+
+## 添加步骤
+
+在部署应用的步骤之后添加该 Action。把它固定到 CLI 的某个发布标签。该标签也决定 Action 安装哪个版本的 CLI。
+
+```yaml
+- name: Report the deploy to LogBrew
+  if: always()
+  uses: LogBrewCo/cli@v<version>
+  with:
+    token: ${{ secrets.LOGBREW_ARTIFACT_KEY }}
+    project: <project_id>
+    release: web@${{ github.sha }}
+    environment: production
+    service: checkout-web
+    sourcemaps: dist
+    status: ${{ job.status == 'success' && 'succeeded' || 'failed' }}
+```
+
+`release`、`environment` 和 `service` 要使用与应用运行时发送的相同的值。版本命名参见[版本](/zh-Hans/concepts/releases)。
+
+`if: always()` 让该步骤在部署失败时也会运行，这样 LogBrew 会记录失败的部署。此时 `status` 表达式会发送 `failed`。
+
+## 输入
+
+| 输入 | 默认值 | 用途 |
+|---|---|---|
+| `token` | 必填 | 构建产物密钥 |
+| `project` | 必填 | 项目 ID |
+| `release` | 必填 | 版本名称 |
+| `environment` | 必填 | 环境，例如 `production` |
+| `service` | 必填 | 服务名称 |
+| `sourcemaps` | 空 | 包含 Vite 插件所生成清单的构建目录 |
+| `sourcemaps-manifest` | 构建目录中的 `logbrew-release-artifacts.json` | 清单路径 |
+| `debug-files` | 空 | dSYM、ZIP、Mach-O 或 Android ELF 文件的路径 |
+| `deploy` | `true` | 设为 `false` 时只上传文件 |
+| `deployment-id` | `github-<run_id>-<run_attempt>` | 部署 ID |
+| `status` | `succeeded` | `succeeded` 或 `failed` |
+| `started-at` | 该步骤的开始时间 | 部署开始时间，采用 RFC 3339 格式 |
+| `commit-sha` | `github.sha` | 所部署构建的提交 |
+| `cli-version` | 标签中的版本，或 `latest` | 要安装的 CLI 版本 |
+| `working-directory` | `.` | 运行目录 |
+
+该 Action 会设置 `deployment-id` 输出。
+
+如需更精确的部署时间窗口，把 `started-at` 设为部署步骤开始的时间。
+
+## 上传 Source Map
+
+`sourcemaps` 输入会上传 Vite 插件准备好的构建。请先设置该插件，参见 [JavaScript Source Map](/zh-Hans/guides/source-maps)。项目必须安装 `@logbrew/sdk`，因为 Action 会用 `npx --no-install` 运行它的上传辅助工具。在该 Action 之前运行 `npm ci`。
+
+不要把 `.map` 文件或清单部署到公开网站或 CDN。
+
+## 上传调试文件
+
+`debug-files` 输入会使用相同的项目、版本、环境和服务运行 `logbrew debug-artifacts upload`。dSYM 文件参见[Apple 崩溃与卡顿](/zh-Hans/guides/apple-crashes-and-hangs)。
+
+## 重新运行步骤
+
+你可以用相同的值再次发送同一个部署 ID。LogBrew 只保留一次部署。同一个 ID 搭配不同的值会失败。重新运行工作流时，GitHub 会增加 `run_attempt`。默认 ID 随之改变，所以 Action 会记录一次新的部署。
+
+## 检查部署
+
+工作流完成后，用 CLI 读取该版本：
+
+```bash
+logbrew explain release "web@<commit_sha>" --project "<project_id>" \
+  --environment production --service checkout-web
+```

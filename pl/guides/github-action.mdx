@@ -1,0 +1,126 @@
+---
+title: "Zapisuj wdrożenia i przesyłaj mapy źródeł z GitHub Actions"
+sidebarTitle: "GitHub Action"
+description: "Użyj akcji GitHub LogBrew, aby przesyłać mapy źródeł JavaScript i natywne pliki debugowania oraz zapisywać każde wdrożenie z workflow GitHub Actions."
+---
+
+Akcja GitHub LogBrew działa na końcu zadania wdrożenia. Przesyła mapy źródeł
+JavaScript i natywne pliki debugowania dla wydania. Potem zapisuje znacznik
+wdrożenia. LogBrew używa tych plików, aby mapować ramki stosu na twój kod
+źródłowy. Znacznik wdrożenia pozwala porównać wydanie z poprzednim wydaniem.
+
+Akcja znajduje się w repozytorium `LogBrewCo/cli`. Instaluje CLI LogBrew z
+npm, więc runner musi mieć Node.js. Runnery Linux, macOS i Windows hostowane
+przez GitHub już go mają.
+
+## Utwórz klucz artefaktów
+
+Zaloguj się w [CLI LogBrew](/pl/guides/cli) i znajdź ID projektu:
+
+```bash
+logbrew projects --json
+```
+
+Utwórz klucz artefaktów dla projektu. Użyj nowej ścieżki pliku w katalogu, do
+którego dostęp ma tylko właściciel:
+
+```bash
+install -d -m 700 "$HOME/.logbrew" &&
+logbrew projects keys create "<project_id>" \
+  --ingest-key-file "$HOME/.logbrew/github-deploys.artifact" \
+  --label "GitHub deploys" \
+  --kind artifact \
+  --json
+```
+
+Klucz artefaktów jest przypisany do projektu i służy tylko do zapisu. Może
+przesyłać mapy źródeł i pliki debugowania oraz zapisywać wdrożenia tego
+projektu. Nie może odczytywać danych ani wysyłać telemetrii.
+
+Zapisz zawartość pliku klucza jako sekret repozytorium o nazwie
+`LOGBREW_ARTIFACT_KEY`. W GitHub przejdź do **Settings**, potem **Secrets and
+variables**, potem **Actions**. Następnie usuń plik lokalny.
+
+## Dodaj krok
+
+Dodaj akcję po kroku, który wdraża aplikację. Przypnij ją do tagu wydania CLI.
+Tag wybiera też wersję CLI, którą instaluje akcja.
+
+```yaml
+- name: Report the deploy to LogBrew
+  if: always()
+  uses: LogBrewCo/cli@v<version>
+  with:
+    token: ${{ secrets.LOGBREW_ARTIFACT_KEY }}
+    project: <project_id>
+    release: web@${{ github.sha }}
+    environment: production
+    service: checkout-web
+    sourcemaps: dist
+    status: ${{ job.status == 'success' && 'succeeded' || 'failed' }}
+```
+
+Użyj tych samych wartości `release`, `environment` i `service`, które
+aplikacja wysyła w czasie działania. Nazwy wydań opisuje strona
+[Wydania](/pl/concepts/releases).
+
+Dzięki `if: always()` krok uruchamia się także wtedy, gdy wdrożenie się nie
+powiedzie, więc LogBrew zapisuje nieudane wdrożenie. W takim przypadku
+wyrażenie dla `status` wysyła `failed`.
+
+## Dane wejściowe
+
+| Wejście | Domyślnie | Zastosowanie |
+|---|---|---|
+| `token` | Wymagane | Klucz artefaktów |
+| `project` | Wymagane | ID projektu |
+| `release` | Wymagane | Nazwa wydania |
+| `environment` | Wymagane | Środowisko, takie jak `production` |
+| `service` | Wymagane | Nazwa usługi |
+| `sourcemaps` | Puste | Katalog builda z manifestem z wtyczki Vite |
+| `sourcemaps-manifest` | `logbrew-release-artifacts.json` w katalogu builda | Ścieżka manifestu |
+| `debug-files` | Puste | Ścieżka do pliku dSYM, ZIP, Mach-O lub Android ELF |
+| `deploy` | `true` | Ustaw `false`, aby tylko przesłać pliki |
+| `deployment-id` | `github-<run_id>-<run_attempt>` | ID wdrożenia |
+| `status` | `succeeded` | `succeeded` lub `failed` |
+| `started-at` | Czas rozpoczęcia kroku | Czas rozpoczęcia wdrożenia w formacie RFC 3339 |
+| `commit-sha` | `github.sha` | Commit wdrożonego builda |
+| `cli-version` | Wersja z tagu albo `latest` | Wersja CLI do zainstalowania |
+| `working-directory` | `.` | Katalog, w którym działa akcja |
+
+Akcja ustawia wyjście `deployment-id`.
+
+Aby okno wdrożenia było dokładniejsze, ustaw `started-at` na czas rozpoczęcia
+kroku wdrożenia.
+
+## Prześlij mapy źródeł
+
+Wejście `sourcemaps` przesyła build przygotowany przez wtyczkę Vite. Najpierw
+skonfiguruj wtyczkę, zobacz [Mapy źródeł JavaScript](/pl/guides/source-maps).
+Projekt musi mieć zainstalowany `@logbrew/sdk`, bo akcja uruchamia jego
+narzędzie do przesyłania przez `npx --no-install`. Przed akcją uruchom `npm
+ci`.
+
+Nie wdrażaj plików `.map` ani manifestu na publiczną stronę ani do CDN.
+
+## Prześlij pliki debugowania
+
+Wejście `debug-files` uruchamia `logbrew debug-artifacts upload` z tym samym
+projektem, wydaniem, środowiskiem i usługą. Pliki dSYM opisuje strona [Awarie
+i zawieszenia Apple](/pl/guides/apple-crashes-and-hangs).
+
+## Uruchom krok ponownie
+
+Możesz ponownie wysłać to samo ID wdrożenia z tymi samymi wartościami. LogBrew
+zachowuje wtedy jedno wdrożenie. To samo ID z innymi wartościami kończy się
+błędem. Gdy uruchamiasz workflow ponownie, GitHub zwiększa `run_attempt`.
+Domyślne ID się zmienia, więc akcja zapisuje nowe wdrożenie.
+
+## Sprawdź wdrożenie
+
+Po zakończeniu workflow odczytaj wydanie za pomocą CLI:
+
+```bash
+logbrew explain release "web@<commit_sha>" --project "<project_id>" \
+  --environment production --service checkout-web
+```

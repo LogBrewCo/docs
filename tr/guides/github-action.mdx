@@ -1,0 +1,130 @@
+---
+title: "GitHub Actions ile dağıtımları kaydedin ve source map'leri yükleyin"
+sidebarTitle: "GitHub Action"
+description: "LogBrew GitHub Action ile bir GitHub Actions iş akışından JavaScript source map'lerini ve yerel hata ayıklama dosyalarını yükleyin. Her dağıtımı kaydedin."
+---
+
+LogBrew GitHub Action bir dağıtım işinin sonunda çalışır. Sürümün JavaScript
+source map'lerini ve yerel hata ayıklama dosyalarını yükler. Ardından bir
+dağıtım işareti kaydeder. LogBrew, yığın çerçevelerini kaynak kodunuza eşlemek
+için bu dosyaları kullanır. Dağıtım işaretiyle de bir sürümü bir önceki
+sürümle karşılaştırır.
+
+Action, `LogBrewCo/cli` deposundadır. LogBrew CLI'yi npm'den kurar, bu yüzden
+runner'da Node.js olmalıdır. GitHub'ın barındırdığı Linux, macOS ve Windows
+runner'larında Node.js vardır.
+
+## Derleme dosyası anahtarı oluşturun
+
+[LogBrew CLI](/tr/guides/cli) ile giriş yapın ve proje kimliğini bulun:
+
+```bash
+logbrew projects --json
+```
+
+Proje için bir derleme dosyası anahtarı oluşturun. Yalnızca sahibinin
+erişebildiği bir dizinde yeni bir dosya yolu kullanın:
+
+```bash
+install -d -m 700 "$HOME/.logbrew" &&
+logbrew projects keys create "<project_id>" \
+  --ingest-key-file "$HOME/.logbrew/github-deploys.artifact" \
+  --label "GitHub deploys" \
+  --kind artifact \
+  --json
+```
+
+Derleme dosyası anahtarı proje kapsamlıdır ve yalnızca yazma yetkisi verir. O
+projenin source map'lerini ve hata ayıklama dosyalarını yükleyebilir,
+dağıtımlarını kaydedebilir. Veri okuyamaz ve telemetri gönderemez.
+
+Anahtar dosyasının içeriğini `LOGBREW_ARTIFACT_KEY` adlı bir repository secret
+olarak kaydedin. GitHub'da **Settings**, ardından **Secrets and variables**,
+ardından **Actions** bölümüne gidin. Sonra yerel dosyayı silin.
+
+## Adımı ekleyin
+
+Action'ı uygulamanızı dağıtan adımdan sonra ekleyin. Action'ı CLI'nin bir
+sürüm etiketine sabitleyin. Etiket, action'ın kuracağı CLI sürümünü de
+belirler.
+
+```yaml
+- name: Report the deploy to LogBrew
+  if: always()
+  uses: LogBrewCo/cli@v<version>
+  with:
+    token: ${{ secrets.LOGBREW_ARTIFACT_KEY }}
+    project: <project_id>
+    release: web@${{ github.sha }}
+    environment: production
+    service: checkout-web
+    sourcemaps: dist
+    status: ${{ job.status == 'success' && 'succeeded' || 'failed' }}
+```
+
+Uygulamanızın çalışma zamanında gönderdiği `release`, `environment` ve
+`service` değerlerinin aynısını kullanın. Sürüm adları için
+[Sürümler](/tr/concepts/releases) sayfasına bakın.
+
+`if: always()` sayesinde adım, dağıtım başarısız olduğunda da çalışır. Böylece
+LogBrew başarısız dağıtımı da kaydeder. Bu durumda `status` ifadesi `failed`
+gönderir.
+
+## Girdiler
+
+| Girdi | Varsayılan | Kullanım |
+|---|---|---|
+| `token` | Zorunlu | Derleme dosyası anahtarı |
+| `project` | Zorunlu | Proje kimliği |
+| `release` | Zorunlu | Sürüm adı |
+| `environment` | Zorunlu | Ortam, örneğin `production` |
+| `service` | Zorunlu | Hizmet adı |
+| `sourcemaps` | Boş | Vite eklentisinin oluşturduğu manifesti içeren derleme dizini |
+| `sourcemaps-manifest` | Derleme dizinindeki `logbrew-release-artifacts.json` | Manifest yolu |
+| `debug-files` | Boş | dSYM, ZIP, Mach-O veya Android ELF yolu |
+| `deploy` | `true` | Yalnızca dosya yüklemek için `false` yapın |
+| `deployment-id` | `github-<run_id>-<run_attempt>` | Dağıtım kimliği |
+| `status` | `succeeded` | `succeeded` veya `failed` |
+| `started-at` | Adımın başladığı zaman | Dağıtımın başladığı RFC 3339 zamanı |
+| `commit-sha` | `github.sha` | Dağıtılan derlemenin commit'i |
+| `cli-version` | Etiketteki sürüm veya `latest` | Kurulacak CLI sürümü |
+| `working-directory` | `.` | Komutların çalışacağı dizin |
+
+Action, `deployment-id` çıktısını ayarlar.
+
+Dağıtım aralığını daha kesin tutmak için `started-at` değerini dağıtım
+adımınızın başladığı zamana ayarlayın.
+
+## Source map'leri yükleyin
+
+`sourcemaps` girdisi, Vite eklentisinin hazırladığı derlemeyi yükler. Önce
+eklentiyi kurun. Kurulum için [JavaScript source
+map'leri](/tr/guides/source-maps) sayfasına bakın. Projede `@logbrew/sdk`
+kurulu olmalıdır, çünkü action yükleme yardımcısını `npx --no-install` ile
+çalıştırır. Action'dan önce `npm ci` çalıştırın.
+
+`.map` dosyalarını veya manifesti herkese açık web sitesine ya da CDN'e
+dağıtmayın.
+
+## Hata ayıklama dosyalarını yükleyin
+
+`debug-files` girdisi `logbrew debug-artifacts upload` komutunu aynı proje,
+sürüm, ortam ve hizmetle çalıştırır. dSYM dosyaları için [Apple çökmeleri ve
+donmaları](/tr/guides/apple-crashes-and-hangs) sayfasına bakın.
+
+## Adımı yeniden çalıştırın
+
+Aynı dağıtım kimliğini aynı değerlerle yeniden gönderebilirsiniz. LogBrew
+yalnızca bir dağıtım tutar. Aynı kimliği farklı değerlerle gönderirseniz istek
+başarısız olur. Bir iş akışını yeniden çalıştırdığınızda GitHub `run_attempt`
+değerini artırır. Varsayılan kimlik değişir, bu yüzden action yeni bir dağıtım
+kaydeder.
+
+## Dağıtımı kontrol edin
+
+İş akışı bittikten sonra sürümü CLI ile okuyun:
+
+```bash
+logbrew explain release "web@<commit_sha>" --project "<project_id>" \
+  --environment production --service checkout-web
+```

@@ -1,0 +1,101 @@
+---
+title: "GitHub Actions でデプロイを記録し、ソースマップをアップロードする"
+sidebarTitle: "GitHub Action"
+description: "LogBrew の GitHub Action を使って、GitHub Actions のワークフローから JavaScript のソースマップとネイティブのデバッグファイルをアップロードし、各デプロイを記録します。"
+---
+
+LogBrew の GitHub Action は、デプロイジョブの最後に実行されます。リリースの JavaScript ソースマップとネイティブのデバッグファイルをアップロードし、続けてデプロイマーカーを記録します。LogBrew はこれらのファイルを使って、スタックフレームを元のソースに対応付けます。デプロイマーカーは、リリースを直前のリリースと比較するために使います。
+
+このアクションは `LogBrewCo/cli` リポジトリにあります。LogBrew CLI を npm からインストールするため、ランナーに Node.js が必要です。GitHub ホステッドランナーの Linux、macOS、Windows には Node.js が入っています。
+
+## ビルド成果物キーを作成する
+
+[LogBrew CLI](/ja/guides/cli) でサインインし、プロジェクト ID を確認します。
+
+```bash
+logbrew projects --json
+```
+
+プロジェクトのビルド成果物キーを作成します。所有者だけがアクセスできるディレクトリに、新しいファイルパスを指定します。
+
+```bash
+install -d -m 700 "$HOME/.logbrew" &&
+logbrew projects keys create "<project_id>" \
+  --ingest-key-file "$HOME/.logbrew/github-deploys.artifact" \
+  --label "GitHub deploys" \
+  --kind artifact \
+  --json
+```
+
+ビルド成果物キーはプロジェクト単位で、書き込み専用です。そのプロジェクトのソースマップとデバッグファイルのアップロードと、デプロイの記録ができます。データの読み取りやテレメトリの送信はできません。
+
+キーファイルの内容を、`LOGBREW_ARTIFACT_KEY` という名前のリポジトリシークレットとして保存します。GitHub で **Settings**、**Secrets and variables**、**Actions** の順に開きます。その後、ローカルのファイルを削除します。
+
+## ステップを追加する
+
+アプリをデプロイするステップの後に、このアクションを追加します。アクションは CLI のリリースタグに固定します。このタグで、アクションがインストールする CLI のバージョンも決まります。
+
+```yaml
+- name: Report the deploy to LogBrew
+  if: always()
+  uses: LogBrewCo/cli@v<version>
+  with:
+    token: ${{ secrets.LOGBREW_ARTIFACT_KEY }}
+    project: <project_id>
+    release: web@${{ github.sha }}
+    environment: production
+    service: checkout-web
+    sourcemaps: dist
+    status: ${{ job.status == 'success' && 'succeeded' || 'failed' }}
+```
+
+アプリが実行時に送信するものと同じ `release`、`environment`、`service` の値を使います。リリース名については、[リリース](/ja/concepts/releases)を参照してください。
+
+`if: always()` を指定すると、デプロイが失敗してもステップが実行され、LogBrew は失敗したデプロイを記録します。その場合、`status` の式は `failed` を送信します。
+
+## 入力
+
+| 入力 | デフォルト | 用途 |
+|---|---|---|
+| `token` | 必須 | ビルド成果物キー |
+| `project` | 必須 | プロジェクト ID |
+| `release` | 必須 | リリース名 |
+| `environment` | 必須 | `production` などの環境 |
+| `service` | 必須 | サービス名 |
+| `sourcemaps` | 空 | Vite プラグインが作成したマニフェストを含むビルドディレクトリ |
+| `sourcemaps-manifest` | ビルドディレクトリ内の `logbrew-release-artifacts.json` | マニフェストのパス |
+| `debug-files` | 空 | dSYM、ZIP、Mach-O、Android ELF のパス |
+| `deploy` | `true` | ファイルのアップロードだけを行う場合は `false` にします |
+| `deployment-id` | `github-<run_id>-<run_attempt>` | デプロイ ID |
+| `status` | `succeeded` | `succeeded` または `failed` |
+| `started-at` | ステップの開始時刻 | RFC 3339 形式のデプロイ開始時刻 |
+| `commit-sha` | `github.sha` | デプロイしたビルドのコミット |
+| `cli-version` | タグのバージョン、または `latest` | インストールする CLI のバージョン |
+| `working-directory` | `.` | 実行するディレクトリ |
+
+アクションは `deployment-id` 出力を設定します。
+
+デプロイ期間をより正確に記録するには、`started-at` にデプロイステップの開始時刻を設定します。
+
+## ソースマップをアップロードする
+
+`sourcemaps` 入力は、Vite プラグインが準備したビルドをアップロードします。先にプラグインを設定してください。手順は [JavaScript ソースマップ](/ja/guides/source-maps)を参照してください。アクションはアップロード用のヘルパーを `npx --no-install` で実行するため、プロジェクトに `@logbrew/sdk` をインストールしておく必要があります。アクションの前に `npm ci` を実行します。
+
+`.map` ファイルやマニフェストを、公開 Web サイトや CDN にデプロイしないでください。
+
+## デバッグファイルをアップロードする
+
+`debug-files` 入力は、同じプロジェクト、リリース、環境、サービスを指定して `logbrew debug-artifacts upload` を実行します。dSYM ファイルについては、[Apple のクラッシュとハング](/ja/guides/apple-crashes-and-hangs)を参照してください。
+
+## ステップを再実行する
+
+同じデプロイ ID を同じ値でもう一度送信できます。その場合、LogBrew はデプロイを1件だけ保持します。同じ ID を異なる値で送信すると失敗します。ワークフローを再実行すると、GitHub は `run_attempt` を増やします。デフォルトの ID が変わるため、アクションは新しいデプロイを記録します。
+
+## デプロイを確認する
+
+ワークフローの完了後に、CLI でリリースを読み取ります。
+
+```bash
+logbrew explain release "web@<commit_sha>" --project "<project_id>" \
+  --environment production --service checkout-web
+```

@@ -1,0 +1,122 @@
+---
+title: "تدوين عمليات النشر ورفع خرائط المصدر باستخدام GitHub Actions"
+sidebarTitle: "GitHub Action"
+description: "استخدم LogBrew GitHub Action لرفع خرائط المصدر لـ JavaScript وملفات التصحيح الأصلية وتدوين كل عملية نشر من سير عمل GitHub Actions."
+---
+
+يعمل LogBrew GitHub Action في نهاية مهمة النشر. يرفع خرائط المصدر لـ
+JavaScript وملفات التصحيح الأصلية الخاصة بالإصدار. ثم يدوّن علامة نشر. يستخدم
+LogBrew هذه الملفات لربط إطارات المكدّس بالشيفرة المصدرية لديك. ويستخدم علامة
+النشر لمقارنة الإصدار بالإصدار الذي سبقه.
+
+يوجد الإجراء في المستودع `LogBrewCo/cli`. وهو يثبّت LogBrew CLI من npm، لذا
+يجب أن يتوفر Node.js على المشغّل. وتتضمن مشغّلات Linux وmacOS وWindows التي
+تستضيفها GitHub الأداة Node.js مسبقًا.
+
+## إنشاء مفتاح لملفات البناء
+
+سجّل الدخول باستخدام [LogBrew CLI](/ar/guides/cli) واعثر على معرّف المشروع:
+
+```bash
+logbrew projects --json
+```
+
+أنشئ مفتاحًا لملفات البناء للمشروع. استخدم مسار ملف جديدًا في دليل لا يصل إليه
+إلا مالكه:
+
+```bash
+install -d -m 700 "$HOME/.logbrew" &&
+logbrew projects keys create "<project_id>" \
+  --ingest-key-file "$HOME/.logbrew/github-deploys.artifact" \
+  --label "GitHub deploys" \
+  --kind artifact \
+  --json
+```
+
+مفتاح ملفات البناء خاص بمشروع واحد وللكتابة فقط. يمكنه رفع خرائط المصدر وملفات
+تصحيح الأخطاء وتدوين عمليات النشر لذلك المشروع. ولا يمكنه قراءة البيانات ولا
+إرسال بيانات القياس عن بُعد.
+
+احفظ محتوى ملف المفتاح سرًّا للمستودع باسم `LOGBREW_ARTIFACT_KEY`. في GitHub،
+انتقل إلى **Settings**، ثم **Secrets and variables**، ثم **Actions**. بعد ذلك
+احذف الملف المحلي.
+
+## إضافة الخطوة
+
+أضف الإجراء بعد الخطوة التي تنشر تطبيقك. اربطه بوسم إصدار من CLI. يحدد الوسم
+أيضًا إصدار CLI الذي يثبّته الإجراء.
+
+```yaml
+- name: Report the deploy to LogBrew
+  if: always()
+  uses: LogBrewCo/cli@v<version>
+  with:
+    token: ${{ secrets.LOGBREW_ARTIFACT_KEY }}
+    project: <project_id>
+    release: web@${{ github.sha }}
+    environment: production
+    service: checkout-web
+    sourcemaps: dist
+    status: ${{ job.status == 'success' && 'succeeded' || 'failed' }}
+```
+
+استخدم قيم `release` و`environment` و`service` نفسها التي يرسلها تطبيقك أثناء
+التشغيل. راجع [الإصدارات](/ar/concepts/releases) لمعرفة أسماء الإصدارات.
+
+يجعل `if: always()` الخطوة تعمل عند فشل النشر أيضًا، فيدوّن LogBrew عملية
+النشر الفاشلة. ويرسل تعبير `status` القيمة `failed` في هذه الحالة.
+
+## المدخلات
+
+| المُدخل | الافتراضي | الاستخدام |
+|---|---|---|
+| `token` | مطلوب | مفتاح ملفات البناء |
+| `project` | مطلوب | معرّف المشروع |
+| `release` | مطلوب | اسم الإصدار |
+| `environment` | مطلوب | البيئة، مثل `production` |
+| `service` | مطلوب | اسم الخدمة |
+| `sourcemaps` | فارغ | دليل البناء الذي يحتوي على البيان من إضافة Vite |
+| `sourcemaps-manifest` | `logbrew-release-artifacts.json` في دليل البناء | مسار البيان |
+| `debug-files` | فارغ | مسار ملف dSYM أو ZIP أو Mach-O أو Android ELF |
+| `deploy` | `true` | اضبطه على `false` لرفع الملفات فقط |
+| `deployment-id` | `github-<run_id>-<run_attempt>` | معرّف النشر |
+| `status` | `succeeded` | `succeeded` أو `failed` |
+| `started-at` | وقت بدء الخطوة | وقت بدء النشر بتنسيق RFC 3339 |
+| `commit-sha` | `github.sha` | الإيداع الخاص بالبناء المنشور |
+| `cli-version` | الإصدار في الوسم، أو `latest` | إصدار CLI المراد تثبيته |
+| `working-directory` | `.` | الدليل الذي يعمل فيه الإجراء |
+
+يضبط الإجراء المُخرج `deployment-id`.
+
+للحصول على نافذة نشر أدق، اضبط `started-at` على وقت بدء خطوة النشر لديك.
+
+## رفع خرائط المصدر
+
+يرفع المُدخل `sourcemaps` البناء الذي أعدّته إضافة Vite. أعدّ الإضافة أولًا،
+وراجع [خرائط المصدر لـ JavaScript](/ar/guides/source-maps). يجب أن يثبّت
+المشروع `@logbrew/sdk`، لأن الإجراء يشغّل أداة الرفع المساعدة الخاصة به
+باستخدام `npx --no-install`. شغّل `npm ci` قبل الإجراء.
+
+لا تنشر ملفات `.map` ولا البيان على الموقع العام أو شبكة CDN.
+
+## رفع ملفات تصحيح الأخطاء
+
+يشغّل المُدخل `debug-files` الأمر `logbrew debug-artifacts upload` بالمشروع
+والإصدار والبيئة والخدمة نفسها. راجع [أعطال Apple
+والتجمّد](/ar/guides/apple-crashes-and-hangs) لملفات dSYM.
+
+## تشغيل الخطوة مرة أخرى
+
+يمكنك إرسال معرّف النشر نفسه بالقيم نفسها مرة أخرى. يحتفظ LogBrew بعملية نشر
+واحدة. ويفشل إرسال المعرّف نفسه بقيم مختلفة. عند إعادة تشغيل سير العمل، تزيد
+GitHub قيمة `run_attempt`. فيتغيّر المعرّف الافتراضي، ويدوّن الإجراء عملية نشر
+جديدة.
+
+## التحقق من النشر
+
+اقرأ الإصدار باستخدام CLI بعد انتهاء سير العمل:
+
+```bash
+logbrew explain release "web@<commit_sha>" --project "<project_id>" \
+  --environment production --service checkout-web
+```

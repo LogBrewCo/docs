@@ -1,0 +1,127 @@
+---
+title: "Catat deployment dan unggah source map dengan GitHub Actions"
+sidebarTitle: "GitHub Action"
+description: "Gunakan GitHub Action LogBrew untuk mengunggah source map JavaScript dan file debug native, lalu mencatat setiap deployment dari workflow GitHub Actions."
+---
+
+GitHub Action LogBrew berjalan di akhir job deployment. Action ini mengunggah
+source map JavaScript dan file debug native untuk rilis tersebut. Setelah itu,
+action mencatat penanda deployment. LogBrew memakai file tersebut untuk
+memetakan stack frame ke kode sumber Anda. LogBrew memakai penanda deployment
+untuk membandingkan sebuah rilis dengan rilis sebelumnya.
+
+Action ini ada di repositori `LogBrewCo/cli`. Action menginstal LogBrew CLI
+dari npm, jadi runner harus memiliki Node.js. Runner Linux, macOS, dan Windows
+yang di-host GitHub sudah memilikinya.
+
+## Buat kunci artefak
+
+Masuk dengan [LogBrew CLI](/id/guides/cli) dan cari ID proyek:
+
+```bash
+logbrew projects --json
+```
+
+Buat kunci artefak untuk proyek. Gunakan path file baru di direktori yang
+hanya bisa diakses pemiliknya:
+
+```bash
+install -d -m 700 "$HOME/.logbrew" &&
+logbrew projects keys create "<project_id>" \
+  --ingest-key-file "$HOME/.logbrew/github-deploys.artifact" \
+  --label "GitHub deploys" \
+  --kind artifact \
+  --json
+```
+
+Kunci artefak bersifat khusus proyek dan hanya bisa menulis. Kunci ini bisa
+mengunggah source map dan file debug, serta mencatat deployment untuk proyek
+tersebut. Kunci ini tidak bisa membaca data atau mengirim telemetri.
+
+Simpan isi file kunci sebagai secret repositori bernama
+`LOGBREW_ARTIFACT_KEY`. Di GitHub, buka **Settings**, lalu **Secrets and
+variables**, lalu **Actions**. Setelah itu, hapus file lokalnya.
+
+## Tambahkan langkah
+
+Tambahkan action setelah langkah yang men-deploy aplikasi Anda. Sematkan
+action ke tag rilis CLI. Tag ini juga menentukan versi CLI yang diinstal
+action.
+
+```yaml
+- name: Report the deploy to LogBrew
+  if: always()
+  uses: LogBrewCo/cli@v<version>
+  with:
+    token: ${{ secrets.LOGBREW_ARTIFACT_KEY }}
+    project: <project_id>
+    release: web@${{ github.sha }}
+    environment: production
+    service: checkout-web
+    sourcemaps: dist
+    status: ${{ job.status == 'success' && 'succeeded' || 'failed' }}
+```
+
+Gunakan nilai `release`, `environment`, dan `service` yang sama dengan yang
+dikirim aplikasi Anda saat runtime. Lihat [Rilis](/id/concepts/releases) untuk
+nama rilis.
+
+Dengan `if: always()`, langkah tetap berjalan saat deployment gagal, sehingga
+LogBrew mencatat deployment yang gagal. Dalam kasus itu, ekspresi `status`
+mengirim `failed`.
+
+## Input
+
+| Input | Default | Kegunaan |
+|---|---|---|
+| `token` | Wajib | Kunci artefak |
+| `project` | Wajib | ID proyek |
+| `release` | Wajib | Nama rilis |
+| `environment` | Wajib | Lingkungan, seperti `production` |
+| `service` | Wajib | Nama layanan |
+| `sourcemaps` | Kosong | Direktori build yang berisi manifest dari plugin Vite |
+| `sourcemaps-manifest` | `logbrew-release-artifacts.json` di direktori build | Path manifest |
+| `debug-files` | Kosong | Path dSYM, ZIP, Mach-O, atau ELF Android |
+| `deploy` | `true` | Atur ke `false` untuk mengunggah file saja |
+| `deployment-id` | `github-<run_id>-<run_attempt>` | ID deployment |
+| `status` | `succeeded` | `succeeded` atau `failed` |
+| `started-at` | Waktu langkah dimulai | Waktu RFC 3339 saat deployment dimulai |
+| `commit-sha` | `github.sha` | Commit dari build yang di-deploy |
+| `cli-version` | Versi di tag, atau `latest` | Versi CLI yang akan diinstal |
+| `working-directory` | `.` | Direktori tempat action berjalan |
+
+Action menetapkan output `deployment-id`.
+
+Agar jendela waktu deployment lebih tepat, atur `started-at` ke waktu langkah
+deployment Anda dimulai.
+
+## Unggah source map
+
+Input `sourcemaps` mengunggah build yang disiapkan plugin Vite. Siapkan plugin
+terlebih dahulu, lihat [Source map JavaScript](/id/guides/source-maps). Proyek
+harus menginstal `@logbrew/sdk`, karena action menjalankan helper unggahnya
+dengan `npx --no-install`. Jalankan `npm ci` sebelum action.
+
+Jangan deploy file `.map` atau manifest ke situs web publik atau CDN.
+
+## Unggah file debug
+
+Input `debug-files` menjalankan `logbrew debug-artifacts upload` dengan
+proyek, rilis, lingkungan, dan layanan yang sama. Lihat [Crash dan hang
+Apple](/id/guides/apple-crashes-and-hangs) untuk file dSYM.
+
+## Jalankan ulang langkah
+
+Anda bisa mengirim lagi ID deployment yang sama dengan nilai yang sama.
+LogBrew hanya menyimpan satu deployment. ID yang sama dengan nilai berbeda
+akan gagal. Saat Anda menjalankan ulang workflow, GitHub menaikkan
+`run_attempt`. ID default berubah, jadi action mencatat deployment baru.
+
+## Periksa deployment
+
+Baca rilis dengan CLI setelah workflow selesai:
+
+```bash
+logbrew explain release "web@<commit_sha>" --project "<project_id>" \
+  --environment production --service checkout-web
+```

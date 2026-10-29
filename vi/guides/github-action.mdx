@@ -1,0 +1,125 @@
+---
+title: "Ghi lại lần triển khai và tải source map lên bằng GitHub Actions"
+sidebarTitle: "GitHub Action"
+description: "Dùng GitHub Action của LogBrew để tải source map JavaScript và tệp gỡ lỗi của mã native lên, đồng thời ghi lại mỗi lần triển khai từ một workflow GitHub Actions."
+---
+
+GitHub Action của LogBrew chạy ở cuối job triển khai. Action tải source map
+JavaScript và tệp gỡ lỗi của mã native cho bản phát hành lên. Sau đó, action
+ghi lại một mốc triển khai. LogBrew dùng các tệp này để ánh xạ khung ngăn xếp
+về mã nguồn của bạn. LogBrew dùng mốc triển khai để so sánh một bản phát hành
+với bản phát hành trước đó.
+
+Action nằm trong repository `LogBrewCo/cli`. Action cài LogBrew CLI từ npm,
+nên runner phải có Node.js. Runner Linux, macOS và Windows do GitHub lưu trữ
+đã có sẵn Node.js.
+
+## Tạo khóa artifact
+
+Đăng nhập bằng [LogBrew CLI](/vi/guides/cli) và tìm ID dự án:
+
+```bash
+logbrew projects --json
+```
+
+Tạo khóa artifact cho dự án. Dùng một đường dẫn tệp mới trong thư mục mà chỉ
+chủ sở hữu truy cập được:
+
+```bash
+install -d -m 700 "$HOME/.logbrew" &&
+logbrew projects keys create "<project_id>" \
+  --ingest-key-file "$HOME/.logbrew/github-deploys.artifact" \
+  --label "GitHub deploys" \
+  --kind artifact \
+  --json
+```
+
+Khóa artifact có phạm vi theo dự án và chỉ có quyền ghi. Khóa này tải được
+source map và tệp gỡ lỗi lên, và ghi lại được các lần triển khai của dự án đó.
+Khóa không đọc được dữ liệu và không gửi được telemetry.
+
+Lưu nội dung tệp khóa thành repository secret có tên `LOGBREW_ARTIFACT_KEY`.
+Trên GitHub, vào **Settings**, rồi **Secrets and variables**, rồi **Actions**.
+Sau đó xóa tệp cục bộ.
+
+## Thêm bước
+
+Thêm action sau bước triển khai ứng dụng. Ghim action vào một tag phát hành
+của CLI. Tag này cũng quyết định phiên bản CLI mà action cài đặt.
+
+```yaml
+- name: Report the deploy to LogBrew
+  if: always()
+  uses: LogBrewCo/cli@v<version>
+  with:
+    token: ${{ secrets.LOGBREW_ARTIFACT_KEY }}
+    project: <project_id>
+    release: web@${{ github.sha }}
+    environment: production
+    service: checkout-web
+    sourcemaps: dist
+    status: ${{ job.status == 'success' && 'succeeded' || 'failed' }}
+```
+
+Dùng cùng các giá trị `release`, `environment` và `service` mà ứng dụng gửi
+lúc chạy. Xem [Bản phát hành](/vi/concepts/releases) để biết cách đặt tên bản
+phát hành.
+
+`if: always()` giúp bước này vẫn chạy khi triển khai thất bại, nhờ đó LogBrew
+ghi lại lần triển khai thất bại. Khi đó, biểu thức của `status` gửi `failed`.
+
+## Đầu vào
+
+| Đầu vào | Mặc định | Công dụng |
+|---|---|---|
+| `token` | Bắt buộc | Khóa artifact |
+| `project` | Bắt buộc | ID dự án |
+| `release` | Bắt buộc | Tên bản phát hành |
+| `environment` | Bắt buộc | Môi trường, chẳng hạn `production` |
+| `service` | Bắt buộc | Tên dịch vụ |
+| `sourcemaps` | Trống | Thư mục build chứa manifest do plugin Vite tạo |
+| `sourcemaps-manifest` | `logbrew-release-artifacts.json` trong thư mục build | Đường dẫn manifest |
+| `debug-files` | Trống | Đường dẫn tới tệp dSYM, ZIP, Mach-O hoặc ELF Android |
+| `deploy` | `true` | Đặt thành `false` để chỉ tải tệp lên |
+| `deployment-id` | `github-<run_id>-<run_attempt>` | ID lần triển khai |
+| `status` | `succeeded` | `succeeded` hoặc `failed` |
+| `started-at` | Thời điểm bước bắt đầu | Thời điểm bắt đầu triển khai theo RFC 3339 |
+| `commit-sha` | `github.sha` | Commit của bản dựng đã triển khai |
+| `cli-version` | Phiên bản trong tag, hoặc `latest` | Phiên bản CLI cần cài |
+| `working-directory` | `.` | Thư mục để chạy action |
+
+Action đặt output `deployment-id`.
+
+Để khung thời gian triển khai chính xác hơn, đặt `started-at` thành thời điểm
+bước triển khai của bạn bắt đầu.
+
+## Tải source map lên
+
+Đầu vào `sourcemaps` tải lên bản dựng mà plugin Vite đã chuẩn bị. Hãy thiết
+lập plugin trước, xem [Source map JavaScript](/vi/guides/source-maps). Dự án
+phải cài `@logbrew/sdk`, vì action chạy helper tải lên của gói này bằng `npx
+--no-install`. Chạy `npm ci` trước action.
+
+Không triển khai tệp `.map` hoặc manifest lên website công khai hay CDN.
+
+## Tải tệp gỡ lỗi lên
+
+Đầu vào `debug-files` chạy `logbrew debug-artifacts upload` với cùng dự án,
+bản phát hành, môi trường và dịch vụ. Xem [Crash và treo trên
+Apple](/vi/guides/apple-crashes-and-hangs) về tệp dSYM.
+
+## Chạy lại bước
+
+Bạn có thể gửi lại cùng ID lần triển khai với cùng giá trị. LogBrew chỉ giữ
+một lần triển khai. Cùng ID nhưng khác giá trị sẽ thất bại. Khi bạn chạy lại
+một workflow, GitHub tăng `run_attempt`. ID mặc định thay đổi, nên action ghi
+lại một lần triển khai mới.
+
+## Kiểm tra lần triển khai
+
+Đọc bản phát hành bằng CLI sau khi workflow chạy xong:
+
+```bash
+logbrew explain release "web@<commit_sha>" --project "<project_id>" \
+  --environment production --service checkout-web
+```

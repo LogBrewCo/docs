@@ -1,0 +1,124 @@
+---
+title: "Record deploys and upload source maps with GitHub Actions"
+sidebarTitle: "GitHub Action"
+description: "Use the LogBrew GitHub Action to upload JavaScript source maps and native debug files and record each deploy from a GitHub Actions workflow."
+---
+
+The LogBrew GitHub Action runs at the end of a deploy job. It uploads
+JavaScript source maps and native debug files for the release. Then it
+records a deploy marker. LogBrew uses the files to map stack frames to your
+source. It uses the deploy marker to compare a release with the release
+before it.
+
+The action is in the `LogBrewCo/cli` repository. It installs the LogBrew CLI
+from npm, so the runner must have Node.js. GitHub-hosted Linux, macOS, and
+Windows runners have it.
+
+## Create an artifact key
+
+Sign in with the [LogBrew CLI](/guides/cli) and find the project ID:
+
+```bash
+logbrew projects --json
+```
+
+Create an artifact key for the project. Use a new file path in an owner-only
+directory:
+
+```bash
+install -d -m 700 "$HOME/.logbrew" &&
+logbrew projects keys create "<project_id>" \
+  --ingest-key-file "$HOME/.logbrew/github-deploys.artifact" \
+  --label "GitHub deploys" \
+  --kind artifact \
+  --json
+```
+
+An artifact key is project-scoped and write-only. It can upload source maps
+and debug files and record deploys for that project. It cannot read data or
+send telemetry.
+
+Save the contents of the key file as a repository secret named
+`LOGBREW_ARTIFACT_KEY`. In GitHub, go to **Settings**, then **Secrets and
+variables**, then **Actions**. Then delete the local file.
+
+## Add the step
+
+Add the action after the step that deploys your app. Pin it to a release tag
+of the CLI. The tag also selects the CLI version that the action installs.
+
+```yaml
+- name: Report the deploy to LogBrew
+  if: always()
+  uses: LogBrewCo/cli@v<version>
+  with:
+    token: ${{ secrets.LOGBREW_ARTIFACT_KEY }}
+    project: <project_id>
+    release: web@${{ github.sha }}
+    environment: production
+    service: checkout-web
+    sourcemaps: dist
+    status: ${{ job.status == 'success' && 'succeeded' || 'failed' }}
+```
+
+Use the same `release`, `environment`, and `service` values that your app
+sends at runtime. See [Releases](/concepts/releases) for release names.
+
+`if: always()` makes the step run when the deploy fails, so LogBrew records
+the failed deploy. The `status` expression sends `failed` in that case.
+
+## Inputs
+
+| Input | Default | Use |
+|---|---|---|
+| `token` | Required | The artifact key |
+| `project` | Required | The project ID |
+| `release` | Required | The release name |
+| `environment` | Required | The environment, such as `production` |
+| `service` | Required | The service name |
+| `sourcemaps` | Empty | The build directory that has the manifest from the Vite plugin |
+| `sourcemaps-manifest` | `logbrew-release-artifacts.json` in the build directory | The manifest path |
+| `debug-files` | Empty | A dSYM, ZIP, Mach-O, or Android ELF path |
+| `deploy` | `true` | Set to `false` to upload files only |
+| `deployment-id` | `github-<run_id>-<run_attempt>` | The deploy ID |
+| `status` | `succeeded` | `succeeded` or `failed` |
+| `started-at` | The time the step started | The RFC 3339 time the deploy started |
+| `commit-sha` | `github.sha` | The commit of the deployed build |
+| `cli-version` | The version in the tag, or `latest` | The CLI version to install |
+| `working-directory` | `.` | The directory to run in |
+
+The action sets the `deployment-id` output.
+
+For a more exact deploy window, set `started-at` to the time your deploy step
+started.
+
+## Upload source maps
+
+The `sourcemaps` input uploads the build that the Vite plugin prepared. Set
+up the plugin first, see [JavaScript source maps](/guides/source-maps). The
+project must install `@logbrew/sdk`, because the action runs its upload
+helper with `npx --no-install`. Run `npm ci` before the action.
+
+Do not deploy `.map` files or the manifest to the public website or CDN.
+
+## Upload debug files
+
+The `debug-files` input runs `logbrew debug-artifacts upload` with the same
+project, release, environment, and service. See
+[Apple crashes and hangs](/guides/apple-crashes-and-hangs) for dSYM files.
+
+## Run the step again
+
+You can send the same deploy ID with the same values again. LogBrew keeps
+one deploy. The same ID with different values fails. When you run a workflow
+again, GitHub increases `run_attempt`. The default ID changes, so the action
+records a new deploy.
+
+## Check the deploy
+
+Read the release with the CLI after the workflow finishes:
+
+```bash
+logbrew explain release "web@<commit_sha>" --project "<project_id>" \
+  --environment production --service checkout-web
+```
