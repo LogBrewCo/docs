@@ -26,11 +26,11 @@ class KeyFileTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             self.assertIsNone(indexnow.find_key(root))
-            (root / "notes.txt").write_text("notes\n", encoding="utf-8")
-            (root / "short.txt").write_text("short\n", encoding="utf-8")
-            (root / "example-other-key.txt").write_text("different\n", encoding="utf-8")
+            (root / "notes.json").write_text("notes\n", encoding="utf-8")
+            (root / "short.json").write_text("short\n", encoding="utf-8")
+            (root / "example-other-key.json").write_text("different\n", encoding="utf-8")
             self.assertIsNone(indexnow.find_key(root))
-            (root / f"{KEY}.txt").write_text(f"{KEY}\n", encoding="utf-8")
+            (root / f"{KEY}.json").write_text(f"{KEY}\n", encoding="utf-8")
             self.assertEqual(indexnow.find_key(root), KEY)
 
 
@@ -80,7 +80,7 @@ class RequestTest(unittest.TestCase):
         self.assertEqual(json.loads(body), {
             "host": "docs.logbrew.co",
             "key": KEY,
-            "keyLocation": f"{SITE}/{KEY}.txt",
+            "keyLocation": f"{SITE}/{KEY}.json",
             "urlList": [f"{SITE}/quickstart"],
         })
 
@@ -129,7 +129,7 @@ class LiveTest(unittest.TestCase):
         return fetch, calls
 
     def test_waits_for_the_key_file_and_new_pages(self):
-        key_url = f"{SITE}/{KEY}.txt"
+        key_url = f"{SITE}/{KEY}.json"
         old = "<loc>https://docs.logbrew.co/quickstart</loc>"
         fetch, _ = self.site({
             key_url: [(404, ""), (200, KEY + "\n")],
@@ -141,7 +141,7 @@ class LiveTest(unittest.TestCase):
         self.assertEqual(waits, [30, 30])
 
     def test_gives_up_after_bounded_checks(self):
-        fetch, calls = self.site({f"{SITE}/{KEY}.txt": [(404, "")]})
+        fetch, calls = self.site({f"{SITE}/{KEY}.json": [(404, "")]})
         waits = []
         self.assertEqual(indexnow.wait_until_live(fetch, waits.append, set(), KEY), ([], False))
         self.assertEqual((len(calls), len(waits)), (indexnow.LIVE_CHECKS, indexnow.LIVE_CHECKS - 1))
