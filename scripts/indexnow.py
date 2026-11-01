@@ -2,16 +2,17 @@
 """Tell IndexNow search engines which docs.logbrew.co pages changed.
 
 The IndexNow workflow runs this script after a new version of docs.logbrew.co goes
-live. It compares the pages of that version with the version that was live before
-it and sends IndexNow (Bing, Yandex, and other engines) the URLs of the pages that
-were added, changed, renamed, or removed. When the earlier version did not have
-the key file yet, it sends every URL in the sitemap. The key file is the file
+live. It compares the pages of that version with the last version that IndexNow
+accepted and sends IndexNow (Bing, Yandex, and other engines) the URLs of the pages
+that were added, changed, renamed, or removed since then. A version that IndexNow
+accepted gets a successful "IndexNow" commit status. When no recent version has one,
+or that version did not have the key file, it sends every URL in the sitemap. The key file is the file
 <key>.json at the repository root, which holds only <key> as plain text. The site
 serves .json files from the repository root as they are, so engines read the key at
 https://docs.logbrew.co/<key>.json.
 
-The workflow sets GITHUB_REPOSITORY, GITHUB_TOKEN, DEPLOYMENT_ID,
-DEPLOYMENT_SHA, and DEPLOYMENT_ENVIRONMENT. IndexNow accepts a list with a 200 or
+The workflow sets GITHUB_REPOSITORY, GITHUB_TOKEN, GITHUB_SERVER_URL,
+GITHUB_RUN_ID, and DEPLOYMENT_SHA. IndexNow accepts a list with a 200 or
 202 answer. A 429 or 5xx answer, or a network error, gets 3 tries in all. The
 result goes to the job summary, and the script exits 0 whatever IndexNow answers,
 because the new pages are already live.
@@ -129,12 +130,24 @@ def post_indexnow(body):
         return 0, "", str(error)
 
 
-def get(url, token=None):
+def github(method, url, token, payload=None):
+    """Return (status, body) for a GitHub API request."""
+    request = urllib.request.Request(
+        url, method=method, data=None if payload is None else json.dumps(payload).encode(),
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
+                 "User-Agent": "logbrew-docs-indexnow"})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return response.status, response.read().decode(errors="replace")
+    except urllib.error.HTTPError as error:
+        return error.code, ""
+    except OSError:
+        return 0, ""
+
+
+def get(url):
     """Return (status, body) for a GET request."""
     headers = {"User-Agent": "logbrew-docs-indexnow"}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-        headers["Accept"] = "application/vnd.github+json"
     try:
         with urllib.request.urlopen(
                 urllib.request.Request(url, headers=headers), timeout=30) as response:
@@ -145,17 +158,17 @@ def get(url, token=None):
         return 0, ""
 
 
-def previous_live_sha(fetch_json, repository, deployment_id, environment):
-    """Return the commit of the last version that went live before this one."""
-    deployments = fetch_json(
-        f"/repos/{repository}/deployments?environment={environment}&ref=main&per_page=50")
-    for deployment in deployments or []:
-        if deployment["id"] >= deployment_id:
-            continue
-        statuses = fetch_json(
-            f"/repos/{repository}/deployments/{deployment['id']}/statuses?per_page=20")
-        if any(status["state"] == "success" for status in statuses or []):
-            return deployment["sha"]
+STATUS_CONTEXT = "IndexNow"
+HISTORY = 50
+
+
+def last_accepted_sha(fetch_json, repository, shas):
+    """Return the newest of these commits that has an accepted IndexNow status."""
+    for sha in shas:
+        statuses = fetch_json(f"/repos/{repository}/commits/{sha}/statuses?per_page=100")
+        if any(status["context"] == STATUS_CONTEXT and status["state"] == "success"
+               for status in statuses or []):
+            return sha
     return None
 
 
@@ -185,7 +198,7 @@ def wait_until_live(fetch, sleep, expected, key):
 def select(previous, current, sitemap, key):
     """Return the URLs to send: all of the sitemap on the first run, else the changes."""
     if previous is None or git("cat-file", "-e", f"{previous}:{key}.json")[0] != 0:
-        return list(sitemap), "every sitemap URL (first run)"
+        return list(sitemap), "every sitemap URL (no earlier accepted version)"
     code, diff = git("diff", "--name-status", "-M", previous, current, "--")
     if code != 0:
         return list(sitemap), f"every sitemap URL ({previous[:12]} is not in this history)"
@@ -216,17 +229,26 @@ def main():
     repository = os.environ["GITHUB_REPOSITORY"]
     token = os.environ["GITHUB_TOKEN"]
     current = os.environ["DEPLOYMENT_SHA"]
+    run_url = (f"{os.environ['GITHUB_SERVER_URL']}/{repository}/actions/runs/"
+               f"{os.environ['GITHUB_RUN_ID']}")
     key = find_key()
     if not key:
         report("skipped: the repository has no key file", warning=True)
         return 0
 
     def fetch_json(path):
-        status, body = get(f"https://api.github.com{path}", token)
+        status, body = github("GET", f"https://api.github.com{path}", token)
         return json.loads(body) if status == 200 else None
 
-    previous = previous_live_sha(fetch_json, repository, int(os.environ["DEPLOYMENT_ID"]),
-                                 os.environ["DEPLOYMENT_ENVIRONMENT"])
+    def mark_accepted(description):
+        status, _ = github("POST", f"https://api.github.com/repos/{repository}/statuses/{current}",
+                           token, {"state": "success", "context": STATUS_CONTEXT,
+                                   "description": description[:140], "target_url": run_url})
+        if status != 201:
+            print(f"::warning::could not set the {STATUS_CONTEXT} status (HTTP {status})")
+
+    shas = git("rev-list", "--first-parent", f"--max-count={HISTORY}", current)[1].split()
+    previous = last_accepted_sha(fetch_json, repository, shas)
     sitemap, live = wait_until_live(get, time.sleep, expected_pages(previous, current), key)
     if not sitemap:
         report(f"skipped: https://{HOST}/{key}.json or the sitemap is not live", warning=True)
@@ -236,6 +258,7 @@ def main():
     urls, scope = select(previous, current, sitemap, key)
     if not urls:
         report(f"nothing to send: no page changed ({scope})")
+        mark_accepted("No page changed")
         return 0
     for body in build_requests(urls, key):
         accepted, status, attempts, detail = submit(body, post_indexnow, time.sleep)
@@ -244,6 +267,7 @@ def main():
                    warning=True)
             return 0
     report(f"HTTP {status} accepted {len(urls)} URLs, {scope}")
+    mark_accepted(f"HTTP {status}: accepted {len(urls)} URLs")
     return 0
 
 
