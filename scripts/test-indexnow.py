@@ -148,22 +148,23 @@ class LiveTest(unittest.TestCase):
 
 
 class PreviousVersionTest(unittest.TestCase):
-    def test_last_successful_earlier_deployment(self):
+    def test_newest_commit_with_an_accepted_status(self):
         api = {
-            "/repos/o/r/deployments?environment=env&ref=main&per_page=50": [
-                {"id": 9, "sha": "later"}, {"id": 7, "sha": "current"},
-                {"id": 6, "sha": "failed"}, {"id": 5, "sha": "live"}, {"id": 4, "sha": "older"},
-            ],
-            "/repos/o/r/deployments/6/statuses?per_page=20": [{"state": "failure"}],
-            "/repos/o/r/deployments/5/statuses?per_page=20": [
-                {"state": "success"}, {"state": "in_progress"}],
+            "/repos/o/r/commits/c3/statuses?per_page=100": [
+                {"context": "Public guard", "state": "success"}],
+            "/repos/o/r/commits/c2/statuses?per_page=100": [
+                {"context": "IndexNow", "state": "failure"}],
+            "/repos/o/r/commits/c1/statuses?per_page=100": [
+                {"context": "IndexNow", "state": "success"}],
+            "/repos/o/r/commits/c0/statuses?per_page=100": [
+                {"context": "IndexNow", "state": "success"}],
         }
-        self.assertEqual(indexnow.previous_live_sha(api.get, "o/r", 7, "env"), "live")
+        self.assertEqual(indexnow.last_accepted_sha(api.get, "o/r", ["c3", "c2", "c1", "c0"]),
+                         "c1")
 
-    def test_none_when_nothing_went_live_before(self):
-        api = {"/repos/o/r/deployments?environment=env&ref=main&per_page=50": [{"id": 7}]}
-        self.assertIsNone(indexnow.previous_live_sha(api.get, "o/r", 7, "env"))
-        self.assertIsNone(indexnow.previous_live_sha({}.get, "o/r", 7, "env"))
+    def test_none_when_no_commit_was_accepted(self):
+        self.assertIsNone(indexnow.last_accepted_sha({}.get, "o/r", ["c1", "c0"]))
+        self.assertIsNone(indexnow.last_accepted_sha({}.get, "o/r", []))
 
 
 class WorkflowTest(unittest.TestCase):
