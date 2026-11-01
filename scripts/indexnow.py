@@ -6,7 +6,9 @@ live. It compares the pages of that version with the version that was live befor
 it and sends IndexNow (Bing, Yandex, and other engines) the URLs of the pages that
 were added, changed, renamed, or removed. When the earlier version did not have
 the key file yet, it sends every URL in the sitemap. The key file is the file
-<key>.txt at the repository root that holds only <key>.
+<key>.json at the repository root, which holds only <key> as plain text. The site
+serves .json files from the repository root as they are, so engines read the key at
+https://docs.logbrew.co/<key>.json.
 
 The workflow sets GITHUB_REPOSITORY, GITHUB_TOKEN, DEPLOYMENT_ID,
 DEPLOYMENT_SHA, and DEPLOYMENT_ENVIRONMENT. IndexNow accepts a list with a 200 or
@@ -38,8 +40,8 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def find_key(root=ROOT):
-    """Return the key of the root file <key>.txt that holds only <key>, or None."""
-    for path in sorted(root.glob("*.txt")):
+    """Return the key of the root file <key>.json that holds only <key>, or None."""
+    for path in sorted(root.glob("*.json")):
         if KEY_NAME.fullmatch(path.stem) and path.read_text(encoding="utf-8").strip() == path.stem:
             return path.stem
     return None
@@ -88,7 +90,7 @@ def build_requests(urls, key):
         json.dumps({
             "host": HOST,
             "key": key,
-            "keyLocation": f"https://{HOST}/{key}.txt",
+            "keyLocation": f"https://{HOST}/{key}.json",
             "urlList": urls[start:start + MAX_URLS],
         }).encode()
         for start in range(0, len(urls), MAX_URLS)
@@ -170,7 +172,7 @@ def wait_until_live(fetch, sleep, expected, key):
     for check in range(LIVE_CHECKS):
         if check:
             sleep(LIVE_WAIT)
-        key_status, key_body = fetch(f"https://{HOST}/{key}.txt")
+        key_status, key_body = fetch(f"https://{HOST}/{key}.json")
         if key_status != 200 or key_body.strip() != key:
             continue
         map_status, xml = fetch(f"https://{HOST}/sitemap.xml")
@@ -182,7 +184,7 @@ def wait_until_live(fetch, sleep, expected, key):
 
 def select(previous, current, sitemap, key):
     """Return the URLs to send: all of the sitemap on the first run, else the changes."""
-    if previous is None or git("cat-file", "-e", f"{previous}:{key}.txt")[0] != 0:
+    if previous is None or git("cat-file", "-e", f"{previous}:{key}.json")[0] != 0:
         return list(sitemap), "every sitemap URL (first run)"
     code, diff = git("diff", "--name-status", "-M", previous, current, "--")
     if code != 0:
@@ -227,7 +229,7 @@ def main():
                                  os.environ["DEPLOYMENT_ENVIRONMENT"])
     sitemap, live = wait_until_live(get, time.sleep, expected_pages(previous, current), key)
     if not sitemap:
-        report(f"skipped: https://{HOST}/{key}.txt or the sitemap is not live", warning=True)
+        report(f"skipped: https://{HOST}/{key}.json or the sitemap is not live", warning=True)
         return 0
     if not live:
         print("Some changed pages are not in the sitemap yet; sending the ones that are.")
