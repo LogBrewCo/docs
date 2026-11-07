@@ -1,0 +1,394 @@
+---
+title: "Logging trong Python, mức log và xử lý lỗi"
+sidebarTitle: "Logging trong Python"
+description: "Cấu hình logging trong Python với mức log phù hợp, xử lý lỗi và các loại ngoại lệ Python, rồi gửi log và crash đến LogBrew."
+---
+
+LogBrew là nền tảng observability (khả năng quan sát) cho lập trình viên và agent lập trình, có gói miễn phí rộng rãi và không cần thẻ thanh toán.
+
+Hướng dẫn này trình bày logging trong Python với module `logging` chuẩn, 5 mức log của Python, cách xử lý lỗi trong Python và các loại lỗi Python thường gặp. Các phần cuối gửi chính các log và crash đó đến LogBrew bằng `logbrew-sdk` 0.1.29. Mọi ví dụ đều đã chạy trên Python 3.13, và mỗi khối kết quả là kết quả thật.
+
+Với ứng dụng Flask, dùng [logging cho Flask](/vi/guides/flask) thay cho trang này. Cách đó thêm trace của yêu cầu vào cùng cấu hình logging.
+
+## Ghi log Python đầu tiên
+
+Lưu tệp này thành `app.py`. Gọi `logging.basicConfig()` một lần, tại điểm vào của chương trình. Trong mỗi module, lấy một logger có tên.
+
+```python
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+logger = logging.getLogger("billing")
+
+logger.debug("cache warmed")
+logger.info("invoice created")
+logger.warning("payment retry %d of %d", 2, 3)
+
+try:
+    total = 100 / 0
+except ZeroDivisionError:
+    logger.exception("invoice total failed")
+```
+
+Chạy `python3 app.py`. Kết quả được ghi ra standard error.
+
+```text
+2026-11-07 17:21:29,602 INFO billing invoice created
+2026-11-07 17:21:29,602 WARNING billing payment retry 2 of 3
+2026-11-07 17:21:29,602 ERROR billing invoice total failed
+Traceback (most recent call last):
+  File "/srv/app/app.py", line 14, in <module>
+    total = 100 / 0
+            ~~~~^~~
+ZeroDivisionError: division by zero
+```
+
+Bản ghi `debug` không xuất hiện vì mức log là `INFO`. `logger.exception()` ghi log ở mức `ERROR` và thêm traceback. Chỉ gọi hàm này trong khối `except`.
+
+Truyền giá trị dưới dạng đối số, như trong `"payment retry %d of %d", 2, 3`. Python chỉ tạo thông điệp khi một handler chấp nhận bản ghi. Mẫu thông điệp giữ nguyên cho mọi lần thử lại, nên bạn có thể tìm kiếm theo mẫu đó.
+
+## Các mức log trong Python
+
+Logger chỉ gửi bản ghi khi mức của bản ghi bằng hoặc cao hơn mức của logger. Handler có thể đặt thêm một mức thứ hai, cao hơn.
+
+| Mức | Số | Dùng cho |
+| --- | --- | --- |
+| `DEBUG` | 10 | Chi tiết chỉ cần khi bạn đang tìm lỗi. |
+| `INFO` | 20 | Sự kiện bình thường xác nhận chương trình chạy đúng, ví dụ một job đã bắt đầu. |
+| `WARNING` | 30 | Trạng thái bất thường mà chương trình đã phục hồi được, ví dụ một lần thử lại. |
+| `ERROR` | 40 | Một thao tác thất bại. Chương trình vẫn tiếp tục chạy. |
+| `CRITICAL` | 50 | Lỗi làm dừng chương trình hoặc một tính năng chính. |
+
+Logger gốc bắt đầu ở mức `WARNING`. Logger mới có mức `NOTSET` (0) và dùng mức của logger cha. Đặt `INFO` trong production. Chỉ dùng `DEBUG` khi phát triển hoặc khi chẩn đoán trong thời gian ngắn.
+
+```python
+logging.getLogger("billing").setLevel(logging.DEBUG)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+```
+
+Dòng đầu tiên hiện các bản ghi debug của một module. Dòng thứ hai bớt log nhiễu từ một thư viện.
+
+## Logger, handler và formatter
+
+- Logger nhận lời gọi. Dùng `logging.getLogger(__name__)` để tên logger đi theo đường dẫn module.
+- Handler gửi bản ghi đến một đích, ví dụ console, tệp hoặc LogBrew.
+- Formatter chuyển bản ghi thành văn bản.
+
+Thư viện không được cấu hình logging. Thư viện chỉ thêm `logging.NullHandler()` vào logger của chính nó. Ứng dụng cấu hình handler và mức log một lần. Với cấu hình lớn, dùng `logging.config.dictConfig()`.
+
+## Xử lý lỗi trong Python
+
+Bắt ngoại lệ cụ thể nhất mà bạn xử lý được. Dùng `else` cho code chỉ chạy khi thành công và `finally` cho code luôn chạy. Dùng `raise ... from error` để giữ nguyên nhân gốc.
+
+Lưu tệp này thành `orders.py`.
+
+```python
+import logging
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
+logger = logging.getLogger("orders")
+
+
+class OrderError(Exception):
+    """The order cannot be processed."""
+
+
+def parse_quantity(raw):
+    try:
+        quantity = int(raw)
+    except ValueError as error:
+        raise OrderError(f"quantity must be a whole number, got {raw!r}") from error
+    else:
+        logger.info("quantity parsed")
+        return quantity
+    finally:
+        logger.debug("parse attempt finished")
+
+
+for raw in ["3", "three"]:
+    try:
+        parse_quantity(raw)
+    except OrderError:
+        logger.exception("order rejected")
+```
+
+Kết quả hiện cả hai ngoại lệ trong chuỗi ngoại lệ.
+
+```text
+INFO orders quantity parsed
+ERROR orders order rejected
+Traceback (most recent call last):
+  File "/srv/app/orders.py", line 13, in parse_quantity
+    quantity = int(raw)
+ValueError: invalid literal for int() with base 10: 'three'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/srv/app/orders.py", line 25, in <module>
+    parse_quantity(raw)
+    ~~~~~~~~~~~~~~^^^^^
+  File "/srv/app/orders.py", line 15, in parse_quantity
+    raise OrderError(f"quantity must be a whole number, got {raw!r}") from error
+OrderError: quantity must be a whole number, got 'three'
+```
+
+Áp dụng các quy tắc sau cho từng ngoại lệ.
+
+- Ghi log một ngoại lệ một lần, tại nơi bạn xử lý nó. Đừng ghi log rồi ném lại ở mỗi tầng, vì mỗi tầng sẽ thêm một bản ghi trùng lặp.
+- Đừng viết `except Exception: pass`. Nếu bỏ qua một lỗi, ghi log lỗi đó ở mức `WARNING` trở lên kèm lý do.
+- Bắt `Exception`, không bắt `BaseException`. `BaseException` còn bắt cả `KeyboardInterrupt` và `SystemExit`, vốn được dùng để chủ động dừng chương trình.
+- Định nghĩa lớp ngoại lệ riêng cho các lỗi mà bên gọi phải xử lý, như `OrderError`.
+
+### Báo nhiều lỗi cùng lúc
+
+Python 3.11 trở lên có thể ném `ExceptionGroup`. Dùng nó khi một lần kiểm tra phát hiện nhiều lỗi. Xử lý từng loại bằng `except*`.
+
+```python
+def validate(order):
+    errors = []
+    if not order.get("email"):
+        errors.append(ValueError("email is required"))
+    if order.get("quantity", 0) < 1:
+        errors.append(ValueError("quantity must be 1 or more"))
+    if errors:
+        raise ExceptionGroup("order is invalid", errors)
+
+
+try:
+    validate({"quantity": 0})
+except* ValueError as group:
+    for error in group.exceptions:
+        logger.warning("validation failed: %s", error)
+```
+
+```text
+WARNING orders validation failed: email is required
+WARNING orders validation failed: quantity must be 1 or more
+```
+
+## Các loại lỗi Python thường gặp
+
+Mọi lỗi dựng sẵn mà chương trình xử lý được đều kế thừa từ `Exception`. Bảng này liệt kê các lỗi Python hay gặp nhất và điều cần kiểm tra đầu tiên cho mỗi lỗi.
+
+| Loại lỗi | Python ném lỗi khi | Kiểm tra đầu tiên |
+| --- | --- | --- |
+| `SyntaxError` | Code không phải Python hợp lệ. Tệp không chạy. | Đọc dòng và cột trong thông điệp. |
+| `IndentationError` | Thụt lề của một khối không đúng. | Dùng 4 dấu cách và không dùng tab. |
+| `NameError` | Một tên chưa được định nghĩa. | Kiểm tra chính tả và lệnh import. |
+| `AttributeError` | Đối tượng không có thuộc tính mang tên đó. | Kiểm tra kiểu của đối tượng, thường là `None`. |
+| `TypeError` | Một phép toán nhận giá trị sai kiểu. | Kiểm tra kiểu của các đối số. |
+| `ValueError` | Giá trị đúng kiểu nhưng không hợp lệ, ví dụ `int("three")`. | Kiểm tra đầu vào trước khi chuyển đổi. |
+| `KeyError` | Dictionary không có khóa đó. | Dùng `dict.get()` hoặc kiểm tra `key in mapping`. |
+| `IndexError` | Chỉ số của sequence nằm ngoài phạm vi. | Kiểm tra độ dài trước khi đọc chỉ số. |
+| `ZeroDivisionError` | Phép chia hoặc chia lấy dư dùng số 0. | Kiểm tra số chia trước. |
+| `ModuleNotFoundError` | Lệnh import không tìm thấy module. Đây là lớp con của `ImportError`. | Cài gói vào môi trường đang kích hoạt. |
+| `FileNotFoundError` | Tệp hoặc thư mục không tồn tại. Đây là lớp con của `OSError`. | Kiểm tra đường dẫn và thư mục làm việc. |
+| `PermissionError` | Tiến trình không có quyền truy cập tệp hoặc tài nguyên. | Kiểm tra chủ sở hữu và chế độ quyền của tệp. |
+| `TimeoutError` | Một thao tác không hoàn tất đúng hạn. | Thêm cơ chế thử lại có giới hạn, rồi ghi log lần thất bại cuối cùng. |
+| `RecursionError` | Call stack sâu hơn giới hạn đệ quy. | Tìm lời gọi không dừng. |
+| `RuntimeError` | Lỗi không thuộc nhóm nào khác. | Đọc thông điệp. Thư viện thường ném lỗi này. |
+
+`KeyboardInterrupt` và `SystemExit` kế thừa từ `BaseException`, không phải `Exception`. Đây không phải lỗi trong code của bạn.
+
+## Gửi log Python đến LogBrew
+
+`LogBrewLoggingHandler` là một logging handler chuẩn. Handler này gửi mỗi bản ghi mà nó chấp nhận đến LogBrew. Handler của console vẫn giữ nguyên.
+
+<Steps>
+  <Step title="Tạo khóa dự án">
+    Đăng nhập bằng [CLI](/vi/guides/cli). Tạo một dự án và lưu khóa gửi dữ liệu của dự án vào một tệp mà chỉ chủ sở hữu đọc được.
+
+    ```bash
+    install -d -m 700 "$HOME/.logbrew"
+    logbrew projects create billing-worker \
+      --runtime python \
+      --environment development \
+      --ingest-key-file "$HOME/.logbrew/billing-worker.ingest" \
+      --json
+    ```
+
+    CLI không in khóa ra. Trong production, dùng trình quản lý secret của nền tảng bạn dùng.
+  </Step>
+
+  <Step title="Cài đặt SDK">
+    Kích hoạt môi trường ảo của ứng dụng. Sau đó cài gói. Gói này cần Python 3.10 trở lên.
+
+    ```bash
+    python3 -m pip install "logbrew-sdk>=0.1.29"
+    ```
+  </Step>
+
+  <Step title="Đặt khóa và danh tính triển khai">
+    ```bash
+    export LOGBREW_SERVER_API_KEY="$(tr -d '\r\n' < "$HOME/.logbrew/billing-worker.ingest")"
+    export LOGBREW_SERVICE_NAME="billing-worker"
+    export LOGBREW_ENVIRONMENT="development"
+    export LOGBREW_RELEASE="billing-worker@1.0.0"
+    ```
+
+    Client thêm dịch vụ, môi trường và bản phát hành vào mỗi sự kiện.
+  </Step>
+
+  <Step title="Thêm handler">
+    Lưu tệp này thành `worker.py`. Gọi `logging.basicConfig()` trước khi tạo client. Client thêm một handler vào logger gốc, và `basicConfig()` không làm gì khi logger gốc đã có handler.
+
+    ```python
+    import logging
+    import os
+
+    from logbrew_sdk import (
+        HttpTransport,
+        LogBrewClient,
+        LogBrewLoggingHandler,
+        install_process_error_capture,
+    )
+
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
+
+    client = LogBrewClient.create(
+        api_key=os.environ["LOGBREW_SERVER_API_KEY"],
+        transport=HttpTransport(),
+    )
+    install_process_error_capture(client)
+
+    logger = logging.getLogger("billing")
+    logger.addHandler(LogBrewLoggingHandler(client))
+
+    logger.info("invoice created", extra={"invoice_id": "inv_1001", "amount_cents": 4200})
+
+    try:
+        {"plan": "pro"}["seats"]
+    except KeyError:
+        logger.exception("seat count missing")
+
+    client.shutdown()
+    ```
+
+    `HttpTransport()` gửi sự kiện ở chế độ nền, 1 giây sau sự kiện đầu tiên hoặc khi đủ 50 sự kiện. `client.shutdown()` gửi các sự kiện còn lại và đóng client.
+  </Step>
+
+  <Step title="Chạy chương trình">
+    ```bash
+    python3 worker.py
+    ```
+
+    Kết quả trên console không đổi. LogBrew nhận 1 sự kiện log cho mỗi bản ghi. Đây là sự kiện đầu tiên, đã bỏ phần ngữ cảnh runtime dùng chung.
+
+    ```json
+    {
+      "type": "log",
+      "id": "evt_log_54bfab6d7a9e4a2b88cc1e7872722e4d",
+      "timestamp": "2026-11-07T14:21:36.457Z",
+      "attributes": {
+        "message": "invoice created",
+        "level": "info",
+        "logger": "billing",
+        "metadata": {
+          "fileName": "worker.py",
+          "functionName": "<module>",
+          "levelName": "INFO",
+          "levelNumber": 20,
+          "lineNumber": 22,
+          "module": "worker",
+          "processName": "MainProcess",
+          "threadName": "MainThread",
+          "invoice_id": "inv_1001",
+          "amount_cents": 4200
+        }
+      }
+    }
+    ```
+
+    Các giá trị nguyên thủy trong `extra={...}` trở thành metadata. Sự kiện thứ hai có `exceptionName` là `KeyError` và `exceptionMessage` là `'seats'`. Để gửi toàn bộ nội dung traceback, tạo handler với `include_exception_text=True`.
+  </Step>
+
+  <Step title="Đọc lại log">
+    ```bash
+    logbrew read logs \
+      --service billing-worker \
+      --environment development \
+      --since 1h \
+      --json
+
+    logbrew read logs --severity error --search "seat count missing" --since 1h --json
+    ```
+
+    Kết quả đọc khớp cho thấy LogBrew đã lưu log. Để đọc từ CI hoặc agent lập trình, dùng khóa đọc dữ liệu của dự án. Xem [Kiểm tra thiết lập](/vi/guides/verify-setup).
+  </Step>
+</Steps>
+
+### Chọn bản ghi gửi đến LogBrew
+
+Đặt mức riêng cho handler để gửi ít bản ghi hơn. Console vẫn nhận các bản ghi từ `INFO` trở lên.
+
+```python
+logger.addHandler(LogBrewLoggingHandler(client, level=logging.WARNING))
+```
+
+Mức log Python được chuyển thành mức log LogBrew. Tên và số của mức gốc vẫn nằm trong metadata.
+
+| Mức log Python | Mức log LogBrew |
+| --- | --- |
+| `DEBUG`, `INFO` | `info` |
+| `WARNING` | `warning` |
+| `ERROR` | `error` |
+| `CRITICAL` | `critical` |
+
+## Báo crash Python thành vấn đề
+
+`install_process_error_capture(client)` báo các ngoại lệ chưa được bắt trong script, worker, code khởi động và thread. Mỗi crash trở thành 1 vấn đề, gồm loại ngoại lệ, thông điệp, các khung ngăn xếp (stack frame) và các nguyên nhân trong chuỗi ngoại lệ. Python vẫn in traceback và thoát như trước.
+
+Lưu tệp này thành `startup.py` rồi chạy.
+
+```python
+import os
+
+from logbrew_sdk import HttpTransport, LogBrewClient, install_process_error_capture
+
+client = LogBrewClient.create(
+    api_key=os.environ["LOGBREW_SERVER_API_KEY"],
+    transport=HttpTransport(),
+)
+install_process_error_capture(client)
+
+def load_config(path):
+    with open(path) as file:
+        return file.read()
+
+load_config("missing.toml")
+```
+
+```text
+Traceback (most recent call last):
+  File "/srv/app/startup.py", line 15, in <module>
+    load_config("missing.toml")
+    ~~~~~~~~~~~^^^^^^^^^^^^^^^^
+  File "/srv/app/startup.py", line 12, in load_config
+    with open(path) as file:
+         ~~~~^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'missing.toml'
+```
+
+LogBrew nhận một vấn đề có tiêu đề `FileNotFoundError`, mức `critical` và cơ chế `python.excepthook`. Các khung ngăn xếp của vấn đề chứa tên tệp, dòng và hàm, nhưng không chứa đường dẫn đầy đủ. Crash trong một thread có mức `error`. Trước khi Python thoát, SDK chờ tối đa 2 giây để gửi xong.
+
+```bash
+logbrew read issues --since 1h --json
+```
+
+Vấn đề có chứa thông điệp của ngoại lệ. Đừng đưa thông tin xác thực hoặc dữ liệu cá nhân vào thông điệp ngoại lệ hay thông điệp log. Xem [Che dữ liệu log](/vi/guides/safe-capture).
+
+## Khắc phục sự cố
+
+| Triệu chứng | Nguyên nhân | Cách khắc phục |
+| --- | --- | --- |
+| Không có kết quả trên console sau khi thêm LogBrew | `logging.basicConfig()` chạy sau `LogBrewClient.create()`. | Gọi `logging.basicConfig()` trước `LogBrewClient.create()`. |
+| Bản ghi `INFO` không xuất hiện | Logger dùng mức `WARNING` của logger gốc. | Đặt mức trong `basicConfig()` hoặc gọi `logger.setLevel(logging.INFO)`. |
+| Mỗi bản ghi xuất hiện 2 lần | Bản ghi đi đến handler trên logger, rồi lại đến một handler cùng loại trên logger gốc. | Chỉ thêm mỗi handler một lần, hoặc đặt `logger.propagate = False`. |
+| Mất sự kiện sau khi buộc dừng | `SIGKILL` hoặc `os._exit()` đã dừng tiến trình trước khi gửi xong. | Gọi `client.shutdown()` trong luồng tắt bình thường. |
+| `KeyError: 'LOGBREW_SERVER_API_KEY'` | Biến chưa được đặt trong shell này. | Chạy lại bước `export`. |
+
+Với ứng dụng web, xem [logging cho Flask](/vi/guides/flask). Để chọn định dạng log, xem [Structured logging](/vi/concepts/structured-logging). Với các runtime khác, xem [Tích hợp SDK](/vi/guides/sdk-ingestion).

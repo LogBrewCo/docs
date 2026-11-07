@@ -1,0 +1,452 @@
+---
+title: "Logowanie w Pythonie, poziomy logowania i obsługa błędów"
+sidebarTitle: "Logowanie w Pythonie"
+description: "Skonfiguruj logowanie w Pythonie z właściwymi poziomami logowania, obsługuj błędy i typy wyjątków, a logi i awarie wysyłaj do LogBrew."
+---
+
+LogBrew to platforma obserwowalności dla programistów i agentów kodujących. Ma
+hojny darmowy plan i nie wymaga karty.
+
+Ten przewodnik opisuje logowanie w Pythonie ze standardowym modułem `logging`, 5
+poziomów logowania w Pythonie, obsługę błędów w Pythonie i najczęstsze typy
+błędów Pythona. Ostatnie sekcje wysyłają te same logi i awarie do LogBrew przez
+`logbrew-sdk` 0.1.29. Każdy przykład uruchomiono w Pythonie 3.13, a każdy blok
+wyniku pokazuje prawdziwy wynik.
+
+W aplikacji Flask użyj zamiast tego przewodnika [Logowanie w aplikacji
+Flask](/pl/guides/flask). Dodaje on ślady żądań do tej samej konfiguracji
+logowania.
+
+## Napisz pierwszy log w Pythonie
+
+Zapisz ten plik jako `app.py`. Wywołaj `logging.basicConfig()` jeden raz, w
+punkcie wejścia programu. W każdym module pobierz nazwany logger.
+
+```python
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+logger = logging.getLogger("billing")
+
+logger.debug("cache warmed")
+logger.info("invoice created")
+logger.warning("payment retry %d of %d", 2, 3)
+
+try:
+    total = 100 / 0
+except ZeroDivisionError:
+    logger.exception("invoice total failed")
+```
+
+Uruchom `python3 app.py`. Wynik trafia na standardowe wyjście błędów.
+
+```text
+2026-11-07 17:21:29,602 INFO billing invoice created
+2026-11-07 17:21:29,602 WARNING billing payment retry 2 of 3
+2026-11-07 17:21:29,602 ERROR billing invoice total failed
+Traceback (most recent call last):
+  File "/srv/app/app.py", line 14, in <module>
+    total = 100 / 0
+            ~~~~^~~
+ZeroDivisionError: division by zero
+```
+
+Rekord `debug` się nie pojawia, bo poziom to `INFO`. `logger.exception()` loguje
+na poziomie `ERROR` i dodaje traceback. Wywołuj tę metodę tylko w bloku
+`except`.
+
+Przekazuj wartości jako argumenty, jak w `"payment retry %d of %d", 2, 3`.
+Python buduje komunikat dopiero wtedy, gdy handler przyjmie rekord. Szablon
+komunikatu jest taki sam przy każdej ponownej próbie, więc łatwo go wyszukać.
+
+## Poziomy logowania w Pythonie
+
+Logger wysyła rekord tylko wtedy, gdy poziom rekordu jest równy poziomowi
+loggera lub od niego wyższy. Handler może ustawić drugi, wyższy poziom.
+
+| Poziom | Liczba | Kiedy go używać |
+| --- | --- | --- |
+| `DEBUG` | 10 | Szczegóły potrzebne tylko podczas szukania przyczyny błędu. |
+| `INFO` | 20 | Zwykłe zdarzenia, które potwierdzają, że program działa, na przykład start zadania. |
+| `WARNING` | 30 | Nieoczekiwany stan, po którym program wrócił do działania, na przykład ponowna próba. |
+| `ERROR` | 40 | Nieudana operacja. Program działa dalej. |
+| `CRITICAL` | 50 | Awaria, która zatrzymuje program lub jego główną funkcję. |
+
+Główny logger (root logger) startuje z poziomem `WARNING`. Nowy logger ma poziom
+`NOTSET` (0) i używa poziomu swojego rodzica. Na produkcji ustaw `INFO`, a
+`DEBUG` włączaj tylko w środowisku deweloperskim lub na czas krótkiej diagnozy.
+
+```python
+logging.getLogger("billing").setLevel(logging.DEBUG)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+```
+
+Pierwszy wiersz pokazuje rekordy debug jednego modułu. Drugi wiersz wycisza szum
+z biblioteki.
+
+## Loggery, handlery i formattery
+
+- Logger przyjmuje wywołanie. Użyj `logging.getLogger(__name__)`, aby nazwa
+  loggera odpowiadała ścieżce modułu.
+- Handler wysyła rekordy do miejsca docelowego, na przykład do konsoli, pliku
+  lub LogBrew.
+- Formatter zamienia rekord na tekst.
+
+Biblioteka nie może konfigurować logowania. Dodaje tylko `logging.NullHandler()`
+do własnego loggera. Aplikacja konfiguruje handlery i poziomy jeden raz. Przy
+dużej konfiguracji użyj `logging.config.dictConfig()`.
+
+## Obsługa błędów w Pythonie
+
+Przechwytuj najbardziej konkretny wyjątek, który umiesz obsłużyć. Użyj `else`
+dla kodu, który działa tylko po sukcesie, a `finally` dla kodu, który działa
+zawsze. Użyj `raise ... from error`, aby zachować pierwotną przyczynę.
+
+Zapisz ten plik jako `orders.py`.
+
+```python
+import logging
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
+logger = logging.getLogger("orders")
+
+
+class OrderError(Exception):
+    """The order cannot be processed."""
+
+
+def parse_quantity(raw):
+    try:
+        quantity = int(raw)
+    except ValueError as error:
+        raise OrderError(f"quantity must be a whole number, got {raw!r}") from error
+    else:
+        logger.info("quantity parsed")
+        return quantity
+    finally:
+        logger.debug("parse attempt finished")
+
+
+for raw in ["3", "three"]:
+    try:
+        parse_quantity(raw)
+    except OrderError:
+        logger.exception("order rejected")
+```
+
+Wynik pokazuje oba wyjątki z łańcucha wyjątków.
+
+```text
+INFO orders quantity parsed
+ERROR orders order rejected
+Traceback (most recent call last):
+  File "/srv/app/orders.py", line 13, in parse_quantity
+    quantity = int(raw)
+ValueError: invalid literal for int() with base 10: 'three'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/srv/app/orders.py", line 25, in <module>
+    parse_quantity(raw)
+    ~~~~~~~~~~~~~~^^^^^
+  File "/srv/app/orders.py", line 15, in parse_quantity
+    raise OrderError(f"quantity must be a whole number, got {raw!r}") from error
+OrderError: quantity must be a whole number, got 'three'
+```
+
+Stosuj te zasady przy każdym wyjątku.
+
+- Loguj wyjątek raz, w miejscu, w którym go obsługujesz. Nie loguj go i nie
+  zgłaszaj ponownie w każdej warstwie, bo każda warstwa doda zduplikowany
+  rekord.
+- Nie pisz `except Exception: pass`. Jeśli ignorujesz błąd, zaloguj go razem z
+  powodem na poziomie `WARNING` lub wyższym.
+- Przechwytuj `Exception`, a nie `BaseException`. `BaseException` przechwytuje
+  też `KeyboardInterrupt` i `SystemExit`, które celowo zatrzymują program.
+- Twórz własne klasy wyjątków dla błędów, które musi obsłużyć kod wywołujący,
+  tak jak robi to `OrderError`.
+
+### Zgłoś kilka błędów naraz
+
+Python 3.11 i nowszy może zgłosić `ExceptionGroup`. Użyj go, gdy jedna walidacja
+znajdzie więcej niż jeden błąd. Każdy typ obsłuż przez `except*`.
+
+```python
+def validate(order):
+    errors = []
+    if not order.get("email"):
+        errors.append(ValueError("email is required"))
+    if order.get("quantity", 0) < 1:
+        errors.append(ValueError("quantity must be 1 or more"))
+    if errors:
+        raise ExceptionGroup("order is invalid", errors)
+
+
+try:
+    validate({"quantity": 0})
+except* ValueError as group:
+    for error in group.exceptions:
+        logger.warning("validation failed: %s", error)
+```
+
+```text
+WARNING orders validation failed: email is required
+WARNING orders validation failed: quantity must be 1 or more
+```
+
+## Najczęstsze typy błędów w Pythonie
+
+Wszystkie wbudowane błędy, które program może obsłużyć, dziedziczą po
+`Exception`. Ta tabela pokazuje najczęstsze błędy Pythona i to, co sprawdzić
+najpierw przy każdym z nich.
+
+| Typ błędu | Python zgłasza go, gdy | Co sprawdzić najpierw |
+| --- | --- | --- |
+| `SyntaxError` | Kod nie jest poprawnym kodem Pythona. Plik się nie uruchamia. | Przeczytaj numer wiersza i kolumny w komunikacie. |
+| `IndentationError` | Wcięcie bloku jest niepoprawne. | Używaj 4 spacji i nie używaj tabulatorów. |
+| `NameError` | Nazwa nie jest zdefiniowana. | Sprawdź pisownię i import. |
+| `AttributeError` | Obiekt nie ma atrybutu o tej nazwie. | Sprawdź typ obiektu. Często jest to `None`. |
+| `TypeError` | Operacja dostaje wartość złego typu. | Sprawdź typy argumentów. |
+| `ValueError` | Wartość ma poprawny typ, ale niepoprawną treść, na przykład `int("three")`. | Waliduj dane wejściowe przed konwersją. |
+| `KeyError` | Słownik nie ma takiego klucza. | Użyj `dict.get()` lub sprawdź `key in mapping`. |
+| `IndexError` | Indeks sekwencji jest poza zakresem. | Sprawdź długość, zanim odczytasz indeks. |
+| `ZeroDivisionError` | Dzielenie lub modulo używa zera. | Najpierw sprawdź dzielnik. |
+| `ModuleNotFoundError` | Import nie znajduje modułu. To podklasa `ImportError`. | Zainstaluj pakiet w aktywnym środowisku. |
+| `FileNotFoundError` | Plik lub katalog nie istnieje. To podklasa `OSError`. | Sprawdź ścieżkę i katalog roboczy. |
+| `PermissionError` | Proces nie ma dostępu do pliku lub zasobu. | Sprawdź właściciela i uprawnienia pliku. |
+| `TimeoutError` | Operacja nie skończyła się na czas. | Dodaj ponowienia z limitem, a potem zaloguj ostatnie niepowodzenie. |
+| `RecursionError` | Stos wywołań jest głębszy niż limit rekurencji. | Znajdź wywołanie, które się nie kończy. |
+| `RuntimeError` | Błąd nie pasuje do innej kategorii. | Przeczytaj komunikat. Biblioteki często zgłaszają ten błąd. |
+
+`KeyboardInterrupt` i `SystemExit` dziedziczą po `BaseException`, a nie po
+`Exception`. Nie są to błędy w twoim kodzie.
+
+## Wysyłaj logi Pythona do LogBrew
+
+`LogBrewLoggingHandler` to standardowy handler logowania. Wysyła do LogBrew
+każdy rekord, który przyjmie. Handler konsoli się nie zmienia.
+
+<Steps>
+  <Step title="Utwórz klucz projektu">
+    Zaloguj się w [CLI](/pl/guides/cli). Utwórz projekt i zapisz jego klucz
+    wysyłania w pliku, który może czytać tylko właściciel.
+
+    ```bash
+    install -d -m 700 "$HOME/.logbrew"
+    logbrew projects create billing-worker \
+      --runtime python \
+      --environment development \
+      --ingest-key-file "$HOME/.logbrew/billing-worker.ingest" \
+      --json
+    ```
+
+    CLI nie wyświetla klucza. Na produkcji używaj menedżera sekretów swojej
+    platformy.
+  </Step>
+
+  <Step title="Zainstaluj SDK">
+    Aktywuj środowisko wirtualne aplikacji. Potem zainstaluj pakiet. Wymaga on
+    Pythona 3.10 lub nowszego.
+
+    ```bash
+    python3 -m pip install "logbrew-sdk>=0.1.29"
+    ```
+  </Step>
+
+  <Step title="Ustaw klucz i tożsamość wdrożenia">
+    ```bash
+    export LOGBREW_SERVER_API_KEY="$(tr -d '\r\n' < "$HOME/.logbrew/billing-worker.ingest")"
+    export LOGBREW_SERVICE_NAME="billing-worker"
+    export LOGBREW_ENVIRONMENT="development"
+    export LOGBREW_RELEASE="billing-worker@1.0.0"
+    ```
+
+    Klient dodaje usługę, środowisko i wydanie do każdego zdarzenia.
+  </Step>
+
+  <Step title="Dodaj handler">
+    Zapisz ten plik jako `worker.py`. Wywołaj `logging.basicConfig()`, zanim
+    utworzysz klienta. Klient dodaje handler do głównego loggera, a
+    `basicConfig()` nic nie robi, gdy główny logger ma już handler.
+
+    ```python
+    import logging
+    import os
+
+    from logbrew_sdk import (
+        HttpTransport,
+        LogBrewClient,
+        LogBrewLoggingHandler,
+        install_process_error_capture,
+    )
+
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
+
+    client = LogBrewClient.create(
+        api_key=os.environ["LOGBREW_SERVER_API_KEY"],
+        transport=HttpTransport(),
+    )
+    install_process_error_capture(client)
+
+    logger = logging.getLogger("billing")
+    logger.addHandler(LogBrewLoggingHandler(client))
+
+    logger.info("invoice created", extra={"invoice_id": "inv_1001", "amount_cents": 4200})
+
+    try:
+        {"plan": "pro"}["seats"]
+    except KeyError:
+        logger.exception("seat count missing")
+
+    client.shutdown()
+    ```
+
+    `HttpTransport()` wysyła zdarzenia w tle, 1 sekundę po pierwszym zdarzeniu
+    albo po zebraniu 50 zdarzeń. `client.shutdown()` wysyła pozostałe zdarzenia
+    i zamyka klienta.
+  </Step>
+
+  <Step title="Uruchom program">
+    ```bash
+    python3 worker.py
+    ```
+
+    Wynik w konsoli się nie zmienia. LogBrew dostaje 1 zdarzenie logu na każdy
+    rekord. Oto pierwsze zdarzenie bez wspólnego kontekstu środowiska
+    uruchomieniowego.
+
+    ```json
+    {
+      "type": "log",
+      "id": "evt_log_54bfab6d7a9e4a2b88cc1e7872722e4d",
+      "timestamp": "2026-11-07T14:21:36.457Z",
+      "attributes": {
+        "message": "invoice created",
+        "level": "info",
+        "logger": "billing",
+        "metadata": {
+          "fileName": "worker.py",
+          "functionName": "<module>",
+          "levelName": "INFO",
+          "levelNumber": 20,
+          "lineNumber": 22,
+          "module": "worker",
+          "processName": "MainProcess",
+          "threadName": "MainThread",
+          "invoice_id": "inv_1001",
+          "amount_cents": 4200
+        }
+      }
+    }
+    ```
+
+    Proste wartości z `extra={...}` trafiają do metadanych. Drugie zdarzenie ma
+    `exceptionName` `KeyError` i `exceptionMessage` `'seats'`. Aby wysłać pełny
+    tekst tracebacku, utwórz handler z `include_exception_text=True`.
+  </Step>
+
+  <Step title="Odczytaj logi">
+    ```bash
+    logbrew read logs \
+      --service billing-worker \
+      --environment development \
+      --since 1h \
+      --json
+
+    logbrew read logs --severity error --search "seat count missing" --since 1h --json
+    ```
+
+    Pasujący wynik odczytu pokazuje, że LogBrew zapisał logi. Aby czytać logi z
+    CI lub z agenta kodującego, użyj klucza odczytu projektu. Szczegóły
+    znajdziesz w przewodniku [Sprawdź konfigurację](/pl/guides/verify-setup).
+  </Step>
+</Steps>
+
+### Wybierz rekordy, które trafiają do LogBrew
+
+Nadaj handlerowi własny poziom, aby wysyłać mniej rekordów. Konsola nadal
+dostaje `INFO` i wyższe poziomy.
+
+```python
+logger.addHandler(LogBrewLoggingHandler(client, level=logging.WARNING))
+```
+
+Poziomy Pythona zmieniają się w poziomy LogBrew. Pierwotna nazwa i liczba
+poziomu zostają w metadanych.
+
+| Poziom w Pythonie | Poziom w LogBrew |
+| --- | --- |
+| `DEBUG`, `INFO` | `info` |
+| `WARNING` | `warning` |
+| `ERROR` | `error` |
+| `CRITICAL` | `critical` |
+
+## Zgłaszaj awarie Pythona jako problemy
+
+`install_process_error_capture(client)` zgłasza nieprzechwycone wyjątki w
+skryptach, workerach, kodzie startowym i wątkach. Każda awaria staje się 1
+problemem z typem wyjątku, komunikatem, ramkami stosu i przyczynami z łańcucha
+wyjątków. Python nadal wypisuje traceback i kończy działanie tak jak wcześniej.
+
+Zapisz ten plik jako `startup.py` i uruchom go.
+
+```python
+import os
+
+from logbrew_sdk import HttpTransport, LogBrewClient, install_process_error_capture
+
+client = LogBrewClient.create(
+    api_key=os.environ["LOGBREW_SERVER_API_KEY"],
+    transport=HttpTransport(),
+)
+install_process_error_capture(client)
+
+def load_config(path):
+    with open(path) as file:
+        return file.read()
+
+load_config("missing.toml")
+```
+
+```text
+Traceback (most recent call last):
+  File "/srv/app/startup.py", line 15, in <module>
+    load_config("missing.toml")
+    ~~~~~~~~~~~^^^^^^^^^^^^^^^^
+  File "/srv/app/startup.py", line 12, in load_config
+    with open(path) as file:
+         ~~~~^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'missing.toml'
+```
+
+LogBrew dostaje problem z tytułem `FileNotFoundError`, poziomem `critical` i
+mechanizmem `python.excepthook`. Jego ramki zawierają nazwę pliku, wiersz i
+funkcję, ale nie pełną ścieżkę. Awaria w wątku ma poziom `error`. Zanim Python
+zakończy działanie, SDK czeka na dostarczenie zdarzeń najwyżej 2 sekundy.
+
+```bash
+logbrew read issues --since 1h --json
+```
+
+Problem zawiera komunikat wyjątku. Nie umieszczaj poświadczeń ani danych
+osobowych w komunikatach wyjątków i logów. Szczegóły znajdziesz w przewodniku
+[Kontrola rejestrowanych danych](/pl/guides/safe-capture).
+
+## Rozwiązywanie problemów
+
+| Objaw | Przyczyna | Rozwiązanie |
+| --- | --- | --- |
+| Brak wyniku w konsoli po dodaniu LogBrew | `logging.basicConfig()` uruchomiono po `LogBrewClient.create()`. | Wywołaj `logging.basicConfig()` przed `LogBrewClient.create()`. |
+| Rekordy `INFO` się nie pojawiają | Logger używa poziomu `WARNING` z głównego loggera. | Ustaw poziom w `basicConfig()` lub wywołaj `logger.setLevel(logging.INFO)`. |
+| Każdy rekord pojawia się 2 razy | Rekord trafia do handlera w loggerze, a potem do handlera tego samego rodzaju w głównym loggerze. | Dodaj każdy handler tylko raz albo ustaw `logger.propagate = False`. |
+| Po wymuszonym zatrzymaniu brakuje zdarzeń | `SIGKILL` lub `os._exit()` zatrzymał proces przed dostarczeniem zdarzeń. | Wywołaj `client.shutdown()` w ścieżce łagodnego zamykania. |
+| `KeyError: 'LOGBREW_SERVER_API_KEY'` | Zmienna nie jest ustawiona w tej powłoce. | Ponownie wykonaj krok z `export`. |
+
+Dla aplikacji webowych zobacz przewodnik [Logowanie w aplikacji
+Flask](/pl/guides/flask). Format logów pomoże ci wybrać przewodnik [Logowanie
+strukturalne](/pl/concepts/structured-logging). Inne środowiska uruchomieniowe
+opisuje przewodnik [Integracja SDK](/pl/guides/sdk-ingestion).

@@ -1,0 +1,173 @@
+---
+title: "التسجيل المنظم وأفضل ممارسات التسجيل وتنسيق السجلات"
+sidebarTitle: "التسجيل المنظم"
+description: "تعرّف على التسجيل المنظم، واختر تنسيق سجلات JSON بحقول قياسية، وطبّق أفضل ممارسات التسجيل التي تجعل البحث في السجلات سهلًا."
+---
+
+LogBrew منصة لقابلية الملاحظة (Observability) للمطوّرين ووكلاء البرمجة، مع خطة
+مجانية سخية ودون الحاجة إلى بطاقة دفع.
+
+يكتب التسجيل المنظم كل سجل في صورة حقول مسمّاة، وليس في سطر واحد من النص الحر.
+وبذلك يستطيع برنامج أو شخص أو وكيل برمجة تصفية السجلات حسب الحقل وعدّها وربطها
+بتتبّع الطلب.
+
+## السجلات النصية والسجلات المنظمة
+
+يحمل هذا السجل النصي الحقائق نفسها التي يحملها السجل المنظم أسفله.
+
+```text
+2026-11-07 14:21:19 ERROR checkout payment failed for order ord_1001 after 5 s
+```
+
+```json
+{"timestamp": "2026-11-07T14:21:19.773+00:00", "level": "error", "logger": "checkout", "message": "payment failed", "order_id": "ord_1001", "error.type": "TimeoutError", "error.message": "payment provider did not answer in 5 s"}
+```
+
+للعثور على كل المدفوعات الفاشلة لطلب شراء واحد في السجل النصي، يجب أن تكتب نمطًا
+لكل صيغة من صيغ الرسالة. أما في السجل المنظم، فتصفّي السجلات حسب `message`
+و`order_id`. وتبقى الرسالة ثابتة لكل طلب شراء، لذلك يمكنك عدّها أيضًا.
+
+## اختر تنسيق السجلات
+
+استخدم JSON، مع كائن واحد في كل سطر. استخدم أسماء الحقول نفسها في كل الخدمات.
+يسرد هذا الجدول الحقول الأساسية والأسماء المقابلة لها في نموذج بيانات السجلات في
+OpenTelemetry وفي LogBrew.
+
+| الحقل | المحتوى | OpenTelemetry | LogBrew |
+| --- | --- | --- | --- |
+| `timestamp` | وقت UTC بتنسيق RFC 3339 مع أجزاء الألف من الثانية | `Timestamp` | الحقل `timestamp` في الحدث |
+| `level` | قيمة واحدة من مجموعة ثابتة صغيرة، مثل `info` و`warning` و`error` و`critical` | `SeverityText`، `SeverityNumber` | `level` |
+| `message` | نص ثابت للحدث دون قيم متغيرة | `Body` | `message` |
+| `logger` | الوحدة أو المكوّن الذي كتب السجل | نطاق أداة القياس (Instrumentation scope) | `logger` |
+| `trace_id`، `span_id` | معرّفا التتبّع والـ Span النشطين | `TraceId`، `SpanId` | `context.trace` |
+| `service`، `environment`، `release` | مكان تشغيل الشيفرة وإصدارها | سمات المورد (Resource attributes) | `context.resource` |
+| `error.type`، `error.message` | صنف الاستثناء ورسالته | `exception.type`، `exception.message` | `metadata` |
+| حقول الحدث | قيم هذا الحدث، مثل `order_id` | `Attributes` | `metadata` |
+
+تتراوح أرقام الخطورة في OpenTelemetry من 1 إلى 24. يبدأ `INFO` عند 9، و`WARN`
+عند 13، و`ERROR` عند 17، و`FATAL` عند 21. ويقبل LogBrew سجلات OTLP مباشرة. راجع
+[أرسل بيانات OpenTelemetry](/ar/guides/opentelemetry).
+
+## أفضل ممارسات التسجيل
+
+### أبقِ الرسالة ثابتة
+
+اكتب `"payment failed"` وضع معرّف طلب الشراء في حقل. تتيح لك الرسالة الثابتة
+تجميع نوع حدث واحد وعدّه وإطلاق التنبيهات عليه.
+
+### استخدم اسمًا واحدًا لكل حقل
+
+اختر `order_id` أو `orderId` مرة واحدة، واستخدمه في كل الخدمات. استخدم أسماء
+الاصطلاحات الدلالية في OpenTelemetry للحقول الشائعة، مثل
+`http.response.status_code`.
+
+### اختر المستوى حسب الإجراء الذي يتطلبه
+
+يعني `error` أن عملية فشلت. ويعني `warning` أن البرنامج تعافى. ويؤكد `info` أن
+العمل يسير بشكل عادي. استخدم `debug` فقط أثناء تشخيص خلل.
+
+### اكتب الوقت بتوقيت UTC
+
+استخدم RFC 3339 مع أجزاء الألف من الثانية وفارق التوقيت، مثل
+`2026-11-07T14:21:19.773+00:00`. دون UTC وأجزاء الألف من الثانية، تُرتَّب
+السجلات القادمة من مناطق زمنية مختلفة، أو السجلات التي تقع في الثانية نفسها،
+بترتيب خاطئ.
+
+### أضف معرّف التتبّع ومعرّف الـ Span
+
+بهذين المعرّفين، يمكنك قراءة كل سجلات طلب واحد عبر الخدمات.
+
+### اضبط الخدمة والبيئة والإصدار مرة واحدة
+
+اضبطها عند بدء التشغيل، وليس في كل استدعاء. فغياب الإصدار يُخفي عملية النشر التي
+سبّبت التغيير.
+
+### سجّل الخطأ مرة واحدة حيث تعالجه
+
+أضف نوع الخطأ ورسالته. لا تسجّل الخطأ نفسه مرة أخرى في كل طبقة.
+
+### أبعد الأسرار والبيانات الشخصية عن السجلات
+
+لا تسجّل كلمات المرور أو الرموز المميزة أو ملفات تعريف الارتباط أو متون الطلبات
+أو عناوين URL الكاملة مع سلاسل الاستعلام. استخدم ميزة الحجب في المسجِّل. راجع
+[التحكم في البيانات الملتقطة](/ar/guides/safe-capture).
+
+### استخدم أسماء حقول ثابتة
+
+لا تستخدم القيم كأسماء حقول، مثل `{"ord_1001": "failed"}`. عندها تضيف كل قيمة
+جديدة حقلًا جديدًا، ولا تجد تصفية واحدة كل طلبات الشراء.
+
+### اكتب JSON إلى المخرج القياسي في بيئة الإنتاج
+
+استخدم تنسيقًا سهل القراءة في التطوير فقط.
+
+## التسجيل المنظم في Python
+
+لا تحتوي الوحدة القياسية `logging` على منسِّق JSON. يكتب هذا المنسِّق الحقول
+الأساسية والقيم الواردة في `extra={"fields": {...}}`.
+
+```python
+import json
+import logging
+from datetime import datetime, timezone
+
+
+class JsonFormatter(logging.Formatter):
+    def format(self, record):
+        entry = {
+            "timestamp": datetime.fromtimestamp(record.created, timezone.utc).isoformat(
+                timespec="milliseconds"
+            ),
+            "level": record.levelname.lower(),
+            "logger": record.name,
+            "message": record.getMessage(),
+            **getattr(record, "fields", {}),
+        }
+        if record.exc_info:
+            entry["error.type"] = record.exc_info[0].__name__
+            entry["error.message"] = str(record.exc_info[1])
+        return json.dumps(entry)
+
+
+handler = logging.StreamHandler()
+handler.setFormatter(JsonFormatter())
+logging.basicConfig(level=logging.INFO, handlers=[handler])
+logger = logging.getLogger("checkout")
+
+logger.info("order created", extra={"fields": {"order_id": "ord_1001", "total_cents": 4200}})
+try:
+    raise TimeoutError("payment provider did not answer in 5 s")
+except TimeoutError:
+    logger.error("payment failed", exc_info=True, extra={"fields": {"order_id": "ord_1001"}})
+```
+
+```text
+{"timestamp": "2026-11-07T14:21:19.772+00:00", "level": "info", "logger": "checkout", "message": "order created", "order_id": "ord_1001", "total_cents": 4200}
+{"timestamp": "2026-11-07T14:21:19.773+00:00", "level": "error", "logger": "checkout", "message": "payment failed", "order_id": "ord_1001", "error.type": "TimeoutError", "error.message": "payment provider did not answer in 5 s"}
+```
+
+لإرسال السجلات نفسها إلى LogBrew، أضف `LogBrewLoggingHandler`. فهو يرسل الرسالة
+والمستوى والمسجِّل كحقول، ويرسل القيم الأولية في `extra` كبيانات وصفية. راجع
+[تسجيل السجلات في Python](/ar/guides/python-logging).
+
+## التسجيل المنظم في Node.js
+
+يكتب Pino افتراضيًا سطر JSON واحدًا لكل سجل. ويكتب Winston بتنسيق JSON باستخدام
+`winston.format.json()`. وتحتفظ المكتبتان بالحقول القادمة من الاستدعاء ومن
+المسجِّلات الفرعية. راجع [تسجيل السجلات في Node.js](/ar/guides/node-logging)
+لإعداد المكتبتين ولمعرّف التتبّع في سجلات Express.
+
+## ابحث في السجلات المنظمة في LogBrew
+
+يخزّن LogBrew كل سجل مع رسالته ومستواه ومسجِّله وبياناته الوصفية وتتبّعه. صفِّ
+السجلات حسب هذه الحقول من الـ CLI.
+
+```bash
+logbrew read logs --severity error --since 24h --json
+logbrew read logs --search "payment failed" --service checkout-api --since 24h --json
+logbrew read logs --trace "<trace_id>" --since 24h --json
+```
+
+يمكن للـ API أيضًا تصفية السجلات حسب قيم البيانات الوصفية ذات الأنواع، مثل رقم
+يساوي 500 أو أكثر. راجع [عوامل تصفية
+الاستعلام](/ar/reference/telemetry-api-filters).

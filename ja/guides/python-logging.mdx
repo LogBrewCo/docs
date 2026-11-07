@@ -1,0 +1,394 @@
+---
+title: "Python logging の使い方とログレベル、エラー処理"
+sidebarTitle: "Python logging"
+description: "Python logging で適切なログレベルを設定し、Python のエラーと例外の種類を扱い、ログとクラッシュを LogBrew に送信します。"
+---
+
+LogBrew は、開発者とコーディングエージェントのための Observability（可観測性）プラットフォームです。無料枠が充実していて、カードの登録は不要です。
+
+このガイドでは、標準の `logging` モジュールを使った Python logging、Python の5つのログレベル、Python のエラー処理、よくある Python のエラーの種類を説明します。最後のセクションでは、`logbrew-sdk` 0.1.29 を使って同じログとクラッシュを LogBrew に送信します。どの例も Python 3.13 で実行しました。出力のブロックはすべて実際の出力です。
+
+Flask アプリケーションの場合は、代わりに [Flask のログ](/ja/guides/flask)を使ってください。同じログ設定にリクエストのトレースが加わります。
+
+## Python logging で最初のログを出力する
+
+このファイルを `app.py` として保存します。`logging.basicConfig()` は、プログラムのエントリーポイントで1回だけ呼び出します。各モジュールでは名前付きのロガーを取得します。
+
+```python
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+logger = logging.getLogger("billing")
+
+logger.debug("cache warmed")
+logger.info("invoice created")
+logger.warning("payment retry %d of %d", 2, 3)
+
+try:
+    total = 100 / 0
+except ZeroDivisionError:
+    logger.exception("invoice total failed")
+```
+
+`python3 app.py` を実行します。出力は標準エラー出力に送られます。
+
+```text
+2026-11-07 17:21:29,602 INFO billing invoice created
+2026-11-07 17:21:29,602 WARNING billing payment retry 2 of 3
+2026-11-07 17:21:29,602 ERROR billing invoice total failed
+Traceback (most recent call last):
+  File "/srv/app/app.py", line 14, in <module>
+    total = 100 / 0
+            ~~~~^~~
+ZeroDivisionError: division by zero
+```
+
+レベルが `INFO` なので、`debug` のレコードは表示されません。`logger.exception()` は `ERROR` レベルでログを記録し、トレースバックを追加します。このメソッドは `except` ブロックの中だけで呼び出してください。
+
+値は `"payment retry %d of %d", 2, 3` のように引数として渡します。Python は、ハンドラーがレコードを受け付けたときにだけメッセージを組み立てます。メッセージのテンプレートはどの再試行でも同じなので、そのテンプレートで検索できます。
+
+## Python のログレベル
+
+ロガーがレコードを送るのは、レコードのレベルがロガーのレベル以上のときだけです。ハンドラーには、それより高い2つ目のレベルを設定できます。
+
+| レベル | 数値 | 用途 |
+| --- | --- | --- |
+| `DEBUG` | 10 | 問題を調べている間だけ必要な詳細情報です。 |
+| `INFO` | 20 | ジョブの開始など、プログラムが正常に動いていることを示す通常のイベントです。 |
+| `WARNING` | 30 | 再試行など、プログラムが回復できた想定外の状態です。 |
+| `ERROR` | 40 | 失敗した操作です。プログラムは動き続けます。 |
+| `CRITICAL` | 50 | プログラムや主要な機能を止める障害です。 |
+
+ルートロガーの初期レベルは `WARNING` です。新しいロガーのレベルは `NOTSET`（0）で、親のレベルを使います。本番環境では `INFO` を設定します。`DEBUG` は開発中か、短時間の診断のときだけ使います。
+
+```python
+logging.getLogger("billing").setLevel(logging.DEBUG)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+```
+
+1行目は、1つのモジュールのデバッグレコードを表示します。2行目は、ライブラリのノイズを抑えます。
+
+## ロガー、ハンドラー、フォーマッター
+
+- ロガーは呼び出しを受け取ります。ロガー名がモジュールのパスと一致するように、`logging.getLogger(__name__)` を使います。
+- ハンドラーは、コンソール、ファイル、LogBrew などの送信先にレコードを送ります。
+- フォーマッターは、レコードをテキストに変換します。
+
+ライブラリではログを設定しないでください。ライブラリは自身のロガーに `logging.NullHandler()` だけを追加します。ハンドラーとレベルは、アプリケーションが1回だけ設定します。設定が大きい場合は `logging.config.dictConfig()` を使います。
+
+## Python のエラー処理
+
+処理できる例外のうち、最も具体的なものをキャッチします。成功したときだけ実行するコードには `else` を、常に実行するコードには `finally` を使います。元の原因を残すには `raise ... from error` を使います。
+
+このファイルを `orders.py` として保存します。
+
+```python
+import logging
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
+logger = logging.getLogger("orders")
+
+
+class OrderError(Exception):
+    """The order cannot be processed."""
+
+
+def parse_quantity(raw):
+    try:
+        quantity = int(raw)
+    except ValueError as error:
+        raise OrderError(f"quantity must be a whole number, got {raw!r}") from error
+    else:
+        logger.info("quantity parsed")
+        return quantity
+    finally:
+        logger.debug("parse attempt finished")
+
+
+for raw in ["3", "three"]:
+    try:
+        parse_quantity(raw)
+    except OrderError:
+        logger.exception("order rejected")
+```
+
+出力には、例外チェーンの2つの例外が両方とも表示されます。
+
+```text
+INFO orders quantity parsed
+ERROR orders order rejected
+Traceback (most recent call last):
+  File "/srv/app/orders.py", line 13, in parse_quantity
+    quantity = int(raw)
+ValueError: invalid literal for int() with base 10: 'three'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/srv/app/orders.py", line 25, in <module>
+    parse_quantity(raw)
+    ~~~~~~~~~~~~~~^^^^^
+  File "/srv/app/orders.py", line 15, in parse_quantity
+    raise OrderError(f"quantity must be a whole number, got {raw!r}") from error
+OrderError: quantity must be a whole number, got 'three'
+```
+
+例外ごとに、次のルールに従います。
+
+- 例外は、処理する場所で1回だけログに記録します。各レイヤーでログに記録してから再送出しないでください。レイヤーごとに重複したレコードが増えます。
+- `except Exception: pass` と書かないでください。エラーを無視する場合は、理由を添えて `WARNING` 以上のレベルでログに記録します。
+- `BaseException` ではなく `Exception` をキャッチします。`BaseException` は、意図的にプログラムを止める `KeyboardInterrupt` と `SystemExit` もキャッチします。
+- 呼び出し側で処理する必要があるエラーには、`OrderError` のように独自の例外クラスを定義します。
+
+### 複数のエラーを報告する
+
+Python 3.11 以降では `ExceptionGroup` を送出できます。1回のチェックで複数の問題が見つかったときに使います。種類ごとに `except*` で処理します。
+
+```python
+def validate(order):
+    errors = []
+    if not order.get("email"):
+        errors.append(ValueError("email is required"))
+    if order.get("quantity", 0) < 1:
+        errors.append(ValueError("quantity must be 1 or more"))
+    if errors:
+        raise ExceptionGroup("order is invalid", errors)
+
+
+try:
+    validate({"quantity": 0})
+except* ValueError as group:
+    for error in group.exceptions:
+        logger.warning("validation failed: %s", error)
+```
+
+```text
+WARNING orders validation failed: email is required
+WARNING orders validation failed: quantity must be 1 or more
+```
+
+## よくある Python のエラーの種類
+
+プログラムで処理できる組み込みのエラーは、すべて `Exception` を継承しています。次の表に、よく見る Python のエラーと、それぞれで最初に確認することをまとめます。
+
+| エラーの種類 | Python が送出する条件 | 最初に確認すること |
+| --- | --- | --- |
+| `SyntaxError` | コードが Python として正しくありません。ファイルは実行されません。 | メッセージにある行と列を確認します。 |
+| `IndentationError` | ブロックのインデントが正しくありません。 | タブを使わず、スペース4つを使います。 |
+| `NameError` | 名前が定義されていません。 | スペルと import を確認します。 |
+| `AttributeError` | オブジェクトにその名前の属性がありません。 | オブジェクトの型を確認します。多くの場合は `None` です。 |
+| `TypeError` | 演算に間違った型の値が渡されました。 | 引数の型を確認します。 |
+| `ValueError` | 型は正しいものの、`int("three")` のように値が正しくありません。 | 変換する前に入力を検証します。 |
+| `KeyError` | 辞書にそのキーがありません。 | `dict.get()` を使うか、`key in mapping` で確認します。 |
+| `IndexError` | シーケンスのインデックスが範囲外です。 | インデックスを読む前に長さを確認します。 |
+| `ZeroDivisionError` | 除算か剰余で0を使いました。 | 先に除数を確認します。 |
+| `ModuleNotFoundError` | import でモジュールが見つかりません。`ImportError` のサブクラスです。 | 有効な環境にパッケージをインストールします。 |
+| `FileNotFoundError` | ファイルかディレクトリが存在しません。`OSError` のサブクラスです。 | パスと作業ディレクトリを確認します。 |
+| `PermissionError` | プロセスにファイルやリソースへのアクセス権がありません。 | ファイルの所有者とモードを確認します。 |
+| `TimeoutError` | 操作が時間内に終わりませんでした。 | 上限付きの再試行を追加し、最後の失敗をログに記録します。 |
+| `RecursionError` | コールスタックが再帰の上限より深くなりました。 | 止まらない呼び出しを探します。 |
+| `RuntimeError` | ほかのどのカテゴリーにも当てはまらないエラーです。 | メッセージを読みます。ライブラリがよく送出します。 |
+
+`KeyboardInterrupt` と `SystemExit` は、`Exception` ではなく `BaseException` を継承しています。これらはコードのエラーではありません。
+
+## Python のログを LogBrew に送信する
+
+`LogBrewLoggingHandler` は標準のロギングハンドラーです。受け付けた各レコードを LogBrew に送信します。コンソールのハンドラーはそのまま変わりません。
+
+<Steps>
+  <Step title="プロジェクトのキーを作成する">
+    [CLI](/ja/guides/cli) でサインインします。プロジェクトを作成し、その取り込みキーを所有者だけが読めるファイルに保存します。
+
+    ```bash
+    install -d -m 700 "$HOME/.logbrew"
+    logbrew projects create billing-worker \
+      --runtime python \
+      --environment development \
+      --ingest-key-file "$HOME/.logbrew/billing-worker.ingest" \
+      --json
+    ```
+
+    CLI はキーを表示しません。本番環境では、利用しているプラットフォームのシークレット管理機能を使ってください。
+  </Step>
+
+  <Step title="SDK をインストールする">
+    アプリケーションの仮想環境を有効化します。次に、パッケージをインストールします。このパッケージには Python 3.10 以降が必要です。
+
+    ```bash
+    python3 -m pip install "logbrew-sdk>=0.1.29"
+    ```
+  </Step>
+
+  <Step title="キーとデプロイの識別情報を設定する">
+    ```bash
+    export LOGBREW_SERVER_API_KEY="$(tr -d '\r\n' < "$HOME/.logbrew/billing-worker.ingest")"
+    export LOGBREW_SERVICE_NAME="billing-worker"
+    export LOGBREW_ENVIRONMENT="development"
+    export LOGBREW_RELEASE="billing-worker@1.0.0"
+    ```
+
+    クライアントは、各イベントにサービス、環境、リリースを追加します。
+  </Step>
+
+  <Step title="ハンドラーを追加する">
+    このファイルを `worker.py` として保存します。クライアントを作成する前に `logging.basicConfig()` を呼び出します。クライアントはルートロガーにハンドラーを追加します。ルートロガーにハンドラーがすでにあると、`basicConfig()` は何もしません。
+
+    ```python
+    import logging
+    import os
+
+    from logbrew_sdk import (
+        HttpTransport,
+        LogBrewClient,
+        LogBrewLoggingHandler,
+        install_process_error_capture,
+    )
+
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
+
+    client = LogBrewClient.create(
+        api_key=os.environ["LOGBREW_SERVER_API_KEY"],
+        transport=HttpTransport(),
+    )
+    install_process_error_capture(client)
+
+    logger = logging.getLogger("billing")
+    logger.addHandler(LogBrewLoggingHandler(client))
+
+    logger.info("invoice created", extra={"invoice_id": "inv_1001", "amount_cents": 4200})
+
+    try:
+        {"plan": "pro"}["seats"]
+    except KeyError:
+        logger.exception("seat count missing")
+
+    client.shutdown()
+    ```
+
+    `HttpTransport()` は、最初のイベントから1秒後、またはイベントが50件たまった時点で、バックグラウンドでイベントを送信します。`client.shutdown()` は残りのイベントを送信し、クライアントを閉じます。
+  </Step>
+
+  <Step title="プログラムを実行する">
+    ```bash
+    python3 worker.py
+    ```
+
+    コンソールの出力は変わりません。LogBrew は、レコードごとに1件のログイベントを受け取ります。次は最初のイベントです。共通のランタイムコンテキストは省いています。
+
+    ```json
+    {
+      "type": "log",
+      "id": "evt_log_54bfab6d7a9e4a2b88cc1e7872722e4d",
+      "timestamp": "2026-11-07T14:21:36.457Z",
+      "attributes": {
+        "message": "invoice created",
+        "level": "info",
+        "logger": "billing",
+        "metadata": {
+          "fileName": "worker.py",
+          "functionName": "<module>",
+          "levelName": "INFO",
+          "levelNumber": 20,
+          "lineNumber": 22,
+          "module": "worker",
+          "processName": "MainProcess",
+          "threadName": "MainThread",
+          "invoice_id": "inv_1001",
+          "amount_cents": 4200
+        }
+      }
+    }
+    ```
+
+    `extra={...}` のプリミティブ値はメタデータになります。2件目のイベントでは、`exceptionName` が `KeyError`、`exceptionMessage` が `'seats'` です。トレースバックの全文を送信するには、`include_exception_text=True` を指定してハンドラーを作成します。
+  </Step>
+
+  <Step title="ログを読み取って確認する">
+    ```bash
+    logbrew read logs \
+      --service billing-worker \
+      --environment development \
+      --since 1h \
+      --json
+
+    logbrew read logs --severity error --search "seat count missing" --since 1h --json
+    ```
+
+    一致する結果が返れば、LogBrew がログを保存したことがわかります。CI やコーディングエージェントから読み取るには、プロジェクトの読み取りキーを使います。[セットアップの確認](/ja/guides/verify-setup)を参照してください。
+  </Step>
+</Steps>
+
+### LogBrew に送るレコードを選ぶ
+
+送るレコードを減らすには、ハンドラーに専用のレベルを設定します。コンソールには引き続き `INFO` 以上が出力されます。
+
+```python
+logger.addHandler(LogBrewLoggingHandler(client, level=logging.WARNING))
+```
+
+Python のレベルは LogBrew のレベルに変換されます。元のレベル名と数値はメタデータに残ります。
+
+| Python のレベル | LogBrew のレベル |
+| --- | --- |
+| `DEBUG`, `INFO` | `info` |
+| `WARNING` | `warning` |
+| `ERROR` | `error` |
+| `CRITICAL` | `critical` |
+
+## Python のクラッシュを課題として報告する
+
+`install_process_error_capture(client)` は、スクリプト、ワーカー、起動コード、スレッドで捕捉されなかった例外を報告します。各クラッシュは1件の課題になり、例外の型、メッセージ、スタックフレーム、例外チェーンの原因を含みます。Python は、これまでどおりトレースバックを出力して終了します。
+
+このファイルを `startup.py` として保存し、実行します。
+
+```python
+import os
+
+from logbrew_sdk import HttpTransport, LogBrewClient, install_process_error_capture
+
+client = LogBrewClient.create(
+    api_key=os.environ["LOGBREW_SERVER_API_KEY"],
+    transport=HttpTransport(),
+)
+install_process_error_capture(client)
+
+def load_config(path):
+    with open(path) as file:
+        return file.read()
+
+load_config("missing.toml")
+```
+
+```text
+Traceback (most recent call last):
+  File "/srv/app/startup.py", line 15, in <module>
+    load_config("missing.toml")
+    ~~~~~~~~~~~^^^^^^^^^^^^^^^^
+  File "/srv/app/startup.py", line 12, in load_config
+    with open(path) as file:
+         ~~~~^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'missing.toml'
+```
+
+LogBrew は、タイトルが `FileNotFoundError`、レベルが `critical`、メカニズムが `python.excepthook` の課題を受け取ります。そのフレームには、ファイル名、行、関数が含まれます。フルパスは含まれません。スレッド内のクラッシュのレベルは `error` です。Python が終了する前に、SDK は配信を最大2秒待ちます。
+
+```bash
+logbrew read issues --since 1h --json
+```
+
+課題には例外のメッセージが含まれます。例外のメッセージやログのメッセージに、認証情報や個人データを入れないでください。[ログの秘匿](/ja/guides/safe-capture)を参照してください。
+
+## トラブルシューティング
+
+| 症状 | 原因 | 対処 |
+| --- | --- | --- |
+| LogBrew を追加した後、コンソールに何も出力されない | `logging.basicConfig()` が `LogBrewClient.create()` の後に実行されています。 | `LogBrewClient.create()` の前に `logging.basicConfig()` を呼び出します。 |
+| `INFO` のレコードが表示されない | ロガーがルートロガーの `WARNING` レベルを使っています。 | `basicConfig()` でレベルを設定するか、`logger.setLevel(logging.INFO)` を呼び出します。 |
+| 各レコードが2回表示される | レコードがロガーのハンドラーに送られ、さらにルートロガーにある同じ種類のハンドラーにも送られています。 | 各ハンドラーを1回だけ追加するか、`logger.propagate = False` を設定します。 |
+| 強制停止の後、イベントが欠けている | 配信の前に `SIGKILL` か `os._exit()` がプロセスを止めました。 | 正常なシャットダウン処理で `client.shutdown()` を呼び出します。 |
+| `KeyError: 'LOGBREW_SERVER_API_KEY'` | このシェルで変数が設定されていません。 | `export` の手順をもう一度実行します。 |
+
+Web アプリケーションについては [Flask のログ](/ja/guides/flask)を参照してください。ログ形式を選ぶには[構造化ログ](/ja/concepts/structured-logging)を参照してください。ほかのランタイムについては [SDK 連携](/ja/guides/sdk-ingestion)を参照してください。

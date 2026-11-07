@@ -1,0 +1,287 @@
+---
+title: "Logging trong Node.js với Winston, Pino và Express"
+sidebarTitle: "Logging trong Node.js"
+description: "Cấu hình logger Winston hoặc Pino trong Node.js và Express, chọn mức log, rồi gửi log có cấu trúc kèm trace ID đến LogBrew."
+---
+
+LogBrew là nền tảng observability (khả năng quan sát) cho lập trình viên và agent lập trình, có gói miễn phí rộng rãi và không cần thẻ thanh toán.
+
+Hướng dẫn này cấu hình logging trong Node.js với Winston và Pino, thêm logger cho Express, rồi gửi mỗi log đến LogBrew cùng trace của yêu cầu. Mọi ví dụ đã chạy trên Node.js 22 với Winston 3.19, Pino 10.4, Express 5.3, `@logbrew/sdk` 0.1.40, `@logbrew/node` 0.1.24 và `@logbrew/express` 0.1.10. Mỗi khối kết quả là kết quả thật.
+
+## Chọn Winston hay Pino
+
+Cả hai thư viện đều ghi log JSON có cấu trúc. Giữ thư viện mà ứng dụng đang dùng. Cách thiết lập LogBrew khác nhau cho mỗi thư viện.
+
+| | Winston | Pino |
+| --- | --- | --- |
+| Đầu ra mặc định | Bạn tự chọn định dạng, ví dụ `winston.format.json()`. | 1 dòng JSON cho mỗi bản ghi. |
+| Đối số thông điệp | `logger.info("message", { fields })` | `logger.info({ fields }, "message")` |
+| Đích ghi | Transport chạy trong tiến trình ứng dụng. | Transport chạy trong một worker thread. |
+| Logger con | `logger.child({ fields })` | `logger.child({ fields })` |
+| Che dữ liệu | Định dạng do bạn tự viết. | Tùy chọn `redact` có sẵn. |
+| Thiết lập LogBrew | Thêm `createLogBrewWinstonTransport()` vào `transports`. | Gọi `installLogBrewPinoInstrumentation()` một lần. |
+
+## Chuẩn bị dự án LogBrew
+
+<Steps>
+  <Step title="Tạo khóa dự án">
+    Đăng nhập bằng [CLI](/vi/guides/cli). Tạo một dự án và lưu khóa gửi dữ liệu của dự án vào một tệp mà chỉ chủ sở hữu đọc được.
+
+    ```bash
+    install -d -m 700 "$HOME/.logbrew"
+    logbrew projects create checkout-api \
+      --runtime node \
+      --environment development \
+      --ingest-key-file "$HOME/.logbrew/checkout-api.ingest" \
+      --json
+    ```
+
+    CLI không in khóa ra. Trong production, dùng trình quản lý secret của nền tảng bạn dùng.
+  </Step>
+
+  <Step title="Cài đặt các gói">
+    Các gói cần Node.js 18.19 trở lên. Cài Winston, Pino hoặc cả hai.
+
+    ```bash
+    npm install @logbrew/sdk @logbrew/node @logbrew/express express winston pino
+    ```
+  </Step>
+
+  <Step title="Đặt khóa và danh tính triển khai">
+    ```bash
+    export LOGBREW_SERVER_API_KEY="$(tr -d '\r\n' < "$HOME/.logbrew/checkout-api.ingest")"
+    export LOGBREW_ENVIRONMENT="development"
+    export LOGBREW_RELEASE="checkout-api@1.0.0"
+    ```
+
+    `createLogBrewNodeClient()` đọc khóa từ `LOGBREW_SERVER_API_KEY`. Tên dịch vụ là `name` trong `package.json`. Để dùng tên khác, đặt `LOGBREW_SERVICE_NAME`. Các ví dụ dùng ES module, nên đặt `"type": "module"` trong `package.json`.
+  </Step>
+</Steps>
+
+## Các mức log trong Node.js
+
+Mỗi thư viện có tên và số mức riêng. LogBrew lưu 4 mức và giữ mức gốc trong metadata.
+
+| Mức LogBrew | Mức Winston (độ ưu tiên) | Mức Pino (số) |
+| --- | --- | --- |
+| `info` | `info` (2), `http` (3), `verbose` (4), `debug` (5), `silly` (6) | `info` (30), `debug` (20), `trace` (10) |
+| `warning` | `warn` (1) | `warn` (40) |
+| `error` | `error` (0) | `error` (50) |
+| `critical` | `fatal` hoặc `critical`, nếu bạn tự định nghĩa | `fatal` (60) |
+
+Trong Winston, số càng nhỏ thì càng nghiêm trọng. Trong Pino, số càng lớn thì càng nghiêm trọng. Đặt `info` trong production. Chỉ dùng `debug` khi chẩn đoán trong thời gian ngắn.
+
+## Logger Winston
+
+Lưu tệp này thành `winston-app.js`. Format đầu tiên loại các bản ghi thấp hơn mức của logger trước khi bất kỳ transport nào nhận được. Transport LogBrew nhận mọi bản ghi mà logger ghi, nên cần bộ lọc này.
+
+```js
+import winston from "winston";
+import { createLogBrewWinstonTransport } from "@logbrew/sdk";
+import { createLogBrewNodeClient } from "@logbrew/node";
+
+const client = createLogBrewNodeClient();
+
+const logger = winston.createLogger({
+  level: "info",
+  format: winston.format.combine(
+    winston.format((info) => (logger.isLevelEnabled(info.level) ? info : false))(),
+    winston.format.timestamp(),
+    winston.format.errors({ stack: true }),
+    winston.format.json()
+  ),
+  defaultMeta: { component: "checkout" },
+  transports: [
+    new winston.transports.Console(),
+    createLogBrewWinstonTransport({ client })
+  ]
+});
+
+logger.debug("cart loaded");
+logger.info("order created", { orderId: "ord_1001", totalCents: 4200 });
+logger.warn("payment retry", { attempt: 2 });
+logger.error(new Error("card declined"));
+
+await client.shutdown();
+```
+
+Chạy `node winston-app.js`. Console nhận 1 dòng JSON cho mỗi bản ghi từ mức `info` trở lên. Dấu vết ngăn xếp (stack trace) ở đây đã được rút gọn.
+
+```text
+{"component":"checkout","level":"info","message":"order created","orderId":"ord_1001","timestamp":"2026-11-07T14:19:53.863Z","totalCents":4200}
+{"attempt":2,"component":"checkout","level":"warn","message":"payment retry","timestamp":"2026-11-07T14:19:53.864Z"}
+{"component":"checkout","level":"error","message":"card declined","stack":"Error: card declined\n    at file:///srv/app/winston-app.js:25:14\n ...","timestamp":"2026-11-07T14:19:53.864Z"}
+```
+
+LogBrew nhận cùng 3 bản ghi đó. Các trường trở thành metadata `context.*`.
+
+| `message` | `level` | `metadata` |
+| --- | --- | --- |
+| `order created` | `info` | `winstonLevel` `info`, `context.component` `checkout`, `context.orderId` `ord_1001`, `context.totalCents` 4200 |
+| `payment retry` | `warning` | `winstonLevel` `warn`, `context.component` `checkout`, `context.attempt` 2 |
+| `card declined` | `error` | `winstonLevel` `error`, `context.component` `checkout`, `errorName` `Error`, `errorMessage` `card declined` |
+
+Transport gửi tên và thông điệp lỗi, nhưng không gửi dấu vết ngăn xếp. Để gửi dấu vết ngăn xếp, đặt `includeErrorStack: true` trong `createLogBrewWinstonTransport()`. Mỗi thông điệp cũng trở thành một breadcrumb của vấn đề tiếp theo. Đặt `breadcrumbs: false` để tắt việc này.
+
+## Logger Pino
+
+Lưu tệp này thành `pino-app.js`. Gọi `installLogBrewPinoInstrumentation()` một lần, trước log đầu tiên. Hàm này đọc từng bản ghi Pino đã hoàn tất. Pino vẫn ghi vào đích riêng của nó.
+
+```js
+import pino from "pino";
+import {
+  createLogBrewNodeClient,
+  installLogBrewPinoInstrumentation
+} from "@logbrew/node";
+
+const client = createLogBrewNodeClient();
+installLogBrewPinoInstrumentation({ client });
+
+const logger = pino({
+  level: "info",
+  redact: ["password", "token", "req.headers.authorization"]
+});
+const orderLogger = logger.child({ component: "checkout" });
+
+orderLogger.debug("cart loaded");
+orderLogger.info({ orderId: "ord_1001", totalCents: 4200 }, "order created");
+orderLogger.warn({ attempt: 2, token: "tok_example" }, "payment retry");
+orderLogger.error(new Error("card declined"), "payment failed");
+
+await client.shutdown();
+```
+
+Chạy `node pino-app.js`. Tên máy chủ và dấu vết ngăn xếp ở đây đã được rút gọn.
+
+```text
+{"level":30,"time":1794061059490,"pid":13985,"hostname":"app-host","component":"checkout","orderId":"ord_1001","totalCents":4200,"msg":"order created"}
+{"level":40,"time":1794061059493,"pid":13985,"hostname":"app-host","component":"checkout","attempt":2,"token":"[Redacted]","msg":"payment retry"}
+{"level":50,"time":1794061059494,"pid":13985,"hostname":"app-host","component":"checkout","err":{"type":"Error","message":"card declined","stack":"Error: card declined\n ..."},"msg":"payment failed"}
+```
+
+LogBrew nhận 3 bản ghi. Pino loại bản ghi `debug` trước khi LogBrew thấy nó.
+
+| `message` | `level` | `metadata` |
+| --- | --- | --- |
+| `order created` | `info` | `pinoLevel` `info`, `pinoLevelNumber` 30, `context.component` `checkout`, `context.orderId` `ord_1001`, `context.totalCents` 4200 |
+| `payment retry` | `warning` | `pinoLevel` `warn`, `pinoLevelNumber` 40, `context.component` `checkout`, `context.attempt` 2 |
+| `payment failed` | `error` | `pinoLevel` `error`, `pinoLevelNumber` 50, `context.component` `checkout`, `errorName` `Error`, `errorMessage` `card declined` |
+
+Trường `token` không có trong LogBrew. LogBrew loại các trường thông tin xác thực, cookie, body, query, URL và dấu vết ngăn xếp. Các đường dẫn `redact` của Pino vẫn có hiệu lực như lớp kiểm soát thứ hai. `pid`, `hostname` và `time` là giá trị mặc định của Pino, nên LogBrew không sao chép chúng.
+
+Tính năng tự động ghi nhận cần Pino 9.11 trở lên trong nhánh 9.x, hoặc Pino 10.1 trở lên. Với các phiên bản Pino cũ hơn, dùng `createLogBrewPinoDestination()` từ `@logbrew/sdk` làm đích của Pino.
+
+Để đọc kết quả của Pino khi phát triển, chuyển nó qua `pino-pretty`.
+
+```bash
+node pino-app.js | npx pino-pretty
+```
+
+## Logger cho Express
+
+`logbrewMiddleware()` tạo 1 span yêu cầu cho mỗi yêu cầu. `logbrewErrorHandler()` báo lỗi thành vấn đề. Log Pino bên trong một yêu cầu nhận trace ID và span ID của yêu cầu đó. Lưu tệp này thành `express-app.js`.
+
+```js
+import express from "express";
+import pino from "pino";
+import { logbrewErrorHandler, logbrewMiddleware } from "@logbrew/express";
+import {
+  createLogBrewNodeClient,
+  installLogBrewPinoInstrumentation
+} from "@logbrew/node";
+
+const client = createLogBrewNodeClient();
+installLogBrewPinoInstrumentation({ client });
+const logger = pino({ level: "info" });
+
+const app = express();
+app.use(logbrewMiddleware());
+
+app.get("/orders/:orderId", (req, res) => {
+  logger.info({ orderId: req.params.orderId }, "order loaded");
+  res.json({ ok: true });
+});
+
+app.get("/fail", () => {
+  throw new Error("inventory service timeout");
+});
+
+app.use(logbrewErrorHandler());
+app.use((err, req, res, next) => {
+  logger.error(err, "request failed");
+  res.status(500).json({ error: "internal" });
+});
+
+const server = app.listen(3000, () => logger.info("listening on 3000"));
+
+process.on("SIGTERM", () => {
+  server.close(async () => {
+    await client.shutdown();
+    process.exit(0);
+  });
+});
+```
+
+Khởi động ứng dụng. Sau đó gửi 2 yêu cầu từ một terminal thứ hai.
+
+```bash
+curl -s http://127.0.0.1:3000/orders/ord_1001
+curl -s http://127.0.0.1:3000/fail
+```
+
+LogBrew nhận các sự kiện sau. Log và span của mỗi yêu cầu có cùng trace ID.
+
+| Sự kiện | Tên hoặc thông điệp | Trace |
+| --- | --- | --- |
+| span | `GET /orders/:orderId`, trạng thái `ok` | `4f18970f494d633c2164588fee9c692a` |
+| log | `order loaded` | `4f18970f494d633c2164588fee9c692a` |
+| vấn đề | `GET /fail failed`, thông điệp `inventory service timeout` | `d273e106d73ce6c5a5955e5a8c74d2d0` |
+| span | `GET /fail`, trạng thái `error` | `d273e106d73ce6c5a5955e5a8c74d2d0` |
+| log | `request failed` | `d273e106d73ce6c5a5955e5a8c74d2d0` |
+
+Tên span dùng mẫu route, không dùng đường dẫn cụ thể. Log `listening on 3000` không có trace, vì log này nằm ngoài yêu cầu.
+
+Để middleware tự tạo client cho từng yêu cầu. Đừng truyền `client` dùng chung cho cả tiến trình vào `logbrewMiddleware()` hay `logbrewErrorHandler()`. Middleware tắt client của yêu cầu sau mỗi phản hồi.
+
+### Thêm trace vào log Winston
+
+Với Winston, truyền trace đang hoạt động cho transport.
+
+```js
+import { createLogBrewWinstonTransport } from "@logbrew/sdk";
+import { createLogBrewNodeClient, getActiveLogBrewTrace } from "@logbrew/node";
+
+const client = createLogBrewNodeClient();
+const logbrewTransport = createLogBrewWinstonTransport({
+  client,
+  traceProvider: getActiveLogBrewTrace
+});
+```
+
+Thêm `logbrewTransport` vào danh sách `transports` của logger. Khi đó, log Winston bên trong một yêu cầu Express có trace ID và span ID của yêu cầu đó.
+
+## Đọc lại log
+
+```bash
+logbrew read logs --service checkout-api --since 1h --json
+logbrew read logs --severity error --search "request failed" --since 1h --json
+logbrew read logs --trace "<trace_id>" --since 1h --json
+```
+
+Lệnh cuối cùng đọc mọi log của 1 yêu cầu. Sao chép `<trace_id>` từ một trace hoặc một vấn đề. Để đọc từ CI hoặc agent lập trình, dùng khóa đọc dữ liệu của dự án. Xem [Kiểm tra thiết lập](/vi/guides/verify-setup).
+
+## Tắt mà không mất log
+
+Client gửi các sự kiện trong hàng đợi 1 giây sau sự kiện đầu tiên hoặc khi đủ 50 sự kiện. Khi event loop trống, client gửi các sự kiện còn lại trong tối đa 2 giây. `process.exit()` và signal của hệ điều hành bỏ qua bước đó. Gọi `await client.shutdown()` trước khi thoát, như handler `SIGTERM` trong ví dụ Express.
+
+## Khắc phục sự cố
+
+| Triệu chứng | Nguyên nhân | Cách khắc phục |
+| --- | --- | --- |
+| `createLogBrewNodeClient requires serverApiKey, apiKey, LOGBREW_SERVER_API_KEY, or LOGBREW_API_KEY` | Khóa chưa được đặt trong shell này. | Chạy lại bước `export`. |
+| Log `debug` của Winston xuất hiện trong LogBrew nhưng không có trên console | Transport LogBrew không áp dụng mức của logger. | Thêm format lọc theo mức trong ví dụ Winston. |
+| Log Pino không xuất hiện trong LogBrew | Phiên bản Pino không có tracing channel, hoặc log chạy trước `installLogBrewPinoInstrumentation()`. | Dùng Pino 9.11 trở lên, hoặc 10.1 trở lên. Cài phần ghi nhận trước log đầu tiên. |
+| Log dừng sau yêu cầu đầu tiên, và `client.shutdown()` ném `client is already shut down` | Client dùng chung cho cả tiến trình đã được truyền vào middleware Express. | Xóa tùy chọn `client` khỏi `logbrewMiddleware()` và `logbrewErrorHandler()`. |
+| Mất các log cuối sau một lần triển khai | Tiến trình đã thoát trước khi gửi xong. | Gọi `await client.shutdown()` trong handler `SIGTERM`. |
+
+Để chọn các trường log, xem [Structured logging](/vi/concepts/structured-logging). Với các framework khác, xem [Tích hợp SDK](/vi/guides/sdk-ingestion).

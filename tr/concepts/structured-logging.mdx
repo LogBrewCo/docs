@@ -1,0 +1,178 @@
+---
+title: "Yapılandırılmış loglama, log formatı ve en iyi uygulamalar"
+sidebarTitle: "Yapılandırılmış loglama"
+description: "Yapılandırılmış loglamanın ne olduğunu öğrenin, standart alanlarla bir JSON log formatı seçin ve logları kolay aranır tutan en iyi uygulamaları kullanın."
+---
+
+LogBrew, geliştiriciler ve kodlama asistanları için bir gözlemlenebilirlik
+platformudur. Cömert bir ücretsiz planı vardır ve kart gerektirmez.
+
+Yapılandırılmış loglama her log kaydını tek satırlık serbest metin olarak değil,
+adlandırılmış alanlar olarak yazar. Böylece bir program, bir kişi veya bir
+kodlama asistanı kayıtları alana göre filtreleyebilir, sayabilir ve bir istek
+izine bağlayabilir.
+
+## Metin logları ve yapılandırılmış loglar
+
+Bu metin logu, altındaki yapılandırılmış logla aynı bilgileri içerir.
+
+```text
+2026-11-07 14:21:19 ERROR checkout payment failed for order ord_1001 after 5 s
+```
+
+```json
+{"timestamp": "2026-11-07T14:21:19.773+00:00", "level": "error", "logger": "checkout", "message": "payment failed", "order_id": "ord_1001", "error.type": "TimeoutError", "error.message": "payment provider did not answer in 5 s"}
+```
+
+Metin logunda 1 siparişin tüm başarısız ödemelerini bulmak için her mesaj
+varyantına ayrı bir kalıp yazmanız gerekir. Yapılandırılmış logda `message` ve
+`order_id` alanlarına göre filtrelersiniz. Mesaj her siparişte aynı kalır, bu
+yüzden onu sayabilirsiniz de.
+
+## Bir log formatı seçin
+
+Her satırda 1 nesne olacak şekilde JSON kullanın. Tüm hizmetlerde aynı alan
+adlarını kullanın. Bu tablo temel alanları listeler. Tablo ayrıca OpenTelemetry
+log veri modelindeki ve LogBrew'deki karşılık gelen adları gösterir.
+
+| Alan | İçerik | OpenTelemetry | LogBrew |
+| --- | --- | --- | --- |
+| `timestamp` | RFC 3339 formatında, milisaniyeli UTC zamanı | `Timestamp` | Olayın `timestamp` alanı |
+| `level` | Küçük ve sabit bir kümeden 1 değer, örneğin `info`, `warning`, `error`, `critical` | `SeverityText`, `SeverityNumber` | `level` |
+| `message` | Olay için değişken değer içermeyen sabit bir metin | `Body` | `message` |
+| `logger` | Kaydı yazan modül veya bileşen | Instrumentation scope | `logger` |
+| `trace_id`, `span_id` | Etkin izin ve span'in kimlikleri | `TraceId`, `SpanId` | `context.trace` |
+| `service`, `environment`, `release` | Kodun nerede çalıştığı ve hangi sürüm olduğu | Kaynak öznitelikleri | `context.resource` |
+| `error.type`, `error.message` | İstisna sınıfı ve mesajı | `exception.type`, `exception.message` | `metadata` |
+| Olay alanları | Bu olaya ait değerler, örneğin `order_id` | `Attributes` | `metadata` |
+
+OpenTelemetry önem düzeyi sayıları 1 ile 24 arasındadır. `INFO` 9'dan, `WARN`
+13'ten, `ERROR` 17'den ve `FATAL` 21'den başlar. LogBrew OTLP loglarını doğrudan
+kabul eder. [OpenTelemetry verilerini gönderin](/tr/guides/opentelemetry)
+rehberine bakın.
+
+## Loglama için en iyi uygulamalar
+
+### Mesajı sabit tutun
+
+`"payment failed"` yazın ve sipariş kimliğini bir alana koyun. Sabit bir mesajla
+1 olay türünü gruplayabilir, sayabilir ve onun için alarm kurabilirsiniz.
+
+### Her alan için 1 ad kullanın
+
+`order_id` veya `orderId` adını bir kez seçin ve tüm hizmetlerde kullanın.
+Yaygın alanlar için OpenTelemetry semantic conventions adlarını kullanın,
+örneğin `http.response.status_code`.
+
+### Seviyeyi gereken müdahaleye göre seçin
+
+`error` bir işlemin başarısız olduğunu gösterir. `warning` programın
+toparlandığını gösterir. `info` normal işi doğrular. `debug` seviyesini yalnızca
+hata ayıklarken kullanın.
+
+### Zamanı UTC olarak yazın
+
+RFC 3339 formatını milisaniye ve saat farkıyla kullanın, örneğin
+`2026-11-07T14:21:19.773+00:00`. UTC ve milisaniye olmadan farklı saat
+dilimlerinden gelen kayıtlar veya aynı saniyedeki kayıtlar yanlış sırayla
+dizilir.
+
+### İz kimliğini ve span kimliğini ekleyin
+
+Bu kimliklerle 1 isteğin tüm loglarını hizmetler arasında okuyabilirsiniz.
+
+### Hizmeti, ortamı ve sürümü bir kez ayarlayın
+
+Bunları her çağrıda değil, başlangıçta yapılandırın. Sürüm eksikse bir
+değişikliğe hangi dağıtımın yol açtığı görünmez.
+
+### Bir hatayı ele aldığınız yerde bir kez loglayın
+
+Hata türünü ve mesajını ekleyin. Aynı hatayı her katmanda yeniden loglamayın.
+
+### Gizli bilgileri ve kişisel verileri dışarıda tutun
+
+Parolaları, tokenları, çerezleri, istek gövdelerini veya sorgu dizesi içeren tam
+URL'leri loglamayın. Logger'ınızın gizleme özelliğini kullanın. [Yakalanan
+verileri denetleyin](/tr/guides/safe-capture) sayfasına bakın.
+
+### Sabit alan adları kullanın
+
+Değerleri alan adı olarak kullanmayın, örneğin `{"ord_1001": "failed"}`. Aksi
+hâlde her yeni değer yeni bir alan ekler ve 1 filtre tüm siparişleri bulamaz.
+
+### Canlı ortamda JSON'u standart çıktıya yazın
+
+Okunabilir bir formatı yalnızca geliştirmede kullanın.
+
+## Python'da yapılandırılmış loglama
+
+Standart `logging` modülünde JSON formatter yoktur. Bu formatter temel alanları
+ve `extra={"fields": {...}}` içindeki değerleri yazar.
+
+```python
+import json
+import logging
+from datetime import datetime, timezone
+
+
+class JsonFormatter(logging.Formatter):
+    def format(self, record):
+        entry = {
+            "timestamp": datetime.fromtimestamp(record.created, timezone.utc).isoformat(
+                timespec="milliseconds"
+            ),
+            "level": record.levelname.lower(),
+            "logger": record.name,
+            "message": record.getMessage(),
+            **getattr(record, "fields", {}),
+        }
+        if record.exc_info:
+            entry["error.type"] = record.exc_info[0].__name__
+            entry["error.message"] = str(record.exc_info[1])
+        return json.dumps(entry)
+
+
+handler = logging.StreamHandler()
+handler.setFormatter(JsonFormatter())
+logging.basicConfig(level=logging.INFO, handlers=[handler])
+logger = logging.getLogger("checkout")
+
+logger.info("order created", extra={"fields": {"order_id": "ord_1001", "total_cents": 4200}})
+try:
+    raise TimeoutError("payment provider did not answer in 5 s")
+except TimeoutError:
+    logger.error("payment failed", exc_info=True, extra={"fields": {"order_id": "ord_1001"}})
+```
+
+```text
+{"timestamp": "2026-11-07T14:21:19.772+00:00", "level": "info", "logger": "checkout", "message": "order created", "order_id": "ord_1001", "total_cents": 4200}
+{"timestamp": "2026-11-07T14:21:19.773+00:00", "level": "error", "logger": "checkout", "message": "payment failed", "order_id": "ord_1001", "error.type": "TimeoutError", "error.message": "payment provider did not answer in 5 s"}
+```
+
+Aynı kayıtları LogBrew'e göndermek için `LogBrewLoggingHandler` ekleyin. Handler
+mesajı, seviyeyi ve logger'ı alan olarak gönderir. İlkel `extra` değerlerini
+meta veri olarak gönderir. [Python loglama](/tr/guides/python-logging) rehberine
+bakın.
+
+## Node.js'te yapılandırılmış loglama
+
+Pino varsayılan olarak her kayıt için 1 JSON satırı yazar. Winston
+`winston.format.json()` ile JSON yazar. İkisi de çağrıdaki ve alt logger'lardaki
+alanları korur. İki kurulum ve Express loglarındaki iz kimliği için [Node.js
+loglama](/tr/guides/node-logging) rehberine bakın.
+
+## LogBrew'de yapılandırılmış logları arayın
+
+LogBrew her logu mesajı, seviyesi, logger'ı, meta verisi ve iziyle birlikte
+saklar. Bu alanlara göre CLI'dan filtreleyin.
+
+```bash
+logbrew read logs --severity error --since 24h --json
+logbrew read logs --search "payment failed" --service checkout-api --since 24h --json
+logbrew read logs --trace "<trace_id>" --since 24h --json
+```
+
+API ayrıca türü belirli meta veri değerlerine göre de filtreleyebilir, örneğin
+500 veya üstü bir sayı. [Sorgu filtreleri](/tr/reference/telemetry-api-filters)
+sayfasına bakın.

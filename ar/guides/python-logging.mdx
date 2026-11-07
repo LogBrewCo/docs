@@ -1,0 +1,444 @@
+---
+title: "تسجيل السجلات في Python ومستويات السجلات ومعالجة الأخطاء"
+sidebarTitle: "تسجيل السجلات في Python"
+description: "اضبط تسجيل السجلات في Python بمستويات السجلات الصحيحة، وعالج أخطاء Python وأنواع الاستثناءات، وأرسل السجلات والأعطال إلى LogBrew."
+---
+
+LogBrew منصة لقابلية الملاحظة (Observability) للمطوّرين ووكلاء البرمجة، مع خطة
+مجانية سخية ودون الحاجة إلى بطاقة دفع.
+
+يشرح هذا الدليل تسجيل السجلات في Python باستخدام الوحدة القياسية `logging`، و5
+مستويات للسجلات في Python، ومعالجة الأخطاء في Python، وأنواع أخطاء Python
+الشائعة. وترسل الأقسام الأخيرة السجلات والأعطال نفسها إلى LogBrew باستخدام
+`logbrew-sdk` 0.1.29. شُغّل كل مثال على Python 3.13، وتعرض كل كتلة مخرجات
+مخرجاتها الفعلية.
+
+لتطبيق Flask، استخدم [سجلات Flask](/ar/guides/flask) بدلًا من هذا الدليل. فهو
+يضيف تتبّعات الطلبات إلى إعداد السجلات نفسه.
+
+## اكتب أول سجل في Python
+
+احفظ هذا الملف باسم `app.py`. استدعِ `logging.basicConfig()` مرة واحدة عند نقطة
+دخول البرنامج. أنشئ مسجِّلًا باسم خاص في كل وحدة.
+
+```python
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+logger = logging.getLogger("billing")
+
+logger.debug("cache warmed")
+logger.info("invoice created")
+logger.warning("payment retry %d of %d", 2, 3)
+
+try:
+    total = 100 / 0
+except ZeroDivisionError:
+    logger.exception("invoice total failed")
+```
+
+شغّل `python3 app.py`. تذهب المخرجات إلى مجرى الخطأ القياسي.
+
+```text
+2026-11-07 17:21:29,602 INFO billing invoice created
+2026-11-07 17:21:29,602 WARNING billing payment retry 2 of 3
+2026-11-07 17:21:29,602 ERROR billing invoice total failed
+Traceback (most recent call last):
+  File "/srv/app/app.py", line 14, in <module>
+    total = 100 / 0
+            ~~~~^~~
+ZeroDivisionError: division by zero
+```
+
+لا يظهر سجل `debug` لأن المستوى هو `INFO`. يسجّل `logger.exception()` بالمستوى
+`ERROR` ويضيف تتبّع المكدّس (traceback). استدعِه داخل كتلة `except` فقط.
+
+مرّر القيم كوسائط، كما في `"payment retry %d of %d", 2, 3`. لا يبني Python
+الرسالة إلا عندما يقبل أحد المعالجات السجل. ويبقى قالب الرسالة ثابتًا في كل
+إعادة محاولة، لذلك يمكنك البحث عنه.
+
+## مستويات السجلات في Python
+
+يرسل المسجِّل السجل فقط عندما يكون مستوى السجل مساويًا لمستوى المسجِّل أو أعلى
+منه. ويمكن للمعالج أن يضبط مستوى ثانيًا أعلى.
+
+| المستوى | الرقم | الاستخدام |
+| --- | --- | --- |
+| `DEBUG` | 10 | تفاصيل لا تحتاجها إلا أثناء تشخيص خلل. |
+| `INFO` | 20 | أحداث عادية تؤكد أن البرنامج يعمل، مثل بدء مهمة. |
+| `WARNING` | 30 | حالة غير متوقعة تعافى منها البرنامج، مثل إعادة المحاولة. |
+| `ERROR` | 40 | عملية فشلت. ويستمر البرنامج في العمل. |
+| `CRITICAL` | 50 | فشل يوقف البرنامج أو ميزة رئيسية. |
+
+يبدأ المسجِّل الجذري بالمستوى `WARNING`. ويكون مستوى المسجِّل الجديد `NOTSET`
+(0)، فيستخدم مستوى المسجِّل الأب. اضبط `INFO` في بيئة الإنتاج، واضبط `DEBUG` في
+التطوير فقط أو لتشخيص قصير.
+
+```python
+logging.getLogger("billing").setLevel(logging.DEBUG)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+```
+
+يعرض السطر الأول سجلات التصحيح لوحدة واحدة. ويزيل السطر الثاني الضجيج الصادر عن
+مكتبة.
+
+## المسجِّلات والمعالجات والمنسِّقات
+
+- يستقبل المسجِّل الاستدعاء. استخدم `logging.getLogger(__name__)` ليتبع اسم
+  المسجِّل مسار الوحدة.
+- يرسل المعالج السجلات إلى وجهة، مثل وحدة التحكم أو ملف أو LogBrew.
+- يحوّل المنسِّق السجل إلى نص.
+
+يجب ألا تضبط المكتبة إعدادات السجلات. فهي تضيف `logging.NullHandler()` فقط إلى
+مسجِّلها الخاص. ويضبط التطبيق المعالجات والمستويات مرة واحدة. للإعدادات الكبيرة،
+استخدم `logging.config.dictConfig()`.
+
+## معالجة الأخطاء في Python
+
+التقط الاستثناء الأكثر تحديدًا الذي يمكنك معالجته. استخدم `else` للشيفرة التي
+تعمل عند النجاح فقط، واستخدم `finally` للشيفرة التي تعمل دائمًا. استخدم
+`raise ... from error` للاحتفاظ بالسبب الأصلي.
+
+احفظ هذا الملف باسم `orders.py`.
+
+```python
+import logging
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
+logger = logging.getLogger("orders")
+
+
+class OrderError(Exception):
+    """The order cannot be processed."""
+
+
+def parse_quantity(raw):
+    try:
+        quantity = int(raw)
+    except ValueError as error:
+        raise OrderError(f"quantity must be a whole number, got {raw!r}") from error
+    else:
+        logger.info("quantity parsed")
+        return quantity
+    finally:
+        logger.debug("parse attempt finished")
+
+
+for raw in ["3", "three"]:
+    try:
+        parse_quantity(raw)
+    except OrderError:
+        logger.exception("order rejected")
+```
+
+تعرض المخرجات الاستثناءين كليهما في السلسلة.
+
+```text
+INFO orders quantity parsed
+ERROR orders order rejected
+Traceback (most recent call last):
+  File "/srv/app/orders.py", line 13, in parse_quantity
+    quantity = int(raw)
+ValueError: invalid literal for int() with base 10: 'three'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/srv/app/orders.py", line 25, in <module>
+    parse_quantity(raw)
+    ~~~~~~~~~~~~~~^^^^^
+  File "/srv/app/orders.py", line 15, in parse_quantity
+    raise OrderError(f"quantity must be a whole number, got {raw!r}") from error
+OrderError: quantity must be a whole number, got 'three'
+```
+
+اتبع هذه القواعد لكل استثناء.
+
+- سجّل الاستثناء مرة واحدة، في المكان الذي تعالجه فيه. لا تسجّله ثم تُعِد رفعه
+  في كل طبقة، لأن كل طبقة تضيف سجلًا مكررًا.
+- لا تكتب `except Exception: pass`. إذا تجاهلت خطأً، فسجّله بالمستوى `WARNING`
+  أو أعلى مع ذكر السبب.
+- التقط `Exception` وليس `BaseException`. يلتقط `BaseException` أيضًا
+  `KeyboardInterrupt` و`SystemExit`، وهما يوقفان البرنامج عن قصد.
+- عرّف أصناف استثناءات خاصة بك للأخطاء التي يجب على المستدعين معالجتها، كما يفعل
+  `OrderError`.
+
+### أبلغ عن أكثر من خطأ
+
+يستطيع Python 3.11 والإصدارات الأحدث رفع `ExceptionGroup`. استخدمه عندما يجد فحص
+واحد أكثر من خلل. عالج كل نوع باستخدام `except*`.
+
+```python
+def validate(order):
+    errors = []
+    if not order.get("email"):
+        errors.append(ValueError("email is required"))
+    if order.get("quantity", 0) < 1:
+        errors.append(ValueError("quantity must be 1 or more"))
+    if errors:
+        raise ExceptionGroup("order is invalid", errors)
+
+
+try:
+    validate({"quantity": 0})
+except* ValueError as group:
+    for error in group.exceptions:
+        logger.warning("validation failed: %s", error)
+```
+
+```text
+WARNING orders validation failed: email is required
+WARNING orders validation failed: quantity must be 1 or more
+```
+
+## أنواع أخطاء Python الشائعة
+
+ترث كل الأخطاء المضمّنة التي يستطيع البرنامج معالجتها من `Exception`. يسرد هذا
+الجدول أخطاء Python الأكثر ظهورًا وأول ما تفحصه في كل منها.
+
+| نوع الخطأ | يرفعه Python عندما | الفحص الأول |
+| --- | --- | --- |
+| `SyntaxError` | الشيفرة ليست Python صالحة. ولا يعمل الملف. | اقرأ السطر والعمود في الرسالة. |
+| `IndentationError` | المسافة البادئة لإحدى الكتل غير صحيحة. | استخدم 4 مسافات دون علامات جدولة. |
+| `NameError` | الاسم غير معرّف. | تحقّق من الإملاء ومن الاستيراد. |
+| `AttributeError` | لا يملك الكائن سمة بهذا الاسم. | تحقّق من نوع الكائن، فهو غالبًا `None`. |
+| `TypeError` | تتلقى عملية قيمة من نوع خاطئ. | تحقّق من أنواع الوسائط. |
+| `ValueError` | القيمة من النوع الصحيح لكنها غير صالحة، مثل `int("three")`. | تحقّق من صحة المدخلات قبل تحويلها. |
+| `KeyError` | لا يحتوي القاموس على هذا المفتاح. | استخدم `dict.get()` أو افحص `key in mapping`. |
+| `IndexError` | فهرس التسلسل خارج النطاق. | تحقّق من الطول قبل قراءة الفهرس. |
+| `ZeroDivisionError` | تقسم عملية قسمة أو باقي قسمة على صفر. | تحقّق من المقسوم عليه أولًا. |
+| `ModuleNotFoundError` | لا يجد الاستيراد الوحدة. وهو صنف فرعي من `ImportError`. | ثبّت الحزمة في البيئة النشطة. |
+| `FileNotFoundError` | الملف أو المجلد غير موجود. وهو صنف فرعي من `OSError`. | تحقّق من المسار ومن مجلد العمل. |
+| `PermissionError` | لا تملك العملية صلاحية الوصول إلى ملف أو مورد. | تحقّق من مالك الملف وأذوناته. |
+| `TimeoutError` | لم تنتهِ عملية في الوقت المحدد. | أضف إعادة محاولة بحد أقصى، ثم سجّل آخر فشل. |
+| `RecursionError` | مكدّس الاستدعاءات أعمق من حد العودية. | ابحث عن الاستدعاء الذي لا يتوقف. |
+| `RuntimeError` | الخطأ لا يطابق أي فئة أخرى. | اقرأ الرسالة. ترفعه المكتبات غالبًا. |
+
+يرث `KeyboardInterrupt` و`SystemExit` من `BaseException` وليس من `Exception`.
+فهما ليسا أخطاءً في شيفرتك.
+
+## أرسل سجلات Python إلى LogBrew
+
+`LogBrewLoggingHandler` معالج سجلات قياسي. يرسل إلى LogBrew كل سجل يقبله. ويبقى
+معالج وحدة التحكم كما هو.
+
+<Steps>
+  <Step title="أنشئ مفتاحًا للمشروع">
+    سجّل الدخول باستخدام [الـ CLI](/ar/guides/cli). أنشئ مشروعًا وخزّن مفتاح
+    الاستيعاب الخاص به في ملف لا يقرؤه إلا مالكه.
+
+    ```bash
+    install -d -m 700 "$HOME/.logbrew"
+    logbrew projects create billing-worker \
+      --runtime python \
+      --environment development \
+      --ingest-key-file "$HOME/.logbrew/billing-worker.ingest" \
+      --json
+    ```
+
+    لا يطبع الـ CLI المفتاح. في بيئة الإنتاج، استخدم مدير الأسرار في منصتك.
+  </Step>
+
+  <Step title="ثبّت الـ SDK">
+    فعّل البيئة الافتراضية للتطبيق. ثم ثبّت الحزمة. تتطلب الحزمة Python 3.10 أو
+    أحدث.
+
+    ```bash
+    python3 -m pip install "logbrew-sdk>=0.1.29"
+    ```
+  </Step>
+
+  <Step title="اضبط المفتاح وهوية النشر">
+    ```bash
+    export LOGBREW_SERVER_API_KEY="$(tr -d '\r\n' < "$HOME/.logbrew/billing-worker.ingest")"
+    export LOGBREW_SERVICE_NAME="billing-worker"
+    export LOGBREW_ENVIRONMENT="development"
+    export LOGBREW_RELEASE="billing-worker@1.0.0"
+    ```
+
+    يضيف العميل الخدمة والبيئة والإصدار إلى كل حدث.
+  </Step>
+
+  <Step title="أضف المعالج">
+    احفظ هذا الملف باسم `worker.py`. استدعِ `logging.basicConfig()` قبل إنشاء
+    العميل. يضيف العميل معالجًا إلى المسجِّل الجذري، ولا يفعل `basicConfig()`
+    شيئًا إذا كان للمسجِّل الجذري معالج بالفعل.
+
+    ```python
+    import logging
+    import os
+
+    from logbrew_sdk import (
+        HttpTransport,
+        LogBrewClient,
+        LogBrewLoggingHandler,
+        install_process_error_capture,
+    )
+
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
+
+    client = LogBrewClient.create(
+        api_key=os.environ["LOGBREW_SERVER_API_KEY"],
+        transport=HttpTransport(),
+    )
+    install_process_error_capture(client)
+
+    logger = logging.getLogger("billing")
+    logger.addHandler(LogBrewLoggingHandler(client))
+
+    logger.info("invoice created", extra={"invoice_id": "inv_1001", "amount_cents": 4200})
+
+    try:
+        {"plan": "pro"}["seats"]
+    except KeyError:
+        logger.exception("seat count missing")
+
+    client.shutdown()
+    ```
+
+    يرسل `HttpTransport()` الأحداث في الخلفية بعد ثانية واحدة من أول حدث أو عند
+    بلوغ 50 حدثًا. ويرسل `client.shutdown()` الأحداث المتبقية ويغلق العميل.
+  </Step>
+
+  <Step title="شغّل البرنامج">
+    ```bash
+    python3 worker.py
+    ```
+
+    لا تتغير مخرجات وحدة التحكم. يستقبل LogBrew حدث سجل واحدًا لكل سجل. هذا هو
+    الحدث الأول، دون سياق وقت التشغيل المشترك.
+
+    ```json
+    {
+      "type": "log",
+      "id": "evt_log_54bfab6d7a9e4a2b88cc1e7872722e4d",
+      "timestamp": "2026-11-07T14:21:36.457Z",
+      "attributes": {
+        "message": "invoice created",
+        "level": "info",
+        "logger": "billing",
+        "metadata": {
+          "fileName": "worker.py",
+          "functionName": "<module>",
+          "levelName": "INFO",
+          "levelNumber": 20,
+          "lineNumber": 22,
+          "module": "worker",
+          "processName": "MainProcess",
+          "threadName": "MainThread",
+          "invoice_id": "inv_1001",
+          "amount_cents": 4200
+        }
+      }
+    }
+    ```
+
+    تصبح القيم الأولية من `extra={...}` بيانات وصفية. يحمل الحدث الثاني
+    `exceptionName` بالقيمة `KeyError` و`exceptionMessage` بالقيمة `'seats'`.
+    لإرسال نص تتبّع المكدّس كاملًا، أنشئ المعالج مع
+    `include_exception_text=True`.
+  </Step>
+
+  <Step title="اقرأ السجلات المخزّنة">
+    ```bash
+    logbrew read logs \
+      --service billing-worker \
+      --environment development \
+      --since 1h \
+      --json
+
+    logbrew read logs --severity error --search "seat count missing" --since 1h --json
+    ```
+
+    تُثبت القراءة المطابقة أن LogBrew خزّن السجلات. للقراءة من CI أو من وكيل
+    برمجة، استخدم مفتاح القراءة الخاص بالمشروع. راجع [تحقّق من
+    الإعداد](/ar/guides/verify-setup).
+  </Step>
+</Steps>
+
+### اختر السجلات التي تصل إلى LogBrew
+
+امنح المعالج مستواه الخاص لترسل سجلات أقل. وتظل وحدة التحكم تتلقى `INFO` وما
+فوقه.
+
+```python
+logger.addHandler(LogBrewLoggingHandler(client, level=logging.WARNING))
+```
+
+تتحول مستويات Python إلى مستويات LogBrew. ويبقى اسم المستوى الأصلي ورقمه في
+البيانات الوصفية.
+
+| مستوى Python | مستوى LogBrew |
+| --- | --- |
+| `DEBUG`, `INFO` | `info` |
+| `WARNING` | `warning` |
+| `ERROR` | `error` |
+| `CRITICAL` | `critical` |
+
+## أبلغ عن أعطال Python كمشكلات
+
+يُبلغ `install_process_error_capture(client)` عن الاستثناءات غير الملتقَطة في
+السكربتات والعمليات العاملة (workers) وشيفرة بدء التشغيل والخيوط. يصبح كل تعطّل
+مشكلة واحدة تحمل نوع الاستثناء والرسالة وإطارات المكدّس والأسباب المتسلسلة. ويظل
+Python يطبع تتبّع المكدّس ويخرج كما كان يفعل من قبل.
+
+احفظ هذا الملف باسم `startup.py` وشغّله.
+
+```python
+import os
+
+from logbrew_sdk import HttpTransport, LogBrewClient, install_process_error_capture
+
+client = LogBrewClient.create(
+    api_key=os.environ["LOGBREW_SERVER_API_KEY"],
+    transport=HttpTransport(),
+)
+install_process_error_capture(client)
+
+def load_config(path):
+    with open(path) as file:
+        return file.read()
+
+load_config("missing.toml")
+```
+
+```text
+Traceback (most recent call last):
+  File "/srv/app/startup.py", line 15, in <module>
+    load_config("missing.toml")
+    ~~~~~~~~~~~^^^^^^^^^^^^^^^^
+  File "/srv/app/startup.py", line 12, in load_config
+    with open(path) as file:
+         ~~~~^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'missing.toml'
+```
+
+يستقبل LogBrew مشكلة بالعنوان `FileNotFoundError` والمستوى `critical` والآلية
+`python.excepthook`. تحتوي إطاراتها على اسم الملف والسطر والدالة، لكن دون المسار
+الكامل. ويكون مستوى التعطّل داخل خيط هو `error`. قبل أن يخرج Python، ينتظر الـ
+SDK اكتمال التسليم مدة ثانيتين على الأكثر.
+
+```bash
+logbrew read issues --since 1h --json
+```
+
+تتضمن المشكلة رسالة الاستثناء. لا تضع بيانات الاعتماد أو البيانات الشخصية في
+رسائل الاستثناءات أو رسائل السجلات. راجع [التحكم في البيانات
+الملتقطة](/ar/guides/safe-capture).
+
+## استكشاف الأخطاء وإصلاحها
+
+| العَرَض | السبب | الحل |
+| --- | --- | --- |
+| لا تظهر مخرجات في وحدة التحكم بعد إضافة LogBrew | شُغّل `logging.basicConfig()` بعد `LogBrewClient.create()`. | استدعِ `logging.basicConfig()` قبل `LogBrewClient.create()`. |
+| لا تظهر سجلات `INFO` | يستخدم المسجِّل المستوى `WARNING` الخاص بالمسجِّل الجذري. | اضبط المستوى في `basicConfig()` أو استدعِ `logger.setLevel(logging.INFO)`. |
+| يظهر كل سجل مرتين | يصل السجل إلى معالج على المسجِّل، ثم يصل مرة أخرى إلى معالج من النوع نفسه على المسجِّل الجذري. | أضف كل معالج مرة واحدة، أو اضبط `logger.propagate = False`. |
+| أحداث مفقودة بعد إيقاف قسري | أوقف `SIGKILL` أو `os._exit()` العملية قبل التسليم. | استدعِ `client.shutdown()` في مسار الإيقاف السلس. |
+| `KeyError: 'LOGBREW_SERVER_API_KEY'` | المتغير غير مضبوط في هذه الطرفية. | شغّل خطوة `export` مرة أخرى. |
+
+لتطبيقات الويب، راجع [سجلات Flask](/ar/guides/flask). لاختيار تنسيق السجلات،
+راجع [التسجيل المنظم](/ar/concepts/structured-logging). لبيئات التشغيل الأخرى،
+راجع [دمج SDK](/ar/guides/sdk-ingestion).

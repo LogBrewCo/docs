@@ -1,0 +1,144 @@
+---
+title: "Structured logging, định dạng log và best practice"
+sidebarTitle: "Structured logging"
+description: "Tìm hiểu structured logging (log có cấu trúc), chọn định dạng log JSON với các trường chuẩn, và áp dụng best practice để log dễ tìm kiếm."
+---
+
+LogBrew là nền tảng observability (khả năng quan sát) cho lập trình viên và agent lập trình, có gói miễn phí rộng rãi và không cần thẻ thanh toán.
+
+Structured logging ghi mỗi bản ghi log thành các trường có tên, không phải một dòng văn bản tự do. Nhờ đó, chương trình, con người hoặc agent lập trình có thể lọc bản ghi theo trường, đếm chúng và liên kết chúng với trace của một yêu cầu.
+
+## Log dạng văn bản và log có cấu trúc
+
+Log dạng văn bản này có cùng thông tin với log có cấu trúc bên dưới.
+
+```text
+2026-11-07 14:21:19 ERROR checkout payment failed for order ord_1001 after 5 s
+```
+
+```json
+{"timestamp": "2026-11-07T14:21:19.773+00:00", "level": "error", "logger": "checkout", "message": "payment failed", "order_id": "ord_1001", "error.type": "TimeoutError", "error.message": "payment provider did not answer in 5 s"}
+```
+
+Để tìm mọi lần thanh toán thất bại của 1 đơn hàng trong log văn bản, bạn phải viết một mẫu cho từng biến thể thông điệp. Trong log có cấu trúc, bạn lọc theo `message` và `order_id`. Thông điệp giữ nguyên cho mọi đơn hàng, nên bạn cũng đếm được nó.
+
+## Chọn định dạng log
+
+Dùng JSON, mỗi dòng 1 đối tượng. Dùng cùng tên trường trong mọi dịch vụ. Bảng này liệt kê các trường cơ bản và tên tương ứng trong mô hình dữ liệu log của OpenTelemetry và trong LogBrew.
+
+| Trường | Nội dung | OpenTelemetry | LogBrew |
+| --- | --- | --- | --- |
+| `timestamp` | Thời gian UTC theo định dạng RFC 3339, có mili giây | `Timestamp` | `timestamp` của sự kiện |
+| `level` | 1 giá trị trong một tập nhỏ cố định, ví dụ `info`, `warning`, `error`, `critical` | `SeverityText`, `SeverityNumber` | `level` |
+| `message` | Văn bản cố định cho sự kiện, không chứa giá trị thay đổi | `Body` | `message` |
+| `logger` | Module hoặc thành phần đã ghi bản ghi | Instrumentation scope | `logger` |
+| `trace_id`, `span_id` | ID của trace và span đang hoạt động | `TraceId`, `SpanId` | `context.trace` |
+| `service`, `environment`, `release` | Nơi code chạy và phiên bản của code | Thuộc tính resource | `context.resource` |
+| `error.type`, `error.message` | Lớp và thông điệp của ngoại lệ | `exception.type`, `exception.message` | `metadata` |
+| Trường của sự kiện | Giá trị cho sự kiện này, ví dụ `order_id` | `Attributes` | `metadata` |
+
+Số mức độ nghiêm trọng của OpenTelemetry đi từ 1 đến 24. `INFO` bắt đầu ở 9, `WARN` ở 13, `ERROR` ở 17 và `FATAL` ở 21. LogBrew nhận trực tiếp log OTLP. Xem [Gửi dữ liệu OpenTelemetry](/vi/guides/opentelemetry).
+
+## Best practice cho logging
+
+### Giữ thông điệp cố định
+
+Viết `"payment failed"` và đặt mã đơn hàng vào một trường. Thông điệp cố định giúp bạn nhóm, đếm và đặt alert cho 1 loại sự kiện.
+
+### Dùng 1 tên cho mỗi trường
+
+Chọn `order_id` hoặc `orderId` một lần và dùng nó trong mọi dịch vụ. Với các trường phổ biến, dùng tên theo semantic convention của OpenTelemetry, ví dụ `http.response.status_code`.
+
+### Chọn mức log theo việc cần làm
+
+`error` nghĩa là một thao tác đã thất bại. `warning` nghĩa là chương trình đã phục hồi. `info` xác nhận công việc diễn ra bình thường. Chỉ dùng `debug` khi bạn đang tìm lỗi.
+
+### Ghi thời gian theo UTC
+
+Dùng RFC 3339 có mili giây và độ lệch múi giờ, ví dụ `2026-11-07T14:21:19.773+00:00`. Nếu thiếu UTC và mili giây, các bản ghi từ những múi giờ khác nhau, hoặc các bản ghi trong cùng một giây, sẽ bị sắp xếp sai thứ tự.
+
+### Thêm trace ID và span ID
+
+Với các ID này, bạn đọc được mọi log của 1 yêu cầu qua nhiều dịch vụ.
+
+### Đặt dịch vụ, môi trường và bản phát hành một lần
+
+Cấu hình chúng khi khởi động, không cấu hình trong từng lời gọi. Nếu thiếu bản phát hành, bạn không biết lần triển khai nào gây ra thay đổi.
+
+### Ghi log một lỗi một lần, tại nơi xử lý nó
+
+Thêm loại lỗi và thông điệp lỗi. Đừng ghi log lại cùng một lỗi ở mỗi tầng.
+
+### Không ghi secret và dữ liệu cá nhân
+
+Đừng ghi log mật khẩu, token, cookie, body của yêu cầu, hoặc URL đầy đủ có query string. Dùng tính năng che dữ liệu của logger. Xem [Che dữ liệu log](/vi/guides/safe-capture).
+
+### Dùng tên trường cố định
+
+Đừng dùng giá trị làm tên trường, ví dụ `{"ord_1001": "failed"}`. Khi đó, mỗi giá trị mới lại thêm một trường mới, và 1 bộ lọc không thể tìm hết các đơn hàng.
+
+### Ghi JSON ra standard output trong production
+
+Chỉ dùng định dạng dễ đọc khi phát triển.
+
+## Structured logging trong Python
+
+Module `logging` chuẩn không có formatter JSON. Formatter này ghi các trường cơ bản và các giá trị từ `extra={"fields": {...}}`.
+
+```python
+import json
+import logging
+from datetime import datetime, timezone
+
+
+class JsonFormatter(logging.Formatter):
+    def format(self, record):
+        entry = {
+            "timestamp": datetime.fromtimestamp(record.created, timezone.utc).isoformat(
+                timespec="milliseconds"
+            ),
+            "level": record.levelname.lower(),
+            "logger": record.name,
+            "message": record.getMessage(),
+            **getattr(record, "fields", {}),
+        }
+        if record.exc_info:
+            entry["error.type"] = record.exc_info[0].__name__
+            entry["error.message"] = str(record.exc_info[1])
+        return json.dumps(entry)
+
+
+handler = logging.StreamHandler()
+handler.setFormatter(JsonFormatter())
+logging.basicConfig(level=logging.INFO, handlers=[handler])
+logger = logging.getLogger("checkout")
+
+logger.info("order created", extra={"fields": {"order_id": "ord_1001", "total_cents": 4200}})
+try:
+    raise TimeoutError("payment provider did not answer in 5 s")
+except TimeoutError:
+    logger.error("payment failed", exc_info=True, extra={"fields": {"order_id": "ord_1001"}})
+```
+
+```text
+{"timestamp": "2026-11-07T14:21:19.772+00:00", "level": "info", "logger": "checkout", "message": "order created", "order_id": "ord_1001", "total_cents": 4200}
+{"timestamp": "2026-11-07T14:21:19.773+00:00", "level": "error", "logger": "checkout", "message": "payment failed", "order_id": "ord_1001", "error.type": "TimeoutError", "error.message": "payment provider did not answer in 5 s"}
+```
+
+Để gửi cùng các bản ghi đó đến LogBrew, thêm `LogBrewLoggingHandler`. Handler này gửi thông điệp, mức log và logger dưới dạng trường, và gửi các giá trị nguyên thủy trong `extra` dưới dạng metadata. Xem [Logging trong Python](/vi/guides/python-logging).
+
+## Structured logging trong Node.js
+
+Mặc định, Pino ghi 1 dòng JSON cho mỗi bản ghi. Winston ghi JSON với `winston.format.json()`. Cả hai đều giữ các trường từ lời gọi và từ logger con. Xem [Logging trong Node.js](/vi/guides/node-logging) để biết cách thiết lập cả hai và cách đưa trace ID vào log Express.
+
+## Tìm kiếm log có cấu trúc trong LogBrew
+
+LogBrew lưu mỗi log cùng thông điệp, mức, logger, metadata và trace của log đó. Lọc theo các trường này từ CLI.
+
+```bash
+logbrew read logs --severity error --since 24h --json
+logbrew read logs --search "payment failed" --service checkout-api --since 24h --json
+logbrew read logs --trace "<trace_id>" --since 24h --json
+```
+
+API cũng lọc được theo giá trị metadata có kiểu, ví dụ một số từ 500 trở lên. Xem [Bộ lọc truy vấn](/vi/reference/telemetry-api-filters).
