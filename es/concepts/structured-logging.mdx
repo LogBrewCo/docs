@@ -1,0 +1,178 @@
+---
+title: "Logging estructurado, buenas prácticas y formato de log"
+sidebarTitle: "Logging estructurado"
+description: "Aprende qué es el logging estructurado, elige un formato JSON con campos estándar y aplica buenas prácticas para que tus logs sean fáciles de buscar."
+---
+
+LogBrew es una plataforma de observabilidad para desarrolladores y agentes de
+programación, con un plan gratuito generoso y sin tarjeta.
+
+El logging estructurado escribe cada registro de log como campos con nombre, no
+como una línea de texto libre. Así, un programa, una persona o un agente de
+programación puede filtrar los registros por campo, contarlos y conectarlos con
+la traza de una solicitud.
+
+## Logs de texto y logs estructurados
+
+Este log de texto tiene los mismos datos que el log estructurado de abajo.
+
+```text
+2026-11-07 14:21:19 ERROR checkout payment failed for order ord_1001 after 5 s
+```
+
+```json
+{"timestamp": "2026-11-07T14:21:19.773+00:00", "level": "error", "logger": "checkout", "message": "payment failed", "order_id": "ord_1001", "error.type": "TimeoutError", "error.message": "payment provider did not answer in 5 s"}
+```
+
+Para encontrar en el log de texto todos los pagos fallidos de 1 pedido, debes
+escribir un patrón para cada variante del mensaje. En el log estructurado,
+filtras por `message` y `order_id`. El mensaje es el mismo para todos los
+pedidos, así que también puedes contarlo.
+
+## Elige un formato de log
+
+Usa JSON, con 1 objeto por línea. Usa los mismos nombres de campo en todos los
+servicios. Esta tabla muestra los campos base y los nombres equivalentes en el
+modelo de datos de logs de OpenTelemetry y en LogBrew.
+
+| Campo | Contenido | OpenTelemetry | LogBrew |
+| --- | --- | --- | --- |
+| `timestamp` | Hora UTC en formato RFC 3339, con milisegundos | `Timestamp` | `timestamp` del evento |
+| `level` | 1 valor de un conjunto fijo y pequeño, como `info`, `warning`, `error`, `critical` | `SeverityText`, `SeverityNumber` | `level` |
+| `message` | Un texto fijo para el evento, sin valores variables | `Body` | `message` |
+| `logger` | El módulo o componente que escribió el registro | Alcance de instrumentación | `logger` |
+| `trace_id`, `span_id` | Los ID de la traza y el span activos | `TraceId`, `SpanId` | `context.trace` |
+| `service`, `environment`, `release` | Dónde se ejecuta el código y qué versión es | Atributos de recurso | `context.resource` |
+| `error.type`, `error.message` | La clase y el mensaje de la excepción | `exception.type`, `exception.message` | `metadata` |
+| Campos del evento | Valores de este evento, como `order_id` | `Attributes` | `metadata` |
+
+Los números de severidad de OpenTelemetry van de 1 a 24. `INFO` empieza en 9,
+`WARN` en 13, `ERROR` en 17 y `FATAL` en 21. LogBrew acepta logs OTLP
+directamente. Consulta
+[Envía datos de OpenTelemetry](/es/guides/opentelemetry).
+
+## Buenas prácticas de logging
+
+### Mantén fijo el mensaje
+
+Escribe `"payment failed"` y pon el ID del pedido en un campo. Un mensaje fijo
+te permite agrupar, contar y crear alertas sobre 1 tipo de evento.
+
+### Usa 1 nombre para cada campo
+
+Elige `order_id` u `orderId` una vez y úsalo en todos los servicios. Usa los
+nombres de las convenciones semánticas de OpenTelemetry para los campos
+comunes, como `http.response.status_code`.
+
+### Elige el nivel según la acción que requiere
+
+`error` significa que una operación falló. `warning` significa que el programa
+se recuperó. `info` confirma el trabajo normal. Usa `debug` solo mientras
+buscas un problema.
+
+### Escribe la hora en UTC
+
+Usa RFC 3339 con milisegundos y desfase horario, como
+`2026-11-07T14:21:19.773+00:00`. Sin UTC y milisegundos, los registros de zonas
+horarias distintas, o del mismo segundo, se ordenan mal.
+
+### Añade el ID de traza y el ID de span
+
+Con estos ID, puedes leer todos los logs de 1 solicitud en todos los
+servicios.
+
+### Define el servicio, el entorno y el release una sola vez
+
+Configúralos al arrancar, no en cada llamada. Si falta el release, no sabes qué
+despliegue causó un cambio.
+
+### Registra un error una sola vez, donde lo manejas
+
+Añade el tipo y el mensaje del error. No vuelvas a registrar el mismo error en
+cada capa.
+
+### Deja fuera los secretos y los datos personales
+
+No registres contraseñas, tokens, cookies, cuerpos de solicitud ni URL
+completas con parámetros de consulta. Usa la función de ocultación de tu
+logger. Consulta [Controlar los datos capturados](/es/guides/safe-capture).
+
+### Usa nombres de campo fijos
+
+No uses valores como nombres de campo, como `{"ord_1001": "failed"}`. Cada valor
+nuevo añade entonces un campo nuevo, y 1 filtro no puede encontrar todos los
+pedidos.
+
+### Escribe JSON en la salida estándar en producción
+
+Usa un formato legible solo en desarrollo.
+
+## Logging estructurado en Python
+
+El módulo estándar `logging` no tiene un formatter JSON. Este formatter escribe
+los campos base y los valores de `extra={"fields": {...}}`.
+
+```python
+import json
+import logging
+from datetime import datetime, timezone
+
+
+class JsonFormatter(logging.Formatter):
+    def format(self, record):
+        entry = {
+            "timestamp": datetime.fromtimestamp(record.created, timezone.utc).isoformat(
+                timespec="milliseconds"
+            ),
+            "level": record.levelname.lower(),
+            "logger": record.name,
+            "message": record.getMessage(),
+            **getattr(record, "fields", {}),
+        }
+        if record.exc_info:
+            entry["error.type"] = record.exc_info[0].__name__
+            entry["error.message"] = str(record.exc_info[1])
+        return json.dumps(entry)
+
+
+handler = logging.StreamHandler()
+handler.setFormatter(JsonFormatter())
+logging.basicConfig(level=logging.INFO, handlers=[handler])
+logger = logging.getLogger("checkout")
+
+logger.info("order created", extra={"fields": {"order_id": "ord_1001", "total_cents": 4200}})
+try:
+    raise TimeoutError("payment provider did not answer in 5 s")
+except TimeoutError:
+    logger.error("payment failed", exc_info=True, extra={"fields": {"order_id": "ord_1001"}})
+```
+
+```text
+{"timestamp": "2026-11-07T14:21:19.772+00:00", "level": "info", "logger": "checkout", "message": "order created", "order_id": "ord_1001", "total_cents": 4200}
+{"timestamp": "2026-11-07T14:21:19.773+00:00", "level": "error", "logger": "checkout", "message": "payment failed", "order_id": "ord_1001", "error.type": "TimeoutError", "error.message": "payment provider did not answer in 5 s"}
+```
+
+Para enviar los mismos registros a LogBrew, añade `LogBrewLoggingHandler`.
+Envía el mensaje, el nivel y el logger como campos, y los valores primitivos de
+`extra` como metadatos. Consulta [Logging en Python](/es/guides/python-logging).
+
+## Logging estructurado en Node.js
+
+Pino escribe por defecto 1 línea JSON por cada registro. Winston escribe JSON
+con `winston.format.json()`. Los dos conservan los campos de la llamada y de
+los loggers hijos. Consulta [Logging en Node.js](/es/guides/node-logging) para
+ver las dos configuraciones y el ID de traza en los logs de Express.
+
+## Busca logs estructurados en LogBrew
+
+LogBrew guarda cada log con su mensaje, nivel, logger, metadatos y traza.
+Filtra por esos campos desde la CLI.
+
+```bash
+logbrew read logs --severity error --since 24h --json
+logbrew read logs --search "payment failed" --service checkout-api --since 24h --json
+logbrew read logs --trace "<trace_id>" --since 24h --json
+```
+
+La API también puede filtrar por valores de metadatos con tipo, como un número
+de 500 o más. Consulta [Filtros de consulta](/es/reference/telemetry-api-filters).

@@ -1,0 +1,287 @@
+---
+title: "用 Winston 和 Pino 配置 Node.js 与 Express 日志"
+sidebarTitle: "Node.js 日志"
+description: "在 Node.js 和 Express 中配置 Winston 或 Pino 记录器，选择日志级别，并把带 Trace ID 的结构化日志发送到 LogBrew。"
+---
+
+LogBrew 是面向开发者和编程智能体的可观测性平台，提供充足的免费额度，无需绑卡。
+
+本指南讲解如何配置 Node.js 日志。它用 Winston 和 Pino 记录日志，添加 Express 记录器，并把每条日志连同请求链路发送到 LogBrew。所有示例都在 Node.js 22、Winston 3.19、Pino 10.4、Express 5.3、`@logbrew/sdk` 0.1.40、`@logbrew/node` 0.1.24 和 `@logbrew/express` 0.1.10 上运行过。每个输出块都是真实输出。
+
+## 选择 Winston 还是 Pino
+
+两个库都输出结构化的 JSON 日志。继续使用应用已经在用的库。两者接入 LogBrew 的方式不同。
+
+| | Winston | Pino |
+| --- | --- | --- |
+| 默认输出 | 由你选择格式，例如 `winston.format.json()`。 | 每条记录输出 1 行 JSON。 |
+| 消息参数 | `logger.info("message", { fields })` | `logger.info({ fields }, "message")` |
+| 输出目标 | 在应用进程内运行的 transport。 | 在 worker 线程中运行的 transport。 |
+| 子记录器 | `logger.child({ fields })` | `logger.child({ fields })` |
+| 敏感字段隐藏 | 自己编写格式。 | 内置 `redact` 选项。 |
+| LogBrew 接入 | 把 `createLogBrewWinstonTransport()` 添加到 `transports`。 | 调用一次 `installLogBrewPinoInstrumentation()`。 |
+
+## 准备 LogBrew 项目
+
+<Steps>
+  <Step title="创建项目密钥">
+    使用 [CLI](/zh-Hans/guides/cli) 登录。创建一个项目，把它的接入密钥保存到仅所有者可访问的文件中。
+
+    ```bash
+    install -d -m 700 "$HOME/.logbrew"
+    logbrew projects create checkout-api \
+      --runtime node \
+      --environment development \
+      --ingest-key-file "$HOME/.logbrew/checkout-api.ingest" \
+      --json
+    ```
+
+    CLI 不会输出密钥。在生产环境中，使用所在平台的密钥管理服务。
+  </Step>
+
+  <Step title="安装依赖包">
+    这些包需要 Node.js 18.19 或更高版本。安装 Winston 或 Pino，也可以两者都装。
+
+    ```bash
+    npm install @logbrew/sdk @logbrew/node @logbrew/express express winston pino
+    ```
+  </Step>
+
+  <Step title="配置密钥和部署标识">
+    ```bash
+    export LOGBREW_SERVER_API_KEY="$(tr -d '\r\n' < "$HOME/.logbrew/checkout-api.ingest")"
+    export LOGBREW_ENVIRONMENT="development"
+    export LOGBREW_RELEASE="checkout-api@1.0.0"
+    ```
+
+    `createLogBrewNodeClient()` 从 `LOGBREW_SERVER_API_KEY` 读取密钥。服务名称是 `package.json` 中的 `name`。要使用其他名称，设置 `LOGBREW_SERVICE_NAME`。示例使用 ES 模块，所以要在 `package.json` 中设置 `"type": "module"`。
+  </Step>
+</Steps>
+
+## Node.js 日志级别
+
+每个库都有自己的级别名称和数值。LogBrew 存储 4 个级别，并把原始级别保留在元数据中。
+
+| LogBrew 级别 | Winston 级别（优先级） | Pino 级别（数值） |
+| --- | --- | --- |
+| `info` | `info` (2), `http` (3), `verbose` (4), `debug` (5), `silly` (6) | `info` (30), `debug` (20), `trace` (10) |
+| `warning` | `warn` (1) | `warn` (40) |
+| `error` | `error` (0) | `error` (50) |
+| `critical` | `fatal` 或 `critical`（需自行定义） | `fatal` (60) |
+
+在 Winston 中，数值越小越严重。在 Pino 中，数值越大越严重。生产环境设置 `info`，只在短时诊断时使用 `debug`。
+
+## Winston 记录器
+
+把这个文件保存为 `winston-app.js`。第一个格式会在任何 transport 收到记录之前，丢弃低于记录器级别的记录。LogBrew transport 会收到记录器写入的每条记录，所以需要这一步筛选。
+
+```js
+import winston from "winston";
+import { createLogBrewWinstonTransport } from "@logbrew/sdk";
+import { createLogBrewNodeClient } from "@logbrew/node";
+
+const client = createLogBrewNodeClient();
+
+const logger = winston.createLogger({
+  level: "info",
+  format: winston.format.combine(
+    winston.format((info) => (logger.isLevelEnabled(info.level) ? info : false))(),
+    winston.format.timestamp(),
+    winston.format.errors({ stack: true }),
+    winston.format.json()
+  ),
+  defaultMeta: { component: "checkout" },
+  transports: [
+    new winston.transports.Console(),
+    createLogBrewWinstonTransport({ client })
+  ]
+});
+
+logger.debug("cart loaded");
+logger.info("order created", { orderId: "ord_1001", totalCents: 4200 });
+logger.warn("payment retry", { attempt: 2 });
+logger.error(new Error("card declined"));
+
+await client.shutdown();
+```
+
+运行 `node winston-app.js`。终端会为每条 `info` 及以上级别的记录输出 1 行 JSON。这里缩短了堆栈。
+
+```text
+{"component":"checkout","level":"info","message":"order created","orderId":"ord_1001","timestamp":"2026-11-07T14:19:53.863Z","totalCents":4200}
+{"attempt":2,"component":"checkout","level":"warn","message":"payment retry","timestamp":"2026-11-07T14:19:53.864Z"}
+{"component":"checkout","level":"error","message":"card declined","stack":"Error: card declined\n    at file:///srv/app/winston-app.js:25:14\n ...","timestamp":"2026-11-07T14:19:53.864Z"}
+```
+
+LogBrew 收到同样的 3 条记录。字段会成为 `context.*` 元数据。
+
+| `message` | `level` | `metadata` |
+| --- | --- | --- |
+| `order created` | `info` | `winstonLevel` `info`, `context.component` `checkout`, `context.orderId` `ord_1001`, `context.totalCents` 4200 |
+| `payment retry` | `warning` | `winstonLevel` `warn`, `context.component` `checkout`, `context.attempt` 2 |
+| `card declined` | `error` | `winstonLevel` `error`, `context.component` `checkout`, `errorName` `Error`, `errorMessage` `card declined` |
+
+这个 transport 会发送错误名称和消息，但不发送堆栈。要发送堆栈，在 `createLogBrewWinstonTransport()` 中设置 `includeErrorStack: true`。每条消息也会成为下一个问题的操作记录（Breadcrumbs）。要关闭这一行为，设置 `breadcrumbs: false`。
+
+## Pino 记录器
+
+把这个文件保存为 `pino-app.js`。在写第一条日志之前，调用一次 `installLogBrewPinoInstrumentation()`。它会读取每条写完的 Pino 记录。Pino 仍会写入自己的输出目标。
+
+```js
+import pino from "pino";
+import {
+  createLogBrewNodeClient,
+  installLogBrewPinoInstrumentation
+} from "@logbrew/node";
+
+const client = createLogBrewNodeClient();
+installLogBrewPinoInstrumentation({ client });
+
+const logger = pino({
+  level: "info",
+  redact: ["password", "token", "req.headers.authorization"]
+});
+const orderLogger = logger.child({ component: "checkout" });
+
+orderLogger.debug("cart loaded");
+orderLogger.info({ orderId: "ord_1001", totalCents: 4200 }, "order created");
+orderLogger.warn({ attempt: 2, token: "tok_example" }, "payment retry");
+orderLogger.error(new Error("card declined"), "payment failed");
+
+await client.shutdown();
+```
+
+运行 `node pino-app.js`。这里缩短了主机名和堆栈。
+
+```text
+{"level":30,"time":1794061059490,"pid":13985,"hostname":"app-host","component":"checkout","orderId":"ord_1001","totalCents":4200,"msg":"order created"}
+{"level":40,"time":1794061059493,"pid":13985,"hostname":"app-host","component":"checkout","attempt":2,"token":"[Redacted]","msg":"payment retry"}
+{"level":50,"time":1794061059494,"pid":13985,"hostname":"app-host","component":"checkout","err":{"type":"Error","message":"card declined","stack":"Error: card declined\n ..."},"msg":"payment failed"}
+```
+
+LogBrew 收到 3 条记录。`debug` 记录在到达 LogBrew 之前就被 Pino 丢弃了。
+
+| `message` | `level` | `metadata` |
+| --- | --- | --- |
+| `order created` | `info` | `pinoLevel` `info`, `pinoLevelNumber` 30, `context.component` `checkout`, `context.orderId` `ord_1001`, `context.totalCents` 4200 |
+| `payment retry` | `warning` | `pinoLevel` `warn`, `pinoLevelNumber` 40, `context.component` `checkout`, `context.attempt` 2 |
+| `payment failed` | `error` | `pinoLevel` `error`, `pinoLevelNumber` 50, `context.component` `checkout`, `errorName` `Error`, `errorMessage` `card declined` |
+
+LogBrew 中没有 `token` 字段。LogBrew 会丢弃凭据、Cookie、请求体、查询参数、URL 和堆栈字段，并保留你的 Pino `redact` 路径作为第二道防线。`pid`、`hostname` 和 `time` 是 Pino 的默认字段，所以 LogBrew 不会复制它们。
+
+自动采集需要 9.x 系列中的 Pino 9.11 或更高版本，或者 Pino 10.1 或更高版本。对于更早的 Pino 版本，把 `@logbrew/sdk` 中的 `createLogBrewPinoDestination()` 用作 Pino 输出目标。
+
+在开发环境中，要方便地阅读 Pino 输出，把它通过管道传给 `pino-pretty`。
+
+```bash
+node pino-app.js | npx pino-pretty
+```
+
+## Express 记录器
+
+`logbrewMiddleware()` 为每个请求创建 1 个请求 Span（一次计时操作）。`logbrewErrorHandler()` 把错误报告为问题。请求内的 Pino 日志会带上该请求的 Trace ID 和 Span ID。把这个文件保存为 `express-app.js`。
+
+```js
+import express from "express";
+import pino from "pino";
+import { logbrewErrorHandler, logbrewMiddleware } from "@logbrew/express";
+import {
+  createLogBrewNodeClient,
+  installLogBrewPinoInstrumentation
+} from "@logbrew/node";
+
+const client = createLogBrewNodeClient();
+installLogBrewPinoInstrumentation({ client });
+const logger = pino({ level: "info" });
+
+const app = express();
+app.use(logbrewMiddleware());
+
+app.get("/orders/:orderId", (req, res) => {
+  logger.info({ orderId: req.params.orderId }, "order loaded");
+  res.json({ ok: true });
+});
+
+app.get("/fail", () => {
+  throw new Error("inventory service timeout");
+});
+
+app.use(logbrewErrorHandler());
+app.use((err, req, res, next) => {
+  logger.error(err, "request failed");
+  res.status(500).json({ error: "internal" });
+});
+
+const server = app.listen(3000, () => logger.info("listening on 3000"));
+
+process.on("SIGTERM", () => {
+  server.close(async () => {
+    await client.shutdown();
+    process.exit(0);
+  });
+});
+```
+
+启动应用，然后在另一个终端中发送 2 个请求。
+
+```bash
+curl -s http://127.0.0.1:3000/orders/ord_1001
+curl -s http://127.0.0.1:3000/fail
+```
+
+LogBrew 收到以下信号。每个请求的日志和 Span 带有相同的 Trace ID。
+
+| 信号 | 名称或消息 | 链路 |
+| --- | --- | --- |
+| Span | `GET /orders/:orderId`，状态 `ok` | `4f18970f494d633c2164588fee9c692a` |
+| 日志 | `order loaded` | `4f18970f494d633c2164588fee9c692a` |
+| 问题 | `GET /fail failed`，消息 `inventory service timeout` | `d273e106d73ce6c5a5955e5a8c74d2d0` |
+| Span | `GET /fail`，状态 `error` | `d273e106d73ce6c5a5955e5a8c74d2d0` |
+| 日志 | `request failed` | `d273e106d73ce6c5a5955e5a8c74d2d0` |
+
+Span 名称使用路由模板，而不是具体路径。`listening on 3000` 日志不属于任何请求，所以没有链路。
+
+让中间件自己创建请求客户端。不要把进程级的 `client` 传给 `logbrewMiddleware()` 或 `logbrewErrorHandler()`。中间件会在每次响应后关闭它的请求客户端。
+
+### 为 Winston 日志添加链路
+
+对于 Winston，把当前活动的链路传给 transport。
+
+```js
+import { createLogBrewWinstonTransport } from "@logbrew/sdk";
+import { createLogBrewNodeClient, getActiveLogBrewTrace } from "@logbrew/node";
+
+const client = createLogBrewNodeClient();
+const logbrewTransport = createLogBrewWinstonTransport({
+  client,
+  traceProvider: getActiveLogBrewTrace
+});
+```
+
+把 `logbrewTransport` 添加到记录器的 `transports` 列表。这样，Express 请求内的 Winston 日志就会带上该请求的 Trace ID 和 Span ID。
+
+## 读回日志
+
+```bash
+logbrew read logs --service checkout-api --since 1h --json
+logbrew read logs --severity error --search "request failed" --since 1h --json
+logbrew read logs --trace "<trace_id>" --since 1h --json
+```
+
+最后一条命令读取 1 个请求的全部日志。从链路或问题中复制 `<trace_id>`。要从 CI 或编程智能体读取，使用项目只读密钥。参见[验证接入](/zh-Hans/guides/verify-setup)。
+
+## 关闭时不丢日志
+
+客户端会在第一个信号产生 1 秒后，或累计到 50 个信号时，发送队列中的信号。事件循环为空时，客户端最多用 2 秒发送剩余的信号。`process.exit()` 和进程信号会跳过这一步。像 Express 示例中的 `SIGTERM` 处理函数那样，在退出前调用 `await client.shutdown()`。
+
+## 故障排除
+
+| 现象 | 原因 | 解决方法 |
+| --- | --- | --- |
+| `createLogBrewNodeClient requires serverApiKey, apiKey, LOGBREW_SERVER_API_KEY, or LOGBREW_API_KEY` | 当前 shell 中没有设置密钥。 | 重新运行 `export` 步骤。 |
+| Winston 的 `debug` 日志出现在 LogBrew 中，却没有出现在终端 | LogBrew transport 不会应用记录器级别。 | 添加 Winston 示例中的级别筛选格式。 |
+| Pino 日志没有出现在 LogBrew 中 | 当前 Pino 版本没有 tracing channel，或者日志在 `installLogBrewPinoInstrumentation()` 之前就已写出。 | 使用 Pino 9.11 或更高版本，或 10.1 或更高版本。在写第一条日志之前安装采集。 |
+| 第一个请求之后日志停止，`client.shutdown()` 抛出 `client is already shut down` | 进程级客户端被传给了 Express 中间件。 | 从 `logbrewMiddleware()` 和 `logbrewErrorHandler()` 中移除 `client` 选项。 |
+| 部署后缺少最后几条日志 | 进程在发送完成前退出了。 | 在 `SIGTERM` 处理函数中调用 `await client.shutdown()`。 |
+
+要选择日志字段，参见[结构化日志](/zh-Hans/concepts/structured-logging)。其他框架参见 [SDK 接入](/zh-Hans/guides/sdk-ingestion)。

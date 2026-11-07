@@ -1,0 +1,287 @@
+---
+title: "Logging Node.js dengan Winston, Pino, dan Express"
+sidebarTitle: "Logging Node.js"
+description: "Siapkan logger Winston atau Pino di Node.js dan Express, pilih level log, lalu kirim log terstruktur dengan trace ID ke LogBrew."
+---
+
+LogBrew adalah platform observabilitas untuk developer dan agen coding, dengan paket gratis yang besar dan tanpa perlu kartu kredit.
+
+Panduan ini menyiapkan logging Node.js dengan Winston dan Pino, menambahkan logger Express, dan mengirim setiap log ke LogBrew bersama trace permintaannya. Setiap contoh dijalankan di Node.js 22 dengan Winston 3.19, Pino 10.4, Express 5.3, `@logbrew/sdk` 0.1.40, `@logbrew/node` 0.1.24, dan `@logbrew/express` 0.1.10. Setiap blok output menunjukkan output aslinya.
+
+## Pilih Winston atau Pino
+
+Kedua library menulis log JSON terstruktur. Tetap gunakan library yang sudah dipakai aplikasi Anda. Penyiapan LogBrew berbeda untuk masing-masing library.
+
+| | Winston | Pino |
+| --- | --- | --- |
+| Output default | Anda memilih formatnya, misalnya `winston.format.json()`. | 1 baris JSON untuk setiap record. |
+| Argumen pesan | `logger.info("message", { fields })` | `logger.info({ fields }, "message")` |
+| Tujuan | Transport di dalam proses aplikasi. | Transport di dalam worker thread. |
+| Child logger | `logger.child({ fields })` | `logger.child({ fields })` |
+| Penyamaran | Format buatan Anda sendiri. | Opsi `redact` bawaan. |
+| Penyiapan LogBrew | Tambahkan `createLogBrewWinstonTransport()` ke `transports`. | Panggil `installLogBrewPinoInstrumentation()` sekali. |
+
+## Siapkan proyek LogBrew
+
+<Steps>
+  <Step title="Buat kunci proyek">
+    Masuk dengan [CLI](/id/guides/cli). Buat proyek dan simpan kunci ingest-nya di file yang hanya bisa dibaca pemiliknya.
+
+    ```bash
+    install -d -m 700 "$HOME/.logbrew"
+    logbrew projects create checkout-api \
+      --runtime node \
+      --environment development \
+      --ingest-key-file "$HOME/.logbrew/checkout-api.ingest" \
+      --json
+    ```
+
+    CLI tidak menampilkan kunci. Di produksi, gunakan secret manager dari platform Anda.
+  </Step>
+
+  <Step title="Instal paket">
+    Paket ini membutuhkan Node.js 18.19 atau yang lebih baru. Instal Winston, Pino, atau keduanya.
+
+    ```bash
+    npm install @logbrew/sdk @logbrew/node @logbrew/express express winston pino
+    ```
+  </Step>
+
+  <Step title="Tetapkan kunci dan identitas deployment">
+    ```bash
+    export LOGBREW_SERVER_API_KEY="$(tr -d '\r\n' < "$HOME/.logbrew/checkout-api.ingest")"
+    export LOGBREW_ENVIRONMENT="development"
+    export LOGBREW_RELEASE="checkout-api@1.0.0"
+    ```
+
+    `createLogBrewNodeClient()` membaca kunci dari `LOGBREW_SERVER_API_KEY`. Nama layanan adalah `name` di `package.json`. Tetapkan `LOGBREW_SERVICE_NAME` untuk memakai nama lain. Contoh-contoh ini memakai ES module, jadi tetapkan `"type": "module"` di `package.json`.
+  </Step>
+</Steps>
+
+## Level log Node.js
+
+Setiap library punya nama dan angka level sendiri. LogBrew menyimpan 4 level dan mempertahankan level aslinya di metadata.
+
+| Level LogBrew | Level Winston (prioritas) | Level Pino (angka) |
+| --- | --- | --- |
+| `info` | `info` (2), `http` (3), `verbose` (4), `debug` (5), `silly` (6) | `info` (30), `debug` (20), `trace` (10) |
+| `warning` | `warn` (1) | `warn` (40) |
+| `error` | `error` (0) | `error` (50) |
+| `critical` | `fatal` atau `critical`, jika Anda mendefinisikannya | `fatal` (60) |
+
+Di Winston, angka yang lebih kecil berarti lebih parah. Di Pino, angka yang lebih besar berarti lebih parah. Gunakan `info` di produksi. Gunakan `debug` hanya untuk diagnosis singkat.
+
+## Logger Winston
+
+Simpan file ini sebagai `winston-app.js`. Format pertama membuang record di bawah level logger sebelum transport mana pun menerimanya. Transport LogBrew menerima setiap record yang ditulis logger, jadi transport ini membutuhkan filter tersebut.
+
+```js
+import winston from "winston";
+import { createLogBrewWinstonTransport } from "@logbrew/sdk";
+import { createLogBrewNodeClient } from "@logbrew/node";
+
+const client = createLogBrewNodeClient();
+
+const logger = winston.createLogger({
+  level: "info",
+  format: winston.format.combine(
+    winston.format((info) => (logger.isLevelEnabled(info.level) ? info : false))(),
+    winston.format.timestamp(),
+    winston.format.errors({ stack: true }),
+    winston.format.json()
+  ),
+  defaultMeta: { component: "checkout" },
+  transports: [
+    new winston.transports.Console(),
+    createLogBrewWinstonTransport({ client })
+  ]
+});
+
+logger.debug("cart loaded");
+logger.info("order created", { orderId: "ord_1001", totalCents: 4200 });
+logger.warn("payment retry", { attempt: 2 });
+logger.error(new Error("card declined"));
+
+await client.shutdown();
+```
+
+Jalankan `node winston-app.js`. Konsol menerima 1 baris JSON untuk setiap record di level `info` atau lebih tinggi. Stack trace di sini dipersingkat.
+
+```text
+{"component":"checkout","level":"info","message":"order created","orderId":"ord_1001","timestamp":"2026-11-07T14:19:53.863Z","totalCents":4200}
+{"attempt":2,"component":"checkout","level":"warn","message":"payment retry","timestamp":"2026-11-07T14:19:53.864Z"}
+{"component":"checkout","level":"error","message":"card declined","stack":"Error: card declined\n    at file:///srv/app/winston-app.js:25:14\n ...","timestamp":"2026-11-07T14:19:53.864Z"}
+```
+
+LogBrew menerima 3 record yang sama. Field-nya menjadi metadata `context.*`.
+
+| `message` | `level` | `metadata` |
+| --- | --- | --- |
+| `order created` | `info` | `winstonLevel` `info`, `context.component` `checkout`, `context.orderId` `ord_1001`, `context.totalCents` 4200 |
+| `payment retry` | `warning` | `winstonLevel` `warn`, `context.component` `checkout`, `context.attempt` 2 |
+| `card declined` | `error` | `winstonLevel` `error`, `context.component` `checkout`, `errorName` `Error`, `errorMessage` `card declined` |
+
+Transport ini mengirim nama dan pesan error, tetapi tidak mengirim stack trace. Tetapkan `includeErrorStack: true` di `createLogBrewWinstonTransport()` untuk mengirim stack trace. Setiap pesan juga menjadi breadcrumb pada masalah berikutnya. Tetapkan `breadcrumbs: false` untuk menghentikannya.
+
+## Logger Pino
+
+Simpan file ini sebagai `pino-app.js`. Panggil `installLogBrewPinoInstrumentation()` sekali, sebelum log pertama. Fungsi ini membaca setiap record Pino yang sudah selesai. Pino tetap menulis ke tujuannya sendiri.
+
+```js
+import pino from "pino";
+import {
+  createLogBrewNodeClient,
+  installLogBrewPinoInstrumentation
+} from "@logbrew/node";
+
+const client = createLogBrewNodeClient();
+installLogBrewPinoInstrumentation({ client });
+
+const logger = pino({
+  level: "info",
+  redact: ["password", "token", "req.headers.authorization"]
+});
+const orderLogger = logger.child({ component: "checkout" });
+
+orderLogger.debug("cart loaded");
+orderLogger.info({ orderId: "ord_1001", totalCents: 4200 }, "order created");
+orderLogger.warn({ attempt: 2, token: "tok_example" }, "payment retry");
+orderLogger.error(new Error("card declined"), "payment failed");
+
+await client.shutdown();
+```
+
+Jalankan `node pino-app.js`. Nama host dan stack trace di sini dipersingkat.
+
+```text
+{"level":30,"time":1794061059490,"pid":13985,"hostname":"app-host","component":"checkout","orderId":"ord_1001","totalCents":4200,"msg":"order created"}
+{"level":40,"time":1794061059493,"pid":13985,"hostname":"app-host","component":"checkout","attempt":2,"token":"[Redacted]","msg":"payment retry"}
+{"level":50,"time":1794061059494,"pid":13985,"hostname":"app-host","component":"checkout","err":{"type":"Error","message":"card declined","stack":"Error: card declined\n ..."},"msg":"payment failed"}
+```
+
+LogBrew menerima 3 record. Pino membuang record `debug` sebelum LogBrew melihatnya.
+
+| `message` | `level` | `metadata` |
+| --- | --- | --- |
+| `order created` | `info` | `pinoLevel` `info`, `pinoLevelNumber` 30, `context.component` `checkout`, `context.orderId` `ord_1001`, `context.totalCents` 4200 |
+| `payment retry` | `warning` | `pinoLevel` `warn`, `pinoLevelNumber` 40, `context.component` `checkout`, `context.attempt` 2 |
+| `payment failed` | `error` | `pinoLevel` `error`, `pinoLevelNumber` 50, `context.component` `checkout`, `errorName` `Error`, `errorMessage` `card declined` |
+
+Field `token` tidak ada di LogBrew. LogBrew membuang field kredensial, cookie, body, query, URL, dan stack trace. Path `redact` Pino Anda tetap berlaku sebagai kontrol kedua. `pid`, `hostname`, dan `time` adalah default Pino, jadi LogBrew tidak menyalinnya.
+
+Perekaman otomatis membutuhkan Pino 9.11 atau yang lebih baru di versi 9.x, atau Pino 10.1 atau yang lebih baru. Untuk versi Pino yang lebih lama, gunakan `createLogBrewPinoDestination()` dari `@logbrew/sdk` sebagai tujuan Pino.
+
+Untuk membaca output Pino saat pengembangan, kirim output itu ke `pino-pretty`.
+
+```bash
+node pino-app.js | npx pino-pretty
+```
+
+## Logger Express
+
+`logbrewMiddleware()` membuat 1 span permintaan untuk setiap permintaan. `logbrewErrorHandler()` melaporkan error sebagai masalah. Log Pino di dalam permintaan mendapat trace ID dan span ID dari permintaan itu. Simpan file ini sebagai `express-app.js`.
+
+```js
+import express from "express";
+import pino from "pino";
+import { logbrewErrorHandler, logbrewMiddleware } from "@logbrew/express";
+import {
+  createLogBrewNodeClient,
+  installLogBrewPinoInstrumentation
+} from "@logbrew/node";
+
+const client = createLogBrewNodeClient();
+installLogBrewPinoInstrumentation({ client });
+const logger = pino({ level: "info" });
+
+const app = express();
+app.use(logbrewMiddleware());
+
+app.get("/orders/:orderId", (req, res) => {
+  logger.info({ orderId: req.params.orderId }, "order loaded");
+  res.json({ ok: true });
+});
+
+app.get("/fail", () => {
+  throw new Error("inventory service timeout");
+});
+
+app.use(logbrewErrorHandler());
+app.use((err, req, res, next) => {
+  logger.error(err, "request failed");
+  res.status(500).json({ error: "internal" });
+});
+
+const server = app.listen(3000, () => logger.info("listening on 3000"));
+
+process.on("SIGTERM", () => {
+  server.close(async () => {
+    await client.shutdown();
+    process.exit(0);
+  });
+});
+```
+
+Jalankan aplikasi. Lalu kirim 2 permintaan dari terminal kedua.
+
+```bash
+curl -s http://127.0.0.1:3000/orders/ord_1001
+curl -s http://127.0.0.1:3000/fail
+```
+
+LogBrew menerima peristiwa berikut. Log dan span dari setiap permintaan memiliki trace ID yang sama.
+
+| Peristiwa | Nama atau pesan | Trace |
+| --- | --- | --- |
+| span | `GET /orders/:orderId`, status `ok` | `4f18970f494d633c2164588fee9c692a` |
+| log | `order loaded` | `4f18970f494d633c2164588fee9c692a` |
+| masalah | `GET /fail failed`, pesan `inventory service timeout` | `d273e106d73ce6c5a5955e5a8c74d2d0` |
+| span | `GET /fail`, status `error` | `d273e106d73ce6c5a5955e5a8c74d2d0` |
+| log | `request failed` | `d273e106d73ce6c5a5955e5a8c74d2d0` |
+
+Nama span memakai template route, bukan path konkret. Log `listening on 3000` tidak punya trace karena ditulis di luar permintaan.
+
+Biarkan middleware membuat klien permintaannya sendiri. Jangan teruskan `client` untuk seluruh proses ke `logbrewMiddleware()` atau `logbrewErrorHandler()`. Middleware mematikan klien permintaannya setelah setiap respons.
+
+### Tambahkan trace ke log Winston
+
+Untuk Winston, berikan trace yang aktif ke transport.
+
+```js
+import { createLogBrewWinstonTransport } from "@logbrew/sdk";
+import { createLogBrewNodeClient, getActiveLogBrewTrace } from "@logbrew/node";
+
+const client = createLogBrewNodeClient();
+const logbrewTransport = createLogBrewWinstonTransport({
+  client,
+  traceProvider: getActiveLogBrewTrace
+});
+```
+
+Tambahkan `logbrewTransport` ke daftar `transports` logger. Setelah itu, log Winston di dalam permintaan Express memiliki trace ID dan span ID dari permintaan tersebut.
+
+## Baca kembali log
+
+```bash
+logbrew read logs --service checkout-api --since 1h --json
+logbrew read logs --severity error --search "request failed" --since 1h --json
+logbrew read logs --trace "<trace_id>" --since 1h --json
+```
+
+Perintah terakhir membaca semua log dari 1 permintaan. Salin `<trace_id>` dari trace atau masalah. Untuk membaca dari CI atau agen coding, gunakan kunci baca proyek. Lihat [Verifikasi penyiapan](/id/guides/verify-setup).
+
+## Matikan tanpa kehilangan log
+
+Klien mengirim peristiwa dalam antrean 1 detik setelah peristiwa pertama atau saat terkumpul 50 peristiwa. Saat event loop kosong, klien mengirim peristiwa yang tersisa paling lama 2 detik. `process.exit()` dan sinyal sistem operasi melewati langkah itu. Panggil `await client.shutdown()` sebelum keluar, seperti handler `SIGTERM` di contoh Express.
+
+## Mengatasi kendala
+
+| Gejala | Penyebab | Solusi |
+| --- | --- | --- |
+| `createLogBrewNodeClient requires serverApiKey, apiKey, LOGBREW_SERVER_API_KEY, or LOGBREW_API_KEY` | Kunci belum ditetapkan di shell ini. | Jalankan lagi langkah `export`. |
+| Log Winston `debug` muncul di LogBrew tetapi tidak di konsol | Transport LogBrew tidak menerapkan level logger. | Tambahkan format filter level dari contoh Winston. |
+| Log Pino tidak muncul di LogBrew | Versi Pino tidak punya tracing channel, atau log ditulis sebelum `installLogBrewPinoInstrumentation()`. | Gunakan Pino 9.11 atau yang lebih baru, atau 10.1 atau yang lebih baru. Instal perekaman sebelum log pertama. |
+| Log berhenti setelah permintaan pertama, dan `client.shutdown()` melempar `client is already shut down` | Klien untuk seluruh proses diteruskan ke middleware Express. | Hapus opsi `client` dari `logbrewMiddleware()` dan `logbrewErrorHandler()`. |
+| Log terakhir hilang setelah deployment | Proses keluar sebelum pengiriman selesai. | Panggil `await client.shutdown()` di handler `SIGTERM`. |
+
+Untuk memilih field log, lihat [Structured logging](/id/concepts/structured-logging). Untuk framework lain, lihat [Integrasi SDK](/id/guides/sdk-ingestion).

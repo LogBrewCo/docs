@@ -1,0 +1,287 @@
+---
+title: "Winston と Pino で Node.js と Express のログを出力する"
+sidebarTitle: "Node.js のログ"
+description: "Node.js と Express で Winston または Pino のロガーを設定し、ログレベルを選んで、トレース ID 付きの構造化ログを LogBrew に送信します。"
+---
+
+LogBrew は、開発者とコーディングエージェントのための Observability（可観測性）プラットフォームです。無料枠が充実していて、カードの登録は不要です。
+
+このガイドでは、Node.js で Winston と Pino のログ出力を設定し、Express のロガーを追加して、各ログをリクエストのトレースと一緒に LogBrew に送信します。どの例も、Node.js 22、Winston 3.19、Pino 10.4、Express 5.3、`@logbrew/sdk` 0.1.40、`@logbrew/node` 0.1.24、`@logbrew/express` 0.1.10 で実行しました。出力のブロックはすべて実際の出力です。
+
+## Winston と Pino のどちらを選ぶか
+
+どちらのライブラリも構造化された JSON ログを出力します。アプリケーションですでに使っているライブラリをそのまま使います。LogBrew の設定はライブラリごとに異なります。
+
+| | Winston | Pino |
+| --- | --- | --- |
+| デフォルトの出力 | `winston.format.json()` などの形式を自分で選びます。 | レコードごとに1行の JSON です。 |
+| メッセージの引数 | `logger.info("message", { fields })` | `logger.info({ fields }, "message")` |
+| 送信先 | アプリケーションのプロセス内で動くトランスポートです。 | ワーカースレッド内で動くトランスポートです。 |
+| 子ロガー | `logger.child({ fields })` | `logger.child({ fields })` |
+| 秘匿処理 | 独自のフォーマットで実装します。 | 組み込みの `redact` オプションを使います。 |
+| LogBrew の設定 | `createLogBrewWinstonTransport()` を `transports` に追加します。 | `installLogBrewPinoInstrumentation()` を1回呼び出します。 |
+
+## LogBrew のプロジェクトを準備する
+
+<Steps>
+  <Step title="プロジェクトのキーを作成する">
+    [CLI](/ja/guides/cli) でサインインします。プロジェクトを作成し、その取り込みキーを所有者だけが読めるファイルに保存します。
+
+    ```bash
+    install -d -m 700 "$HOME/.logbrew"
+    logbrew projects create checkout-api \
+      --runtime node \
+      --environment development \
+      --ingest-key-file "$HOME/.logbrew/checkout-api.ingest" \
+      --json
+    ```
+
+    CLI はキーを表示しません。本番環境では、利用しているプラットフォームのシークレット管理機能を使ってください。
+  </Step>
+
+  <Step title="パッケージをインストールする">
+    パッケージには Node.js 18.19 以降が必要です。Winston と Pino のどちらか、または両方をインストールします。
+
+    ```bash
+    npm install @logbrew/sdk @logbrew/node @logbrew/express express winston pino
+    ```
+  </Step>
+
+  <Step title="キーとデプロイの識別情報を設定する">
+    ```bash
+    export LOGBREW_SERVER_API_KEY="$(tr -d '\r\n' < "$HOME/.logbrew/checkout-api.ingest")"
+    export LOGBREW_ENVIRONMENT="development"
+    export LOGBREW_RELEASE="checkout-api@1.0.0"
+    ```
+
+    `createLogBrewNodeClient()` は `LOGBREW_SERVER_API_KEY` からキーを読み取ります。サービス名は `package.json` の `name` です。別の名前を使うには `LOGBREW_SERVICE_NAME` を設定します。例では ES モジュールを使うので、`package.json` に `"type": "module"` を設定します。
+  </Step>
+</Steps>
+
+## Node.js のログレベル
+
+ライブラリごとにレベル名と数値が異なります。LogBrew は4つのレベルを保存し、元のレベルをメタデータに残します。
+
+| LogBrew のレベル | Winston のレベル（優先度） | Pino のレベル（数値） |
+| --- | --- | --- |
+| `info` | `info` (2), `http` (3), `verbose` (4), `debug` (5), `silly` (6) | `info` (30), `debug` (20), `trace` (10) |
+| `warning` | `warn` (1) | `warn` (40) |
+| `error` | `error` (0) | `error` (50) |
+| `critical` | 定義した場合は `fatal` または `critical` | `fatal` (60) |
+
+Winston では、数値が小さいほど重大度が高くなります。Pino では、数値が大きいほど重大度が高くなります。本番環境では `info` を設定します。`debug` は短時間の診断のときだけ使います。
+
+## Winston のロガー
+
+このファイルを `winston-app.js` として保存します。最初のフォーマットは、ロガーのレベルより低いレコードを、トランスポートに渡る前に除外します。LogBrew のトランスポートはロガーが書き込むすべてのレコードを受け取るので、このフィルターが必要です。
+
+```js
+import winston from "winston";
+import { createLogBrewWinstonTransport } from "@logbrew/sdk";
+import { createLogBrewNodeClient } from "@logbrew/node";
+
+const client = createLogBrewNodeClient();
+
+const logger = winston.createLogger({
+  level: "info",
+  format: winston.format.combine(
+    winston.format((info) => (logger.isLevelEnabled(info.level) ? info : false))(),
+    winston.format.timestamp(),
+    winston.format.errors({ stack: true }),
+    winston.format.json()
+  ),
+  defaultMeta: { component: "checkout" },
+  transports: [
+    new winston.transports.Console(),
+    createLogBrewWinstonTransport({ client })
+  ]
+});
+
+logger.debug("cart loaded");
+logger.info("order created", { orderId: "ord_1001", totalCents: 4200 });
+logger.warn("payment retry", { attempt: 2 });
+logger.error(new Error("card declined"));
+
+await client.shutdown();
+```
+
+`node winston-app.js` を実行します。コンソールには、`info` 以上の各レコードが1行の JSON として出力されます。ここではスタックを短くしています。
+
+```text
+{"component":"checkout","level":"info","message":"order created","orderId":"ord_1001","timestamp":"2026-11-07T14:19:53.863Z","totalCents":4200}
+{"attempt":2,"component":"checkout","level":"warn","message":"payment retry","timestamp":"2026-11-07T14:19:53.864Z"}
+{"component":"checkout","level":"error","message":"card declined","stack":"Error: card declined\n    at file:///srv/app/winston-app.js:25:14\n ...","timestamp":"2026-11-07T14:19:53.864Z"}
+```
+
+LogBrew は同じ3件のレコードを受け取ります。フィールドは `context.*` のメタデータになります。
+
+| `message` | `level` | `metadata` |
+| --- | --- | --- |
+| `order created` | `info` | `winstonLevel` `info`, `context.component` `checkout`, `context.orderId` `ord_1001`, `context.totalCents` 4200 |
+| `payment retry` | `warning` | `winstonLevel` `warn`, `context.component` `checkout`, `context.attempt` 2 |
+| `card declined` | `error` | `winstonLevel` `error`, `context.component` `checkout`, `errorName` `Error`, `errorMessage` `card declined` |
+
+トランスポートはエラーの名前とメッセージを送信しますが、スタックは送信しません。スタックを送信するには、`createLogBrewWinstonTransport()` で `includeErrorStack: true` を設定します。各メッセージは、次の課題の直前の手順にもなります。これを止めるには `breadcrumbs: false` を設定します。
+
+## Pino のロガー
+
+このファイルを `pino-app.js` として保存します。最初のログの前に、`installLogBrewPinoInstrumentation()` を1回呼び出します。この関数は、書き込みが終わった Pino の各レコードを読み取ります。Pino は引き続き独自の出力先に書き込みます。
+
+```js
+import pino from "pino";
+import {
+  createLogBrewNodeClient,
+  installLogBrewPinoInstrumentation
+} from "@logbrew/node";
+
+const client = createLogBrewNodeClient();
+installLogBrewPinoInstrumentation({ client });
+
+const logger = pino({
+  level: "info",
+  redact: ["password", "token", "req.headers.authorization"]
+});
+const orderLogger = logger.child({ component: "checkout" });
+
+orderLogger.debug("cart loaded");
+orderLogger.info({ orderId: "ord_1001", totalCents: 4200 }, "order created");
+orderLogger.warn({ attempt: 2, token: "tok_example" }, "payment retry");
+orderLogger.error(new Error("card declined"), "payment failed");
+
+await client.shutdown();
+```
+
+`node pino-app.js` を実行します。ここではホスト名とスタックを短くしています。
+
+```text
+{"level":30,"time":1794061059490,"pid":13985,"hostname":"app-host","component":"checkout","orderId":"ord_1001","totalCents":4200,"msg":"order created"}
+{"level":40,"time":1794061059493,"pid":13985,"hostname":"app-host","component":"checkout","attempt":2,"token":"[Redacted]","msg":"payment retry"}
+{"level":50,"time":1794061059494,"pid":13985,"hostname":"app-host","component":"checkout","err":{"type":"Error","message":"card declined","stack":"Error: card declined\n ..."},"msg":"payment failed"}
+```
+
+LogBrew は3件のレコードを受け取ります。`debug` のレコードは、LogBrew に届く前に Pino が除外します。
+
+| `message` | `level` | `metadata` |
+| --- | --- | --- |
+| `order created` | `info` | `pinoLevel` `info`, `pinoLevelNumber` 30, `context.component` `checkout`, `context.orderId` `ord_1001`, `context.totalCents` 4200 |
+| `payment retry` | `warning` | `pinoLevel` `warn`, `pinoLevelNumber` 40, `context.component` `checkout`, `context.attempt` 2 |
+| `payment failed` | `error` | `pinoLevel` `error`, `pinoLevelNumber` 50, `context.component` `checkout`, `errorName` `Error`, `errorMessage` `card declined` |
+
+`token` フィールドは LogBrew に保存されません。LogBrew は認証情報、Cookie、本文、クエリ、URL、スタックのフィールドを除外します。Pino の `redact` のパスも、2つ目の対策として有効なままです。`pid`、`hostname`、`time` は Pino のデフォルトなので、LogBrew はこれらをコピーしません。
+
+自動取得には、9.x 系なら Pino 9.11 以降、それ以外は Pino 10.1 以降が必要です。それより古い Pino では、`@logbrew/sdk` の `createLogBrewPinoDestination()` を Pino の出力先として使います。
+
+開発中に Pino の出力を読みやすくするには、`pino-pretty` に渡します。
+
+```bash
+node pino-app.js | npx pino-pretty
+```
+
+## Express のロガー
+
+`logbrewMiddleware()` は、リクエストごとに1つのリクエストスパンを作成します。`logbrewErrorHandler()` はエラーを課題として報告します。リクエスト内の Pino のログには、そのリクエストのトレース ID とスパン ID が付きます。このファイルを `express-app.js` として保存します。
+
+```js
+import express from "express";
+import pino from "pino";
+import { logbrewErrorHandler, logbrewMiddleware } from "@logbrew/express";
+import {
+  createLogBrewNodeClient,
+  installLogBrewPinoInstrumentation
+} from "@logbrew/node";
+
+const client = createLogBrewNodeClient();
+installLogBrewPinoInstrumentation({ client });
+const logger = pino({ level: "info" });
+
+const app = express();
+app.use(logbrewMiddleware());
+
+app.get("/orders/:orderId", (req, res) => {
+  logger.info({ orderId: req.params.orderId }, "order loaded");
+  res.json({ ok: true });
+});
+
+app.get("/fail", () => {
+  throw new Error("inventory service timeout");
+});
+
+app.use(logbrewErrorHandler());
+app.use((err, req, res, next) => {
+  logger.error(err, "request failed");
+  res.status(500).json({ error: "internal" });
+});
+
+const server = app.listen(3000, () => logger.info("listening on 3000"));
+
+process.on("SIGTERM", () => {
+  server.close(async () => {
+    await client.shutdown();
+    process.exit(0);
+  });
+});
+```
+
+アプリケーションを起動します。次に、別のターミナルから2つのリクエストを送信します。
+
+```bash
+curl -s http://127.0.0.1:3000/orders/ord_1001
+curl -s http://127.0.0.1:3000/fail
+```
+
+LogBrew は次のイベントを受け取ります。各リクエストのログとスパンは、同じトレース ID を持ちます。
+
+| イベント | 名前またはメッセージ | トレース |
+| --- | --- | --- |
+| スパン | `GET /orders/:orderId`、ステータス `ok` | `4f18970f494d633c2164588fee9c692a` |
+| ログ | `order loaded` | `4f18970f494d633c2164588fee9c692a` |
+| 課題 | `GET /fail failed`、メッセージ `inventory service timeout` | `d273e106d73ce6c5a5955e5a8c74d2d0` |
+| スパン | `GET /fail`、ステータス `error` | `d273e106d73ce6c5a5955e5a8c74d2d0` |
+| ログ | `request failed` | `d273e106d73ce6c5a5955e5a8c74d2d0` |
+
+スパン名には、実際のパスではなくルートのテンプレートが使われます。`listening on 3000` のログはリクエストの外で出力されるので、トレースを持ちません。
+
+リクエスト用のクライアントは、ミドルウェアに作成させます。プロセス全体で使う `client` を、`logbrewMiddleware()` や `logbrewErrorHandler()` に渡さないでください。ミドルウェアは、各レスポンスの後でリクエスト用のクライアントをシャットダウンします。
+
+### Winston のログにトレースを追加する
+
+Winston では、アクティブなトレースをトランスポートに渡します。
+
+```js
+import { createLogBrewWinstonTransport } from "@logbrew/sdk";
+import { createLogBrewNodeClient, getActiveLogBrewTrace } from "@logbrew/node";
+
+const client = createLogBrewNodeClient();
+const logbrewTransport = createLogBrewWinstonTransport({
+  client,
+  traceProvider: getActiveLogBrewTrace
+});
+```
+
+`logbrewTransport` をロガーの `transports` リストに追加します。これで、Express のリクエスト内の Winston のログに、そのリクエストのトレース ID とスパン ID が付きます。
+
+## ログを読み取って確認する
+
+```bash
+logbrew read logs --service checkout-api --since 1h --json
+logbrew read logs --severity error --search "request failed" --since 1h --json
+logbrew read logs --trace "<trace_id>" --since 1h --json
+```
+
+最後のコマンドは、1件のリクエストのすべてのログを読み取ります。`<trace_id>` はトレースか課題からコピーします。CI やコーディングエージェントから読み取るには、プロジェクトの読み取りキーを使います。[セットアップの確認](/ja/guides/verify-setup)を参照してください。
+
+## ログを失わずにシャットダウンする
+
+クライアントは、キューにたまったイベントを、最初のイベントから1秒後、またはイベントが50件たまった時点で送信します。イベントループが空になると、クライアントは残りのイベントを最大2秒かけて送信します。`process.exit()` とシグナルでは、この処理が実行されません。Express の例の `SIGTERM` ハンドラーのように、終了する前に `await client.shutdown()` を呼び出します。
+
+## トラブルシューティング
+
+| 症状 | 原因 | 対処 |
+| --- | --- | --- |
+| `createLogBrewNodeClient requires serverApiKey, apiKey, LOGBREW_SERVER_API_KEY, or LOGBREW_API_KEY` | このシェルでキーが設定されていません。 | `export` の手順をもう一度実行します。 |
+| Winston の `debug` のログが、コンソールには出ないのに LogBrew には表示される | LogBrew のトランスポートは、ロガーのレベルを適用しません。 | Winston の例にあるレベルフィルターのフォーマットを追加します。 |
+| Pino のログが LogBrew に表示されない | Pino のバージョンにトレーシングチャネルがないか、`installLogBrewPinoInstrumentation()` より前にログが出力されています。 | Pino 9.11 以降、または 10.1 以降を使います。最初のログの前に取得処理をインストールします。 |
+| 最初のリクエストの後でログが止まり、`client.shutdown()` が `client is already shut down` をスローする | プロセス全体のクライアントが、Express のミドルウェアに渡されています。 | `logbrewMiddleware()` と `logbrewErrorHandler()` から `client` オプションを削除します。 |
+| デプロイの後、最後のログが欠けている | 配信の前にプロセスが終了しました。 | `SIGTERM` ハンドラーで `await client.shutdown()` を呼び出します。 |
+
+ログのフィールドを選ぶには[構造化ログ](/ja/concepts/structured-logging)を参照してください。ほかのフレームワークについては [SDK 連携](/ja/guides/sdk-ingestion)を参照してください。

@@ -1,0 +1,287 @@
+---
+title: "Winston과 Pino로 Node.js와 Express 로깅 설정하기"
+sidebarTitle: "Node.js 로깅"
+description: "Node.js와 Express에서 Winston 로거나 Pino 로거를 설정하고, 로그 레벨을 고르고, 트레이스 ID가 담긴 구조화된 로그를 LogBrew로 보내세요."
+---
+
+LogBrew는 개발자와 코딩 에이전트를 위한 옵저버빌리티 플랫폼입니다. 넉넉한 무료 요금제를 제공하며 카드 등록이 필요 없습니다.
+
+이 가이드는 Node.js 로깅을 Winston과 Pino로 설정하고, Express 로거를 추가하고, 각 로그를 요청 트레이스와 함께 LogBrew로 보냅니다. 모든 예제는 Node.js 22, Winston 3.19, Pino 10.4, Express 5.3, `@logbrew/sdk` 0.1.40, `@logbrew/node` 0.1.24, `@logbrew/express` 0.1.10에서 실행했습니다. 각 출력 블록은 실제 출력입니다.
+
+## Winston과 Pino 중 선택하기
+
+두 라이브러리 모두 구조화된 JSON 로그를 씁니다. 앱에서 이미 쓰는 라이브러리를 계속 사용하세요. LogBrew 설정은 라이브러리마다 다릅니다.
+
+| | Winston | Pino |
+| --- | --- | --- |
+| 기본 출력 | `winston.format.json()` 같은 형식을 직접 고릅니다. | 레코드마다 JSON 1줄입니다. |
+| 메시지 인수 | `logger.info("message", { fields })` | `logger.info({ fields }, "message")` |
+| 출력 대상 | 앱 프로세스 안에서 동작하는 트랜스포트입니다. | 워커 스레드 안에서 동작하는 트랜스포트입니다. |
+| 자식 로거 | `logger.child({ fields })` | `logger.child({ fields })` |
+| 민감 정보 가리기 | 직접 만든 포맷을 사용합니다. | 내장 `redact` 옵션을 사용합니다. |
+| LogBrew 설정 | `createLogBrewWinstonTransport()`를 `transports`에 추가합니다. | `installLogBrewPinoInstrumentation()`을 한 번 호출합니다. |
+
+## LogBrew 프로젝트 준비하기
+
+<Steps>
+  <Step title="프로젝트 키 만들기">
+    [CLI](/ko/guides/cli)로 로그인하세요. 프로젝트를 만들고 수집 키를 소유자만 접근할 수 있는 파일에 저장하세요.
+
+    ```bash
+    install -d -m 700 "$HOME/.logbrew"
+    logbrew projects create checkout-api \
+      --runtime node \
+      --environment development \
+      --ingest-key-file "$HOME/.logbrew/checkout-api.ingest" \
+      --json
+    ```
+
+    CLI는 키를 출력하지 않습니다. 프로덕션에서는 사용하는 플랫폼의 시크릿 관리 도구를 사용하세요.
+  </Step>
+
+  <Step title="패키지 설치하기">
+    이 패키지에는 Node.js 18.19 이상이 필요합니다. Winston이나 Pino 중 하나를 설치하거나 둘 다 설치하세요.
+
+    ```bash
+    npm install @logbrew/sdk @logbrew/node @logbrew/express express winston pino
+    ```
+  </Step>
+
+  <Step title="키와 배포 정보 설정하기">
+    ```bash
+    export LOGBREW_SERVER_API_KEY="$(tr -d '\r\n' < "$HOME/.logbrew/checkout-api.ingest")"
+    export LOGBREW_ENVIRONMENT="development"
+    export LOGBREW_RELEASE="checkout-api@1.0.0"
+    ```
+
+    `createLogBrewNodeClient()`는 `LOGBREW_SERVER_API_KEY`에서 키를 읽습니다. 서비스 이름은 `package.json`의 `name`입니다. 다른 이름을 쓰려면 `LOGBREW_SERVICE_NAME`을 설정하세요. 예제는 ES 모듈을 사용하므로 `package.json`에 `"type": "module"`을 설정하세요.
+  </Step>
+</Steps>
+
+## Node.js 로그 레벨
+
+라이브러리마다 레벨 이름과 숫자가 다릅니다. LogBrew는 레벨 4개를 저장하고 원래 레벨은 메타데이터에 남깁니다.
+
+| LogBrew 레벨 | Winston 레벨(우선순위) | Pino 레벨(숫자) |
+| --- | --- | --- |
+| `info` | `info` (2), `http` (3), `verbose` (4), `debug` (5), `silly` (6) | `info` (30), `debug` (20), `trace` (10) |
+| `warning` | `warn` (1) | `warn` (40) |
+| `error` | `error` (0) | `error` (50) |
+| `critical` | 직접 정의한 경우 `fatal` 또는 `critical` | `fatal` (60) |
+
+Winston에서는 숫자가 낮을수록 심각합니다. Pino에서는 숫자가 높을수록 심각합니다. 프로덕션에서는 `info`를 설정하세요. `debug`는 짧게 진단할 때만 사용하세요.
+
+## Winston 로거
+
+이 파일을 `winston-app.js`로 저장하세요. 첫 번째 포맷은 로거 레벨보다 낮은 레코드를 트랜스포트가 받기 전에 걸러 냅니다. LogBrew 트랜스포트는 로거가 쓰는 모든 레코드를 받으므로 이 필터가 필요합니다.
+
+```js
+import winston from "winston";
+import { createLogBrewWinstonTransport } from "@logbrew/sdk";
+import { createLogBrewNodeClient } from "@logbrew/node";
+
+const client = createLogBrewNodeClient();
+
+const logger = winston.createLogger({
+  level: "info",
+  format: winston.format.combine(
+    winston.format((info) => (logger.isLevelEnabled(info.level) ? info : false))(),
+    winston.format.timestamp(),
+    winston.format.errors({ stack: true }),
+    winston.format.json()
+  ),
+  defaultMeta: { component: "checkout" },
+  transports: [
+    new winston.transports.Console(),
+    createLogBrewWinstonTransport({ client })
+  ]
+});
+
+logger.debug("cart loaded");
+logger.info("order created", { orderId: "ord_1001", totalCents: 4200 });
+logger.warn("payment retry", { attempt: 2 });
+logger.error(new Error("card declined"));
+
+await client.shutdown();
+```
+
+`node winston-app.js`를 실행하세요. 콘솔에는 `info` 이상인 레코드마다 JSON 1줄이 출력됩니다. 여기서는 스택을 줄였습니다.
+
+```text
+{"component":"checkout","level":"info","message":"order created","orderId":"ord_1001","timestamp":"2026-11-07T14:19:53.863Z","totalCents":4200}
+{"attempt":2,"component":"checkout","level":"warn","message":"payment retry","timestamp":"2026-11-07T14:19:53.864Z"}
+{"component":"checkout","level":"error","message":"card declined","stack":"Error: card declined\n    at file:///srv/app/winston-app.js:25:14\n ...","timestamp":"2026-11-07T14:19:53.864Z"}
+```
+
+LogBrew는 같은 레코드 3개를 받습니다. 필드는 `context.*` 메타데이터가 됩니다.
+
+| `message` | `level` | `metadata` |
+| --- | --- | --- |
+| `order created` | `info` | `winstonLevel` `info`, `context.component` `checkout`, `context.orderId` `ord_1001`, `context.totalCents` 4200 |
+| `payment retry` | `warning` | `winstonLevel` `warn`, `context.component` `checkout`, `context.attempt` 2 |
+| `card declined` | `error` | `winstonLevel` `error`, `context.component` `checkout`, `errorName` `Error`, `errorMessage` `card declined` |
+
+트랜스포트는 오류 이름과 메시지를 보내지만 스택은 보내지 않습니다. 스택을 보내려면 `createLogBrewWinstonTransport()`에 `includeErrorStack: true`를 설정하세요. 각 메시지는 다음 이슈의 브레드크럼도 됩니다. 이 동작을 끄려면 `breadcrumbs: false`를 설정하세요.
+
+## Pino 로거
+
+이 파일을 `pino-app.js`로 저장하세요. 첫 로그를 쓰기 전에 `installLogBrewPinoInstrumentation()`을 한 번 호출하세요. 이 함수는 완성된 Pino 레코드를 하나씩 읽습니다. Pino는 계속 자체 출력 대상에 씁니다.
+
+```js
+import pino from "pino";
+import {
+  createLogBrewNodeClient,
+  installLogBrewPinoInstrumentation
+} from "@logbrew/node";
+
+const client = createLogBrewNodeClient();
+installLogBrewPinoInstrumentation({ client });
+
+const logger = pino({
+  level: "info",
+  redact: ["password", "token", "req.headers.authorization"]
+});
+const orderLogger = logger.child({ component: "checkout" });
+
+orderLogger.debug("cart loaded");
+orderLogger.info({ orderId: "ord_1001", totalCents: 4200 }, "order created");
+orderLogger.warn({ attempt: 2, token: "tok_example" }, "payment retry");
+orderLogger.error(new Error("card declined"), "payment failed");
+
+await client.shutdown();
+```
+
+`node pino-app.js`를 실행하세요. 여기서는 호스트 이름과 스택을 줄였습니다.
+
+```text
+{"level":30,"time":1794061059490,"pid":13985,"hostname":"app-host","component":"checkout","orderId":"ord_1001","totalCents":4200,"msg":"order created"}
+{"level":40,"time":1794061059493,"pid":13985,"hostname":"app-host","component":"checkout","attempt":2,"token":"[Redacted]","msg":"payment retry"}
+{"level":50,"time":1794061059494,"pid":13985,"hostname":"app-host","component":"checkout","err":{"type":"Error","message":"card declined","stack":"Error: card declined\n ..."},"msg":"payment failed"}
+```
+
+LogBrew는 레코드 3개를 받습니다. `debug` 레코드는 LogBrew에 닿기 전에 Pino가 버립니다.
+
+| `message` | `level` | `metadata` |
+| --- | --- | --- |
+| `order created` | `info` | `pinoLevel` `info`, `pinoLevelNumber` 30, `context.component` `checkout`, `context.orderId` `ord_1001`, `context.totalCents` 4200 |
+| `payment retry` | `warning` | `pinoLevel` `warn`, `pinoLevelNumber` 40, `context.component` `checkout`, `context.attempt` 2 |
+| `payment failed` | `error` | `pinoLevel` `error`, `pinoLevelNumber` 50, `context.component` `checkout`, `errorName` `Error`, `errorMessage` `card declined` |
+
+`token` 필드는 LogBrew에 없습니다. LogBrew는 자격 증명, 쿠키, 본문, 쿼리, URL, 스택 필드를 버립니다. Pino `redact` 경로는 두 번째 보호 장치로 그대로 유지됩니다. `pid`, `hostname`, `time`은 Pino 기본값이므로 LogBrew는 복사하지 않습니다.
+
+자동 수집에는 9.x 버전대의 Pino 9.11 이상 또는 Pino 10.1 이상이 필요합니다. 이전 Pino 버전에서는 `@logbrew/sdk`의 `createLogBrewPinoDestination()`을 Pino 출력 대상으로 사용하세요.
+
+개발 중에 Pino 출력을 읽기 쉽게 보려면 `pino-pretty`로 보내세요.
+
+```bash
+node pino-app.js | npx pino-pretty
+```
+
+## Express 로거
+
+`logbrewMiddleware()`는 요청마다 요청 스팬을 1개 만듭니다. 스팬은 시간을 측정한 작업 하나입니다. `logbrewErrorHandler()`는 오류를 이슈로 보고합니다. 요청 안의 Pino 로그에는 그 요청의 트레이스 ID와 스팬 ID가 붙습니다. 이 파일을 `express-app.js`로 저장하세요.
+
+```js
+import express from "express";
+import pino from "pino";
+import { logbrewErrorHandler, logbrewMiddleware } from "@logbrew/express";
+import {
+  createLogBrewNodeClient,
+  installLogBrewPinoInstrumentation
+} from "@logbrew/node";
+
+const client = createLogBrewNodeClient();
+installLogBrewPinoInstrumentation({ client });
+const logger = pino({ level: "info" });
+
+const app = express();
+app.use(logbrewMiddleware());
+
+app.get("/orders/:orderId", (req, res) => {
+  logger.info({ orderId: req.params.orderId }, "order loaded");
+  res.json({ ok: true });
+});
+
+app.get("/fail", () => {
+  throw new Error("inventory service timeout");
+});
+
+app.use(logbrewErrorHandler());
+app.use((err, req, res, next) => {
+  logger.error(err, "request failed");
+  res.status(500).json({ error: "internal" });
+});
+
+const server = app.listen(3000, () => logger.info("listening on 3000"));
+
+process.on("SIGTERM", () => {
+  server.close(async () => {
+    await client.shutdown();
+    process.exit(0);
+  });
+});
+```
+
+앱을 시작하세요. 그런 다음 다른 터미널에서 요청 2개를 보내세요.
+
+```bash
+curl -s http://127.0.0.1:3000/orders/ord_1001
+curl -s http://127.0.0.1:3000/fail
+```
+
+LogBrew는 다음 이벤트를 받습니다. 각 요청의 로그와 스팬은 같은 트레이스 ID를 가집니다.
+
+| 이벤트 | 이름 또는 메시지 | 트레이스 |
+| --- | --- | --- |
+| 스팬 | `GET /orders/:orderId`, 상태 `ok` | `4f18970f494d633c2164588fee9c692a` |
+| 로그 | `order loaded` | `4f18970f494d633c2164588fee9c692a` |
+| 이슈 | `GET /fail failed`, 메시지 `inventory service timeout` | `d273e106d73ce6c5a5955e5a8c74d2d0` |
+| 스팬 | `GET /fail`, 상태 `error` | `d273e106d73ce6c5a5955e5a8c74d2d0` |
+| 로그 | `request failed` | `d273e106d73ce6c5a5955e5a8c74d2d0` |
+
+스팬 이름에는 실제 경로가 아니라 라우트 템플릿이 쓰입니다. `listening on 3000` 로그는 요청 밖에서 기록되므로 트레이스가 없습니다.
+
+요청 클라이언트는 미들웨어가 직접 만들게 두세요. 프로세스 전체에서 쓰는 `client`를 `logbrewMiddleware()`나 `logbrewErrorHandler()`에 전달하지 마세요. 미들웨어는 응답이 끝날 때마다 요청 클라이언트를 종료합니다.
+
+### Winston 로그에 트레이스 추가하기
+
+Winston에서는 활성 트레이스를 트랜스포트에 전달하세요.
+
+```js
+import { createLogBrewWinstonTransport } from "@logbrew/sdk";
+import { createLogBrewNodeClient, getActiveLogBrewTrace } from "@logbrew/node";
+
+const client = createLogBrewNodeClient();
+const logbrewTransport = createLogBrewWinstonTransport({
+  client,
+  traceProvider: getActiveLogBrewTrace
+});
+```
+
+`logbrewTransport`를 로거의 `transports` 목록에 추가하세요. 그러면 Express 요청 안의 Winston 로그에 그 요청의 트레이스 ID와 스팬 ID가 붙습니다.
+
+## 로그 다시 읽기
+
+```bash
+logbrew read logs --service checkout-api --since 1h --json
+logbrew read logs --severity error --search "request failed" --since 1h --json
+logbrew read logs --trace "<trace_id>" --since 1h --json
+```
+
+마지막 명령어는 요청 1개의 로그를 모두 읽습니다. `<trace_id>`는 트레이스나 이슈에서 복사하세요. CI나 코딩 에이전트에서 읽으려면 프로젝트 읽기 키를 사용하세요. [설정 확인](/ko/guides/verify-setup)을 참고하세요.
+
+## 로그 손실 없이 종료하기
+
+클라이언트는 대기 중인 이벤트를 첫 이벤트 후 1초가 지나거나 이벤트가 50개 쌓이면 보냅니다. 이벤트 루프가 비면 클라이언트는 남은 이벤트를 최대 2초 동안 보냅니다. `process.exit()`와 프로세스 시그널은 이 단계를 건너뜁니다. Express 예제의 `SIGTERM` 핸들러처럼 종료하기 전에 `await client.shutdown()`을 호출하세요.
+
+## 문제 해결
+
+| 증상 | 원인 | 해결 방법 |
+| --- | --- | --- |
+| `createLogBrewNodeClient requires serverApiKey, apiKey, LOGBREW_SERVER_API_KEY, or LOGBREW_API_KEY` | 이 셸에 키가 설정되지 않았습니다. | `export` 단계를 다시 실행하세요. |
+| Winston `debug` 로그가 콘솔에는 없고 LogBrew에는 나타남 | LogBrew 트랜스포트는 로거 레벨을 적용하지 않습니다. | Winston 예제에 있는 레벨 필터 포맷을 추가하세요. |
+| Pino 로그가 LogBrew에 나타나지 않음 | Pino 버전에 tracing channel이 없거나, `installLogBrewPinoInstrumentation()` 전에 로그를 썼습니다. | Pino 9.11 이상 또는 10.1 이상을 사용하세요. 첫 로그를 쓰기 전에 수집 기능을 설치하세요. |
+| 첫 요청 후 로그가 멈추고 `client.shutdown()`이 `client is already shut down`을 던짐 | 프로세스 전체 클라이언트를 Express 미들웨어에 전달했습니다. | `logbrewMiddleware()`와 `logbrewErrorHandler()`에서 `client` 옵션을 제거하세요. |
+| 배포 후 마지막 로그가 없음 | 전송 전에 프로세스가 종료되었습니다. | `SIGTERM` 핸들러에서 `await client.shutdown()`을 호출하세요. |
+
+로그 필드를 고르려면 [구조화된 로깅](/ko/concepts/structured-logging)을 참고하세요. 다른 프레임워크는 [SDK 연동](/ko/guides/sdk-ingestion)을 참고하세요.

@@ -1,0 +1,394 @@
+---
+title: "Python 로깅 설정, 로그 레벨, 오류 처리"
+sidebarTitle: "Python 로깅"
+description: "Python 로깅을 알맞은 로그 레벨로 설정하고, Python 오류와 예외 유형을 처리하고, 로그와 크래시를 LogBrew로 보내세요."
+---
+
+LogBrew는 개발자와 코딩 에이전트를 위한 옵저버빌리티 플랫폼입니다. 넉넉한 무료 요금제를 제공하며 카드 등록이 필요 없습니다.
+
+이 가이드는 표준 `logging` 모듈을 사용한 Python 로깅, Python 로그 레벨 5가지, Python 오류 처리, 자주 보는 Python 오류 유형을 다룹니다. 마지막 섹션에서는 `logbrew-sdk` 0.1.29로 같은 로그와 크래시를 LogBrew로 보냅니다. 모든 예제는 Python 3.13에서 실행했으며, 각 출력 블록은 실제 출력입니다.
+
+Flask 앱이라면 이 가이드 대신 [Flask 로깅](/ko/guides/flask)을 사용하세요. 같은 로깅 설정에 요청 트레이스가 더해집니다.
+
+## 첫 Python 로그 작성하기
+
+이 파일을 `app.py`로 저장하세요. `logging.basicConfig()`는 프로그램 진입점에서 한 번만 호출하세요. 각 모듈에서는 이름이 있는 로거를 가져오세요.
+
+```python
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+logger = logging.getLogger("billing")
+
+logger.debug("cache warmed")
+logger.info("invoice created")
+logger.warning("payment retry %d of %d", 2, 3)
+
+try:
+    total = 100 / 0
+except ZeroDivisionError:
+    logger.exception("invoice total failed")
+```
+
+`python3 app.py`를 실행하세요. 출력은 표준 오류로 나갑니다.
+
+```text
+2026-11-07 17:21:29,602 INFO billing invoice created
+2026-11-07 17:21:29,602 WARNING billing payment retry 2 of 3
+2026-11-07 17:21:29,602 ERROR billing invoice total failed
+Traceback (most recent call last):
+  File "/srv/app/app.py", line 14, in <module>
+    total = 100 / 0
+            ~~~~^~~
+ZeroDivisionError: division by zero
+```
+
+레벨이 `INFO`이므로 `debug` 레코드는 나타나지 않습니다. `logger.exception()`은 `ERROR` 레벨로 기록하고 트레이스백을 추가합니다. 이 메서드는 `except` 블록 안에서만 호출하세요.
+
+`"payment retry %d of %d", 2, 3`처럼 값을 인수로 전달하세요. Python은 핸들러가 레코드를 받아들일 때만 메시지를 만듭니다. 메시지 템플릿은 재시도마다 같으므로 이 템플릿으로 검색할 수 있습니다.
+
+## Python 로그 레벨
+
+로거는 레코드 레벨이 로거 레벨과 같거나 높을 때만 레코드를 보냅니다. 핸들러에는 더 높은 두 번째 레벨을 설정할 수 있습니다.
+
+| 레벨 | 숫자 | 용도 |
+| --- | --- | --- |
+| `DEBUG` | 10 | 문제를 찾는 동안에만 필요한 상세 정보입니다. |
+| `INFO` | 20 | 작업 시작처럼 프로그램이 정상 동작함을 확인하는 일반 이벤트입니다. |
+| `WARNING` | 30 | 재시도처럼 프로그램이 복구한 예상치 못한 상태입니다. |
+| `ERROR` | 40 | 실패한 작업입니다. 프로그램은 계속 실행됩니다. |
+| `CRITICAL` | 50 | 프로그램이나 주요 기능을 멈추는 장애입니다. |
+
+루트 로거는 `WARNING` 레벨에서 시작합니다. 새 로거의 레벨은 `NOTSET`(0)이며 부모의 레벨을 사용합니다. 프로덕션에서는 `INFO`를 설정하세요. `DEBUG`는 개발 중이거나 짧게 진단할 때만 사용하세요.
+
+```python
+logging.getLogger("billing").setLevel(logging.DEBUG)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+```
+
+첫 번째 줄은 한 모듈의 디버그 레코드를 보여 줍니다. 두 번째 줄은 라이브러리의 불필요한 로그를 줄입니다.
+
+## 로거, 핸들러, 포매터
+
+- 로거는 호출을 받습니다. 로거 이름이 모듈 경로를 따르도록 `logging.getLogger(__name__)`을 사용하세요.
+- 핸들러는 콘솔, 파일, LogBrew 같은 대상으로 레코드를 보냅니다.
+- 포매터는 레코드를 텍스트로 바꿉니다.
+
+라이브러리에서는 로깅을 설정하지 마세요. 라이브러리는 자기 로거에 `logging.NullHandler()`만 추가합니다. 핸들러와 레벨은 애플리케이션이 한 번만 설정합니다. 설정이 크면 `logging.config.dictConfig()`를 사용하세요.
+
+## Python 오류 처리
+
+처리할 수 있는 가장 구체적인 예외를 잡으세요. 성공했을 때만 실행할 코드에는 `else`를, 항상 실행할 코드에는 `finally`를 사용하세요. 원래 원인을 유지하려면 `raise ... from error`를 사용하세요.
+
+이 파일을 `orders.py`로 저장하세요.
+
+```python
+import logging
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
+logger = logging.getLogger("orders")
+
+
+class OrderError(Exception):
+    """The order cannot be processed."""
+
+
+def parse_quantity(raw):
+    try:
+        quantity = int(raw)
+    except ValueError as error:
+        raise OrderError(f"quantity must be a whole number, got {raw!r}") from error
+    else:
+        logger.info("quantity parsed")
+        return quantity
+    finally:
+        logger.debug("parse attempt finished")
+
+
+for raw in ["3", "three"]:
+    try:
+        parse_quantity(raw)
+    except OrderError:
+        logger.exception("order rejected")
+```
+
+출력에는 예외 체인의 두 예외가 모두 나타납니다.
+
+```text
+INFO orders quantity parsed
+ERROR orders order rejected
+Traceback (most recent call last):
+  File "/srv/app/orders.py", line 13, in parse_quantity
+    quantity = int(raw)
+ValueError: invalid literal for int() with base 10: 'three'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/srv/app/orders.py", line 25, in <module>
+    parse_quantity(raw)
+    ~~~~~~~~~~~~~~^^^^^
+  File "/srv/app/orders.py", line 15, in parse_quantity
+    raise OrderError(f"quantity must be a whole number, got {raw!r}") from error
+OrderError: quantity must be a whole number, got 'three'
+```
+
+예외마다 다음 규칙을 따르세요.
+
+- 예외는 처리하는 곳에서 한 번만 기록하세요. 계층마다 기록하고 다시 발생시키지 마세요. 계층마다 중복 레코드가 생깁니다.
+- `except Exception: pass`를 쓰지 마세요. 오류를 무시한다면 이유와 함께 `WARNING` 이상으로 기록하세요.
+- `BaseException`이 아니라 `Exception`을 잡으세요. `BaseException`은 의도적으로 프로그램을 멈추는 `KeyboardInterrupt`와 `SystemExit`도 잡습니다.
+- 호출하는 쪽에서 처리해야 하는 오류에는 `OrderError`처럼 자체 예외 클래스를 정의하세요.
+
+### 여러 오류 한 번에 보고하기
+
+Python 3.11 이상에서는 `ExceptionGroup`을 발생시킬 수 있습니다. 한 번의 검사에서 문제를 여러 개 찾았을 때 사용하세요. 각 유형은 `except*`로 처리하세요.
+
+```python
+def validate(order):
+    errors = []
+    if not order.get("email"):
+        errors.append(ValueError("email is required"))
+    if order.get("quantity", 0) < 1:
+        errors.append(ValueError("quantity must be 1 or more"))
+    if errors:
+        raise ExceptionGroup("order is invalid", errors)
+
+
+try:
+    validate({"quantity": 0})
+except* ValueError as group:
+    for error in group.exceptions:
+        logger.warning("validation failed: %s", error)
+```
+
+```text
+WARNING orders validation failed: email is required
+WARNING orders validation failed: quantity must be 1 or more
+```
+
+## 자주 보는 Python 오류 유형
+
+프로그램이 처리할 수 있는 내장 오류는 모두 `Exception`을 상속합니다. 아래 표는 가장 자주 보는 Python 오류와 각 오류에서 먼저 확인할 점입니다.
+
+| 오류 유형 | Python이 발생시키는 경우 | 먼저 확인할 점 |
+| --- | --- | --- |
+| `SyntaxError` | 코드가 올바른 Python이 아닙니다. 파일이 실행되지 않습니다. | 메시지에 있는 줄과 열을 읽으세요. |
+| `IndentationError` | 블록의 들여쓰기가 올바르지 않습니다. | 탭 없이 공백 4칸을 사용하세요. |
+| `NameError` | 이름이 정의되지 않았습니다. | 철자와 import를 확인하세요. |
+| `AttributeError` | 객체에 그 이름의 속성이 없습니다. | 객체의 타입을 확인하세요. `None`인 경우가 많습니다. |
+| `TypeError` | 연산이 잘못된 타입의 값을 받았습니다. | 인수의 타입을 확인하세요. |
+| `ValueError` | 타입은 맞지만 `int("three")`처럼 값이 올바르지 않습니다. | 변환하기 전에 입력을 검증하세요. |
+| `KeyError` | 딕셔너리에 해당 키가 없습니다. | `dict.get()`을 사용하거나 `key in mapping`으로 확인하세요. |
+| `IndexError` | 시퀀스 인덱스가 범위를 벗어났습니다. | 인덱스를 읽기 전에 길이를 확인하세요. |
+| `ZeroDivisionError` | 나눗셈이나 나머지 연산에 0을 사용했습니다. | 먼저 나누는 수를 확인하세요. |
+| `ModuleNotFoundError` | import가 모듈을 찾지 못했습니다. `ImportError`의 하위 클래스입니다. | 활성화된 환경에 패키지를 설치하세요. |
+| `FileNotFoundError` | 파일이나 디렉터리가 없습니다. `OSError`의 하위 클래스입니다. | 경로와 작업 디렉터리를 확인하세요. |
+| `PermissionError` | 프로세스에 파일이나 리소스에 대한 접근 권한이 없습니다. | 파일 소유자와 모드를 확인하세요. |
+| `TimeoutError` | 작업이 제시간에 끝나지 않았습니다. | 횟수 제한이 있는 재시도를 추가하고 마지막 실패를 기록하세요. |
+| `RecursionError` | 호출 스택이 재귀 한도보다 깊어졌습니다. | 멈추지 않는 호출을 찾으세요. |
+| `RuntimeError` | 오류가 다른 범주에 맞지 않습니다. | 메시지를 읽으세요. 라이브러리가 자주 발생시킵니다. |
+
+`KeyboardInterrupt`와 `SystemExit`은 `Exception`이 아니라 `BaseException`을 상속합니다. 코드의 오류가 아닙니다.
+
+## Python 로그를 LogBrew로 보내기
+
+`LogBrewLoggingHandler`는 표준 로깅 핸들러입니다. 받아들인 레코드를 하나씩 LogBrew로 보냅니다. 콘솔 핸들러는 그대로 유지됩니다.
+
+<Steps>
+  <Step title="프로젝트 키 만들기">
+    [CLI](/ko/guides/cli)로 로그인하세요. 프로젝트를 만들고 수집 키를 소유자만 접근할 수 있는 파일에 저장하세요.
+
+    ```bash
+    install -d -m 700 "$HOME/.logbrew"
+    logbrew projects create billing-worker \
+      --runtime python \
+      --environment development \
+      --ingest-key-file "$HOME/.logbrew/billing-worker.ingest" \
+      --json
+    ```
+
+    CLI는 키를 출력하지 않습니다. 프로덕션에서는 사용하는 플랫폼의 시크릿 관리 도구를 사용하세요.
+  </Step>
+
+  <Step title="SDK 설치하기">
+    애플리케이션의 가상 환경을 활성화하세요. 그런 다음 패키지를 설치하세요. 이 패키지에는 Python 3.10 이상이 필요합니다.
+
+    ```bash
+    python3 -m pip install "logbrew-sdk>=0.1.29"
+    ```
+  </Step>
+
+  <Step title="키와 배포 정보 설정하기">
+    ```bash
+    export LOGBREW_SERVER_API_KEY="$(tr -d '\r\n' < "$HOME/.logbrew/billing-worker.ingest")"
+    export LOGBREW_SERVICE_NAME="billing-worker"
+    export LOGBREW_ENVIRONMENT="development"
+    export LOGBREW_RELEASE="billing-worker@1.0.0"
+    ```
+
+    클라이언트는 각 이벤트에 서비스, 환경, 릴리스를 추가합니다.
+  </Step>
+
+  <Step title="핸들러 추가하기">
+    이 파일을 `worker.py`로 저장하세요. 클라이언트를 만들기 전에 `logging.basicConfig()`를 호출하세요. 클라이언트는 루트 로거에 핸들러를 추가하는데, 루트 로거에 이미 핸들러가 있으면 `basicConfig()`는 아무 작업도 하지 않습니다.
+
+    ```python
+    import logging
+    import os
+
+    from logbrew_sdk import (
+        HttpTransport,
+        LogBrewClient,
+        LogBrewLoggingHandler,
+        install_process_error_capture,
+    )
+
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
+
+    client = LogBrewClient.create(
+        api_key=os.environ["LOGBREW_SERVER_API_KEY"],
+        transport=HttpTransport(),
+    )
+    install_process_error_capture(client)
+
+    logger = logging.getLogger("billing")
+    logger.addHandler(LogBrewLoggingHandler(client))
+
+    logger.info("invoice created", extra={"invoice_id": "inv_1001", "amount_cents": 4200})
+
+    try:
+        {"plan": "pro"}["seats"]
+    except KeyError:
+        logger.exception("seat count missing")
+
+    client.shutdown()
+    ```
+
+    `HttpTransport()`는 첫 이벤트 후 1초가 지나거나 이벤트가 50개 쌓이면 백그라운드에서 이벤트를 보냅니다. `client.shutdown()`은 남은 이벤트를 보내고 클라이언트를 닫습니다.
+  </Step>
+
+  <Step title="프로그램 실행하기">
+    ```bash
+    python3 worker.py
+    ```
+
+    콘솔 출력은 바뀌지 않습니다. LogBrew는 레코드마다 로그 이벤트 1개를 받습니다. 다음은 첫 번째 이벤트이며, 공통 런타임 컨텍스트는 뺐습니다.
+
+    ```json
+    {
+      "type": "log",
+      "id": "evt_log_54bfab6d7a9e4a2b88cc1e7872722e4d",
+      "timestamp": "2026-11-07T14:21:36.457Z",
+      "attributes": {
+        "message": "invoice created",
+        "level": "info",
+        "logger": "billing",
+        "metadata": {
+          "fileName": "worker.py",
+          "functionName": "<module>",
+          "levelName": "INFO",
+          "levelNumber": 20,
+          "lineNumber": 22,
+          "module": "worker",
+          "processName": "MainProcess",
+          "threadName": "MainThread",
+          "invoice_id": "inv_1001",
+          "amount_cents": 4200
+        }
+      }
+    }
+    ```
+
+    `extra={...}`의 원시 값은 메타데이터가 됩니다. 두 번째 이벤트에는 `exceptionName` `KeyError`와 `exceptionMessage` `'seats'`가 있습니다. 트레이스백 전체 텍스트를 보내려면 `include_exception_text=True`로 핸들러를 만드세요.
+  </Step>
+
+  <Step title="로그 다시 읽기">
+    ```bash
+    logbrew read logs \
+      --service billing-worker \
+      --environment development \
+      --since 1h \
+      --json
+
+    logbrew read logs --severity error --search "seat count missing" --since 1h --json
+    ```
+
+    일치하는 결과가 나오면 LogBrew가 로그를 저장한 것입니다. CI나 코딩 에이전트에서 읽으려면 프로젝트 읽기 키를 사용하세요. [설정 확인](/ko/guides/verify-setup)을 참고하세요.
+  </Step>
+</Steps>
+
+### LogBrew로 보낼 레코드 선택하기
+
+레코드를 덜 보내려면 핸들러에 별도 레벨을 지정하세요. 콘솔은 여전히 `INFO` 이상을 받습니다.
+
+```python
+logger.addHandler(LogBrewLoggingHandler(client, level=logging.WARNING))
+```
+
+Python 레벨은 LogBrew 레벨로 바뀝니다. 원래 레벨 이름과 숫자는 메타데이터에 남습니다.
+
+| Python 레벨 | LogBrew 레벨 |
+| --- | --- |
+| `DEBUG`, `INFO` | `info` |
+| `WARNING` | `warning` |
+| `ERROR` | `error` |
+| `CRITICAL` | `critical` |
+
+## Python 크래시를 이슈로 보고하기
+
+`install_process_error_capture(client)`는 스크립트, 워커, 시작 코드, 스레드에서 잡히지 않은 예외를 보고합니다. 크래시 하나는 이슈 1개가 되며, 예외 타입, 메시지, 스택 프레임, 예외 체인의 원인을 담습니다. Python은 이전과 같이 트레이스백을 출력하고 종료합니다.
+
+이 파일을 `startup.py`로 저장하고 실행하세요.
+
+```python
+import os
+
+from logbrew_sdk import HttpTransport, LogBrewClient, install_process_error_capture
+
+client = LogBrewClient.create(
+    api_key=os.environ["LOGBREW_SERVER_API_KEY"],
+    transport=HttpTransport(),
+)
+install_process_error_capture(client)
+
+def load_config(path):
+    with open(path) as file:
+        return file.read()
+
+load_config("missing.toml")
+```
+
+```text
+Traceback (most recent call last):
+  File "/srv/app/startup.py", line 15, in <module>
+    load_config("missing.toml")
+    ~~~~~~~~~~~^^^^^^^^^^^^^^^^
+  File "/srv/app/startup.py", line 12, in load_config
+    with open(path) as file:
+         ~~~~^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'missing.toml'
+```
+
+LogBrew는 제목이 `FileNotFoundError`, 레벨이 `critical`, 메커니즘이 `python.excepthook`인 이슈를 받습니다. 프레임에는 파일 이름, 줄, 함수가 있지만 전체 경로는 없습니다. 스레드에서 난 크래시의 레벨은 `error`입니다. Python이 종료되기 전에 SDK는 전송을 최대 2초 기다립니다.
+
+```bash
+logbrew read issues --since 1h --json
+```
+
+이슈에는 예외 메시지가 포함됩니다. 예외 메시지나 로그 메시지에 자격 증명이나 개인정보를 넣지 마세요. [로그 마스킹](/ko/guides/safe-capture)을 참고하세요.
+
+## 문제 해결
+
+| 증상 | 원인 | 해결 방법 |
+| --- | --- | --- |
+| LogBrew를 추가한 뒤 콘솔 출력이 없음 | `logging.basicConfig()`가 `LogBrewClient.create()` 뒤에 실행되었습니다. | `LogBrewClient.create()` 전에 `logging.basicConfig()`를 호출하세요. |
+| `INFO` 레코드가 나타나지 않음 | 로거가 루트 로거의 `WARNING` 레벨을 사용합니다. | `basicConfig()`에서 레벨을 설정하거나 `logger.setLevel(logging.INFO)`를 호출하세요. |
+| 레코드가 2번씩 나타남 | 레코드가 로거의 핸들러로 간 다음, 루트 로거에 있는 같은 종류의 핸들러로 한 번 더 갑니다. | 핸들러를 한 번만 추가하거나 `logger.propagate = False`를 설정하세요. |
+| 강제 종료 후 이벤트가 없음 | 전송 전에 `SIGKILL`이나 `os._exit()`가 프로세스를 멈췄습니다. | 정상 종료 경로에서 `client.shutdown()`을 호출하세요. |
+| `KeyError: 'LOGBREW_SERVER_API_KEY'` | 이 셸에 변수가 설정되지 않았습니다. | `export` 단계를 다시 실행하세요. |
+
+웹 앱은 [Flask 로깅](/ko/guides/flask)을 참고하세요. 로그 형식을 고르려면 [구조화된 로깅](/ko/concepts/structured-logging)을 참고하세요. 다른 런타임은 [SDK 연동](/ko/guides/sdk-ingestion)을 참고하세요.

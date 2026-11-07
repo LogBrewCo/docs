@@ -1,0 +1,144 @@
+---
+title: "结构化日志最佳实践与日志格式"
+sidebarTitle: "结构化日志"
+description: "了解什么是结构化日志，选择带标准字段的 JSON 日志格式，并遵循让日志易于搜索的日志最佳实践。"
+---
+
+LogBrew 是面向开发者和编程智能体的可观测性平台，提供充足的免费额度，无需绑卡。
+
+结构化日志把每条日志写成具名字段，而不是一行自由文本。这样，程序、人或编程智能体就能按字段筛选日志、统计数量，并把日志关联到请求链路。
+
+## 文本日志与结构化日志
+
+下面这条文本日志与其下方的结构化日志包含相同的信息。
+
+```text
+2026-11-07 14:21:19 ERROR checkout payment failed for order ord_1001 after 5 s
+```
+
+```json
+{"timestamp": "2026-11-07T14:21:19.773+00:00", "level": "error", "logger": "checkout", "message": "payment failed", "order_id": "ord_1001", "error.type": "TimeoutError", "error.message": "payment provider did not answer in 5 s"}
+```
+
+要在文本日志中找出 1 个订单的所有支付失败记录，你必须为每种消息变体写一个匹配模式。在结构化日志中，按 `message` 和 `order_id` 筛选即可。每个订单的消息都相同，所以还能统计次数。
+
+## 选择日志格式
+
+使用 JSON，每行 1 个对象。在所有服务中使用相同的字段名。下表列出基础字段，以及它们在 OpenTelemetry 日志数据模型和 LogBrew 中对应的名称。
+
+| 字段 | 内容 | OpenTelemetry | LogBrew |
+| --- | --- | --- | --- |
+| `timestamp` | RFC 3339 格式的 UTC 时间，精确到毫秒 | `Timestamp` | 信号的 `timestamp` |
+| `level` | 一小组固定值之一，例如 `info`、`warning`、`error`、`critical` | `SeverityText`, `SeverityNumber` | `level` |
+| `message` | 描述所发生情况的固定文本，不含变量值 | `Body` | `message` |
+| `logger` | 写出这条日志的模块或组件 | 插桩作用域 | `logger` |
+| `trace_id`, `span_id` | 当前活动的链路和 Span（一次计时操作）的 ID | `TraceId`, `SpanId` | `context.trace` |
+| `service`, `environment`, `release` | 代码在哪里运行，以及是哪个版本 | 资源属性 | `context.resource` |
+| `error.type`, `error.message` | 异常类和异常消息 | `exception.type`, `exception.message` | `metadata` |
+| 日志专属字段 | 这条日志特有的值，例如 `order_id` | `Attributes` | `metadata` |
+
+OpenTelemetry 的严重程度数值范围是 1 到 24。`INFO` 从 9 开始，`WARN` 从 13 开始，`ERROR` 从 17 开始，`FATAL` 从 21 开始。LogBrew 直接接收 OTLP 日志。参见[把 OpenTelemetry 数据发送到 LogBrew](/zh-Hans/guides/opentelemetry)。
+
+## 日志最佳实践
+
+### 保持消息固定
+
+写 `"payment failed"`，把订单 ID 放进字段。消息固定后，你就能把它当作 1 类日志来分组、计数和设置告警。
+
+### 每个字段只用 1 个名称
+
+在 `order_id` 和 `orderId` 中选定一个，并在所有服务中使用。常见字段使用 OpenTelemetry 语义约定中的名称，例如 `http.response.status_code`。
+
+### 按所需的处理动作选择级别
+
+`error` 表示操作失败。`warning` 表示程序已经恢复。`info` 确认工作正常。只在查找故障时使用 `debug`。
+
+### 用 UTC 记录时间
+
+使用带毫秒和时区偏移的 RFC 3339，例如 `2026-11-07T14:21:19.773+00:00`。缺少 UTC 和毫秒时，来自不同时区的日志或同一秒内的日志会排错顺序。
+
+### 添加 Trace ID 和 Span ID
+
+有了这两个 ID，你就能跨服务读取 1 个请求的所有日志。
+
+### 只设置一次服务、环境和版本
+
+在启动时配置它们，而不是在每次调用时配置。缺少版本时，你无法知道是哪次部署引起了变化。
+
+### 在处理错误的地方只记录一次
+
+加上错误类型和错误消息。不要在每一层重复记录同一个错误。
+
+### 不要记录机密信息和个人信息
+
+不要记录密码、令牌、Cookie、请求体或带查询字符串的完整 URL。使用记录器的敏感字段隐藏功能。参见[日志脱敏](/zh-Hans/guides/safe-capture)。
+
+### 使用固定的字段名
+
+不要把值用作字段名，例如 `{"ord_1001": "failed"}`。否则每个新值都会新增一个字段，1 个筛选条件就无法找出所有订单。
+
+### 生产环境向标准输出写 JSON
+
+只在开发环境中使用易读的格式。
+
+## Python 中的结构化日志
+
+标准 `logging` 模块没有 JSON 格式器。下面的格式器会写出基础字段以及 `extra={"fields": {...}}` 中的值。
+
+```python
+import json
+import logging
+from datetime import datetime, timezone
+
+
+class JsonFormatter(logging.Formatter):
+    def format(self, record):
+        entry = {
+            "timestamp": datetime.fromtimestamp(record.created, timezone.utc).isoformat(
+                timespec="milliseconds"
+            ),
+            "level": record.levelname.lower(),
+            "logger": record.name,
+            "message": record.getMessage(),
+            **getattr(record, "fields", {}),
+        }
+        if record.exc_info:
+            entry["error.type"] = record.exc_info[0].__name__
+            entry["error.message"] = str(record.exc_info[1])
+        return json.dumps(entry)
+
+
+handler = logging.StreamHandler()
+handler.setFormatter(JsonFormatter())
+logging.basicConfig(level=logging.INFO, handlers=[handler])
+logger = logging.getLogger("checkout")
+
+logger.info("order created", extra={"fields": {"order_id": "ord_1001", "total_cents": 4200}})
+try:
+    raise TimeoutError("payment provider did not answer in 5 s")
+except TimeoutError:
+    logger.error("payment failed", exc_info=True, extra={"fields": {"order_id": "ord_1001"}})
+```
+
+```text
+{"timestamp": "2026-11-07T14:21:19.772+00:00", "level": "info", "logger": "checkout", "message": "order created", "order_id": "ord_1001", "total_cents": 4200}
+{"timestamp": "2026-11-07T14:21:19.773+00:00", "level": "error", "logger": "checkout", "message": "payment failed", "order_id": "ord_1001", "error.type": "TimeoutError", "error.message": "payment provider did not answer in 5 s"}
+```
+
+要把同样的记录发送到 LogBrew，添加 `LogBrewLoggingHandler`。它会把消息、级别和记录器作为字段发送，并把 `extra` 中的基本类型值作为元数据发送。参见 [Python 日志](/zh-Hans/guides/python-logging)。
+
+## Node.js 中的结构化日志
+
+Pino 默认为每条记录写 1 行 JSON。Winston 通过 `winston.format.json()` 写 JSON。两者都会保留调用时传入的字段和子记录器的字段。两种配置方式以及 Express 日志中的 Trace ID，参见 [Node.js 日志](/zh-Hans/guides/node-logging)。
+
+## 在 LogBrew 中搜索结构化日志
+
+LogBrew 存储每条日志的消息、级别、记录器、元数据和链路。在 CLI 中按这些字段筛选。
+
+```bash
+logbrew read logs --severity error --since 24h --json
+logbrew read logs --search "payment failed" --service checkout-api --since 24h --json
+logbrew read logs --trace "<trace_id>" --since 24h --json
+```
+
+API 还可以按带类型的元数据值筛选，例如大于或等于 500 的数值。参见[查询筛选条件](/zh-Hans/reference/telemetry-api-filters)。

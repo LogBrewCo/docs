@@ -1,0 +1,394 @@
+---
+title: "Python 日志配置、日志级别与错误处理"
+sidebarTitle: "Python 日志"
+description: "用 logging 模块配置 Python 日志和合适的日志级别，处理 Python 错误和异常类型，并把日志和崩溃发送到 LogBrew。"
+---
+
+LogBrew 是面向开发者和编程智能体的可观测性平台，提供充足的免费额度，无需绑卡。
+
+本指南介绍如何用标准 `logging` 模块记录 Python 日志，并讲解 Python 的 5 个日志级别、Python 错误处理和常见的 Python 错误类型。最后几节使用 `logbrew-sdk` 0.1.29 把同样的日志和崩溃发送到 LogBrew。所有示例都在 Python 3.13 上运行过，每个输出块都是真实输出。
+
+Flask 应用请改用 [Flask 日志](/zh-Hans/guides/flask)。它会在同一套日志配置中加入请求链路。
+
+## 写出第一条 Python 日志
+
+把这个文件保存为 `app.py`。在程序入口处调用一次 `logging.basicConfig()`。在每个模块中获取一个具名的记录器。
+
+```python
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+logger = logging.getLogger("billing")
+
+logger.debug("cache warmed")
+logger.info("invoice created")
+logger.warning("payment retry %d of %d", 2, 3)
+
+try:
+    total = 100 / 0
+except ZeroDivisionError:
+    logger.exception("invoice total failed")
+```
+
+运行 `python3 app.py`。输出会写到标准错误。
+
+```text
+2026-11-07 17:21:29,602 INFO billing invoice created
+2026-11-07 17:21:29,602 WARNING billing payment retry 2 of 3
+2026-11-07 17:21:29,602 ERROR billing invoice total failed
+Traceback (most recent call last):
+  File "/srv/app/app.py", line 14, in <module>
+    total = 100 / 0
+            ~~~~^~~
+ZeroDivisionError: division by zero
+```
+
+级别是 `INFO`，所以 `debug` 记录不会出现。`logger.exception()` 以 `ERROR` 级别记录日志，并附上回溯信息。只在 `except` 块中调用它。
+
+像 `"payment retry %d of %d", 2, 3` 这样把值作为参数传入。只有当处理器接受这条记录时，Python 才会构建消息。每次重试的消息模板都相同，因此可以按模板搜索。
+
+## Python 日志级别
+
+只有当记录的级别等于或高于记录器的级别时，记录器才会发送这条记录。处理器还可以设置一个更高的第二级别。
+
+| 级别 | 数值 | 适用场景 |
+| --- | --- | --- |
+| `DEBUG` | 10 | 只在查找故障时才需要的细节。 |
+| `INFO` | 20 | 确认程序正常工作的常规事件，例如任务已启动。 |
+| `WARNING` | 30 | 程序已经恢复的意外状态，例如一次重试。 |
+| `ERROR` | 40 | 一次失败的操作。程序会继续运行。 |
+| `CRITICAL` | 50 | 导致程序或主要功能停止的故障。 |
+
+根记录器的默认级别是 `WARNING`。新记录器的级别是 `NOTSET`（0），并沿用父记录器的级别。在生产环境中设置 `INFO`，只在开发或短时诊断时使用 `DEBUG`。
+
+```python
+logging.getLogger("billing").setLevel(logging.DEBUG)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+```
+
+第 1 行代码显示一个模块的调试记录。第 2 行代码屏蔽某个库的噪声日志。
+
+## 记录器、处理器和格式器
+
+- 记录器接收调用。使用 `logging.getLogger(__name__)`，让记录器名称跟随模块路径。
+- 处理器把记录发送到目标位置，例如终端、文件或 LogBrew。
+- 格式器把记录转换为文本。
+
+库不应配置日志。库只在自己的记录器上添加 `logging.NullHandler()`。应用只配置一次处理器和级别。配置较多时，使用 `logging.config.dictConfig()`。
+
+## Python 错误处理
+
+捕获你能处理的最具体的异常。只在成功时运行的代码放在 `else` 中，始终要运行的代码放在 `finally` 中。用 `raise ... from error` 保留原始原因。
+
+把这个文件保存为 `orders.py`。
+
+```python
+import logging
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
+logger = logging.getLogger("orders")
+
+
+class OrderError(Exception):
+    """The order cannot be processed."""
+
+
+def parse_quantity(raw):
+    try:
+        quantity = int(raw)
+    except ValueError as error:
+        raise OrderError(f"quantity must be a whole number, got {raw!r}") from error
+    else:
+        logger.info("quantity parsed")
+        return quantity
+    finally:
+        logger.debug("parse attempt finished")
+
+
+for raw in ["3", "three"]:
+    try:
+        parse_quantity(raw)
+    except OrderError:
+        logger.exception("order rejected")
+```
+
+输出显示了异常链中的两个异常。
+
+```text
+INFO orders quantity parsed
+ERROR orders order rejected
+Traceback (most recent call last):
+  File "/srv/app/orders.py", line 13, in parse_quantity
+    quantity = int(raw)
+ValueError: invalid literal for int() with base 10: 'three'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/srv/app/orders.py", line 25, in <module>
+    parse_quantity(raw)
+    ~~~~~~~~~~~~~~^^^^^
+  File "/srv/app/orders.py", line 15, in parse_quantity
+    raise OrderError(f"quantity must be a whole number, got {raw!r}") from error
+OrderError: quantity must be a whole number, got 'three'
+```
+
+对每个异常遵循以下规则。
+
+- 只在处理异常的地方记录一次。不要在每一层都记录后再重新抛出，因为每一层都会多出一条重复记录。
+- 不要写 `except Exception: pass`。如果要忽略某个错误，用 `WARNING` 或更高级别记录它，并写明原因。
+- 捕获 `Exception`，而不是 `BaseException`。`BaseException` 还会捕获 `KeyboardInterrupt` 和 `SystemExit`，而它们是有意停止程序的。
+- 为调用方必须处理的错误定义自己的异常类，就像 `OrderError` 这样。
+
+### 报告多个错误
+
+Python 3.11 及更高版本可以抛出 `ExceptionGroup`。当一次检查发现多个错误时使用它。用 `except*` 分别处理每种类型。
+
+```python
+def validate(order):
+    errors = []
+    if not order.get("email"):
+        errors.append(ValueError("email is required"))
+    if order.get("quantity", 0) < 1:
+        errors.append(ValueError("quantity must be 1 or more"))
+    if errors:
+        raise ExceptionGroup("order is invalid", errors)
+
+
+try:
+    validate({"quantity": 0})
+except* ValueError as group:
+    for error in group.exceptions:
+        logger.warning("validation failed: %s", error)
+```
+
+```text
+WARNING orders validation failed: email is required
+WARNING orders validation failed: quantity must be 1 or more
+```
+
+## 常见的 Python 错误类型
+
+程序可以处理的内置错误都继承自 `Exception`。下表列出最常见的 Python 错误，以及每种错误应该先检查什么。
+
+| 错误类型 | Python 何时抛出 | 先检查 |
+| --- | --- | --- |
+| `SyntaxError` | 代码不是合法的 Python，文件无法运行。 | 阅读消息中的行号和列号。 |
+| `IndentationError` | 代码块的缩进不正确。 | 使用 4 个空格，不要用制表符。 |
+| `NameError` | 名称未定义。 | 检查拼写和导入。 |
+| `AttributeError` | 对象没有该名称的属性。 | 检查对象的类型，它常常是 `None`。 |
+| `TypeError` | 操作收到了类型错误的值。 | 检查参数的类型。 |
+| `ValueError` | 值的类型正确但取值无效，例如 `int("three")`。 | 转换前先校验输入。 |
+| `KeyError` | 字典中没有这个键。 | 使用 `dict.get()`，或检查 `key in mapping`。 |
+| `IndexError` | 序列索引超出范围。 | 读取索引前先检查长度。 |
+| `ZeroDivisionError` | 除法或取模运算用了零。 | 先检查除数。 |
+| `ModuleNotFoundError` | 导入时找不到模块。它是 `ImportError` 的子类。 | 在当前激活的环境中安装这个包。 |
+| `FileNotFoundError` | 文件或目录不存在。它是 `OSError` 的子类。 | 检查路径和工作目录。 |
+| `PermissionError` | 进程无权访问文件或资源。 | 检查文件的所有者和权限模式。 |
+| `TimeoutError` | 操作没有在规定时间内完成。 | 添加有次数上限的重试，然后记录最后一次失败。 |
+| `RecursionError` | 调用栈深度超过了递归上限。 | 找出不会停止的调用。 |
+| `RuntimeError` | 错误不属于其他类别。 | 阅读消息。库经常抛出这种错误。 |
+
+`KeyboardInterrupt` 和 `SystemExit` 继承自 `BaseException`，而不是 `Exception`。它们不是你代码中的错误。
+
+## 把 Python 日志发送到 LogBrew
+
+`LogBrewLoggingHandler` 是一个标准日志处理器。它会把接受的每条记录发送到 LogBrew。终端处理器保持不变。
+
+<Steps>
+  <Step title="创建项目密钥">
+    使用 [CLI](/zh-Hans/guides/cli) 登录。创建一个项目，把它的接入密钥保存到仅所有者可访问的文件中。
+
+    ```bash
+    install -d -m 700 "$HOME/.logbrew"
+    logbrew projects create billing-worker \
+      --runtime python \
+      --environment development \
+      --ingest-key-file "$HOME/.logbrew/billing-worker.ingest" \
+      --json
+    ```
+
+    CLI 不会输出密钥。在生产环境中，使用所在平台的密钥管理服务。
+  </Step>
+
+  <Step title="安装 SDK">
+    激活应用的虚拟环境，然后安装这个包。它需要 Python 3.10 或更高版本。
+
+    ```bash
+    python3 -m pip install "logbrew-sdk>=0.1.29"
+    ```
+  </Step>
+
+  <Step title="配置密钥和部署标识">
+    ```bash
+    export LOGBREW_SERVER_API_KEY="$(tr -d '\r\n' < "$HOME/.logbrew/billing-worker.ingest")"
+    export LOGBREW_SERVICE_NAME="billing-worker"
+    export LOGBREW_ENVIRONMENT="development"
+    export LOGBREW_RELEASE="billing-worker@1.0.0"
+    ```
+
+    客户端会为每个信号加上服务、环境和版本。
+  </Step>
+
+  <Step title="添加处理器">
+    把这个文件保存为 `worker.py`。在创建客户端之前调用 `logging.basicConfig()`。客户端会给根记录器添加一个处理器，而根记录器已有处理器时，`basicConfig()` 不会执行任何操作。
+
+    ```python
+    import logging
+    import os
+
+    from logbrew_sdk import (
+        HttpTransport,
+        LogBrewClient,
+        LogBrewLoggingHandler,
+        install_process_error_capture,
+    )
+
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
+
+    client = LogBrewClient.create(
+        api_key=os.environ["LOGBREW_SERVER_API_KEY"],
+        transport=HttpTransport(),
+    )
+    install_process_error_capture(client)
+
+    logger = logging.getLogger("billing")
+    logger.addHandler(LogBrewLoggingHandler(client))
+
+    logger.info("invoice created", extra={"invoice_id": "inv_1001", "amount_cents": 4200})
+
+    try:
+        {"plan": "pro"}["seats"]
+    except KeyError:
+        logger.exception("seat count missing")
+
+    client.shutdown()
+    ```
+
+    `HttpTransport()` 在后台发送信号，时机是第一个信号产生 1 秒后，或累计到 50 个信号时。`client.shutdown()` 会发送剩余的信号并关闭客户端。
+  </Step>
+
+  <Step title="运行程序">
+    ```bash
+    python3 worker.py
+    ```
+
+    终端输出不变。LogBrew 为每条记录收到 1 条日志。下面是第一条日志，省略了共享的运行时上下文。
+
+    ```json
+    {
+      "type": "log",
+      "id": "evt_log_54bfab6d7a9e4a2b88cc1e7872722e4d",
+      "timestamp": "2026-11-07T14:21:36.457Z",
+      "attributes": {
+        "message": "invoice created",
+        "level": "info",
+        "logger": "billing",
+        "metadata": {
+          "fileName": "worker.py",
+          "functionName": "<module>",
+          "levelName": "INFO",
+          "levelNumber": 20,
+          "lineNumber": 22,
+          "module": "worker",
+          "processName": "MainProcess",
+          "threadName": "MainThread",
+          "invoice_id": "inv_1001",
+          "amount_cents": 4200
+        }
+      }
+    }
+    ```
+
+    `extra={...}` 中的基本类型值会成为元数据。第二条日志的 `exceptionName` 为 `KeyError`，`exceptionMessage` 为 `'seats'`。要发送完整的回溯文本，创建处理器时传入 `include_exception_text=True`。
+  </Step>
+
+  <Step title="读回日志">
+    ```bash
+    logbrew read logs \
+      --service billing-worker \
+      --environment development \
+      --since 1h \
+      --json
+
+    logbrew read logs --severity error --search "seat count missing" --since 1h --json
+    ```
+
+    读到匹配的结果，就说明 LogBrew 已存储这些日志。要从 CI 或编程智能体读取，使用项目只读密钥。参见[验证接入](/zh-Hans/guides/verify-setup)。
+  </Step>
+</Steps>
+
+### 选择发送到 LogBrew 的记录
+
+给处理器设置单独的级别，可以减少发送的记录。终端仍会收到 `INFO` 及更高级别的记录。
+
+```python
+logger.addHandler(LogBrewLoggingHandler(client, level=logging.WARNING))
+```
+
+Python 级别会映射为 LogBrew 级别。原始的级别名称和数值保留在元数据中。
+
+| Python 级别 | LogBrew 级别 |
+| --- | --- |
+| `DEBUG`, `INFO` | `info` |
+| `WARNING` | `warning` |
+| `ERROR` | `error` |
+| `CRITICAL` | `critical` |
+
+## 把 Python 崩溃报告为问题
+
+`install_process_error_capture(client)` 会报告脚本、worker 进程、启动代码和线程中未捕获的异常。每次崩溃都会成为 1 个问题，包含异常类型、消息、堆栈帧和异常链中的原因。Python 仍会像以前一样输出回溯信息并退出。
+
+把这个文件保存为 `startup.py` 并运行。
+
+```python
+import os
+
+from logbrew_sdk import HttpTransport, LogBrewClient, install_process_error_capture
+
+client = LogBrewClient.create(
+    api_key=os.environ["LOGBREW_SERVER_API_KEY"],
+    transport=HttpTransport(),
+)
+install_process_error_capture(client)
+
+def load_config(path):
+    with open(path) as file:
+        return file.read()
+
+load_config("missing.toml")
+```
+
+```text
+Traceback (most recent call last):
+  File "/srv/app/startup.py", line 15, in <module>
+    load_config("missing.toml")
+    ~~~~~~~~~~~^^^^^^^^^^^^^^^^
+  File "/srv/app/startup.py", line 12, in load_config
+    with open(path) as file:
+         ~~~~^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'missing.toml'
+```
+
+LogBrew 会收到一个问题，标题为 `FileNotFoundError`，级别为 `critical`，机制为 `python.excepthook`。它的帧包含文件名、行号和函数，但不包含完整路径。线程中的崩溃级别为 `error`。Python 退出前，SDK 最多等待 2 秒完成发送。
+
+```bash
+logbrew read issues --since 1h --json
+```
+
+问题中包含异常消息。不要在异常消息或日志消息中放入凭据或个人信息。参见[日志脱敏](/zh-Hans/guides/safe-capture)。
+
+## 故障排除
+
+| 现象 | 原因 | 解决方法 |
+| --- | --- | --- |
+| 添加 LogBrew 后终端没有输出 | `logging.basicConfig()` 在 `LogBrewClient.create()` 之后运行。 | 在 `LogBrewClient.create()` 之前调用 `logging.basicConfig()`。 |
+| `INFO` 记录没有出现 | 记录器使用了根记录器的 `WARNING` 级别。 | 在 `basicConfig()` 中设置级别，或调用 `logger.setLevel(logging.INFO)`。 |
+| 每条记录出现 2 次 | 记录先发到记录器上的处理器，又发到根记录器上同类的处理器。 | 每个处理器只添加一次，或设置 `logger.propagate = False`。 |
+| 强制停止后缺少信号 | `SIGKILL` 或 `os._exit()` 在发送完成前终止了进程。 | 在正常关闭流程中调用 `client.shutdown()`。 |
+| `KeyError: 'LOGBREW_SERVER_API_KEY'` | 当前 shell 中没有设置这个变量。 | 重新运行 `export` 步骤。 |
+
+Web 应用参见 [Flask 日志](/zh-Hans/guides/flask)。要选择日志格式，参见[结构化日志](/zh-Hans/concepts/structured-logging)。其他运行时参见 [SDK 接入](/zh-Hans/guides/sdk-ingestion)。

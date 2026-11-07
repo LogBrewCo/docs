@@ -1,0 +1,339 @@
+---
+title: "Logging en Node.js con Winston, Pino y Express"
+sidebarTitle: "Logging en Node.js"
+description: "Configura un logger de Winston o Pino en Node.js y Express, elige los niveles de log y envía logs estructurados con ID de traza a LogBrew."
+---
+
+LogBrew es una plataforma de observabilidad para desarrolladores y agentes de
+programación, con un plan gratuito generoso y sin tarjeta.
+
+Esta guía configura el logging con Winston y con Pino en Node.js, añade un
+logger de Express y envía cada log a LogBrew con la traza de su solicitud. Cada
+ejemplo se ejecutó con Node.js 22, Winston 3.19, Pino 10.4, Express 5.3,
+`@logbrew/sdk` 0.1.40, `@logbrew/node` 0.1.24 y `@logbrew/express` 0.1.10.
+Cada bloque de salida muestra su salida real.
+
+## Elige Winston o Pino
+
+Las dos bibliotecas escriben logs JSON estructurados. Quédate con la biblioteca
+que ya usa tu app. La configuración de LogBrew es distinta para cada una.
+
+| | Winston | Pino |
+| --- | --- | --- |
+| Salida predeterminada | Tú eliges el formato, como `winston.format.json()`. | 1 línea JSON por cada registro. |
+| Argumento del mensaje | `logger.info("message", { fields })` | `logger.info({ fields }, "message")` |
+| Destinos | Transports en el proceso de la app. | Transports en un worker thread. |
+| Loggers hijos | `logger.child({ fields })` | `logger.child({ fields })` |
+| Ocultación | Tu propio formato. | Opción `redact` integrada. |
+| Configuración de LogBrew | Añade `createLogBrewWinstonTransport()` a `transports`. | Llama a `installLogBrewPinoInstrumentation()` una vez. |
+
+## Prepara un proyecto de LogBrew
+
+<Steps>
+  <Step title="Crea una clave de proyecto">
+    Inicia sesión con la [CLI](/es/guides/cli). Crea un proyecto y guarda su
+    clave de ingesta en un archivo al que solo accede su propietario.
+
+    ```bash
+    install -d -m 700 "$HOME/.logbrew"
+    logbrew projects create checkout-api \
+      --runtime node \
+      --environment development \
+      --ingest-key-file "$HOME/.logbrew/checkout-api.ingest" \
+      --json
+    ```
+
+    La CLI no muestra la clave. En producción, usa el gestor de secretos de tu
+    plataforma.
+  </Step>
+
+  <Step title="Instala los paquetes">
+    Los paquetes requieren Node.js 18.19 o posterior. Instala Winston, Pino o
+    los dos.
+
+    ```bash
+    npm install @logbrew/sdk @logbrew/node @logbrew/express express winston pino
+    ```
+  </Step>
+
+  <Step title="Define la clave y la identidad del despliegue">
+    ```bash
+    export LOGBREW_SERVER_API_KEY="$(tr -d '\r\n' < "$HOME/.logbrew/checkout-api.ingest")"
+    export LOGBREW_ENVIRONMENT="development"
+    export LOGBREW_RELEASE="checkout-api@1.0.0"
+    ```
+
+    `createLogBrewNodeClient()` lee la clave de `LOGBREW_SERVER_API_KEY`. El
+    nombre del servicio es el `name` de `package.json`. Define
+    `LOGBREW_SERVICE_NAME` para usar otro nombre. Los ejemplos usan módulos
+    ES, así que define `"type": "module"` en `package.json`.
+  </Step>
+</Steps>
+
+## Niveles de log en Node.js
+
+Cada biblioteca tiene sus propios nombres y números de nivel. LogBrew guarda 4
+niveles y conserva el nivel original en los metadatos.
+
+| Nivel de LogBrew | Nivel de Winston (prioridad) | Nivel de Pino (número) |
+| --- | --- | --- |
+| `info` | `info` (2), `http` (3), `verbose` (4), `debug` (5), `silly` (6) | `info` (30), `debug` (20), `trace` (10) |
+| `warning` | `warn` (1) | `warn` (40) |
+| `error` | `error` (0) | `error` (50) |
+| `critical` | `fatal` o `critical`, si los defines | `fatal` (60) |
+
+En Winston, un número más bajo es más grave. En Pino, un número más alto es más
+grave. Usa `info` en producción y `debug` solo para un diagnóstico breve.
+
+## Logger de Winston
+
+Guarda este archivo como `winston-app.js`. El primer formato descarta los
+registros por debajo del nivel del logger antes de que un transport los
+reciba. El transport de LogBrew recibe todos los registros que escribe el
+logger, así que necesita este filtro.
+
+```js
+import winston from "winston";
+import { createLogBrewWinstonTransport } from "@logbrew/sdk";
+import { createLogBrewNodeClient } from "@logbrew/node";
+
+const client = createLogBrewNodeClient();
+
+const logger = winston.createLogger({
+  level: "info",
+  format: winston.format.combine(
+    winston.format((info) => (logger.isLevelEnabled(info.level) ? info : false))(),
+    winston.format.timestamp(),
+    winston.format.errors({ stack: true }),
+    winston.format.json()
+  ),
+  defaultMeta: { component: "checkout" },
+  transports: [
+    new winston.transports.Console(),
+    createLogBrewWinstonTransport({ client })
+  ]
+});
+
+logger.debug("cart loaded");
+logger.info("order created", { orderId: "ord_1001", totalCents: 4200 });
+logger.warn("payment retry", { attempt: 2 });
+logger.error(new Error("card declined"));
+
+await client.shutdown();
+```
+
+Ejecuta `node winston-app.js`. La consola recibe 1 línea JSON por cada registro
+de nivel `info` o superior. Aquí la traza de pila aparece acortada.
+
+```text
+{"component":"checkout","level":"info","message":"order created","orderId":"ord_1001","timestamp":"2026-11-07T14:19:53.863Z","totalCents":4200}
+{"attempt":2,"component":"checkout","level":"warn","message":"payment retry","timestamp":"2026-11-07T14:19:53.864Z"}
+{"component":"checkout","level":"error","message":"card declined","stack":"Error: card declined\n    at file:///srv/app/winston-app.js:25:14\n ...","timestamp":"2026-11-07T14:19:53.864Z"}
+```
+
+LogBrew recibe los mismos 3 registros. Los campos pasan a ser metadatos
+`context.*`.
+
+| `message` | `level` | `metadata` |
+| --- | --- | --- |
+| `order created` | `info` | `winstonLevel` `info`, `context.component` `checkout`, `context.orderId` `ord_1001`, `context.totalCents` 4200 |
+| `payment retry` | `warning` | `winstonLevel` `warn`, `context.component` `checkout`, `context.attempt` 2 |
+| `card declined` | `error` | `winstonLevel` `error`, `context.component` `checkout`, `errorName` `Error`, `errorMessage` `card declined` |
+
+El transport envía el nombre y el mensaje del error, pero no la traza de pila.
+Fija `includeErrorStack: true` en `createLogBrewWinstonTransport()` para enviar
+la traza de pila. Cada mensaje también se convierte en un paso anterior de la
+siguiente incidencia. Fija `breadcrumbs: false` para evitarlo.
+
+## Logger de Pino
+
+Guarda este archivo como `pino-app.js`. Llama a
+`installLogBrewPinoInstrumentation()` una vez, antes del primer log. La función
+lee cada registro de Pino terminado. Pino sigue escribiendo en su propio
+destino.
+
+```js
+import pino from "pino";
+import {
+  createLogBrewNodeClient,
+  installLogBrewPinoInstrumentation
+} from "@logbrew/node";
+
+const client = createLogBrewNodeClient();
+installLogBrewPinoInstrumentation({ client });
+
+const logger = pino({
+  level: "info",
+  redact: ["password", "token", "req.headers.authorization"]
+});
+const orderLogger = logger.child({ component: "checkout" });
+
+orderLogger.debug("cart loaded");
+orderLogger.info({ orderId: "ord_1001", totalCents: 4200 }, "order created");
+orderLogger.warn({ attempt: 2, token: "tok_example" }, "payment retry");
+orderLogger.error(new Error("card declined"), "payment failed");
+
+await client.shutdown();
+```
+
+Ejecuta `node pino-app.js`. Aquí el nombre del host y la traza de pila
+aparecen acortados.
+
+```text
+{"level":30,"time":1794061059490,"pid":13985,"hostname":"app-host","component":"checkout","orderId":"ord_1001","totalCents":4200,"msg":"order created"}
+{"level":40,"time":1794061059493,"pid":13985,"hostname":"app-host","component":"checkout","attempt":2,"token":"[Redacted]","msg":"payment retry"}
+{"level":50,"time":1794061059494,"pid":13985,"hostname":"app-host","component":"checkout","err":{"type":"Error","message":"card declined","stack":"Error: card declined\n ..."},"msg":"payment failed"}
+```
+
+LogBrew recibe 3 registros. Pino descarta el registro `debug` antes de que
+LogBrew lo vea.
+
+| `message` | `level` | `metadata` |
+| --- | --- | --- |
+| `order created` | `info` | `pinoLevel` `info`, `pinoLevelNumber` 30, `context.component` `checkout`, `context.orderId` `ord_1001`, `context.totalCents` 4200 |
+| `payment retry` | `warning` | `pinoLevel` `warn`, `pinoLevelNumber` 40, `context.component` `checkout`, `context.attempt` 2 |
+| `payment failed` | `error` | `pinoLevel` `error`, `pinoLevelNumber` 50, `context.component` `checkout`, `errorName` `Error`, `errorMessage` `card declined` |
+
+El campo `token` no llega a LogBrew. LogBrew descarta los campos de
+credenciales, cookies, cuerpo, parámetros de consulta, URL y traza de pila.
+Además, mantiene tus rutas `redact` de Pino como segundo control. `pid`,
+`hostname` y `time` son valores predeterminados de Pino, así que LogBrew no los
+copia.
+
+La captura automática requiere Pino 9.11 o posterior en la línea 9.x, o Pino
+10.1 o posterior. Para versiones anteriores de Pino, usa
+`createLogBrewPinoDestination()` de `@logbrew/sdk` como destino de Pino.
+
+Para leer la salida de Pino en desarrollo, envíala a `pino-pretty`.
+
+```bash
+node pino-app.js | npx pino-pretty
+```
+
+## Logger de Express
+
+`logbrewMiddleware()` crea 1 span de solicitud por cada solicitud.
+`logbrewErrorHandler()` informa de los errores como incidencias. Un log de Pino
+dentro de una solicitud recibe el ID de traza y el ID de span de esa solicitud.
+Guarda este archivo como `express-app.js`.
+
+```js
+import express from "express";
+import pino from "pino";
+import { logbrewErrorHandler, logbrewMiddleware } from "@logbrew/express";
+import {
+  createLogBrewNodeClient,
+  installLogBrewPinoInstrumentation
+} from "@logbrew/node";
+
+const client = createLogBrewNodeClient();
+installLogBrewPinoInstrumentation({ client });
+const logger = pino({ level: "info" });
+
+const app = express();
+app.use(logbrewMiddleware());
+
+app.get("/orders/:orderId", (req, res) => {
+  logger.info({ orderId: req.params.orderId }, "order loaded");
+  res.json({ ok: true });
+});
+
+app.get("/fail", () => {
+  throw new Error("inventory service timeout");
+});
+
+app.use(logbrewErrorHandler());
+app.use((err, req, res, next) => {
+  logger.error(err, "request failed");
+  res.status(500).json({ error: "internal" });
+});
+
+const server = app.listen(3000, () => logger.info("listening on 3000"));
+
+process.on("SIGTERM", () => {
+  server.close(async () => {
+    await client.shutdown();
+    process.exit(0);
+  });
+});
+```
+
+Inicia la app. Después, envía 2 solicitudes desde una segunda terminal.
+
+```bash
+curl -s http://127.0.0.1:3000/orders/ord_1001
+curl -s http://127.0.0.1:3000/fail
+```
+
+LogBrew recibe estos eventos. El log y el span de cada solicitud tienen el
+mismo ID de traza.
+
+| Evento | Nombre o mensaje | Traza |
+| --- | --- | --- |
+| span | `GET /orders/:orderId`, estado `ok` | `4f18970f494d633c2164588fee9c692a` |
+| log | `order loaded` | `4f18970f494d633c2164588fee9c692a` |
+| incidencia | `GET /fail failed`, mensaje `inventory service timeout` | `d273e106d73ce6c5a5955e5a8c74d2d0` |
+| span | `GET /fail`, estado `error` | `d273e106d73ce6c5a5955e5a8c74d2d0` |
+| log | `request failed` | `d273e106d73ce6c5a5955e5a8c74d2d0` |
+
+El nombre del span usa la plantilla de la ruta, no la ruta concreta. El log
+`listening on 3000` no tiene traza, porque está fuera de una solicitud.
+
+Deja que el middleware cree sus propios clientes de solicitud. No pases el
+`client` de todo el proceso a `logbrewMiddleware()` ni a
+`logbrewErrorHandler()`. El middleware cierra su cliente de solicitud después
+de cada respuesta.
+
+### Añade la traza a los logs de Winston
+
+Con Winston, pasa la traza activa al transport.
+
+```js
+import { createLogBrewWinstonTransport } from "@logbrew/sdk";
+import { createLogBrewNodeClient, getActiveLogBrewTrace } from "@logbrew/node";
+
+const client = createLogBrewNodeClient();
+const logbrewTransport = createLogBrewWinstonTransport({
+  client,
+  traceProvider: getActiveLogBrewTrace
+});
+```
+
+Añade `logbrewTransport` a la lista `transports` del logger. Así, un log de
+Winston dentro de una solicitud de Express tiene el ID de traza y el ID de span
+de la solicitud.
+
+## Vuelve a leer los logs
+
+```bash
+logbrew read logs --service checkout-api --since 1h --json
+logbrew read logs --severity error --search "request failed" --since 1h --json
+logbrew read logs --trace "<trace_id>" --since 1h --json
+```
+
+El último comando lee todos los logs de 1 solicitud. Copia `<trace_id>` de una
+traza o de una incidencia. Para leer desde CI o desde un agente de
+programación, usa una clave de lectura del proyecto. Consulta
+[Verifica tu configuración](/es/guides/verify-setup).
+
+## Apaga sin perder logs
+
+El cliente envía los eventos en cola 1 segundo después del primer evento o al
+llegar a 50 eventos. Cuando el event loop queda vacío, el cliente envía los
+eventos pendientes durante 2 segundos como máximo. `process.exit()` y las
+señales del sistema se saltan ese paso. Llama a `await client.shutdown()` antes
+de salir, como hace el handler de `SIGTERM` del ejemplo de Express.
+
+## Soluciona problemas
+
+| Síntoma | Causa | Solución |
+| --- | --- | --- |
+| `createLogBrewNodeClient requires serverApiKey, apiKey, LOGBREW_SERVER_API_KEY, or LOGBREW_API_KEY` | La clave no está definida en esta shell. | Vuelve a ejecutar el paso `export`. |
+| Los logs `debug` de Winston aparecen en LogBrew pero no en la consola | El transport de LogBrew no aplica el nivel del logger. | Añade el formato de filtro de nivel del ejemplo de Winston. |
+| Los logs de Pino no aparecen en LogBrew | La versión de Pino no tiene tracing channel, o los logs se escribieron antes de `installLogBrewPinoInstrumentation()`. | Usa Pino 9.11 o posterior, o 10.1 o posterior. Instala la captura antes del primer log. |
+| Los logs se detienen después de la primera solicitud, y `client.shutdown()` lanza `client is already shut down` | El cliente de todo el proceso se pasó al middleware de Express. | Quita la opción `client` de `logbrewMiddleware()` y `logbrewErrorHandler()`. |
+| Faltan los últimos logs después de un despliegue | El proceso terminó antes de la entrega. | Llama a `await client.shutdown()` en el handler de `SIGTERM`. |
+
+Para elegir los campos de log, consulta
+[Logging estructurado](/es/concepts/structured-logging). Para otros frameworks,
+consulta [Integración del SDK](/es/guides/sdk-ingestion).

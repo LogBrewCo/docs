@@ -1,0 +1,456 @@
+---
+title: "Python loglama, log seviyeleri ve hata yönetimi"
+sidebarTitle: "Python loglama"
+description: "Python loglamayı doğru log seviyeleriyle kurun, Python hatalarını ve istisna türlerini yönetin, logları ve çökmeleri LogBrew'e gönderin."
+---
+
+LogBrew, geliştiriciler ve kodlama asistanları için bir gözlemlenebilirlik
+platformudur. Cömert bir ücretsiz planı vardır ve kart gerektirmez.
+
+Bu rehber standart `logging` modülüyle Python loglamayı, 5 Python log
+seviyesini, Python hata yönetimini ve yaygın Python hata türlerini anlatır. Son
+bölümler aynı logları ve çökmeleri `logbrew-sdk` 0.1.29 ile LogBrew'e gönderir.
+Her örnek Python 3.13 üzerinde çalıştırıldı. Her çıktı bloğu gerçek çıktıyı
+gösterir.
+
+Flask uygulaması için bunun yerine [Flask loglama](/tr/guides/flask) rehberini
+kullanın. O rehber aynı loglama yapılandırmasına istek izlerini ekler.
+
+## İlk Python logunuzu yazın
+
+Bu dosyayı `app.py` olarak kaydedin. `logging.basicConfig()` fonksiyonunu
+programın giriş noktasında bir kez çağırın. Her modülde adlandırılmış bir logger
+alın.
+
+```python
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+logger = logging.getLogger("billing")
+
+logger.debug("cache warmed")
+logger.info("invoice created")
+logger.warning("payment retry %d of %d", 2, 3)
+
+try:
+    total = 100 / 0
+except ZeroDivisionError:
+    logger.exception("invoice total failed")
+```
+
+`python3 app.py` komutunu çalıştırın. Çıktı standart hataya yazılır.
+
+```text
+2026-11-07 17:21:29,602 INFO billing invoice created
+2026-11-07 17:21:29,602 WARNING billing payment retry 2 of 3
+2026-11-07 17:21:29,602 ERROR billing invoice total failed
+Traceback (most recent call last):
+  File "/srv/app/app.py", line 14, in <module>
+    total = 100 / 0
+            ~~~~^~~
+ZeroDivisionError: division by zero
+```
+
+Seviye `INFO` olduğu için `debug` kaydı görünmez. `logger.exception()` metodu
+`ERROR` seviyesinde log yazar ve traceback'i ekler. Bu metodu yalnızca bir
+`except` bloğu içinde çağırın.
+
+Değerleri `"payment retry %d of %d", 2, 3` örneğindeki gibi argüman olarak
+verin. Python mesajı yalnızca bir handler kaydı kabul ettiğinde oluşturur. Mesaj
+şablonu her yeniden denemede aynı kalır, bu yüzden onu arayabilirsiniz.
+
+## Python log seviyeleri
+
+Logger bir kaydı yalnızca kaydın seviyesi logger'ın seviyesine eşit veya ondan
+yüksekse gönderir. Handler daha yüksek ikinci bir seviye ayarlayabilir.
+
+| Seviye | Sayı | Ne zaman kullanılır |
+| --- | --- | --- |
+| `DEBUG` | 10 | Yalnızca hata ayıklarken gereken ayrıntılar. |
+| `INFO` | 20 | Programın çalıştığını doğrulayan normal olaylar, örneğin başlayan bir iş. |
+| `WARNING` | 30 | Programın toparlandığı beklenmeyen bir durum, örneğin bir yeniden deneme. |
+| `ERROR` | 40 | Başarısız bir işlem. Program çalışmaya devam eder. |
+| `CRITICAL` | 50 | Programı veya ana bir özelliği durduran bir hata. |
+
+Kök logger `WARNING` seviyesiyle başlar. Yeni bir logger'ın seviyesi `NOTSET`
+(0) olur ve üst logger'ın seviyesini kullanır. Canlı ortamda `INFO` ayarlayın.
+`DEBUG` seviyesini yalnızca geliştirmede veya kısa bir tanı için ayarlayın.
+
+```python
+logging.getLogger("billing").setLevel(logging.DEBUG)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+```
+
+İlk satır tek bir modülün debug kayıtlarını gösterir. İkinci satır bir
+kütüphanenin gürültüsünü kaldırır.
+
+## Logger, handler ve formatter
+
+- Logger çağrıyı alır. Logger adının modül yoluyla eşleşmesi için
+  `logging.getLogger(__name__)` kullanın.
+- Handler kayıtları konsol, dosya veya LogBrew gibi bir hedefe gönderir.
+- Formatter bir kaydı metne dönüştürür.
+
+Bir kütüphane loglamayı yapılandırmamalıdır. Kendi logger'ına yalnızca bir
+`logging.NullHandler()` ekler. Handler'ları ve seviyeleri uygulama bir kez
+yapılandırır. Büyük bir yapılandırma için `logging.config.dictConfig()`
+kullanın.
+
+## Python hata yönetimi
+
+Ele alabileceğiniz en özel istisnayı yakalayın. Yalnızca başarı durumunda
+çalışan kod için `else`, her zaman çalışan kod için `finally` kullanın. Asıl
+nedeni korumak için `raise ... from error` kullanın.
+
+Bu dosyayı `orders.py` olarak kaydedin.
+
+```python
+import logging
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
+logger = logging.getLogger("orders")
+
+
+class OrderError(Exception):
+    """The order cannot be processed."""
+
+
+def parse_quantity(raw):
+    try:
+        quantity = int(raw)
+    except ValueError as error:
+        raise OrderError(f"quantity must be a whole number, got {raw!r}") from error
+    else:
+        logger.info("quantity parsed")
+        return quantity
+    finally:
+        logger.debug("parse attempt finished")
+
+
+for raw in ["3", "three"]:
+    try:
+        parse_quantity(raw)
+    except OrderError:
+        logger.exception("order rejected")
+```
+
+Çıktı zincirdeki iki istisnayı da gösterir.
+
+```text
+INFO orders quantity parsed
+ERROR orders order rejected
+Traceback (most recent call last):
+  File "/srv/app/orders.py", line 13, in parse_quantity
+    quantity = int(raw)
+ValueError: invalid literal for int() with base 10: 'three'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/srv/app/orders.py", line 25, in <module>
+    parse_quantity(raw)
+    ~~~~~~~~~~~~~~^^^^^
+  File "/srv/app/orders.py", line 15, in parse_quantity
+    raise OrderError(f"quantity must be a whole number, got {raw!r}") from error
+OrderError: quantity must be a whole number, got 'three'
+```
+
+Her istisna için bu kurallara uyun.
+
+- Bir istisnayı ele aldığınız yerde bir kez loglayın. Onu her katmanda loglayıp
+  yeniden fırlatmayın, çünkü her katman yinelenen bir kayıt ekler.
+- `except Exception: pass` yazmayın. Bir hatayı yok sayarsanız onu nedeniyle
+  birlikte `WARNING` veya daha yüksek bir seviyede loglayın.
+- `BaseException` yerine `Exception` yakalayın. `BaseException` ayrıca
+  `KeyboardInterrupt` ve `SystemExit` istisnalarını da yakalar. Bu ikisi
+  programı bilerek durdurur.
+- Çağıranların ele alması gereken hatalar için `OrderError` örneğindeki gibi
+  kendi istisna sınıflarınızı tanımlayın.
+
+### Birden fazla hatayı bildirin
+
+Python 3.11 ve sonrası bir `ExceptionGroup` fırlatabilir. Tek bir kontrol birden
+fazla hata bulduğunda onu kullanın. Her türü `except*` ile ele alın.
+
+```python
+def validate(order):
+    errors = []
+    if not order.get("email"):
+        errors.append(ValueError("email is required"))
+    if order.get("quantity", 0) < 1:
+        errors.append(ValueError("quantity must be 1 or more"))
+    if errors:
+        raise ExceptionGroup("order is invalid", errors)
+
+
+try:
+    validate({"quantity": 0})
+except* ValueError as group:
+    for error in group.exceptions:
+        logger.warning("validation failed: %s", error)
+```
+
+```text
+WARNING orders validation failed: email is required
+WARNING orders validation failed: quantity must be 1 or more
+```
+
+## Yaygın Python hata türleri
+
+Bir programın ele alabileceği tüm yerleşik hatalar `Exception` sınıfından türer.
+Bu tablo en sık gördüğünüz Python hatalarını ve her biri için ilk kontrolü
+listeler.
+
+| Hata türü | Python bu hatayı ne zaman fırlatır | İlk kontrol |
+| --- | --- | --- |
+| `SyntaxError` | Kod geçerli bir Python kodu değildir. Dosya çalışmaz. | Mesajdaki satırı ve sütunu okuyun. |
+| `IndentationError` | Bir bloğun girintisi doğru değildir. | 4 boşluk kullanın, sekme kullanmayın. |
+| `NameError` | Bir ad tanımlı değildir. | Yazımı ve import satırını kontrol edin. |
+| `AttributeError` | Nesnede bu adda bir öznitelik yoktur. | Nesnenin türünü kontrol edin. Nesne çoğu zaman `None` olur. |
+| `TypeError` | Bir işlem yanlış türde bir değer alır. | Argümanların türlerini kontrol edin. |
+| `ValueError` | Değerin türü doğrudur ama değerin kendisi geçerli değildir, örneğin `int("three")`. | Girdiyi dönüştürmeden önce doğrulayın. |
+| `KeyError` | Sözlükte böyle bir anahtar yoktur. | `dict.get()` kullanın veya `key in mapping` ile kontrol edin. |
+| `IndexError` | Bir dizi indeksi aralığın dışındadır. | İndeksi okumadan önce uzunluğu kontrol edin. |
+| `ZeroDivisionError` | Bir bölme veya mod işlemi sıfır kullanır. | Önce böleni kontrol edin. |
+| `ModuleNotFoundError` | Bir import bir modülü bulamaz. Bu hata `ImportError` sınıfının bir alt sınıfıdır. | Paketi etkin ortama kurun. |
+| `FileNotFoundError` | Bir dosya veya dizin yoktur. Bu hata `OSError` sınıfının bir alt sınıfıdır. | Yolu ve çalışma dizinini kontrol edin. |
+| `PermissionError` | Sürecin bir dosyaya veya kaynağa erişimi yoktur. | Dosyanın sahibini ve izinlerini kontrol edin. |
+| `TimeoutError` | Bir işlem zamanında bitmez. | Sınırlı bir yeniden deneme ekleyin, ardından son hatayı loglayın. |
+| `RecursionError` | Çağrı yığını özyineleme sınırından daha derindir. | Durmayan çağrıyı bulun. |
+| `RuntimeError` | Hata başka bir kategoriye uymaz. | Mesajı okuyun. Kütüphaneler bu hatayı sık fırlatır. |
+
+`KeyboardInterrupt` ve `SystemExit` istisnaları `Exception` sınıfından değil,
+`BaseException` sınıfından türer. Bunlar kodunuzdaki hatalar değildir.
+
+## Python loglarını LogBrew'e gönderin
+
+`LogBrewLoggingHandler` standart bir loglama handler'ıdır. Kabul ettiği her
+kaydı LogBrew'e gönderir. Konsol handler'ı değişmez.
+
+<Steps>
+  <Step title="Bir proje anahtarı oluşturun">
+    [CLI](/tr/guides/cli) ile giriş yapın. Bir proje oluşturun. Projenin alım
+    anahtarını (ingest key) yalnızca sahibinin okuyabildiği bir dosyada
+    saklayın.
+
+    ```bash
+    install -d -m 700 "$HOME/.logbrew"
+    logbrew projects create billing-worker \
+      --runtime python \
+      --environment development \
+      --ingest-key-file "$HOME/.logbrew/billing-worker.ingest" \
+      --json
+    ```
+
+    CLI anahtarı ekrana yazdırmaz. Canlı ortamda platformunuzun gizli anahtar
+    yöneticisini kullanın.
+  </Step>
+
+  <Step title="SDK'yı kurun">
+    Uygulamanın sanal ortamını etkinleştirin. Ardından paketi kurun. Paket
+    Python 3.10 veya üstünü gerektirir.
+
+    ```bash
+    python3 -m pip install "logbrew-sdk>=0.1.29"
+    ```
+  </Step>
+
+  <Step title="Anahtarı ve dağıtım bilgilerini ayarlayın">
+    ```bash
+    export LOGBREW_SERVER_API_KEY="$(tr -d '\r\n' < "$HOME/.logbrew/billing-worker.ingest")"
+    export LOGBREW_SERVICE_NAME="billing-worker"
+    export LOGBREW_ENVIRONMENT="development"
+    export LOGBREW_RELEASE="billing-worker@1.0.0"
+    ```
+
+    İstemci her olaya hizmeti, ortamı ve sürümü ekler.
+  </Step>
+
+  <Step title="Handler'ı ekleyin">
+    Bu dosyayı `worker.py` olarak kaydedin. İstemciyi oluşturmadan önce
+    `logging.basicConfig()` fonksiyonunu çağırın. İstemci kök logger'a bir
+    handler ekler. Kök logger'da zaten bir handler varsa `basicConfig()` hiçbir
+    şey yapmaz.
+
+    ```python
+    import logging
+    import os
+
+    from logbrew_sdk import (
+        HttpTransport,
+        LogBrewClient,
+        LogBrewLoggingHandler,
+        install_process_error_capture,
+    )
+
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
+
+    client = LogBrewClient.create(
+        api_key=os.environ["LOGBREW_SERVER_API_KEY"],
+        transport=HttpTransport(),
+    )
+    install_process_error_capture(client)
+
+    logger = logging.getLogger("billing")
+    logger.addHandler(LogBrewLoggingHandler(client))
+
+    logger.info("invoice created", extra={"invoice_id": "inv_1001", "amount_cents": 4200})
+
+    try:
+        {"plan": "pro"}["seats"]
+    except KeyError:
+        logger.exception("seat count missing")
+
+    client.shutdown()
+    ```
+
+    `HttpTransport()` olayları arka planda, ilk olaydan 1 saniye sonra veya 50
+    olayda gönderir. `client.shutdown()` kalan olayları gönderir ve istemciyi
+    kapatır.
+  </Step>
+
+  <Step title="Programı çalıştırın">
+    ```bash
+    python3 worker.py
+    ```
+
+    Konsol çıktısı değişmez. LogBrew her kayıt için 1 log olayı alır. Aşağıda
+    ilk olay, paylaşılan çalışma zamanı bağlamı olmadan gösterilir.
+
+    ```json
+    {
+      "type": "log",
+      "id": "evt_log_54bfab6d7a9e4a2b88cc1e7872722e4d",
+      "timestamp": "2026-11-07T14:21:36.457Z",
+      "attributes": {
+        "message": "invoice created",
+        "level": "info",
+        "logger": "billing",
+        "metadata": {
+          "fileName": "worker.py",
+          "functionName": "<module>",
+          "levelName": "INFO",
+          "levelNumber": 20,
+          "lineNumber": 22,
+          "module": "worker",
+          "processName": "MainProcess",
+          "threadName": "MainThread",
+          "invoice_id": "inv_1001",
+          "amount_cents": 4200
+        }
+      }
+    }
+    ```
+
+    `extra={...}` içindeki ilkel değerler meta veri olur. İkinci olayda
+    `exceptionName` değeri `KeyError`, `exceptionMessage` değeri `'seats'` olur.
+    Tam traceback metnini göndermek için handler'ı `include_exception_text=True`
+    ile oluşturun.
+  </Step>
+
+  <Step title="Logları geri okuyun">
+    ```bash
+    logbrew read logs \
+      --service billing-worker \
+      --environment development \
+      --since 1h \
+      --json
+
+    logbrew read logs --severity error --search "seat count missing" --since 1h --json
+    ```
+
+    Eşleşen bir okuma, LogBrew'ün logları sakladığını gösterir. CI'dan veya bir
+    kodlama asistanından okumak için proje okuma anahtarı (read key) kullanın.
+    [Kurulumunuzu doğrulayın](/tr/guides/verify-setup) sayfasına bakın.
+  </Step>
+</Steps>
+
+### LogBrew'e hangi kayıtların gideceğini seçin
+
+Daha az kayıt göndermek için handler'a kendi seviyesini verin. Konsol yine
+`INFO` ve üstünü alır.
+
+```python
+logger.addHandler(LogBrewLoggingHandler(client, level=logging.WARNING))
+```
+
+Python seviyeleri LogBrew seviyelerine dönüşür. Asıl seviye adı ve sayısı meta
+veride kalır.
+
+| Python seviyesi | LogBrew seviyesi |
+| --- | --- |
+| `DEBUG`, `INFO` | `info` |
+| `WARNING` | `warning` |
+| `ERROR` | `error` |
+| `CRITICAL` | `critical` |
+
+## Python çökmelerini sorun olarak bildirin
+
+`install_process_error_capture(client)` betiklerde, worker süreçlerinde,
+başlangıç kodunda ve iş parçacıklarında ele alınmamış istisnaları bildirir. Her
+çökme 1 sorun olur. Sorun istisna türünü, mesajı, yığın çerçevelerini ve
+zincirlenmiş nedenleri içerir. Python traceback'i yine yazdırır ve önceki gibi
+çıkar.
+
+Bu dosyayı `startup.py` olarak kaydedin ve çalıştırın.
+
+```python
+import os
+
+from logbrew_sdk import HttpTransport, LogBrewClient, install_process_error_capture
+
+client = LogBrewClient.create(
+    api_key=os.environ["LOGBREW_SERVER_API_KEY"],
+    transport=HttpTransport(),
+)
+install_process_error_capture(client)
+
+def load_config(path):
+    with open(path) as file:
+        return file.read()
+
+load_config("missing.toml")
+```
+
+```text
+Traceback (most recent call last):
+  File "/srv/app/startup.py", line 15, in <module>
+    load_config("missing.toml")
+    ~~~~~~~~~~~^^^^^^^^^^^^^^^^
+  File "/srv/app/startup.py", line 12, in load_config
+    with open(path) as file:
+         ~~~~^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'missing.toml'
+```
+
+LogBrew bir sorun alır. Sorunun başlığı `FileNotFoundError`, seviyesi
+`critical`, mekanizması `python.excepthook` olur. Çerçeveler dosya adını, satırı
+ve fonksiyonu içerir ama tam yolu içermez. Bir iş parçacığındaki çökmenin
+seviyesi `error` olur. Python çıkmadan önce SDK teslim için en fazla 2 saniye
+bekler.
+
+```bash
+logbrew read issues --since 1h --json
+```
+
+Sorun istisna mesajını içerir. İstisna mesajlarına veya log mesajlarına kimlik
+bilgisi ya da kişisel veri koymayın. [Yakalanan verileri
+denetleyin](/tr/guides/safe-capture) sayfasına bakın.
+
+## Sorunları giderin
+
+| Belirti | Neden | Çözüm |
+| --- | --- | --- |
+| LogBrew'ü ekledikten sonra konsol çıktısı yok | `logging.basicConfig()`, `LogBrewClient.create()` çağrısından sonra çalıştı. | `logging.basicConfig()` fonksiyonunu `LogBrewClient.create()` çağrısından önce çağırın. |
+| `INFO` kayıtları görünmüyor | Logger, kök logger'ın `WARNING` seviyesini kullanıyor. | Seviyeyi `basicConfig()` içinde ayarlayın veya `logger.setLevel(logging.INFO)` çağırın. |
+| Her kayıt 2 kez görünüyor | Kayıt önce logger'daki bir handler'a, sonra kök logger'daki aynı türden bir handler'a gidiyor. | Her handler'ı bir kez ekleyin veya `logger.propagate = False` ayarlayın. |
+| Zorla durdurmadan sonra olaylar eksik | `SIGKILL` veya `os._exit()` süreci teslimden önce durdurdu. | Düzgün kapanma yolunda `client.shutdown()` çağırın. |
+| `KeyError: 'LOGBREW_SERVER_API_KEY'` | Değişken bu kabukta ayarlı değil. | `export` adımını yeniden çalıştırın. |
+
+Web uygulamaları için [Flask loglama](/tr/guides/flask) rehberine bakın. Log
+formatı seçmek için [Yapılandırılmış loglama](/tr/concepts/structured-logging)
+sayfasına bakın. Diğer çalışma zamanları için [SDK
+entegrasyonu](/tr/guides/sdk-ingestion) rehberine bakın.

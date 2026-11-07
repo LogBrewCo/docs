@@ -1,0 +1,144 @@
+---
+title: "Structured logging, praktik terbaik, dan format log"
+sidebarTitle: "Structured logging"
+description: "Pelajari apa itu structured logging, pilih format log JSON dengan field standar, dan terapkan praktik terbaik logging agar log mudah dicari."
+---
+
+LogBrew adalah platform observabilitas untuk developer dan agen coding, dengan paket gratis yang besar dan tanpa perlu kartu kredit.
+
+Structured logging menulis setiap record log sebagai field bernama, bukan sebagai satu baris teks bebas. Dengan begitu, program, orang, atau agen coding dapat memfilter record berdasarkan field, menghitungnya, dan menghubungkannya ke trace permintaan.
+
+## Log teks dan log terstruktur
+
+Log teks ini berisi fakta yang sama dengan log terstruktur di bawahnya.
+
+```text
+2026-11-07 14:21:19 ERROR checkout payment failed for order ord_1001 after 5 s
+```
+
+```json
+{"timestamp": "2026-11-07T14:21:19.773+00:00", "level": "error", "logger": "checkout", "message": "payment failed", "order_id": "ord_1001", "error.type": "TimeoutError", "error.message": "payment provider did not answer in 5 s"}
+```
+
+Untuk menemukan semua pembayaran gagal untuk 1 pesanan di log teks, Anda harus menulis pola untuk setiap variasi pesan. Di log terstruktur, Anda memfilter berdasarkan `message` dan `order_id`. Pesannya sama untuk setiap pesanan, jadi Anda juga bisa menghitungnya.
+
+## Pilih format log
+
+Gunakan JSON, dengan 1 objek di setiap baris. Gunakan nama field yang sama di semua layanan. Tabel ini mencantumkan field dasar dan nama padanannya di model data log OpenTelemetry dan di LogBrew.
+
+| Field | Isi | OpenTelemetry | LogBrew |
+| --- | --- | --- | --- |
+| `timestamp` | Waktu UTC dalam format RFC 3339, dengan milidetik | `Timestamp` | `timestamp` peristiwa |
+| `level` | 1 dari sekumpulan kecil nilai tetap, misalnya `info`, `warning`, `error`, `critical` | `SeverityText`, `SeverityNumber` | `level` |
+| `message` | Teks tetap untuk peristiwa, tanpa nilai variabel | `Body` | `message` |
+| `logger` | Modul atau komponen yang menulis record | Instrumentation scope | `logger` |
+| `trace_id`, `span_id` | ID trace dan span yang aktif | `TraceId`, `SpanId` | `context.trace` |
+| `service`, `environment`, `release` | Tempat kode berjalan dan versinya | Atribut resource | `context.resource` |
+| `error.type`, `error.message` | Class dan pesan exception | `exception.type`, `exception.message` | `metadata` |
+| Field peristiwa | Nilai untuk peristiwa ini, misalnya `order_id` | `Attributes` | `metadata` |
+
+Angka tingkat keparahan OpenTelemetry berkisar dari 1 sampai 24. `INFO` dimulai di 9, `WARN` di 13, `ERROR` di 17, dan `FATAL` di 21. LogBrew menerima log OTLP secara langsung. Lihat [Kirim data OpenTelemetry](/id/guides/opentelemetry).
+
+## Praktik terbaik logging
+
+### Buat pesan tetap
+
+Tulis `"payment failed"` dan masukkan ID pesanan ke sebuah field. Pesan yang tetap memungkinkan Anda mengelompokkan, menghitung, dan memasang alert untuk 1 jenis peristiwa.
+
+### Gunakan 1 nama untuk setiap field
+
+Pilih `order_id` atau `orderId` sekali, lalu gunakan di semua layanan. Untuk field umum, gunakan nama dari konvensi semantik OpenTelemetry, misalnya `http.response.status_code`.
+
+### Pilih level berdasarkan tindakan yang dibutuhkan
+
+`error` berarti sebuah operasi gagal. `warning` berarti program berhasil pulih. `info` memastikan pekerjaan berjalan normal. Gunakan `debug` hanya saat Anda menelusuri kendala.
+
+### Tulis waktu dalam UTC
+
+Gunakan RFC 3339 dengan milidetik dan offset, misalnya `2026-11-07T14:21:19.773+00:00`. Tanpa UTC dan milidetik, record dari zona waktu yang berbeda, atau record dalam detik yang sama, tersusun dengan urutan yang salah.
+
+### Tambahkan trace ID dan span ID
+
+Dengan ID ini, Anda bisa membaca semua log dari 1 permintaan di seluruh layanan.
+
+### Tetapkan layanan, lingkungan, dan rilis sekali saja
+
+Konfigurasikan semuanya saat startup, bukan di setiap panggilan. Tanpa rilis, Anda tidak tahu deployment mana yang menyebabkan perubahan.
+
+### Catat error sekali, di tempat Anda menanganinya
+
+Tambahkan tipe dan pesan error. Jangan mencatat error yang sama lagi di setiap lapisan.
+
+### Jauhkan secret dan data pribadi
+
+Jangan mencatat kata sandi, token, cookie, body permintaan, atau URL lengkap dengan query string. Gunakan fitur penyamaran di logger Anda. Lihat [Penyamaran log](/id/guides/safe-capture).
+
+### Gunakan nama field yang tetap
+
+Jangan memakai nilai sebagai nama field, misalnya `{"ord_1001": "failed"}`. Setiap nilai baru lalu menambah field baru, dan 1 filter tidak bisa menemukan semua pesanan.
+
+### Tulis JSON ke standard output di produksi
+
+Gunakan format yang mudah dibaca hanya saat pengembangan.
+
+## Structured logging di Python
+
+Modul standar `logging` tidak punya formatter JSON. Formatter ini menulis field dasar dan nilai dari `extra={"fields": {...}}`.
+
+```python
+import json
+import logging
+from datetime import datetime, timezone
+
+
+class JsonFormatter(logging.Formatter):
+    def format(self, record):
+        entry = {
+            "timestamp": datetime.fromtimestamp(record.created, timezone.utc).isoformat(
+                timespec="milliseconds"
+            ),
+            "level": record.levelname.lower(),
+            "logger": record.name,
+            "message": record.getMessage(),
+            **getattr(record, "fields", {}),
+        }
+        if record.exc_info:
+            entry["error.type"] = record.exc_info[0].__name__
+            entry["error.message"] = str(record.exc_info[1])
+        return json.dumps(entry)
+
+
+handler = logging.StreamHandler()
+handler.setFormatter(JsonFormatter())
+logging.basicConfig(level=logging.INFO, handlers=[handler])
+logger = logging.getLogger("checkout")
+
+logger.info("order created", extra={"fields": {"order_id": "ord_1001", "total_cents": 4200}})
+try:
+    raise TimeoutError("payment provider did not answer in 5 s")
+except TimeoutError:
+    logger.error("payment failed", exc_info=True, extra={"fields": {"order_id": "ord_1001"}})
+```
+
+```text
+{"timestamp": "2026-11-07T14:21:19.772+00:00", "level": "info", "logger": "checkout", "message": "order created", "order_id": "ord_1001", "total_cents": 4200}
+{"timestamp": "2026-11-07T14:21:19.773+00:00", "level": "error", "logger": "checkout", "message": "payment failed", "order_id": "ord_1001", "error.type": "TimeoutError", "error.message": "payment provider did not answer in 5 s"}
+```
+
+Untuk mengirim record yang sama ke LogBrew, tambahkan `LogBrewLoggingHandler`. Handler ini mengirim pesan, level, dan logger sebagai field, dan mengirim nilai primitif `extra` sebagai metadata. Lihat [Logging Python](/id/guides/python-logging).
+
+## Structured logging di Node.js
+
+Secara default, Pino menulis 1 baris JSON untuk setiap record. Winston menulis JSON dengan `winston.format.json()`. Keduanya mempertahankan field dari panggilan dan dari child logger. Lihat [Logging Node.js](/id/guides/node-logging) untuk kedua penyiapan dan untuk trace ID di log Express.
+
+## Cari log terstruktur di LogBrew
+
+LogBrew menyimpan setiap log dengan pesan, level, logger, metadata, dan trace-nya. Filter field tersebut dari CLI.
+
+```bash
+logbrew read logs --severity error --since 24h --json
+logbrew read logs --search "payment failed" --service checkout-api --since 24h --json
+logbrew read logs --trace "<trace_id>" --since 24h --json
+```
+
+API juga dapat memfilter berdasarkan nilai metadata bertipe, misalnya angka 500 atau lebih. Lihat [Filter kueri](/id/reference/telemetry-api-filters).

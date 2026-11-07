@@ -1,0 +1,144 @@
+---
+title: "構造化ログのベストプラクティスとログ形式"
+sidebarTitle: "構造化ログ"
+description: "構造化ログとは何かを理解し、標準フィールドを持つ JSON のログ形式を選んで、検索しやすいログを保つベストプラクティスを適用します。"
+---
+
+LogBrew は、開発者とコーディングエージェントのための Observability（可観測性）プラットフォームです。無料枠が充実していて、カードの登録は不要です。
+
+構造化ログは、各ログレコードを1行の自由なテキストではなく、名前付きのフィールドとして書き出します。これにより、プログラム、人、コーディングエージェントが、フィールドでレコードを絞り込み、件数を数え、リクエストのトレースに関連付けられます。
+
+## テキストのログと構造化ログ
+
+次のテキストのログには、その下の構造化ログと同じ情報が入っています。
+
+```text
+2026-11-07 14:21:19 ERROR checkout payment failed for order ord_1001 after 5 s
+```
+
+```json
+{"timestamp": "2026-11-07T14:21:19.773+00:00", "level": "error", "logger": "checkout", "message": "payment failed", "order_id": "ord_1001", "error.type": "TimeoutError", "error.message": "payment provider did not answer in 5 s"}
+```
+
+テキストのログで1件の注文の失敗した支払いをすべて探すには、メッセージのバリエーションごとにパターンを書く必要があります。構造化ログなら、`message` と `order_id` で絞り込めます。メッセージはどの注文でも同じなので、件数も数えられます。
+
+## ログ形式を選ぶ
+
+JSON を使い、1行に1つのオブジェクトを書きます。すべてのサービスで同じフィールド名を使います。次の表に、基本のフィールドと、それに対応する OpenTelemetry のログデータモデルと LogBrew の名前をまとめます。
+
+| フィールド | 内容 | OpenTelemetry | LogBrew |
+| --- | --- | --- | --- |
+| `timestamp` | RFC 3339 形式の UTC 時刻（ミリ秒まで） | `Timestamp` | イベントの `timestamp` |
+| `level` | `info`、`warning`、`error`、`critical` など、少数の固定値のうち1つ | `SeverityText`, `SeverityNumber` | `level` |
+| `message` | イベントを表す固定のテキスト。変数の値は含めません。 | `Body` | `message` |
+| `logger` | レコードを書き出したモジュールやコンポーネント | 計装スコープ | `logger` |
+| `trace_id`, `span_id` | アクティブなトレースとスパンの ID | `TraceId`, `SpanId` | `context.trace` |
+| `service`, `environment`, `release` | コードが動いている場所と、そのバージョン | リソース属性 | `context.resource` |
+| `error.type`, `error.message` | 例外のクラスとメッセージ | `exception.type`, `exception.message` | `metadata` |
+| イベントのフィールド | `order_id` など、このイベント固有の値 | `Attributes` | `metadata` |
+
+OpenTelemetry の重大度の数値は1から24までです。`INFO` は9、`WARN` は13、`ERROR` は17、`FATAL` は21から始まります。LogBrew は OTLP のログを直接受け付けます。[OpenTelemetry のデータを送信する](/ja/guides/opentelemetry)を参照してください。
+
+## ロギングのベストプラクティス
+
+### メッセージを固定する
+
+`"payment failed"` と書き、注文 ID はフィールドに入れます。メッセージが固定されていれば、1種類のイベントとしてグループ化、集計、アラート設定ができます。
+
+### 1つのフィールドに1つの名前を使う
+
+`order_id` か `orderId` のどちらかを一度だけ決め、すべてのサービスで使います。`http.response.status_code` のような一般的なフィールドには、OpenTelemetry のセマンティック規約の名前を使います。
+
+### 必要な対応に合わせてレベルを選ぶ
+
+`error` は、操作が失敗したことを示します。`warning` は、プログラムが回復したことを示します。`info` は、通常の処理が行われたことを示します。`debug` は、問題を調べている間だけ使います。
+
+### 時刻は UTC で書く
+
+`2026-11-07T14:21:19.773+00:00` のように、ミリ秒とオフセット付きの RFC 3339 を使います。UTC とミリ秒がないと、異なるタイムゾーンのレコードや同じ秒のレコードが、間違った順序で並びます。
+
+### トレース ID とスパン ID を追加する
+
+これらの ID があれば、1件のリクエストのすべてのログを、サービスをまたいで読めます。
+
+### サービス、環境、リリースは1回だけ設定する
+
+呼び出しごとではなく、起動時に設定します。リリースがないと、どのデプロイが変化を起こしたのかがわかりません。
+
+### エラーは処理する場所で1回だけ記録する
+
+エラーの種類とメッセージを追加します。同じエラーを各レイヤーでもう一度記録しないでください。
+
+### シークレットと個人データを含めない
+
+パスワード、トークン、Cookie、リクエストの本文、クエリ文字列付きの完全な URL をログに記録しないでください。ロガーの秘匿機能を使います。[ログの秘匿](/ja/guides/safe-capture)を参照してください。
+
+### 固定のフィールド名を使う
+
+`{"ord_1001": "failed"}` のように、値をフィールド名に使わないでください。新しい値が出るたびに新しいフィールドが増え、1つのフィルターですべての注文を見つけられなくなります。
+
+### 本番環境では標準出力に JSON を書く
+
+読みやすい形式は、開発中だけ使います。
+
+## Python の構造化ログ
+
+標準の `logging` モジュールには JSON フォーマッターがありません。次のフォーマッターは、基本のフィールドと `extra={"fields": {...}}` の値を書き出します。
+
+```python
+import json
+import logging
+from datetime import datetime, timezone
+
+
+class JsonFormatter(logging.Formatter):
+    def format(self, record):
+        entry = {
+            "timestamp": datetime.fromtimestamp(record.created, timezone.utc).isoformat(
+                timespec="milliseconds"
+            ),
+            "level": record.levelname.lower(),
+            "logger": record.name,
+            "message": record.getMessage(),
+            **getattr(record, "fields", {}),
+        }
+        if record.exc_info:
+            entry["error.type"] = record.exc_info[0].__name__
+            entry["error.message"] = str(record.exc_info[1])
+        return json.dumps(entry)
+
+
+handler = logging.StreamHandler()
+handler.setFormatter(JsonFormatter())
+logging.basicConfig(level=logging.INFO, handlers=[handler])
+logger = logging.getLogger("checkout")
+
+logger.info("order created", extra={"fields": {"order_id": "ord_1001", "total_cents": 4200}})
+try:
+    raise TimeoutError("payment provider did not answer in 5 s")
+except TimeoutError:
+    logger.error("payment failed", exc_info=True, extra={"fields": {"order_id": "ord_1001"}})
+```
+
+```text
+{"timestamp": "2026-11-07T14:21:19.772+00:00", "level": "info", "logger": "checkout", "message": "order created", "order_id": "ord_1001", "total_cents": 4200}
+{"timestamp": "2026-11-07T14:21:19.773+00:00", "level": "error", "logger": "checkout", "message": "payment failed", "order_id": "ord_1001", "error.type": "TimeoutError", "error.message": "payment provider did not answer in 5 s"}
+```
+
+同じレコードを LogBrew に送信するには、`LogBrewLoggingHandler` を追加します。このハンドラーは、メッセージ、レベル、ロガーをフィールドとして送信し、`extra` のプリミティブ値をメタデータとして送信します。[Python logging](/ja/guides/python-logging) を参照してください。
+
+## Node.js の構造化ログ
+
+Pino はデフォルトで、レコードごとに1行の JSON を書き出します。Winston は `winston.format.json()` で JSON を書き出します。どちらも、呼び出し時のフィールドと子ロガーのフィールドを保持します。両方の設定と、Express のログに付くトレース ID については、[Node.js のログ](/ja/guides/node-logging)を参照してください。
+
+## LogBrew で構造化ログを検索する
+
+LogBrew は、各ログをメッセージ、レベル、ロガー、メタデータ、トレースと一緒に保存します。CLI から、これらのフィールドで絞り込みます。
+
+```bash
+logbrew read logs --severity error --since 24h --json
+logbrew read logs --search "payment failed" --service checkout-api --since 24h --json
+logbrew read logs --trace "<trace_id>" --since 24h --json
+```
+
+API では、500以上の数値のように、型付きのメタデータの値でも絞り込めます。[クエリフィルター](/ja/reference/telemetry-api-filters)を参照してください。

@@ -1,0 +1,394 @@
+---
+title: "Logging Python, level log, dan penanganan error"
+sidebarTitle: "Logging Python"
+description: "Siapkan logging Python dengan level log yang tepat, tangani error dan jenis exception Python, lalu kirim log dan crash ke LogBrew."
+---
+
+LogBrew adalah platform observabilitas untuk developer dan agen coding, dengan paket gratis yang besar dan tanpa perlu kartu kredit.
+
+Panduan ini membahas logging Python dengan modul standar `logging`, 5 level log Python, penanganan error Python, dan jenis error Python yang umum. Bagian terakhir mengirim log dan crash yang sama ke LogBrew dengan `logbrew-sdk` 0.1.29. Setiap contoh dijalankan di Python 3.13, dan setiap blok output menunjukkan output aslinya.
+
+Untuk aplikasi Flask, gunakan [logging Flask](/id/guides/flask) sebagai gantinya. Panduan itu menambahkan trace permintaan ke penyiapan logging yang sama.
+
+## Tulis log Python pertama Anda
+
+Simpan file ini sebagai `app.py`. Panggil `logging.basicConfig()` sekali, di titik masuk program. Ambil logger bernama di setiap modul.
+
+```python
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+logger = logging.getLogger("billing")
+
+logger.debug("cache warmed")
+logger.info("invoice created")
+logger.warning("payment retry %d of %d", 2, 3)
+
+try:
+    total = 100 / 0
+except ZeroDivisionError:
+    logger.exception("invoice total failed")
+```
+
+Jalankan `python3 app.py`. Output masuk ke standard error.
+
+```text
+2026-11-07 17:21:29,602 INFO billing invoice created
+2026-11-07 17:21:29,602 WARNING billing payment retry 2 of 3
+2026-11-07 17:21:29,602 ERROR billing invoice total failed
+Traceback (most recent call last):
+  File "/srv/app/app.py", line 14, in <module>
+    total = 100 / 0
+            ~~~~^~~
+ZeroDivisionError: division by zero
+```
+
+Record `debug` tidak muncul karena levelnya `INFO`. `logger.exception()` mencatat di level `ERROR` dan menambahkan traceback. Panggil fungsi ini hanya di dalam blok `except`.
+
+Teruskan nilai sebagai argumen, seperti `"payment retry %d of %d", 2, 3`. Python membangun pesan hanya saat handler menerima record. Template pesan tetap sama untuk setiap percobaan ulang, jadi Anda bisa mencarinya.
+
+## Level log Python
+
+Logger mengirim record hanya jika level record sama dengan atau lebih tinggi dari level logger. Handler dapat menetapkan level kedua yang lebih tinggi.
+
+| Level | Angka | Gunakan untuk |
+| --- | --- | --- |
+| `DEBUG` | 10 | Detail yang hanya Anda butuhkan saat menelusuri kendala. |
+| `INFO` | 20 | Peristiwa normal yang memastikan program berjalan, misalnya job yang dimulai. |
+| `WARNING` | 30 | Keadaan tak terduga yang berhasil dipulihkan program, misalnya percobaan ulang. |
+| `ERROR` | 40 | Operasi yang gagal. Program tetap berjalan. |
+| `CRITICAL` | 50 | Kegagalan yang menghentikan program atau fitur utama. |
+
+Root logger dimulai di level `WARNING`. Logger baru memiliki level `NOTSET` (0) dan memakai level induknya. Gunakan `INFO` di produksi. Gunakan `DEBUG` hanya saat pengembangan atau untuk diagnosis singkat.
+
+```python
+logging.getLogger("billing").setLevel(logging.DEBUG)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+```
+
+Baris pertama menampilkan record debug untuk satu modul. Baris kedua menghilangkan noise dari sebuah library.
+
+## Logger, handler, dan formatter
+
+- Logger menerima panggilan. Gunakan `logging.getLogger(__name__)` agar nama logger mengikuti path modul.
+- Handler mengirim record ke tujuan, misalnya konsol, file, atau LogBrew.
+- Formatter mengubah record menjadi teks.
+
+Library tidak boleh mengonfigurasi logging. Library hanya menambahkan `logging.NullHandler()` ke logger miliknya sendiri. Aplikasi mengonfigurasi handler dan level satu kali. Untuk konfigurasi yang besar, gunakan `logging.config.dictConfig()`.
+
+## Penanganan error Python
+
+Tangkap exception paling spesifik yang bisa Anda tangani. Gunakan `else` untuk kode yang hanya berjalan saat berhasil dan `finally` untuk kode yang selalu berjalan. Gunakan `raise ... from error` untuk mempertahankan penyebab aslinya.
+
+Simpan file ini sebagai `orders.py`.
+
+```python
+import logging
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
+logger = logging.getLogger("orders")
+
+
+class OrderError(Exception):
+    """The order cannot be processed."""
+
+
+def parse_quantity(raw):
+    try:
+        quantity = int(raw)
+    except ValueError as error:
+        raise OrderError(f"quantity must be a whole number, got {raw!r}") from error
+    else:
+        logger.info("quantity parsed")
+        return quantity
+    finally:
+        logger.debug("parse attempt finished")
+
+
+for raw in ["3", "three"]:
+    try:
+        parse_quantity(raw)
+    except OrderError:
+        logger.exception("order rejected")
+```
+
+Output menampilkan kedua exception dalam rantai exception.
+
+```text
+INFO orders quantity parsed
+ERROR orders order rejected
+Traceback (most recent call last):
+  File "/srv/app/orders.py", line 13, in parse_quantity
+    quantity = int(raw)
+ValueError: invalid literal for int() with base 10: 'three'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/srv/app/orders.py", line 25, in <module>
+    parse_quantity(raw)
+    ~~~~~~~~~~~~~~^^^^^
+  File "/srv/app/orders.py", line 15, in parse_quantity
+    raise OrderError(f"quantity must be a whole number, got {raw!r}") from error
+OrderError: quantity must be a whole number, got 'three'
+```
+
+Ikuti aturan berikut untuk setiap exception.
+
+- Catat exception sekali, di tempat Anda menanganinya. Jangan mencatatnya lalu me-raise ulang di setiap lapisan, karena setiap lapisan menambah record duplikat.
+- Jangan menulis `except Exception: pass`. Jika Anda mengabaikan error, catat error itu di level `WARNING` atau lebih tinggi beserta alasannya.
+- Tangkap `Exception`, bukan `BaseException`. `BaseException` juga menangkap `KeyboardInterrupt` dan `SystemExit`, yang sengaja menghentikan program.
+- Definisikan class exception sendiri untuk error yang harus ditangani pemanggil, seperti `OrderError`.
+
+### Laporkan lebih dari satu error
+
+Python 3.11 dan yang lebih baru dapat me-raise `ExceptionGroup`. Gunakan saat satu pemeriksaan menemukan lebih dari satu kesalahan. Tangani setiap jenis dengan `except*`.
+
+```python
+def validate(order):
+    errors = []
+    if not order.get("email"):
+        errors.append(ValueError("email is required"))
+    if order.get("quantity", 0) < 1:
+        errors.append(ValueError("quantity must be 1 or more"))
+    if errors:
+        raise ExceptionGroup("order is invalid", errors)
+
+
+try:
+    validate({"quantity": 0})
+except* ValueError as group:
+    for error in group.exceptions:
+        logger.warning("validation failed: %s", error)
+```
+
+```text
+WARNING orders validation failed: email is required
+WARNING orders validation failed: quantity must be 1 or more
+```
+
+## Jenis error Python yang umum
+
+Semua error bawaan yang dapat ditangani program mewarisi `Exception`. Tabel ini mencantumkan error Python yang paling sering muncul dan hal pertama yang perlu diperiksa untuk masing-masing.
+
+| Jenis error | Python me-raise-nya saat | Periksa dulu |
+| --- | --- | --- |
+| `SyntaxError` | Kode bukan Python yang valid. File tidak berjalan. | Baca baris dan kolom di pesannya. |
+| `IndentationError` | Indentasi sebuah blok tidak benar. | Gunakan 4 spasi, tanpa tab. |
+| `NameError` | Sebuah nama belum didefinisikan. | Periksa ejaan dan import. |
+| `AttributeError` | Objek tidak punya atribut dengan nama itu. | Periksa tipe objek, yang sering kali `None`. |
+| `TypeError` | Operasi menerima nilai dengan tipe yang salah. | Periksa tipe argumen. |
+| `ValueError` | Tipe nilai benar, tetapi nilainya tidak valid, misalnya `int("three")`. | Validasi input sebelum mengonversinya. |
+| `KeyError` | Dictionary tidak punya key tersebut. | Gunakan `dict.get()` atau periksa `key in mapping`. |
+| `IndexError` | Indeks sequence di luar jangkauan. | Periksa panjangnya sebelum membaca indeks. |
+| `ZeroDivisionError` | Pembagian atau modulo memakai nol. | Periksa pembaginya lebih dulu. |
+| `ModuleNotFoundError` | Import tidak menemukan modul. Error ini adalah subclass dari `ImportError`. | Instal paket di lingkungan yang aktif. |
+| `FileNotFoundError` | File atau direktori tidak ada. Error ini adalah subclass dari `OSError`. | Periksa path dan direktori kerja. |
+| `PermissionError` | Proses tidak punya akses ke file atau resource. | Periksa pemilik dan mode file. |
+| `TimeoutError` | Operasi tidak selesai tepat waktu. | Tambahkan percobaan ulang dengan batas, lalu catat kegagalan terakhir. |
+| `RecursionError` | Call stack lebih dalam dari batas rekursi. | Cari panggilan yang tidak berhenti. |
+| `RuntimeError` | Error tidak cocok dengan kategori lain. | Baca pesannya. Library sering me-raise error ini. |
+
+`KeyboardInterrupt` dan `SystemExit` mewarisi `BaseException`, bukan `Exception`. Keduanya bukan error di kode Anda.
+
+## Kirim log Python ke LogBrew
+
+`LogBrewLoggingHandler` adalah handler logging standar. Handler ini mengirim setiap record yang diterimanya ke LogBrew. Handler konsol tetap sama.
+
+<Steps>
+  <Step title="Buat kunci proyek">
+    Masuk dengan [CLI](/id/guides/cli). Buat proyek dan simpan kunci ingest-nya di file yang hanya bisa dibaca pemiliknya.
+
+    ```bash
+    install -d -m 700 "$HOME/.logbrew"
+    logbrew projects create billing-worker \
+      --runtime python \
+      --environment development \
+      --ingest-key-file "$HOME/.logbrew/billing-worker.ingest" \
+      --json
+    ```
+
+    CLI tidak menampilkan kunci. Di produksi, gunakan secret manager dari platform Anda.
+  </Step>
+
+  <Step title="Instal SDK">
+    Aktifkan lingkungan virtual aplikasi. Lalu instal paketnya. Paket ini membutuhkan Python 3.10 atau yang lebih baru.
+
+    ```bash
+    python3 -m pip install "logbrew-sdk>=0.1.29"
+    ```
+  </Step>
+
+  <Step title="Tetapkan kunci dan identitas deployment">
+    ```bash
+    export LOGBREW_SERVER_API_KEY="$(tr -d '\r\n' < "$HOME/.logbrew/billing-worker.ingest")"
+    export LOGBREW_SERVICE_NAME="billing-worker"
+    export LOGBREW_ENVIRONMENT="development"
+    export LOGBREW_RELEASE="billing-worker@1.0.0"
+    ```
+
+    Klien menambahkan layanan, lingkungan, dan rilis ke setiap peristiwa.
+  </Step>
+
+  <Step title="Tambahkan handler">
+    Simpan file ini sebagai `worker.py`. Panggil `logging.basicConfig()` sebelum Anda membuat klien. Klien menambahkan handler ke root logger, dan `basicConfig()` tidak melakukan apa pun jika root logger sudah punya handler.
+
+    ```python
+    import logging
+    import os
+
+    from logbrew_sdk import (
+        HttpTransport,
+        LogBrewClient,
+        LogBrewLoggingHandler,
+        install_process_error_capture,
+    )
+
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
+
+    client = LogBrewClient.create(
+        api_key=os.environ["LOGBREW_SERVER_API_KEY"],
+        transport=HttpTransport(),
+    )
+    install_process_error_capture(client)
+
+    logger = logging.getLogger("billing")
+    logger.addHandler(LogBrewLoggingHandler(client))
+
+    logger.info("invoice created", extra={"invoice_id": "inv_1001", "amount_cents": 4200})
+
+    try:
+        {"plan": "pro"}["seats"]
+    except KeyError:
+        logger.exception("seat count missing")
+
+    client.shutdown()
+    ```
+
+    `HttpTransport()` mengirim peristiwa di latar belakang, 1 detik setelah peristiwa pertama atau saat terkumpul 50 peristiwa. `client.shutdown()` mengirim peristiwa yang tersisa dan menutup klien.
+  </Step>
+
+  <Step title="Jalankan program">
+    ```bash
+    python3 worker.py
+    ```
+
+    Output konsol tidak berubah. LogBrew menerima 1 peristiwa log untuk setiap record. Ini peristiwa pertama, tanpa konteks runtime bersama.
+
+    ```json
+    {
+      "type": "log",
+      "id": "evt_log_54bfab6d7a9e4a2b88cc1e7872722e4d",
+      "timestamp": "2026-11-07T14:21:36.457Z",
+      "attributes": {
+        "message": "invoice created",
+        "level": "info",
+        "logger": "billing",
+        "metadata": {
+          "fileName": "worker.py",
+          "functionName": "<module>",
+          "levelName": "INFO",
+          "levelNumber": 20,
+          "lineNumber": 22,
+          "module": "worker",
+          "processName": "MainProcess",
+          "threadName": "MainThread",
+          "invoice_id": "inv_1001",
+          "amount_cents": 4200
+        }
+      }
+    }
+    ```
+
+    Nilai primitif dari `extra={...}` menjadi metadata. Peristiwa kedua memiliki `exceptionName` `KeyError` dan `exceptionMessage` `'seats'`. Untuk mengirim teks traceback lengkap, buat handler dengan `include_exception_text=True`.
+  </Step>
+
+  <Step title="Baca kembali log">
+    ```bash
+    logbrew read logs \
+      --service billing-worker \
+      --environment development \
+      --since 1h \
+      --json
+
+    logbrew read logs --severity error --search "seat count missing" --since 1h --json
+    ```
+
+    Hasil baca yang cocok menunjukkan bahwa LogBrew sudah menyimpan log tersebut. Untuk membaca dari CI atau agen coding, gunakan kunci baca proyek. Lihat [Verifikasi penyiapan](/id/guides/verify-setup).
+  </Step>
+</Steps>
+
+### Pilih record yang dikirim ke LogBrew
+
+Beri handler level sendiri agar lebih sedikit record yang dikirim. Konsol tetap menerima `INFO` dan yang lebih tinggi.
+
+```python
+logger.addHandler(LogBrewLoggingHandler(client, level=logging.WARNING))
+```
+
+Level Python menjadi level LogBrew. Nama dan angka level asli tetap ada di metadata.
+
+| Level Python | Level LogBrew |
+| --- | --- |
+| `DEBUG`, `INFO` | `info` |
+| `WARNING` | `warning` |
+| `ERROR` | `error` |
+| `CRITICAL` | `critical` |
+
+## Laporkan crash Python sebagai masalah
+
+`install_process_error_capture(client)` melaporkan exception yang tidak tertangkap di script, worker, kode startup, dan thread. Setiap crash menjadi 1 masalah yang berisi tipe exception, pesan, stack frame, dan penyebab dalam rantai exception. Python tetap mencetak traceback dan keluar seperti biasa.
+
+Simpan file ini sebagai `startup.py`, lalu jalankan.
+
+```python
+import os
+
+from logbrew_sdk import HttpTransport, LogBrewClient, install_process_error_capture
+
+client = LogBrewClient.create(
+    api_key=os.environ["LOGBREW_SERVER_API_KEY"],
+    transport=HttpTransport(),
+)
+install_process_error_capture(client)
+
+def load_config(path):
+    with open(path) as file:
+        return file.read()
+
+load_config("missing.toml")
+```
+
+```text
+Traceback (most recent call last):
+  File "/srv/app/startup.py", line 15, in <module>
+    load_config("missing.toml")
+    ~~~~~~~~~~~^^^^^^^^^^^^^^^^
+  File "/srv/app/startup.py", line 12, in load_config
+    with open(path) as file:
+         ~~~~^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: 'missing.toml'
+```
+
+LogBrew menerima masalah dengan judul `FileNotFoundError`, level `critical`, dan mekanisme `python.excepthook`. Frame-nya berisi nama file, baris, dan fungsi, tetapi tidak berisi path lengkap. Crash di dalam thread memiliki level `error`. Sebelum Python keluar, SDK menunggu pengiriman paling lama 2 detik.
+
+```bash
+logbrew read issues --since 1h --json
+```
+
+Masalah ini menyertakan pesan exception. Jangan memasukkan kredensial atau data pribadi ke pesan exception atau pesan log. Lihat [Penyamaran log](/id/guides/safe-capture).
+
+## Mengatasi kendala
+
+| Gejala | Penyebab | Solusi |
+| --- | --- | --- |
+| Tidak ada output konsol setelah Anda menambahkan LogBrew | `logging.basicConfig()` berjalan setelah `LogBrewClient.create()`. | Panggil `logging.basicConfig()` sebelum `LogBrewClient.create()`. |
+| Record `INFO` tidak muncul | Logger memakai level `WARNING` dari root logger. | Tetapkan level di `basicConfig()` atau panggil `logger.setLevel(logging.INFO)`. |
+| Setiap record muncul 2 kali | Record masuk ke handler di logger, lalu masuk lagi ke handler sejenis di root logger. | Tambahkan setiap handler sekali saja, atau tetapkan `logger.propagate = False`. |
+| Peristiwa hilang setelah penghentian paksa | `SIGKILL` atau `os._exit()` menghentikan proses sebelum pengiriman selesai. | Panggil `client.shutdown()` di jalur shutdown normal. |
+| `KeyError: 'LOGBREW_SERVER_API_KEY'` | Variabel belum ditetapkan di shell ini. | Jalankan lagi langkah `export`. |
+
+Untuk aplikasi web, lihat [logging Flask](/id/guides/flask). Untuk memilih format log, lihat [Structured logging](/id/concepts/structured-logging). Untuk runtime lain, lihat [Integrasi SDK](/id/guides/sdk-ingestion).
