@@ -69,8 +69,10 @@ def check() -> None:
         raise ValueError("Outfit font is missing")
     if "geist" in (ROOT / "style.css").read_text(encoding="utf-8").lower():
         raise ValueError("retired typography must not override Outfit")
-    if docs_config.get("colors", {}).get("light") != "#F4C914":
-        raise ValueError("documentation accent must match the product gold #F4C914")
+    if docs_config.get("colors") != {"primary": "#9A4A12", "light": "#F2A20C", "dark": "#FECB17"}:
+        raise ValueError("documentation colors must be copper #9A4A12, amber #F2A20C, and lager #FECB17")
+    if docs_config.get("background") != {"color": {"light": "#FBF6EA", "dark": "#14120B"}}:
+        raise ValueError("documentation pages must be paper #FBF6EA in light mode and stout #14120B in dark mode")
     expected_logo = "/logo/logbrew-logo-transparent-512.png"
     if docs_config.get("logo") != {
         "light": expected_logo,
