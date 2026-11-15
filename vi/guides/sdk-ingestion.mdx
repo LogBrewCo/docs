@@ -22,7 +22,9 @@ Làm các bước sau cho mỗi tích hợp:
 
 Một batch được chấp nhận nghĩa là batch đó đã đến API LogBrew. Bộ lọc vẫn có
 thể ẩn các sự kiện của nó. Chọn đúng dự án và khoảng thời gian. Sau đó khớp
-dịch vụ, môi trường, bản phát hành và loại tín hiệu.
+dịch vụ, môi trường, bản phát hành và loại tín hiệu. Bộ lọc đầu vào của dự án
+cũng có thể loại bỏ sự kiện trước khi LogBrew lưu chúng. Xem
+[Dự án và thiết lập](/vi/concepts/projects).
 
 Trước khi bật ghi nhận dữ liệu, [chọn và kiểm tra các trường đã duyệt](/vi/guides/safe-capture).
 Để có dữ liệu cho Phân tích, làm theo [Ghi nhận sự kiện sản phẩm](/vi/guides/product-events).
@@ -120,8 +122,84 @@ khớp với yêu cầu. Log, vấn đề, hành động và chỉ số bên tro
 ngữ cảnh trace và span của yêu cầu đó. Gói mới hơn không bổ sung ngữ cảnh cho
 các sự kiện đã gửi trước khi nâng cấp.
 
+Với `@logbrew/express` 0.1.12 trở lên, mẫu route có cả đường dẫn gắn (mount
+path) của router, chẳng hạn `GET /tenants/:tenantId/orders/:orderId`. Nếu đường
+dẫn gắn là một biểu thức chính quy, chỉ route của handler được giữ lại.
+`withLogBrewHttpHandler` từ `@logbrew/node` 0.1.27 trở lên đổi từng đoạn đường
+dẫn dạng số, UUID hoặc chuỗi thập lục phân dài thành `:id`. Ví dụ,
+`GET /orders/8412` thành `GET /orders/:id`. Để tự đặt tên yêu cầu, đặt
+`routeTemplateFactory(req)`. Khi hàm này trả về chuỗi rỗng, SDK dùng nguồn tên
+tiếp theo.
+
 Tích hợp yêu cầu mặc định không ghi nhận nội dung yêu cầu hay phản hồi, query
 string, header tùy ý hoặc giá trị `traceparent` thô.
+
+### Tên dịch vụ
+
+Tên dịch vụ nhóm trace, log và vấn đề. Đặt `LOGBREW_SERVICE_NAME` để chọn tên
+này. Nếu không có biến này, SDK cho Node.js, Express, Fastify, NestJS và Next.js
+dùng `name` trong `package.json` gần nhất của ứng dụng. Next.js chỉ đọc tệp đó
+trên runtime Node.js. Mã Edge và mã trình duyệt không đọc được tệp này, nên hãy
+đặt `LOGBREW_SERVICE_NAME` ở đó hoặc truyền dịch vụ trong `context`. Để tắt việc
+tìm `package.json`, đặt `captureRuntimeContext: false`. Cần `@logbrew/node`
+0.1.24 trở lên và `@logbrew/next` 0.1.13 trở lên.
+
+Sự kiện không có dịch vụ hiển thị là `unknown_service`. Đây là tên OpenTelemetry
+dùng cho dịch vụ bị thiếu. LogBrew không dùng tên SDK, chẳng hạn
+`logbrew-express`, làm dịch vụ.
+
+### Lỗi phía client
+
+Lỗi có `status` hoặc `statusCode` 4xx không phải là vấn đề trong Express,
+Fastify, NestJS hoặc `withLogBrewHttpHandler`. Ví dụ là lỗi 404 được ném ra hoặc
+lỗi 400 do kiểm tra dữ liệu đầu vào. Các lỗi này mô tả yêu cầu, không phải sự cố
+trong ứng dụng của bạn. Span của yêu cầu giữ trạng thái 4xx, nên yêu cầu vẫn có
+trong trace. `withLogBrewHttpHandler` cũng gửi trạng thái 4xx đó thay vì `500`.
+Để báo cáo các lỗi này là vấn đề, đặt `captureClientErrors: true`. Fastify cần
+`@logbrew/fastify` 0.1.10 trở lên, NestJS cần `@logbrew/nestjs` 0.1.11 trở lên,
+và `withLogBrewHttpHandler` cần `@logbrew/node` 0.1.24 trở lên.
+
+Trong Route Handler của Next.js được `withLogBrewRouteHandler` bao bọc,
+`notFound()`, `forbidden()`, `unauthorized()`, `redirect()` và
+`permanentRedirect()` không phải là vấn đề. LogBrew ghi lại yêu cầu với trạng
+thái 404, 403, 401, 307 hoặc 308 mà Next.js gửi. LogBrew không ghi lại đích
+chuyển hướng. Các lỗi khác được ném ra vẫn là vấn đề, kể cả khi có `status` 4xx,
+vì Next.js trả lời các lỗi đó bằng `500`. `captureClientErrors: true` báo cáo
+`notFound()`, `forbidden()` và `unauthorized()` là vấn đề. Tùy chọn này không
+thay đổi chuyển hướng. Dùng `@logbrew/next` 0.1.14 trở lên.
+
+### Lượt xem trang và Web Vitals trong Next.js
+
+`useLogBrewNextNavigation` từ `@logbrew/next/client` ghi một span route khi
+route của trang thay đổi. LogBrew tính mỗi span này là một lượt xem trang cho
+mẫu route của nó. Hook này nhận `traceparent`, `traceId`, hoặc `traceId` kèm
+`spanId`. Hook không bao giờ ném lỗi vào trang. Khi ghi nhận thất bại, hook bỏ
+span đó và gọi `onCaptureError`. Ứng dụng React Router có cùng hành vi từ
+`useLogBrewReactRouterNavigation` trong `@logbrew/react` 0.1.4 trở lên.
+
+`installLogBrewNextClientErrorCapture` gửi Web Vitals của trang dưới dạng chỉ số
+histogram khi trang bị ẩn lần đầu. `browser.web_vital.lcp`,
+`browser.web_vital.inp`, `browser.web_vital.fcp` và `browser.web_vital.ttfb`
+tính bằng mili giây. `browser.web_vital.cls` là một điểm số. Mỗi chỉ số có
+`metadata.rating` (`good`, `needs-improvement` hoặc `poor`) và
+`metadata.routeTemplate`, tức route mà trang đã tải. Để tắt các chỉ số này, đặt
+`webVitals: false`. Lượt xem trang và Web Vitals cần `@logbrew/next` 0.1.17
+trở lên.
+
+### Gửi dữ liệu sau khi batch bị từ chối
+
+SDK tạm dừng tự động gửi sau khi LogBrew từ chối một batch, chẳng hạn với phản
+hồi `401` hoặc `403`. Sau đó các SDK sau tự gửi lại cùng batch đó:
+
+| SDK | Phiên bản |
+| --- | --- |
+| JavaScript | `@logbrew/sdk` 0.1.43 trở lên |
+| Trình duyệt | `@logbrew/browser` 0.1.20 trở lên |
+| Swift và Objective-C | LogBrew Swift 0.1.26 trở lên |
+
+SDK chờ lâu hơn sau mỗi lần thử thất bại, tối đa 5 phút. Lần thử đầu tiên được
+chấp nhận sẽ khôi phục việc gửi bình thường. Bạn không cần khởi động lại ứng
+dụng. Giới hạn của hàng đợi không thay đổi.
 
 ### ASP.NET Core
 
@@ -254,6 +332,10 @@ Go SDK và các module cho Asynq, Gin, OpenTelemetry cần Go 1.26.0 trở lên.
 LogBrew chỉ hỗ trợ các bản Go vẫn còn nhận bản vá bảo mật, hiện là Go 1.26 và
 1.27.
 
+### Rust
+
+Crate `logbrew` cần Rust 1.88 trở lên.
+
 ### Source map JavaScript
 
 Với bản dựng Vite, làm theo [Source map JavaScript](/vi/guides/source-maps).
@@ -266,6 +348,11 @@ Dùng product Swift `LogBrew` cho telemetry. Chỉ thêm `LogBrewCrash` khi cầ
 ghi nhận crash hoặc treo trên Apple. Làm theo
 [Crash và treo trên Apple](/vi/guides/apple-crashes-and-hangs) để tải
 dSYM lên và dùng tính năng symbolicate do LogBrew thực hiện.
+
+LogBrew Swift 0.1.26 trở lên gửi một chỉ số histogram `app.start.duration` cho
+mỗi lần khởi chạy nguội. Giá trị là thời gian tính bằng mili giây từ khi tiến
+trình bắt đầu đến khung hình đầu tiên, hoặc đến `client.markAppReady()` nếu ứng
+dụng gọi hàm này trước. Để tắt chỉ số này, đặt `includeAppStartMetric: false`.
 
 Với Flask, làm theo hướng dẫn [Flask](/vi/guides/flask).
 

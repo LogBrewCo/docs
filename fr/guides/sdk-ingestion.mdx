@@ -23,7 +23,9 @@ Suivez ces étapes pour chaque intégration :
 
 Un lot accepté a atteint l’API LogBrew. Les filtres peuvent quand même cacher
 ses signaux. Sélectionnez le bon projet et la bonne période. Vérifiez ensuite
-le service, l’environnement, la version et le type de signal.
+le service, l’environnement, la version et le type de signal. Les filtres
+entrants du projet peuvent aussi écarter des événements avant que LogBrew les
+stocke. Consultez [Projets et configuration](/fr/concepts/projects).
 
 Avant d’activer la capture,
 [choisissez et testez les champs approuvés](/fr/guides/safe-capture). Pour
@@ -133,9 +135,94 @@ métriques émis pendant la requête héritent de son contexte de trace et de
 span. Un paquet plus récent n’ajoute pas de contexte aux signaux envoyés
 avant la mise à jour.
 
+Avec `@logbrew/express` 0.1.12 ou une version plus récente, le modèle inclut le
+chemin de montage du routeur, par exemple
+`GET /tenants/:tenantId/orders/:orderId`. Si le chemin de montage est une
+expression régulière, seule la route du handler reste. `withLogBrewHttpHandler`
+de `@logbrew/node` 0.1.27 ou une version plus récente remplace chaque segment de
+chemin numérique, UUID ou hexadécimal long par `:id`. Par exemple,
+`GET /orders/8412` devient `GET /orders/:id`. Pour nommer les requêtes
+vous-même, définissez `routeTemplateFactory(req)`. Quand la fonction renvoie une
+chaîne vide, le SDK utilise la source de nom suivante.
+
 Par défaut, l’intégration des requêtes ne capture ni les corps de requête ou
 de réponse, ni les chaînes de requête, ni les en-têtes arbitraires, ni les
 valeurs `traceparent` brutes.
+
+### <span id="service-name">Nom du service</span>
+
+Le nom du service regroupe les traces, les logs et les problèmes. Définissez
+`LOGBREW_SERVICE_NAME` pour le choisir. Sans cette variable, les SDK Node.js,
+Express, Fastify, NestJS et Next.js utilisent le `name` du `package.json` le
+plus proche de l’app. Next.js lit ce fichier uniquement dans le runtime Node.js.
+Le code Edge et le code navigateur ne peuvent pas le lire. Définissez donc
+`LOGBREW_SERVICE_NAME` à cet endroit, ou indiquez le service dans `context`.
+Pour arrêter la recherche du `package.json`, définissez
+`captureRuntimeContext: false`. Cela nécessite `@logbrew/node` 0.1.24 ou une
+version plus récente et `@logbrew/next` 0.1.13 ou une version plus récente.
+
+Un événement sans service apparaît comme `unknown_service`. C’est le nom
+qu’OpenTelemetry donne à un service manquant. LogBrew n’utilise pas le nom du
+SDK, comme `logbrew-express`, comme service.
+
+### <span id="client-errors">Erreurs client</span>
+
+Une erreur avec un `status` ou un `statusCode` 4xx n’est pas un problème dans
+Express, Fastify, NestJS ou `withLogBrewHttpHandler`. Par exemple, une 404 levée
+ou une 400 issue de la validation des entrées. Ces erreurs décrivent la requête,
+pas une défaillance de votre app. Le span de requête garde le statut 4xx, donc
+la requête reste dans les traces. `withLogBrewHttpHandler` envoie aussi ce
+statut 4xx au lieu de `500`. Pour signaler ces erreurs comme problèmes,
+définissez `captureClientErrors: true`. Fastify nécessite `@logbrew/fastify`
+0.1.10 ou une version plus récente, NestJS nécessite `@logbrew/nestjs` 0.1.11 ou
+une version plus récente, et `withLogBrewHttpHandler` nécessite `@logbrew/node`
+0.1.24 ou une version plus récente.
+
+Dans un Route Handler Next.js enveloppé par `withLogBrewRouteHandler`,
+`notFound()`, `forbidden()`, `unauthorized()`, `redirect()` et
+`permanentRedirect()` ne sont pas des problèmes. LogBrew enregistre la requête
+avec le statut 404, 403, 401, 307 ou 308 que Next.js envoie. Il n’enregistre
+pas la destination de la redirection. Les autres erreurs levées restent des
+problèmes, même avec un `status` 4xx, car Next.js y répond par une `500`.
+`captureClientErrors: true` signale `notFound()`, `forbidden()` et
+`unauthorized()` comme problèmes. L’option ne change pas les redirections.
+Utilisez `@logbrew/next` 0.1.14 ou une version plus récente.
+
+### <span id="nextjs-page-views-and-web-vitals">Vues de page et Web Vitals Next.js</span>
+
+`useLogBrewNextNavigation` de `@logbrew/next/client` enregistre un span de route
+quand la route de la page change. LogBrew compte chacun de ces spans comme une
+vue de page de son modèle de route. Le hook accepte `traceparent`, `traceId`, ou
+`traceId` avec `spanId`. Il ne lève jamais d’erreur dans la page. Quand une
+capture échoue, il écarte le span et appelle `onCaptureError`. Les apps React
+Router obtiennent le même comportement avec `useLogBrewReactRouterNavigation` de
+`@logbrew/react` 0.1.4 ou une version plus récente.
+
+`installLogBrewNextClientErrorCapture` envoie les Web Vitals de la page sous
+forme de métriques histogramme quand la page est masquée pour la première fois.
+`browser.web_vital.lcp`, `browser.web_vital.inp`, `browser.web_vital.fcp` et
+`browser.web_vital.ttfb` sont en millisecondes. `browser.web_vital.cls` est un
+score. Chaque métrique a `metadata.rating` (`good`, `needs-improvement` ou
+`poor`) et `metadata.routeTemplate`, la route sur laquelle la page a été
+chargée. Pour arrêter ces métriques, définissez `webVitals: false`. Les vues de
+page et les Web Vitals nécessitent `@logbrew/next` 0.1.17 ou une version plus
+récente.
+
+### <span id="delivery-after-a-rejected-batch">Envoi après un lot refusé</span>
+
+Un SDK met l’envoi automatique en pause quand LogBrew refuse un lot, par
+exemple avec une réponse `401` ou `403`. Ces SDK renvoient ensuite le même lot
+tout seuls :
+
+| SDK | Version |
+| --- | --- |
+| JavaScript | `@logbrew/sdk` 0.1.43 ou une version plus récente |
+| Navigateur | `@logbrew/browser` 0.1.20 ou une version plus récente |
+| Swift et Objective-C | LogBrew Swift 0.1.26 ou une version plus récente |
+
+Le SDK attend plus longtemps après chaque essai échoué, jusqu’à 5 minutes. Le
+premier essai accepté rétablit l’envoi normal. Vous n’avez pas besoin de
+redémarrer l’app. Les limites de la file d’attente ne changent pas.
 
 ### <span id="aspnet-core">ASP.NET Core</span>
 
@@ -271,6 +358,10 @@ Le SDK Go et ses modules pour Asynq, Gin et OpenTelemetry nécessitent Go 1.26.0
 ou une version plus récente. LogBrew prend en charge uniquement les versions de
 Go qui reçoivent encore des correctifs de sécurité, actuellement Go 1.26 et 1.27.
 
+### <span id="rust">Rust</span>
+
+Le crate `logbrew` nécessite Rust 1.88 ou une version plus récente.
+
 ### <span id="javascript-source-maps">Source maps JavaScript</span>
 
 Pour les builds Vite, suivez [Source maps JavaScript](/fr/guides/source-maps).
@@ -283,6 +374,12 @@ Utilisez le produit Swift `LogBrew` pour la télémétrie. Ajoutez `LogBrewCrash
 uniquement pour capturer les plantages ou blocages Apple. Pour l’import des
 dSYM et la symbolisation hébergée, suivez
 [Plantages et blocages Apple](/fr/guides/apple-crashes-and-hangs).
+
+LogBrew Swift 0.1.26 ou une version plus récente envoie une métrique histogramme
+`app.start.duration` à chaque lancement à froid. La valeur est le temps en
+millisecondes entre le démarrage du processus et la première image. Si l’app
+appelle `client.markAppReady()` avant, la mesure s’arrête à cet appel. Pour
+arrêter cette métrique, définissez `includeAppStartMetric: false`.
 
 Pour Flask, suivez le guide [Flask](/fr/guides/flask).
 
