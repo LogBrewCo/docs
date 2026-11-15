@@ -20,7 +20,9 @@ To do them yourself, do these steps for each integration:
 
 An accepted batch reached the LogBrew API. Filters can still hide its events.
 Select the correct project and time range. Then match the service,
-environment, release, and signal type.
+environment, release, and signal type. The inbound filters of the project can
+also drop events before LogBrew stores them. See
+[Projects and setup](/concepts/projects).
 
 Before you enable capture, [select and test approved fields](/guides/safe-capture).
 To populate Analytics, follow [Product event capture](/guides/product-events).
@@ -116,8 +118,87 @@ the matched route template. Logs, issues, actions, and metrics inside the
 request inherit its trace and span context. A newer package does not add
 context to events that were sent before the upgrade.
 
+With `@logbrew/express` 0.1.12 or newer, the template includes the mount path
+of the router, such as `GET /tenants/:tenantId/orders/:orderId`. A mount path
+that is a regular expression keeps only the route of the handler.
+`withLogBrewHttpHandler` from `@logbrew/node` 0.1.27 or newer changes each
+numeric, UUID, or long hexadecimal path segment to `:id`. For example,
+`GET /orders/8412` becomes `GET /orders/:id`. To name requests yourself, set
+`routeTemplateFactory(req)`. When it returns an empty string, the SDK uses the
+next name source.
+
 The default request integration does not capture request or response bodies,
 query strings, arbitrary headers, or raw `traceparent` values.
+
+### Service name
+
+The service name groups traces, logs, and issues. Set `LOGBREW_SERVICE_NAME`
+to select it. Without it, the Node.js, Express, Fastify, NestJS, and Next.js
+SDKs use the `name` in the nearest `package.json` of the app. Next.js reads
+that file on the Node.js runtime only. Edge and browser code cannot read it, so
+set `LOGBREW_SERVICE_NAME` there or give the service in `context`. To stop the
+`package.json` lookup, set `captureRuntimeContext: false`. This needs
+`@logbrew/node` 0.1.24 or newer and `@logbrew/next` 0.1.13 or newer.
+
+An event without a service shows as `unknown_service`. This is the
+OpenTelemetry name for a missing service. LogBrew does not use the SDK name,
+such as `logbrew-express`, as the service.
+
+### Client errors
+
+An error with a 4xx `status` or `statusCode` is not an issue in Express,
+Fastify, NestJS, or `withLogBrewHttpHandler`. Examples are a thrown 404 or a
+400 from input validation. These errors describe the request, not a failure
+in your app. The request span keeps the 4xx status, so the request stays in
+traces. `withLogBrewHttpHandler` also sends that 4xx status instead of `500`.
+To report these errors as issues, set `captureClientErrors: true`. Fastify
+needs `@logbrew/fastify` 0.1.10 or newer, NestJS needs `@logbrew/nestjs`
+0.1.11 or newer, and `withLogBrewHttpHandler` needs `@logbrew/node` 0.1.24 or
+newer.
+
+In a Next.js Route Handler that `withLogBrewRouteHandler` wraps, `notFound()`,
+`forbidden()`, `unauthorized()`, `redirect()`, and `permanentRedirect()` are
+not issues. LogBrew records the request with the 404, 403, 401, 307, or 308
+status that Next.js sends. It does not record the redirect destination. Other
+thrown errors stay issues, also with a 4xx `status`, because Next.js answers
+them with a `500`. `captureClientErrors: true` reports `notFound()`,
+`forbidden()`, and `unauthorized()` as issues. It does not change redirects.
+Use `@logbrew/next` 0.1.14 or newer.
+
+### Next.js page views and Web Vitals
+
+`useLogBrewNextNavigation` from `@logbrew/next/client` records one route span
+when the route of the page changes. LogBrew counts each of these spans as a
+page view of its route template. The hook accepts `traceparent`, `traceId`, or
+`traceId` with `spanId`. It never throws into the page. When a capture fails,
+it drops the span and calls `onCaptureError`. React Router apps get the same
+behavior from `useLogBrewReactRouterNavigation` in `@logbrew/react` 0.1.4 or
+newer.
+
+`installLogBrewNextClientErrorCapture` sends the Web Vitals of the page as
+histogram metrics when the page is first hidden. `browser.web_vital.lcp`,
+`browser.web_vital.inp`, `browser.web_vital.fcp`, and
+`browser.web_vital.ttfb` are in milliseconds. `browser.web_vital.cls` is a
+score. Each metric has `metadata.rating` (`good`, `needs-improvement`, or
+`poor`) and `metadata.routeTemplate`, the route that the page loaded on. To
+stop these metrics, set `webVitals: false`. Page views and Web Vitals need
+`@logbrew/next` 0.1.17 or newer.
+
+### Delivery after a rejected batch
+
+An SDK pauses automatic delivery after LogBrew rejects a batch, for example
+with a `401` or `403` response. These SDKs then send the same batch again on
+their own:
+
+| SDK | Version |
+| --- | --- |
+| JavaScript | `@logbrew/sdk` 0.1.43 or newer |
+| Browser | `@logbrew/browser` 0.1.20 or newer |
+| Swift and Objective-C | LogBrew Swift 0.1.26 or newer |
+
+The SDK waits longer after each failed try, up to 5 minutes. The first
+accepted try starts normal delivery again. You do not have to restart the app.
+The queue limits do not change.
 
 ### ASP.NET Core
 
@@ -247,6 +328,10 @@ The Go SDK and its Asynq, Gin, and OpenTelemetry modules require Go 1.26.0
 or newer. LogBrew supports only the Go releases that still get security fixes,
 currently Go 1.26 and 1.27.
 
+### Rust
+
+The `logbrew` crate needs Rust 1.88 or newer.
+
 ### JavaScript source maps
 
 For Vite builds, follow [JavaScript source maps](/guides/source-maps).
@@ -259,6 +344,11 @@ Use the `LogBrew` Swift product for telemetry. Add `LogBrewCrash` only for
 Apple crash or hang capture. Follow
 [Capture Apple crashes and hangs](/guides/apple-crashes-and-hangs) for dSYM
 upload and hosted symbolication.
+
+LogBrew Swift 0.1.26 or newer sends one `app.start.duration` histogram metric
+for each cold launch. The value is the time in milliseconds from the process
+start to the first frame, or to `client.markAppReady()` when the app calls it
+first. To stop this metric, set `includeAppStartMetric: false`.
 
 For Flask, follow [Set up Flask](/guides/flask).
 

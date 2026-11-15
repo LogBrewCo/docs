@@ -20,7 +20,8 @@ description: "اختر حزمة LogBrew SDK المناسبة لبيئة التش
 
 الدفعة المقبولة وصلت إلى LogBrew API. لكن عوامل التصفية قد تُخفي أحداثها. اختر
 المشروع الصحيح والنطاق الزمني الصحيح. ثم طابِق الخدمة والبيئة والإصدار ونوع
-الإشارة.
+الإشارة. ويمكن أيضًا لفلاتر الوارد في المشروع أن تُسقط الأحداث قبل أن يخزّنها
+LogBrew. راجع [المشاريع والإعداد](/ar/concepts/projects).
 
 قبل أن تفعّل الالتقاط، [اختر الحقول المعتمدة واختبرها](/ar/guides/safe-capture).
 لملء «التحليلات»، اتبع [التقاط أحداث المنتج](/ar/guides/product-events).
@@ -115,8 +116,80 @@ SDK وبيئات التشغيل إرسال أسماء بديلة مثل `trace` 
 المطابق. وترث السجلات والمشكلات والإجراءات والمقاييس داخل الطلب سياق التتبّع
 والـ Span الخاص به. الحزمة الأحدث لا تضيف سياقًا إلى الأحداث التي أُرسلت قبل الترقية.
 
+مع `@logbrew/express` بالنسخة 0.1.12 أو أحدث، يتضمن القالب مسار تركيب الموجّه
+(mount path)، مثل `GET /tenants/:tenantId/orders/:orderId`. إذا كان مسار التركيب
+تعبيرًا نمطيًا (regular expression)، فلا يبقى إلا مسار المعالج. ويحوّل
+`withLogBrewHttpHandler` من `@logbrew/node` بالنسخة 0.1.27 أو أحدث كل جزء من
+المسار يكون رقمًا أو UUID أو قيمة ست عشرية طويلة إلى `:id`. مثلًا، يصبح
+`GET /orders/8412` هو `GET /orders/:id`. لتسمية الطلبات بنفسك، اضبط
+`routeTemplateFactory(req)`. إذا أعادت سلسلة فارغة، يستخدم الـ SDK مصدر الاسم التالي.
+
 لا يلتقط دمج الطلبات الافتراضي نص الطلب أو الاستجابة، ولا سلاسل الاستعلام، ولا
 الترويسات العشوائية، ولا قيم `traceparent` الخام.
+
+### <span id="service-name">اسم الخدمة</span>
+
+يجمّع اسم الخدمة التتبّعات والسجلات والمشكلات. اضبط `LOGBREW_SERVICE_NAME`
+لاختياره. من دونه، تستخدم حزم SDK الخاصة بـ Node.js وExpress وFastify وNestJS
+وNext.js قيمة `name` في أقرب ملف `package.json` للتطبيق. يقرأ Next.js هذا الملف
+في بيئة تشغيل Node.js فقط. لا تستطيع شيفرة Edge وشيفرة المتصفح قراءته، لذلك اضبط
+`LOGBREW_SERVICE_NAME` هناك أو مرّر الخدمة في `context`. لإيقاف البحث عن
+`package.json`، اضبط `captureRuntimeContext: false`. يحتاج ذلك إلى
+`@logbrew/node` بالنسخة 0.1.24 أو أحدث و`@logbrew/next` بالنسخة 0.1.13 أو أحدث.
+
+يظهر الحدث الذي ليست له خدمة بالقيمة `unknown_service`. وهذا هو الاسم الذي
+يستخدمه OpenTelemetry للخدمة المفقودة. لا يستخدم LogBrew اسم الـ SDK، مثل
+`logbrew-express`، اسمًا للخدمة.
+
+### <span id="client-errors">أخطاء العميل</span>
+
+الخطأ الذي يحمل `status` أو `statusCode` من فئة 4xx لا يُعدّ مشكلة في Express أو
+Fastify أو NestJS أو `withLogBrewHttpHandler`. من الأمثلة خطأ 404 مرمي، أو خطأ
+400 من التحقق من المدخلات. تصف هذه الأخطاء الطلب، لا عطلًا في تطبيقك. يحتفظ Span
+الطلب بحالة 4xx، لذلك يبقى الطلب في التتبّعات. ويرسل `withLogBrewHttpHandler`
+أيضًا حالة 4xx هذه بدلًا من `500`. للإبلاغ عن هذه الأخطاء كمشكلات، اضبط
+`captureClientErrors: true`. يحتاج Fastify إلى `@logbrew/fastify` بالنسخة 0.1.10
+أو أحدث، ويحتاج NestJS إلى `@logbrew/nestjs` بالنسخة 0.1.11 أو أحدث، ويحتاج
+`withLogBrewHttpHandler` إلى `@logbrew/node` بالنسخة 0.1.24 أو أحدث.
+
+في Route Handler من Next.js يغلّفه `withLogBrewRouteHandler`، لا تُعدّ
+`notFound()` و`forbidden()` و`unauthorized()` و`redirect()` و`permanentRedirect()`
+مشكلات. يسجّل LogBrew الطلب مع الحالة 404 أو 403 أو 401 أو 307 أو 308 التي يرسلها
+Next.js. ولا يسجّل وجهة إعادة التوجيه. تبقى الأخطاء المرمية الأخرى مشكلات، حتى مع
+`status` من فئة 4xx، لأن Next.js يرد عليها بالحالة `500`. ويُبلغ
+`captureClientErrors: true` عن `notFound()` و`forbidden()` و`unauthorized()`
+كمشكلات، ولا يغيّر سلوك إعادة التوجيه. استخدم `@logbrew/next` بالنسخة 0.1.14 أو أحدث.
+
+### <span id="nextjs-page-views-and-web-vitals">مشاهدات الصفحات وWeb Vitals في Next.js</span>
+
+يسجّل `useLogBrewNextNavigation` من `@logbrew/next/client` Span مسار واحدًا عندما
+يتغيّر مسار الصفحة. يحتسب LogBrew كل Span من هذه مشاهدةَ صفحة لقالب مساره. يقبل
+الـ hook القيمة `traceparent` أو `traceId` أو `traceId` مع `spanId`. ولا يرمي أي
+خطأ داخل الصفحة أبدًا. عندما يفشل الالتقاط، يُسقط الـ Span ويستدعي
+`onCaptureError`. وتحصل تطبيقات React Router على السلوك نفسه من
+`useLogBrewReactRouterNavigation` في `@logbrew/react` بالنسخة 0.1.4 أو أحدث.
+
+يرسل `installLogBrewNextClientErrorCapture` قيم Web Vitals للصفحة كمقاييس
+histogram عندما تُخفى الصفحة أول مرة. وحدة `browser.web_vital.lcp`
+و`browser.web_vital.inp` و`browser.web_vital.fcp` و`browser.web_vital.ttfb` هي
+الملّي ثانية. أما `browser.web_vital.cls` فهو درجة. لكل مقياس `metadata.rating`
+(`good` أو `needs-improvement` أو `poor`) و`metadata.routeTemplate`، وهو المسار
+الذي حُمّلت عليه الصفحة. لإيقاف هذه المقاييس، اضبط `webVitals: false`. تحتاج
+مشاهدات الصفحات وWeb Vitals إلى `@logbrew/next` بالنسخة 0.1.17 أو أحدث.
+
+### <span id="delivery-after-a-rejected-batch">التسليم بعد رفض دفعة</span>
+
+يوقف الـ SDK التسليم التلقائي مؤقتًا بعد أن يرفض LogBrew دفعة، مثلًا مع استجابة
+`401` أو `403`. ثم تعيد حزم SDK التالية إرسال الدفعة نفسها تلقائيًا:
+
+| الـ SDK | النسخة |
+| --- | --- |
+| JavaScript | `@logbrew/sdk` بالنسخة 0.1.43 أو أحدث |
+| المتصفح | `@logbrew/browser` بالنسخة 0.1.20 أو أحدث |
+| Swift وObjective-C | LogBrew Swift بالنسخة 0.1.26 أو أحدث |
+
+ينتظر الـ SDK مدة أطول بعد كل محاولة فاشلة، حتى 5 دقائق. أول محاولة مقبولة تعيد
+التسليم العادي. لا تحتاج إلى إعادة تشغيل التطبيق. ولا تتغير حدود قائمة الانتظار.
 
 ### <span id="aspnet-core">ASP.NET Core</span>
 
@@ -245,6 +318,10 @@ cmake --build build
 تتطلب Go SDK ووحداتها الخاصة بـ Asynq وGin وOpenTelemetry الإصدار Go 1.26.0 أو أحدث.
 يدعم LogBrew فقط إصدارات Go التي ما زالت تتلقى إصلاحات أمنية، وهي حاليًا Go 1.26 و1.27.
 
+### <span id="rust">Rust</span>
+
+تحتاج حزمة `logbrew` (crate) إلى Rust 1.88 أو أحدث.
+
 ### <span id="javascript-source-maps">خرائط المصدر في JavaScript</span>
 
 لعمليات بناء Vite، اتبع [خرائط المصدر لـ JavaScript](/ar/guides/source-maps).
@@ -257,6 +334,11 @@ cmake --build build
 أعطال Apple وحالات التجمّد. اتبع
 [أعطال Apple والتجمّد](/ar/guides/apple-crashes-and-hangs) لرفع ملفات dSYM
 وتحليل الرموز المستضاف.
+
+يرسل LogBrew Swift بالنسخة 0.1.26 أو أحدث مقياس histogram واحدًا باسم
+`app.start.duration` لكل تشغيل بارد. القيمة هي الوقت بالملّي ثانية من بدء العملية
+حتى أول إطار يُعرض، أو حتى `client.markAppReady()` إذا استدعاه التطبيق قبل ذلك.
+لإيقاف هذا المقياس، اضبط `includeAppStartMetric: false`.
 
 مع Flask، اتبع [إعداد Flask](/ar/guides/flask).
 

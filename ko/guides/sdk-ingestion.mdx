@@ -16,7 +16,7 @@ description: "런타임에 맞는 LogBrew SDK를 고르고 수집 키를 설정�
 4. 애플리케이션에서 안전한 테스트 이벤트 1개를 보내세요.
 5. 전송 결과를 확인하세요. 그다음 LogBrew에서 이벤트를 찾으세요.
 
-배치가 접수되었다면 LogBrew API에 도착한 것입니다. 그래도 필터 때문에 이벤트가 보이지 않을 수 있습니다. 올바른 프로젝트와 기간을 선택하세요. 그다음 서비스, 환경, 릴리스, 시그널 유형을 맞추세요.
+배치가 접수되었다면 LogBrew API에 도착한 것입니다. 그래도 필터 때문에 이벤트가 보이지 않을 수 있습니다. 올바른 프로젝트와 기간을 선택하세요. 그다음 서비스, 환경, 릴리스, 시그널 유형을 맞추세요. LogBrew가 이벤트를 저장하기 전에 프로젝트의 수신 필터가 이벤트를 버릴 수도 있습니다. [프로젝트 및 설정](/ko/concepts/projects)을 참고하세요.
 
 수집을 켜기 전에 [승인된 필드를 고르고 테스트하세요](/ko/guides/safe-capture). **분석**에 데이터를 채우려면 [제품 이벤트 수집](/ko/guides/product-events)을 따르세요.
 
@@ -98,7 +98,39 @@ Express에는 `@logbrew/express` 0.1.5 이상이 필요합니다. Fastify와 Nes
 
 이 연동은 요청 스팬 1개를 만들거나 이어 갑니다. 스팬 이름에는 일치한 라우트 템플릿을 씁니다. 요청 안에서 생긴 로그, 이슈, 액션, 메트릭은 그 요청의 트레이스와 스팬 컨텍스트를 이어받습니다. 패키지를 새 버전으로 올려도 업그레이드 전에 보낸 이벤트에는 컨텍스트가 추가되지 않습니다.
 
+`@logbrew/express` 0.1.12 이상에서는 템플릿에 라우터의 마운트 경로가 포함됩니다. 예를 들면 `GET /tenants/:tenantId/orders/:orderId`입니다. 마운트 경로가 정규식이면 핸들러의 라우트만 남습니다. `@logbrew/node` 0.1.27 이상의 `withLogBrewHttpHandler`는 숫자, UUID, 긴 16진수 경로 세그먼트를 각각 `:id`로 바꿉니다. 예를 들어 `GET /orders/8412`는 `GET /orders/:id`가 됩니다. 요청 이름을 직접 정하려면 `routeTemplateFactory(req)` 함수를 설정하세요. 이 함수가 빈 문자열을 반환하면 SDK는 다음 이름 출처를 사용합니다.
+
 기본 요청 연동은 요청이나 응답 본문, 쿼리 문자열, 임의의 헤더, 원본 `traceparent` 값을 수집하지 않습니다.
+
+### 서비스 이름
+
+서비스 이름은 트레이스, 로그, 이슈를 묶는 기준입니다. 서비스 이름을 정하려면 `LOGBREW_SERVICE_NAME`을 설정하세요. 설정하지 않으면 Node.js, Express, Fastify, NestJS, Next.js SDK는 앱에서 가장 가까운 `package.json`의 `name`을 사용합니다. Next.js는 Node.js 런타임에서만 이 파일을 읽습니다. Edge와 브라우저 코드는 이 파일을 읽을 수 없습니다. 따라서 이런 코드에서는 `LOGBREW_SERVICE_NAME`을 설정하거나 `context`에 서비스를 지정하세요. `package.json` 조회를 끄려면 `captureRuntimeContext: false`를 설정하세요. 이 기능에는 `@logbrew/node` 0.1.24 이상과 `@logbrew/next` 0.1.13 이상이 필요합니다.
+
+서비스가 없는 이벤트는 `unknown_service`로 표시됩니다. 서비스가 없을 때 OpenTelemetry가 쓰는 이름입니다. LogBrew는 `logbrew-express` 같은 SDK 이름을 서비스로 사용하지 않습니다.
+
+### 클라이언트 오류
+
+Express, Fastify, NestJS, `withLogBrewHttpHandler`에서는 `status`나 `statusCode`가 4xx인 오류가 이슈가 되지 않습니다. 예를 들어 던진 404나 입력 검증에서 나온 400이 여기에 해당합니다. 이런 오류는 앱의 장애가 아니라 요청 자체의 문제를 나타냅니다. 요청 스팬에는 4xx 상태가 남으므로 요청은 트레이스에 그대로 남습니다. `withLogBrewHttpHandler`는 `500` 대신 그 4xx 상태를 보냅니다. 이런 오류를 이슈로 보고하려면 `captureClientErrors: true`를 설정하세요. Fastify에는 `@logbrew/fastify` 0.1.10 이상, NestJS에는 `@logbrew/nestjs` 0.1.11 이상, `withLogBrewHttpHandler`에는 `@logbrew/node` 0.1.24 이상이 필요합니다.
+
+`withLogBrewRouteHandler`로 감싼 Next.js Route Handler에서는 `notFound()`, `forbidden()`, `unauthorized()`, `redirect()`, `permanentRedirect()`가 이슈가 되지 않습니다. LogBrew는 Next.js가 보내는 404, 403, 401, 307, 308 상태로 요청을 기록합니다. 리디렉션 대상은 기록하지 않습니다. 그 밖에 던져진 오류는 `status`가 4xx여도 이슈로 남습니다. Next.js가 이런 오류에 `500`으로 응답하기 때문입니다. `captureClientErrors: true`는 `notFound()`, `forbidden()`, `unauthorized()`를 이슈로 보고합니다. 리디렉션은 바뀌지 않습니다. `@logbrew/next` 0.1.14 이상을 사용하세요.
+
+### Next.js 페이지 조회와 Web Vitals
+
+`@logbrew/next/client`의 `useLogBrewNextNavigation`은 페이지의 라우트가 바뀌면 라우트 스팬을 1개 기록합니다. LogBrew는 이런 스팬을 각각 해당 라우트 템플릿의 페이지 조회로 셉니다. 이 훅은 `traceparent`, `traceId`, 또는 `spanId`와 함께 쓴 `traceId`를 받습니다. 페이지로 예외를 던지지 않습니다. 수집에 실패하면 스팬을 버리고 `onCaptureError`를 호출합니다. React Router 앱은 `@logbrew/react` 0.1.4 이상의 `useLogBrewReactRouterNavigation`으로 같은 동작을 얻습니다.
+
+`installLogBrewNextClientErrorCapture`는 페이지가 처음 숨겨질 때 페이지의 Web Vitals를 히스토그램 메트릭으로 보냅니다. `browser.web_vital.lcp`, `browser.web_vital.inp`, `browser.web_vital.fcp`, `browser.web_vital.ttfb`의 단위는 밀리초입니다. `browser.web_vital.cls`는 점수입니다. 각 메트릭에는 `metadata.rating`(`good`, `needs-improvement`, `poor` 중 하나)과, 페이지가 로드된 라우트인 `metadata.routeTemplate`이 있습니다. 이 메트릭을 끄려면 `webVitals: false`를 설정하세요. 페이지 조회와 Web Vitals에는 `@logbrew/next` 0.1.17 이상이 필요합니다.
+
+### 거부된 배치 이후 전송
+
+LogBrew가 배치를 거부하면 SDK는 자동 전송을 일시 중지합니다. 예를 들어 `401`이나 `403` 응답을 받은 경우입니다. 다음 SDK는 그 뒤 같은 배치를 자동으로 다시 보냅니다.
+
+| SDK | 버전 |
+| --- | --- |
+| JavaScript | `@logbrew/sdk` 0.1.43 이상 |
+| 브라우저 | `@logbrew/browser` 0.1.20 이상 |
+| Swift와 Objective-C | LogBrew Swift 0.1.26 이상 |
+
+SDK는 시도가 실패할 때마다 더 오래 기다리며, 최대 5분까지 기다립니다. 처음으로 접수된 시도부터 정상 전송이 다시 시작됩니다. 앱을 다시 시작할 필요는 없습니다. 큐 한도는 바뀌지 않습니다.
 
 ### ASP.NET Core
 
@@ -202,6 +234,10 @@ SDK 모노레포를 가져올 수 없는 빌드라면 [C++ 0.2.3 릴리스](http
 
 Go SDK와 Asynq, Gin, OpenTelemetry 모듈에는 Go 1.26.0 이상이 필요합니다. LogBrew는 보안 수정이 계속 제공되는 Go 릴리스만 지원하며, 현재는 Go 1.26과 1.27입니다.
 
+### Rust
+
+`logbrew` 크레이트에는 Rust 1.88 이상이 필요합니다.
+
 ### JavaScript 소스맵
 
 Vite 빌드는 [JavaScript 소스맵](/ko/guides/source-maps)을 따르세요. 플러그인, 아티팩트 키, 업로드 확인, 원본 소스 위치가 표시되는 새 이슈를 다룹니다.
@@ -209,6 +245,8 @@ Vite 빌드는 [JavaScript 소스맵](/ko/guides/source-maps)을 따르세요. �
 ### Apple, Flask, React Native
 
 텔레메트리에는 `LogBrew` Swift 제품을 사용하세요. `LogBrewCrash`는 Apple 크래시나 멈춤을 수집할 때만 추가하세요. dSYM 업로드와 호스팅 심볼리케이션은 [Apple 크래시와 멈춤](/ko/guides/apple-crashes-and-hangs) 가이드를 따르세요.
+
+LogBrew Swift 0.1.26 이상은 콜드 스타트마다 `app.start.duration` 히스토그램 메트릭을 1개 보냅니다. 값은 프로세스 시작부터 첫 프레임까지 걸린 시간(밀리초)입니다. 앱이 그보다 먼저 `client.markAppReady()`를 호출하면 그 호출까지 걸린 시간입니다. 이 메트릭을 끄려면 `includeAppStartMetric: false`를 설정하세요.
 
 Flask는 [Flask](/ko/guides/flask) 가이드를 따르세요.
 

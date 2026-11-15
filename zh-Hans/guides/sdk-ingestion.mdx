@@ -16,7 +16,7 @@ description: "为你的运行时选择 LogBrew SDK，配置接入密钥，发送
 4. 从应用发送一条安全的测试信号。
 5. 查看投递结果。然后在 LogBrew 中找到这条信号。
 
-批次被接受，说明它已到达 LogBrew API。但筛选条件仍可能隐藏其中的信号。选择正确的项目和时间范围。然后核对服务、环境、版本和信号类型。
+批次被接受，说明它已到达 LogBrew API。但筛选条件仍可能隐藏其中的信号。选择正确的项目和时间范围。然后核对服务、环境、版本和信号类型。在 LogBrew 存储事件之前，项目的入站过滤器也可能丢弃事件。参见[项目与接入](/zh-Hans/concepts/projects)。
 
 启用采集之前，先[选择并测试允许采集的字段](/zh-Hans/guides/safe-capture)。要让“分析”中有数据，按[产品事件采集](/zh-Hans/guides/product-events)操作。
 
@@ -98,7 +98,39 @@ Express 需要 `@logbrew/express` 0.1.5 或更高版本。Fastify 和 NestJS 需
 
 这些集成会创建或延续一个请求 Span。Span 名称使用匹配到的路由模板。请求内的日志、问题、操作和指标会继承它的链路和 Span 上下文。升级包不会为升级前已发送的信号补充上下文。
 
+使用 `@logbrew/express` 0.1.12 或更高版本时，模板会包含路由器的挂载路径，例如 `GET /tenants/:tenantId/orders/:orderId`。如果挂载路径是正则表达式，则只保留处理函数的路由。`@logbrew/node` 0.1.27 或更高版本中的 `withLogBrewHttpHandler` 会把每个数字、UUID 或较长的十六进制路径段替换为 `:id`。例如，`GET /orders/8412` 会变成 `GET /orders/:id`。要自己命名请求，设置 `routeTemplateFactory(req)`。它返回空字符串时，SDK 会使用下一个名称来源。
+
 默认的请求集成不会采集请求体或响应体、查询字符串、任意请求头，或原始 `traceparent` 值。
+
+### 服务名称
+
+服务名称用于对链路、日志和问题分组。设置 `LOGBREW_SERVICE_NAME` 来指定服务名称。如果没有设置，Node.js、Express、Fastify、NestJS 和 Next.js SDK 会使用离应用最近的 `package.json` 中的 `name`。Next.js 只在 Node.js 运行时中读取该文件。Edge 和浏览器代码无法读取它，所以要在这些代码中设置 `LOGBREW_SERVICE_NAME`，或在 `context` 中提供服务。要停止查找 `package.json`，设置 `captureRuntimeContext: false`。这需要 `@logbrew/node` 0.1.24 或更高版本，以及 `@logbrew/next` 0.1.13 或更高版本。
+
+没有服务的事件显示为 `unknown_service`。这是 OpenTelemetry 为缺失的服务使用的名称。LogBrew 不会把 SDK 名称（例如 `logbrew-express`）用作服务。
+
+### 客户端错误
+
+在 Express、Fastify、NestJS 或 `withLogBrewHttpHandler` 中，`status` 或 `statusCode` 为 4xx 的错误不会成为问题。例如抛出的 404，或输入校验返回的 400。这些错误描述的是请求本身，而不是应用中的故障。请求 Span 会保留 4xx 状态，所以该请求仍会出现在链路中。`withLogBrewHttpHandler` 还会发送该 4xx 状态，而不是 `500`。要把这些错误报告为问题，设置 `captureClientErrors: true`。Fastify 需要 `@logbrew/fastify` 0.1.10 或更高版本，NestJS 需要 `@logbrew/nestjs` 0.1.11 或更高版本，`withLogBrewHttpHandler` 需要 `@logbrew/node` 0.1.24 或更高版本。
+
+在由 `withLogBrewRouteHandler` 包装的 Next.js Route Handler 中，`notFound()`、`forbidden()`、`unauthorized()`、`redirect()` 和 `permanentRedirect()` 不会成为问题。LogBrew 会用 Next.js 发送的 404、403、401、307 或 308 状态记录该请求。它不会记录重定向目标。其他抛出的错误即使 `status` 为 4xx，也仍会成为问题，因为 Next.js 会用 `500` 响应它们。`captureClientErrors: true` 会把 `notFound()`、`forbidden()` 和 `unauthorized()` 报告为问题。它不会改变重定向。使用 `@logbrew/next` 0.1.14 或更高版本。
+
+### Next.js 页面浏览和 Web Vitals
+
+`@logbrew/next/client` 中的 `useLogBrewNextNavigation` 会在页面路由变化时记录一个路由 Span。LogBrew 把每个这样的 Span 计为其路由模板的一次页面浏览。该 Hook 接受 `traceparent`、`traceId`，或 `traceId` 加 `spanId`。它绝不会向页面抛出错误。采集失败时，它会丢弃该 Span 并调用 `onCaptureError`。React Router 应用可以通过 `@logbrew/react` 0.1.4 或更高版本中的 `useLogBrewReactRouterNavigation` 获得相同的行为。
+
+`installLogBrewNextClientErrorCapture` 会在页面首次被隐藏时，把页面的 Web Vitals 作为直方图指标发送。`browser.web_vital.lcp`、`browser.web_vital.inp`、`browser.web_vital.fcp` 和 `browser.web_vital.ttfb` 的单位为毫秒。`browser.web_vital.cls` 是一个分数。每个指标都有 `metadata.rating`（`good`、`needs-improvement` 或 `poor`）和 `metadata.routeTemplate`，后者是页面加载时所在的路由。要停止发送这些指标，设置 `webVitals: false`。页面浏览和 Web Vitals 需要 `@logbrew/next` 0.1.17 或更高版本。
+
+### 批次被拒绝后的投递
+
+LogBrew 拒绝一个批次后，SDK 会暂停自动投递，例如收到 `401` 或 `403` 响应时。以下 SDK 随后会自动重新发送同一批次：
+
+| SDK | 版本 |
+| --- | --- |
+| JavaScript | `@logbrew/sdk` 0.1.43 或更高版本 |
+| 浏览器 | `@logbrew/browser` 0.1.20 或更高版本 |
+| Swift 和 Objective-C | LogBrew Swift 0.1.26 或更高版本 |
+
+每次尝试失败后，SDK 都会等待更长时间，最长 5 分钟。第一次被接受的尝试会恢复正常投递。你不需要重启应用。队列上限不变。
 
 ### ASP.NET Core
 
@@ -202,6 +234,10 @@ cmake --build build
 
 Go SDK 及其 Asynq、Gin 和 OpenTelemetry 模块需要 Go 1.26.0 或更高版本。LogBrew 只支持仍在获得安全修复的 Go 版本，目前是 Go 1.26 和 1.27。
 
+### Rust
+
+`logbrew` crate 需要 Rust 1.88 或更高版本。
+
 ### JavaScript Source Map
 
 Vite 构建请按 [JavaScript Source Map](/zh-Hans/guides/source-maps) 操作。它介绍了插件、构建产物密钥、上传检查，以及如何得到一个带原始源码位置的新问题。
@@ -209,6 +245,8 @@ Vite 构建请按 [JavaScript Source Map](/zh-Hans/guides/source-maps) 操作。
 ### Apple、Flask 和 React Native
 
 使用 Swift 包中的 `LogBrew` 产品发送遥测数据。只有需要采集 Apple 崩溃或卡顿时，才添加 `LogBrewCrash`。dSYM 上传和托管符号化见 [Apple 崩溃与卡顿](/zh-Hans/guides/apple-crashes-and-hangs)。
+
+LogBrew Swift 0.1.26 或更高版本会在每次冷启动时发送一个 `app.start.duration` 直方图指标。值为从进程启动到第一帧的时间，单位为毫秒。如果应用先调用了 `client.markAppReady()`，则计时到该调用为止。要停止发送该指标，设置 `includeAppStartMetric: false`。
 
 Flask 请按 [Flask](/zh-Hans/guides/flask) 指南操作。
 

@@ -22,7 +22,9 @@ Her entegrasyon için şu adımları uygulayın:
 
 Kabul edilen bir toplu gönderim LogBrew API'sine ulaşmıştır. Filtreler yine de
 olaylarını gizleyebilir. Doğru projeyi ve zaman aralığını seçin. Ardından
-hizmeti, ortamı, sürümü ve sinyal türünü eşleştirin.
+hizmeti, ortamı, sürümü ve sinyal türünü eşleştirin. Projenin gelen veri
+filtreleri de olayları LogBrew kaydetmeden önce eleyebilir. Bkz.
+[Projeler](/tr/concepts/projects).
 
 Yakalamayı açmadan önce [onaylı alanları seçin ve test edin](/tr/guides/safe-capture).
 Analizler'i doldurmak için [Ürün olaylarını yakalama](/tr/guides/product-events)
@@ -122,8 +124,90 @@ adı, eşleşen rota şablonunu kullanır. İstek içindeki loglar, sorunlar,
 aksiyonlar ve metrikler isteğin iz ve span bağlamını devralır. Daha yeni bir
 paket, yükseltmeden önce gönderilen olaylara bağlam eklemez.
 
+`@logbrew/express` 0.1.12 veya daha yeni sürümde şablon, router'ın bağlama
+yolunu da içerir, örneğin `GET /tenants/:tenantId/orders/:orderId`. Bağlama
+yolu bir düzenli ifadeyse yalnızca handler'ın rotası kalır. `@logbrew/node`
+0.1.27 veya daha yeni sürümdeki `withLogBrewHttpHandler`, sayısal, UUID veya
+uzun onaltılık her yol parçasını `:id` ile değiştirir. Örneğin
+`GET /orders/8412`, `GET /orders/:id` olur. İstekleri kendiniz adlandırmak
+için `routeTemplateFactory(req)` ayarlayın. Bu fonksiyon boş bir dize
+döndürürse SDK sonraki ad kaynağını kullanır.
+
 Varsayılan istek entegrasyonu istek veya yanıt gövdelerini, sorgu dizelerini,
 rastgele başlıkları veya ham `traceparent` değerlerini yakalamaz.
+
+### Hizmet adı
+
+Hizmet adı izleri, logları ve sorunları gruplar. Adı seçmek için
+`LOGBREW_SERVICE_NAME` ayarlayın. Bu değişken yoksa Node.js, Express, Fastify,
+NestJS ve Next.js SDK'ları uygulamaya en yakın `package.json` dosyasındaki
+`name` değerini kullanır. Next.js bu dosyayı yalnızca Node.js çalışma
+zamanında okur. Edge ve tarayıcı kodu dosyayı okuyamaz. Orada
+`LOGBREW_SERVICE_NAME` ayarlayın veya hizmeti `context` içinde verin.
+`package.json` aramasını kapatmak için `captureRuntimeContext: false`
+ayarlayın. Bunun için `@logbrew/node` 0.1.24 veya daha yeni ve
+`@logbrew/next` 0.1.13 veya daha yeni sürüm gerekir.
+
+Hizmeti olmayan bir olay `unknown_service` olarak görünür. Bu,
+OpenTelemetry'nin eksik hizmet için kullandığı addır. LogBrew,
+`logbrew-express` gibi SDK adını hizmet olarak kullanmaz.
+
+### İstemci hataları
+
+`status` veya `statusCode` değeri 4xx olan bir hata Express, Fastify, NestJS
+veya `withLogBrewHttpHandler` içinde sorun olmaz. Örnekler, fırlatılan bir 404
+veya girdi doğrulamasından gelen bir 400'dür. Bu hatalar uygulamanızdaki bir
+arızayı değil, isteği anlatır. İstek span'i 4xx durumunu korur, bu yüzden
+istek izlerde kalır. `withLogBrewHttpHandler` de `500` yerine bu 4xx durumunu
+gönderir. Bu hataları sorun olarak bildirmek için `captureClientErrors: true`
+ayarlayın. Fastify için `@logbrew/fastify` 0.1.10 veya daha yenisi, NestJS
+için `@logbrew/nestjs` 0.1.11 veya daha yenisi, `withLogBrewHttpHandler` için
+`@logbrew/node` 0.1.24 veya daha yenisi gerekir.
+
+`withLogBrewRouteHandler` ile sarılan bir Next.js Route Handler'ında
+`notFound()`, `forbidden()`, `unauthorized()`, `redirect()` ve
+`permanentRedirect()` sorun sayılmaz. LogBrew isteği Next.js'in gönderdiği
+404, 403, 401, 307 veya 308 durumuyla kaydeder. Yönlendirme hedefini
+kaydetmez. Fırlatılan diğer hatalar, `status` değeri 4xx olsa bile sorun
+olarak kalır, çünkü Next.js bunlara `500` ile yanıt verir.
+`captureClientErrors: true`, `notFound()`, `forbidden()` ve `unauthorized()`
+çağrılarını sorun olarak bildirir. Yönlendirmeleri değiştirmez.
+`@logbrew/next` 0.1.14 veya daha yeni bir sürüm kullanın.
+
+### Next.js sayfa görüntülemeleri ve Web Vitals
+
+`@logbrew/next/client` içindeki `useLogBrewNextNavigation`, sayfanın rotası
+değiştiğinde bir rota span'i kaydeder. LogBrew bu span'lerin her birini, rota
+şablonunun bir sayfa görüntülemesi olarak sayar. Hook `traceparent`, `traceId`
+veya `spanId` ile birlikte `traceId` kabul eder. Sayfaya hiçbir zaman hata
+fırlatmaz. Bir yakalama başarısız olursa span'i atar ve `onCaptureError`
+çağırır. React Router uygulamaları aynı davranışı `@logbrew/react` 0.1.4 veya
+daha yeni sürümdeki `useLogBrewReactRouterNavigation` ile alır.
+
+`installLogBrewNextClientErrorCapture`, sayfa ilk kez gizlendiğinde sayfanın
+Web Vitals değerlerini histogram metrikleri olarak gönderir.
+`browser.web_vital.lcp`, `browser.web_vital.inp`, `browser.web_vital.fcp` ve
+`browser.web_vital.ttfb` milisaniye cinsindendir. `browser.web_vital.cls` bir
+puandır. Her metrikte `metadata.rating` (`good`, `needs-improvement` veya
+`poor`) ve sayfanın yüklendiği rota olan `metadata.routeTemplate` bulunur. Bu
+metrikleri kapatmak için `webVitals: false` ayarlayın. Sayfa görüntülemeleri
+ve Web Vitals için `@logbrew/next` 0.1.17 veya daha yeni sürüm gerekir.
+
+### Reddedilen bir toplu gönderimden sonra yeniden gönderim
+
+LogBrew bir toplu gönderimi reddettiğinde SDK otomatik gönderimi duraklatır.
+Örneğin yanıt `401` veya `403` olabilir. Bu SDK'lar ardından aynı toplu
+gönderimi kendiliğinden yeniden gönderir:
+
+| SDK | Sürüm |
+| --- | --- |
+| JavaScript | `@logbrew/sdk` 0.1.43 veya daha yeni |
+| Tarayıcı | `@logbrew/browser` 0.1.20 veya daha yeni |
+| Swift ve Objective-C | LogBrew Swift 0.1.26 veya daha yeni |
+
+SDK her başarısız denemeden sonra daha uzun bekler, en fazla 5 dakika. Kabul
+edilen ilk deneme normal gönderimi yeniden başlatır. Uygulamayı yeniden
+başlatmanız gerekmez. Kuyruk sınırları değişmez.
 
 ### ASP.NET Core
 
@@ -256,6 +340,10 @@ Go SDK'sı ve Asynq, Gin ve OpenTelemetry modülleri için Go 1.26.0 veya üstü
 gerekir. LogBrew yalnızca hâlâ güvenlik düzeltmesi alan Go sürümlerini destekler;
 şu anda bunlar Go 1.26 ve 1.27.
 
+### Rust
+
+`logbrew` crate'i Rust 1.88 veya daha yeni bir sürüm gerektirir.
+
 ### JavaScript source map'leri
 
 Vite derlemeleri için [JavaScript source map'leri](/tr/guides/source-maps)
@@ -269,6 +357,12 @@ yalnızca Apple çökme veya donma yakalama için ekleyin. dSYM yükleme ve
 barındırılan sembolleştirme için
 [Apple çökmelerini ve donmalarını yakalayın](/tr/guides/apple-crashes-and-hangs)
 sayfasını izleyin.
+
+LogBrew Swift 0.1.26 veya daha yeni bir sürüm, her soğuk açılış için bir
+`app.start.duration` histogram metriği gönderir. Değer, sürecin başlamasından
+ilk karenin çizilmesine kadar geçen milisaniye cinsinden süredir. Uygulama
+`client.markAppReady()` çağrısını daha önce yaparsa süre bu çağrıya kadar
+ölçülür. Bu metriği kapatmak için `includeAppStartMetric: false` ayarlayın.
 
 Flask için [Flask'ı kurun](/tr/guides/flask) sayfasını izleyin.
 
