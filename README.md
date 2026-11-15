@@ -82,6 +82,23 @@ python3 scripts/check_locales.py
 Every locale is in the `docs.json` language switcher. A new locale joins it
 only when all its pages exist.
 
+## Layout check
+
+The layout check opens every page in every language at 320, 390, 768, and
+1440 px wide. It fails when a page scrolls sideways, when a control is smaller
+than 44 x 44 px and has no free space around it, or when an Arabic page does
+not mirror its English page. Run it after a change to `style.css`, a script,
+or `docs.json`:
+
+```bash
+bun install
+bunx playwright install chromium
+bun scripts/check-layout.ts --base http://localhost:3000
+```
+
+Leave out `--base` to check the live site. Add `--locales ar` or
+`--pages guides/` to check fewer pages.
+
 ## License
 
 MIT for the documentation source. See [LICENSE](LICENSE). The LogBrew product
