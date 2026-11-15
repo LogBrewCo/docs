@@ -27,7 +27,7 @@ logbrew investigate issue "<issue_id>" --json
 
 Dùng `--json` cho agent và script. `logbrew explain issue "<issue_id>"` là
 cùng một thao tác đọc. Khi đọc trực tiếp qua API, yêu cầu
-phiên bản phản hồi 14. CLI cũng yêu cầu phiên bản này:
+phiên bản phản hồi 17. CLI cũng yêu cầu phiên bản này:
 
 ```bash
 : "${LOGBREW_ISSUE_ID:?set the issue UUID}"
@@ -36,12 +36,12 @@ phiên bản phản hồi 14. CLI cũng yêu cầu phiên bản này:
 curl --fail-with-body -sS -G \
   "https://api.logbrew.co/api/telemetry/issues/$LOGBREW_ISSUE_ID/investigation" \
   -H "Authorization: Bearer $LOGBREW_TOKEN" \
-  --data-urlencode "response_version=14" \
+  --data-urlencode "response_version=17" \
   --data-urlencode "selection=recommended"
 ```
 
-API chấp nhận `response_version` từ 1 đến 16. Việc chọn lần xảy ra cần phiên
-bản 2 trở lên. Hướng dẫn này mô tả phiên bản 14.
+API chấp nhận `response_version` từ 1 đến 17. Việc chọn lần xảy ra cần phiên
+bản 2 trở lên. Hướng dẫn này mô tả phiên bản 17.
 
 Lần xảy ra được đề xuất là một lần xảy ra gần đây, được giữ lại và có ngữ cảnh
 hữu ích. Lần này có thể cũ hơn lần xảy ra mới nhất. LogBrew so sánh các lần
@@ -66,7 +66,7 @@ Trước khi diễn giải lỗi, kiểm tra rằng:
 - `event.occurred_at` nằm trong khoảng thời gian của sự cố.
 - Dịch vụ, môi trường và bản phát hành khớp với lần triển khai đang được xem
   xét.
-- `schema_version` là `14`.
+- `schema_version` là `17`.
 
 Nếu sai dự án, lấy đúng ID vấn đề. Tiêu đề hay thời điểm giống nhau không liên
 kết các lỗi giữa những dự án khác nhau.
@@ -147,6 +147,42 @@ Nếu `source_locator.status` là `not_found`, dịch vụ không có thành ph�
 repository được liên kết. Điều đó không có nghĩa là tệp bị thiếu. Không đoán
 thành phần từ tên tệp.
 
+Ở phiên bản 17, `source_locator.frame_links` liên kết từng khung mã ứng dụng với
+tệp và dòng của khung đó tại commit đã triển khai. Mỗi liên kết có
+`frame_index`, `repository_relative_file`, `line` và `url`. `url` mở tệp trên
+GitHub, GitLab hoặc Bitbucket. LogBrew chỉ thêm liên kết khi revision là commit
+của một lần triển khai, không phải ảnh chụp thiết lập.
+
+### Tìm commit đáng ngờ
+
+Phiên bản 17 thêm `suspect_commits`: tối đa 10 commit đã thay đổi một tệp trong
+các khung mã ứng dụng của vấn đề. Các commit này lấy từ phạm vi triển khai.
+`head_revision` là commit của lần triển khai mà vấn đề xuất hiện lần đầu hoặc
+tái phát. `base_revision` là commit của lần triển khai thành công trước đó của
+một bản phát hành khác.
+
+`rank` 1 là nguyên nhân có khả năng cao nhất. Thứ tự là khung gần chỗ crash nhất
+trước, sau đó đến số tệp khớp nhiều hơn, rồi đến commit mới nhất. Mỗi commit có
+`sha`, `url`, `title`, `author_name`, `committed_at` và `files`. Nếu
+`truncated` là `true`, số commit khớp nhiều hơn số mà phản hồi hiển thị.
+
+Khi danh sách không có sẵn, `suspect_commits.status` cho bạn biết, và
+`suspect_commits.evidence.missing_fields` nêu mục bị thiếu:
+
+| Trường bị thiếu | Bước tiếp theo |
+| --- | --- |
+| `suspect_commits.repository` | Kết nối một repository GitHub với dự án. |
+| `suspect_commits.authorization` | Cho phép LogBrew đọc nội dung của repository. |
+| `suspect_commits.provider` | Commit đáng ngờ cần một repository GitHub. |
+| `suspect_commits.frames` | Vấn đề không có khung mã ứng dụng nào khớp với một tệp trong repository. |
+| `suspect_commits.deployment` | Ghi lại từng lần triển khai bằng `logbrew deploy`. |
+| `suspect_commits.deployment.commit_sha` | Ghi lại lần triển khai bằng `logbrew deploy --commit-sha <sha>`. |
+| `suspect_commits.previous_deployment` | Ghi lại một lần triển khai của bản phát hành cũ hơn. |
+| `suspect_commits.previous_deployment.commit_sha` | Ghi lại lần triển khai cũ hơn kèm SHA của commit. |
+
+Commit đáng ngờ là manh mối, không phải bằng chứng. Đọc thay đổi của commit đó
+trước khi hành động.
+
 ### Người dùng bị ảnh hưởng
 
 | `impact.user_impact.status` | Ý nghĩa |
@@ -187,8 +223,9 @@ Trạng thái đã lưu vẫn là `resolved` cho đến khi có người mở l�
 `lifecycle.regression.first_reappeared_occurrence` xác định lần xảy ra mới đầu
 tiên.
 
-Phản hồi điều tra hiển thị vấn đề đã lưu trữ là `ignored` trong
-`subject.status` và `lifecycle`. Xem [Giá trị trạng thái](/vi/guides/issue-workflow#status-values).
+Từ phiên bản 15, phản hồi điều tra hiển thị vấn đề đã lưu trữ là `archived`
+trong `subject.status` và `lifecycle`. Phiên bản 14 trở về trước hiển thị
+`ignored`. Xem [Giá trị trạng thái](/vi/guides/issue-workflow#status-values).
 
 ## Xử lý bằng chứng bị thiếu hoặc có giới hạn
 
@@ -285,7 +322,7 @@ nhóm của bạn chấp nhận bằng chứng.
 | --- | --- |
 | `401` | Đăng nhập lại. Không bao giờ dùng khóa gửi dữ liệu để thay thế. |
 | `404` | Đọc `error`. `issue not found`, `issue occurrence not found` và `candidate deployment not found` cần các ID khác nhau. Xác nhận ID và quyền truy cập tài khoản. |
-| `422` | Gửi `response_version` từ 1 đến 16 và tối đa một tham số chọn. Với `verify`, kiểm tra các quy tắc về lần triển khai ứng viên. |
+| `422` | Gửi `response_version` từ 1 đến 17 và tối đa một tham số chọn. Với `verify`, kiểm tra các quy tắc về lần triển khai ứng viên. |
 | Trường hoặc giá trị enum không xác định | Client nghiêm ngặt phải dừng lại. Cập nhật trình phân tích cú pháp trước khi hành động. `logbrew investigate issue` báo `investigation_response_invalid`. |
 
 Phản hồi lỗi chứa `error`, `code`, `next` và `next_action`. Dùng `code` và

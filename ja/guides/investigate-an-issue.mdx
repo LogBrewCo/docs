@@ -19,7 +19,7 @@ logbrew investigate issue "<issue_id>"
 logbrew investigate issue "<issue_id>" --json
 ```
 
-エージェントとスクリプトには `--json` を使います。`logbrew explain issue "<issue_id>"` も同じ読み取りです。API を直接呼び出す場合は、レスポンスのバージョン 14 をリクエストします。CLI も同じバージョンをリクエストします。
+エージェントとスクリプトには `--json` を使います。`logbrew explain issue "<issue_id>"` も同じ読み取りです。API を直接呼び出す場合は、レスポンスのバージョン 17 をリクエストします。CLI も同じバージョンをリクエストします。
 
 ```bash
 : "${LOGBREW_ISSUE_ID:?set the issue UUID}"
@@ -28,11 +28,11 @@ logbrew investigate issue "<issue_id>" --json
 curl --fail-with-body -sS -G \
   "https://api.logbrew.co/api/telemetry/issues/$LOGBREW_ISSUE_ID/investigation" \
   -H "Authorization: Bearer $LOGBREW_TOKEN" \
-  --data-urlencode "response_version=14" \
+  --data-urlencode "response_version=17" \
   --data-urlencode "selection=recommended"
 ```
 
-API は `response_version` の 1〜16 を受け付けます。発生事象を選択するには、バージョン 2 以降が必要です。このガイドではバージョン 14 を説明します。
+API は `response_version` の 1〜17 を受け付けます。発生事象を選択するには、バージョン 2 以降が必要です。このガイドではバージョン 17 を説明します。
 
 推奨する発生事象は、役立つコンテキストを持つ、最近の保持済みの発生事象です。最新の発生事象より古い場合もあります。LogBrew は、保持されている新しい発生事象を `occurrence_selection.recommendation.candidate_limit` 件まで比較します。そのうち、調査のコンテキストが最も多いものを選びます。コンテキストが同じ場合は、新しい方を選びます。`occurrence_selection.recommendation.candidate_window_truncated` が `true` の場合、推奨の評価に含まれていない古い発生事象がその課題にあります。
 
@@ -46,7 +46,7 @@ API は `response_version` の 1〜16 を受け付けます。発生事象を選
 - `event.id` が選択した発生事象である。
 - `event.occurred_at` がインシデントの期間内にある。
 - サービス、環境、リリースが、確認中のデプロイと一致する。
-- `schema_version` が `14` である。
+- `schema_version` が `17` である。
 
 プロジェクトが違う場合は、正しい課題 ID を取得します。タイトルや時刻が似ていても、プロジェクトをまたいでエラーが結び付くわけではありません。
 
@@ -105,6 +105,29 @@ API は `response_version` の 1〜16 を受け付けます。発生事象を選
 
 `source_locator.status` が `not_found` の場合、そのサービスにはリポジトリのコンポーネントが結び付いていません。ファイルがないという意味ではありません。ファイル名からコンポーネントを推測しないでください。
 
+バージョン 17 では、`source_locator.frame_links` が、各アプリケーションフレームを、デプロイされたコミットのファイルと行に結び付けます。各リンクには `frame_index`、`repository_relative_file`、`line`、`url` があります。この URL は、GitHub、GitLab、Bitbucket 上のファイルを開きます。LogBrew がリンクを追加するのは、リビジョンがデプロイのコミットの場合だけです。セットアップのスナップショットの場合は追加しません。
+
+### 疑わしいコミットを見つける
+
+バージョン 17 では `suspect_commits` が追加されます。これは、課題のアプリケーションフレームにあるファイルを変更したコミットで、最大10件です。コミットはデプロイの範囲から選ばれます。`head_revision` は、課題が最初に発生した、または再発したデプロイのコミットです。`base_revision` は、別のリリースで直前に成功したデプロイのコミットです。
+
+`rank` が 1 のコミットが、最も可能性の高い原因です。並び順は、まずクラッシュ地点に最も近いフレーム、次に一致したファイルの数、最後にコミットの新しさです。各コミットには `sha`、`url`、`title`、`author_name`、`committed_at`、`files` があります。`truncated` が `true` の場合は、レスポンスに含まれる数より多くのコミットが一致しています。
+
+一覧を取得できない場合は、`suspect_commits.status` でその状態がわかります。`suspect_commits.evidence.missing_fields` は、不足している項目を示します。
+
+| 不足しているフィールド | 次の手順 |
+| --- | --- |
+| `suspect_commits.repository` | プロジェクトに GitHub リポジトリを接続します。 |
+| `suspect_commits.authorization` | リポジトリの内容を読み取る権限を LogBrew に与えます。 |
+| `suspect_commits.provider` | 疑わしいコミットには GitHub リポジトリが必要です。 |
+| `suspect_commits.frames` | 課題に、リポジトリのファイルと一致するアプリケーションフレームがありません。 |
+| `suspect_commits.deployment` | `logbrew deploy` で各デプロイを記録します。 |
+| `suspect_commits.deployment.commit_sha` | `logbrew deploy --commit-sha <sha>` でデプロイを記録します。 |
+| `suspect_commits.previous_deployment` | 以前のリリースのデプロイを記録します。 |
+| `suspect_commits.previous_deployment.commit_sha` | 以前のデプロイを、そのコミット SHA とともに記録します。 |
+
+疑わしいコミットは手がかりであり、証明ではありません。対応する前に、その変更内容を読んでください。
+
 ### 影響を受けたユーザー
 
 | `impact.user_impact.status` | 意味 |
@@ -130,7 +153,7 @@ API は `response_version` の 1〜16 を受け付けます。発生事象を選
 
 `lifecycle.persisted_status` は保存されているステータスです。課題が解決された後に発生事象が届くと、`lifecycle.effective_status` は `regressed` になります。保存されているステータスは、人が課題を再開するまで `resolved` のままです。`lifecycle.regression.first_reappeared_occurrence` は、最初の新しい発生事象を示します。
 
-調査のレスポンスでは、アーカイブ済みの課題は `subject.status` と `lifecycle` で `ignored` と表示されます。[ステータスの値](/ja/guides/issue-workflow#status-values)を参照してください。
+バージョン 15 以降の調査のレスポンスでは、アーカイブ済みの課題は `subject.status` と `lifecycle` で `archived` と表示されます。バージョン 14 以前では `ignored` と表示されます。[ステータスの値](/ja/guides/issue-workflow#status-values)を参照してください。
 
 ## 欠けている証拠と上限のある証拠を扱う
 
@@ -198,7 +221,7 @@ logbrew investigate issue "<issue_id>" verify \
 | --- | --- |
 | `401` | もう一度サインインします。代わりに取り込みキーを使わないでください。 |
 | `404` | `error` を読みます。`issue not found`、`issue occurrence not found`、`candidate deployment not found` では、それぞれ別の ID が必要です。ID とアカウントのアクセス権を確認します。 |
-| `422` | `response_version` を 1〜16 の範囲で送信し、セレクターは1つまでにします。`verify` では、候補のデプロイの条件を確認します。 |
+| `422` | `response_version` を 1〜17 の範囲で送信し、セレクターは1つまでにします。`verify` では、候補のデプロイの条件を確認します。 |
 | 不明なフィールドや enum の値 | 厳密なクライアントでは処理を止めます。対応する前にパーサーを更新します。`logbrew investigate issue` は `investigation_response_invalid` を報告します。 |
 
 エラーレスポンスには `error`、`code`、`next`、`next_action` が含まれます。プログラムの制御には `code` と `next_action` を使います。`next` は案内として表示します。コマンドとして実行しないでください。読み取りに失敗したときに、リクエストした発生事象を別の発生事象に置き換えないでください。[API エラー](/ja/reference/api-errors)と[テレメトリ API](/ja/reference/telemetry-api)を参照してください。

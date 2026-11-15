@@ -19,7 +19,7 @@ logbrew investigate issue "<issue_id>"
 logbrew investigate issue "<issue_id>" --json
 ```
 
-智能体和脚本请使用 `--json`。`logbrew explain issue "<issue_id>"` 执行的是同一次读取。直接调用 API 时，请求响应版本 14。CLI 请求的也是这个版本：
+智能体和脚本请使用 `--json`。`logbrew explain issue "<issue_id>"` 执行的是同一次读取。直接调用 API 时，请求响应版本 17。CLI 请求的也是这个版本：
 
 ```bash
 : "${LOGBREW_ISSUE_ID:?set the issue UUID}"
@@ -28,11 +28,11 @@ logbrew investigate issue "<issue_id>" --json
 curl --fail-with-body -sS -G \
   "https://api.logbrew.co/api/telemetry/issues/$LOGBREW_ISSUE_ID/investigation" \
   -H "Authorization: Bearer $LOGBREW_TOKEN" \
-  --data-urlencode "response_version=14" \
+  --data-urlencode "response_version=17" \
   --data-urlencode "selection=recommended"
 ```
 
-API 接受 1 到 16 的 `response_version`。选择发生记录需要版本 2 或更高。本指南描述的是版本 14。
+API 接受 1 到 17 的 `response_version`。选择发生记录需要版本 2 或更高。本指南描述的是版本 17。
 
 推荐的发生记录是一条近期已保留、且上下文有用的发生记录。它可能比最新的发生记录更早。LogBrew 会比较最新的已保留发生记录，数量上限为 `occurrence_selection.recommendation.candidate_limit`。它会选出排查上下文最多的那一条。如果两条发生记录的上下文一样多，选较新的那条。如果 `occurrence_selection.recommendation.candidate_window_truncated` 为 `true`，说明该问题还有更早的发生记录没有参与推荐评估。
 
@@ -46,7 +46,7 @@ API 接受 1 到 16 的 `response_version`。选择发生记录需要版本 2 �
 - `event.id` 是所选的发生记录。
 - `event.occurred_at` 在事故的时间范围内。
 - 服务、环境和版本与正在审查的部署一致。
-- `schema_version` 为 `14`。
+- `schema_version` 为 `17`。
 
 如果项目不对，获取正确的问题 ID。标题或时间相近，并不能把不同项目中的错误关联起来。
 
@@ -105,6 +105,29 @@ API 接受 1 到 16 的 `response_version`。选择发生记录需要版本 2 �
 
 如果 `source_locator.status` 为 `not_found`，说明该服务没有关联的仓库组件。这并不代表文件不存在。不要根据文件名猜测组件。
 
+在版本 17 中，`source_locator.frame_links` 把每个应用代码帧链接到已部署提交中对应的文件和行。每个链接包含 `frame_index`、`repository_relative_file`、`line` 和 `url`。该 URL 会在 GitHub、GitLab 或 Bitbucket 上打开文件。只有当修订是部署提交而不是接入快照时，LogBrew 才会添加链接。
+
+### 查找可疑提交
+
+版本 17 新增了 `suspect_commits`：最多 10 个修改过该问题应用代码帧中文件的提交。这些提交来自部署范围。`head_revision` 是该问题首次出现或回归时所在部署的提交。`base_revision` 是另一个版本上一次成功部署的提交。
+
+`rank` 为 1 的提交最可能是原因。排序时先看离崩溃位置最近的帧，再看匹配的文件数，最后看提交的新旧。每个提交包含 `sha`、`url`、`title`、`author_name`、`committed_at` 和 `files`。如果 `truncated` 为 `true`，说明匹配的提交多于响应中显示的数量。
+
+列表不可用时，`suspect_commits.status` 会说明情况，`suspect_commits.evidence.missing_fields` 会指出缺少的项：
+
+| 缺少的字段 | 下一步 |
+| --- | --- |
+| `suspect_commits.repository` | 为项目连接一个 GitHub 仓库。 |
+| `suspect_commits.authorization` | 允许 LogBrew 读取该仓库的内容。 |
+| `suspect_commits.provider` | 可疑提交需要 GitHub 仓库。 |
+| `suspect_commits.frames` | 该问题没有与仓库文件匹配的应用代码帧。 |
+| `suspect_commits.deployment` | 使用 `logbrew deploy` 记录每次部署。 |
+| `suspect_commits.deployment.commit_sha` | 使用 `logbrew deploy --commit-sha <sha>` 记录该部署。 |
+| `suspect_commits.previous_deployment` | 记录一次更早版本的部署。 |
+| `suspect_commits.previous_deployment.commit_sha` | 记录更早的部署时，附上它的提交 SHA。 |
+
+可疑提交只是线索，不是证据。采取行动之前，先阅读它的改动。
+
 ### 受影响的用户
 
 | `impact.user_impact.status` | 含义 |
@@ -130,7 +153,7 @@ API 接受 1 到 16 的 `response_version`。选择发生记录需要版本 2 �
 
 `lifecycle.persisted_status` 是已存储的状态。问题解决后如果又有新的发生记录，`lifecycle.effective_status` 为 `regressed`。在有人重新打开问题之前，已存储的状态保持 `resolved`。`lifecycle.regression.first_reappeared_occurrence` 标识第一条新的发生记录。
 
-在排查响应的 `subject.status` 和 `lifecycle` 中，已归档的问题显示为 `ignored`。参见[状态值](/zh-Hans/guides/issue-workflow#status-values)。
+从版本 15 开始，在排查响应的 `subject.status` 和 `lifecycle` 中，已归档的问题显示为 `archived`。版本 14 及更早版本显示为 `ignored`。参见[状态值](/zh-Hans/guides/issue-workflow#status-values)。
 
 ## 处理缺失和受限的证据
 
@@ -198,7 +221,7 @@ logbrew investigate issue "<issue_id>" verify \
 | --- | --- |
 | `401` | 重新登录。不要改用接入密钥。 |
 | `404` | 读取 `error`。`issue not found`、`issue occurrence not found` 和 `candidate deployment not found` 分别需要检查不同的 ID。确认 ID 和账号访问权限。 |
-| `422` | 发送 1 到 16 之间的 `response_version`，且最多发送 1 个选择器。对于 `verify`，检查候选部署的规则。 |
+| `422` | 发送 1 到 17 之间的 `response_version`，且最多发送 1 个选择器。对于 `verify`，检查候选部署的规则。 |
 | 未知字段或枚举值 | 严格模式的客户端应停止处理。先更新解析器，再采取行动。`logbrew investigate issue` 会报告 `investigation_response_invalid`。 |
 
 错误响应包含 `error`、`code`、`next` 和 `next_action`。程序逻辑用 `code` 和 `next_action` 判断。`next` 作为提示展示，不要当作命令执行。读取失败时，不要用另一条发生记录替换所请求的发生记录。参见 [API 错误](/zh-Hans/reference/api-errors)和[遥测 API](/zh-Hans/reference/telemetry-api)。

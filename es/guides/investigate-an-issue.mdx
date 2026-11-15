@@ -27,7 +27,7 @@ logbrew investigate issue "<issue_id>" --json
 ```
 
 Usa `--json` para agentes y scripts. `logbrew explain issue "<issue_id>"` hace
-la misma lectura. Para leer directamente desde la API, solicita la versión 14
+la misma lectura. Para leer directamente desde la API, solicita la versión 17
 de la respuesta. La CLI solicita la misma versión:
 
 ```bash
@@ -37,12 +37,12 @@ de la respuesta. La CLI solicita la misma versión:
 curl --fail-with-body -sS -G \
   "https://api.logbrew.co/api/telemetry/issues/$LOGBREW_ISSUE_ID/investigation" \
   -H "Authorization: Bearer $LOGBREW_TOKEN" \
-  --data-urlencode "response_version=14" \
+  --data-urlencode "response_version=17" \
   --data-urlencode "selection=recommended"
 ```
 
-La API acepta `response_version` de 1 a 16. La selección de ocurrencias
-necesita la versión 2 o posterior. Esta guía describe la versión 14.
+La API acepta `response_version` de 1 a 17. La selección de ocurrencias
+necesita la versión 2 o posterior. Esta guía describe la versión 17.
 
 La ocurrencia recomendada es una ocurrencia reciente y conservada con contexto
 útil. Puede ser anterior a la ocurrencia más reciente. LogBrew compara las
@@ -66,7 +66,7 @@ Antes de interpretar el error, comprueba que:
 - `event.id` es la ocurrencia seleccionada.
 - `event.occurred_at` está dentro del intervalo de tiempo del incidente.
 - El servicio, el entorno y el release coinciden con el despliegue que revisas.
-- `schema_version` es `14`.
+- `schema_version` es `17`.
 
 Si el proyecto no es el correcto, consigue el ID de incidencia correcto. Un
 título o una hora parecidos no relacionan errores de proyectos distintos.
@@ -147,6 +147,43 @@ Si `source_locator.status` es `not_found`, el servicio no tiene ningún
 componente de repositorio vinculado. No significa que falte el archivo. No
 adivines un componente a partir del nombre del archivo.
 
+En la versión 17, `source_locator.frame_links` enlaza cada marco de la
+aplicación con su archivo y su línea en el commit desplegado. Cada enlace tiene
+`frame_index`, `repository_relative_file`, `line` y `url`. La URL abre el
+archivo en GitHub, GitLab o Bitbucket. LogBrew solo añade enlaces cuando la
+revisión es un commit de despliegue, no una instantánea de la configuración.
+
+### Encuentra los commits sospechosos
+
+La versión 17 añade `suspect_commits`. Son hasta 10 commits que cambiaron un
+archivo de los marcos de la aplicación de la incidencia. Los commits salen del
+rango de commits del despliegue. `head_revision` es el commit del despliegue
+en el que la incidencia apareció por primera vez o volvió a aparecer.
+`base_revision` es el commit del despliegue correcto anterior de otro release.
+
+`rank` 1 es la causa más probable. El orden pone primero el marco más cercano
+al fallo, después más archivos coincidentes y después el commit más reciente.
+Cada commit tiene `sha`, `url`, `title`, `author_name`, `committed_at` y
+`files`. Si `truncated` es `true`, coincidieron más commits de los que muestra
+la respuesta.
+
+Cuando la lista no está disponible, `suspect_commits.status` te lo indica.
+`suspect_commits.evidence.missing_fields` nombra el elemento que falta:
+
+| Campo ausente | Siguiente paso |
+| --- | --- |
+| `suspect_commits.repository` | Conecta un repositorio de GitHub al proyecto. |
+| `suspect_commits.authorization` | Permite que LogBrew lea el contenido del repositorio. |
+| `suspect_commits.provider` | Los commits sospechosos necesitan un repositorio de GitHub. |
+| `suspect_commits.frames` | La incidencia no tiene marcos de la aplicación que coincidan con un archivo del repositorio. |
+| `suspect_commits.deployment` | Registra cada despliegue con `logbrew deploy`. |
+| `suspect_commits.deployment.commit_sha` | Registra el despliegue con `logbrew deploy --commit-sha <sha>`. |
+| `suspect_commits.previous_deployment` | Registra un despliegue de un release anterior. |
+| `suspect_commits.previous_deployment.commit_sha` | Registra el despliegue anterior con su SHA de commit. |
+
+Un commit sospechoso es una pista, no una prueba. Lee su cambio antes de actuar
+sobre él.
+
 ### Usuarios afectados
 
 | `impact.user_impact.status` | Significado |
@@ -188,8 +225,9 @@ una persona reabre la incidencia.
 `lifecycle.regression.first_reappeared_occurrence` identifica la primera
 ocurrencia nueva.
 
-La respuesta de la investigación muestra una incidencia archivada como
-`ignored` en `subject.status` y `lifecycle`. Consulta
+Desde la versión 15, la respuesta de la investigación muestra una incidencia
+archivada como `archived` en `subject.status` y `lifecycle`. La versión 14 y
+las anteriores muestran `ignored`. Consulta
 [Valores de estado](/es/guides/issue-workflow#status-values).
 
 ## Gestiona la evidencia ausente o limitada
@@ -290,7 +328,7 @@ cuando tu equipo acepte la evidencia.
 | --- | --- |
 | `401` | Vuelve a iniciar sesión. Nunca uses una clave de ingesta en su lugar. |
 | `404` | Lee `error`. `issue not found`, `issue occurrence not found` y `candidate deployment not found` necesitan ID distintos. Confirma el ID y el acceso de la cuenta. |
-| `422` | Envía un `response_version` de 1 a 16 y como máximo un selector. Para `verify`, revisa las reglas del despliegue candidato. |
+| `422` | Envía un `response_version` de 1 a 17 y como máximo un selector. Para `verify`, revisa las reglas del despliegue candidato. |
 | Campo o valor de enumeración desconocido | Detente en los clientes estrictos. Actualiza el parser antes de actuar. `logbrew investigate issue` informa `investigation_response_invalid`. |
 
 Las respuestas de error contienen `error`, `code`, `next` y `next_action`. Usa
