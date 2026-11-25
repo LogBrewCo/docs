@@ -227,7 +227,10 @@
       openBanner();
       banner?.querySelector("button")?.focus();
     });
-    (footer.firstElementChild ?? footer).append(settings);
+    const row = document.createElement("div");
+    row.className = "lb-cookie-row";
+    row.append(settings);
+    footer.append(row);
   };
 
   new MutationObserver(() => {
