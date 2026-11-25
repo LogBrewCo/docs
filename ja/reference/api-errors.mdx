@@ -35,7 +35,7 @@ LogBrew API のエラーは、1つの JSON エンベロープを使います。�
 3. ステータスと `code` を組み合わせて、クライアントの分岐を選びます。
 4. `error` と `next` はプレーンテキストとして表示します。HTML としてレンダリングしたり、コマンドとして実行したりしないでください。
 5. 自動の復旧には `next_action` を使います。クライアントがそのアクションを認識できない場合は、処理を止めてエラーを表示します。
-6. 返された `limit`、`reset_at`、`retry_after_seconds` の値を、失敗したリクエストと一緒に保持します。
+6. 返された `limit`、`limit_bytes`、`reset_at`、`retry_after_seconds` の値を、失敗したリクエストと一緒に保持します。
 7. 再試行する前に、[再試行のルール](#retry-rules)を確認します。
 
 レスポンスに JSON エンベロープがない場合は、HTTP ステータスを保持し、コードは利用不可として記録します。LogBrew の `code` を作り出さないでください。プロキシやネットワークの障害で、このような結果になることがあります。
@@ -50,7 +50,7 @@ LogBrew の `code` を HTTP ステータスの名前で置き換えないでく�
 
 | HTTP | `code` | 意味 | クライアントの対応 |
 | --- | --- | --- | --- |
-| `400`、`413`、`415`、`422` | `invalid_json` | 本文が有効な JSON でない、大きすぎる、コンテンツタイプが間違っている、またはルートの JSON の形に合っていません。 | `Content-Type: application/json` を付け、ルートに必要なフィールドを含む有効な JSON を送信します。 |
+| `400`、`415`、`422` | `invalid_json` | 本文が有効な JSON でない、コンテンツタイプが間違っている、またはルートの JSON の形に合っていません。 | `Content-Type: application/json` を付け、ルートに必要なフィールドを含む有効な JSON を送信します。 |
 | `400`、`413`、`500` | `invalid_multipart` | サーバーが `multipart/form-data` のアップロードを読み取れません。 | `400` または `413` の場合は、フォームまたはそのサイズを修正します。`500` の場合は、[再試行のルール](#retry-rules)に従います。 |
 | `400`、`500` | `invalid_path` | サーバーが、プロジェクト ID や課題 ID など、URL パスの値を読み取れません。 | `400` の場合は、ID とその型を修正します。`500` の場合は、[再試行のルール](#retry-rules)に従います。 |
 | `400`、`405`、`426` | `invalid_websocket_upgrade` | ライブフィードの接続が、有効な WebSocket のアップグレードではありません。 | `GET` と WebSocket のアップグレードヘッダーで接続します。[ライブイベントの形式](/ja/reference/telemetry-response-shapes#live-event-response-format)を参照してください。 |
@@ -66,6 +66,7 @@ LogBrew の `code` を HTTP ステータスの名前で置き換えないでく�
 | `409` | `account_link_conflict` | サインインに使った ID は、別のアカウントに属しています。 | アカウント設定でアカウントの連携を解決します。同じ ID で2つ目のアカウントを作成しないでください。 |
 | `409` | `account_recovery_available` | アカウントは復旧期間中です。 | 返された復旧アクションに従います。復旧用のトークンは非公開にしてください。 |
 | `410` | `account_recovery_expired` | アカウントの復旧期間が終了しました。 | サインインして新しいアカウントを作成します。 |
+| `413` | `payload_too_large` | JSON の本文が、ルートで受け付けるサイズを超えています。`limit_bytes` が追加されます。 | バッチを小さいリクエストに分けます。各リクエストで送るのは `limit_bytes` 以下にします。 |
 | `422` | `validation_failed` | クエリの値、フィールド、フィルター、カーソル、ヘッダー、または期間が有効ではありません。 | 示された値を修正します。その後、リクエストをもう一度送信します。 |
 | `422` | `invite_invalid` | 招待が `owner` ロールを指定しているか、招待を承諾できません。期限切れ、取り消し済み、または自分のアカウント宛てではありません。 | `admin` または `member` ロールで招待します。承諾するには、オーナーまたは管理者に新しい招待を依頼します。 |
 | `422` | `organization_limit_exceeded` | アカウントの組織数が上限に達しています。 | 組織を削除するか、サポートに連絡します。 |
@@ -91,6 +92,7 @@ LogBrew の `code` を HTTP ステータスの名前で置き換えないでく�
 | `invitation_limit_exceeded` | `invitations_per_day`（組織ごと）または `invitations_per_inviter_per_day`（招待したアカウントごと、UTC の1日あたり20件） | `reset_at`: 次の UTC の日の開始日時（RFC3339）。 |
 | `artifact_storage_limit_exceeded` | `artifact_completed_project_bytes` のようなストレージの境界の名前 | なし。 |
 | `rate_limited` | なし | `retry_after_seconds`: 待つ秒数（整数）。最小値は `1` です。 |
+| `payload_too_large` | なし | `limit_bytes`: ルートで受け付ける JSON 本文の最大サイズ（バイト）。ほとんどのルートは `2097152` バイト（2 MiB）まで受け付けます。 |
 
 現在の許容量と使用量は、[アカウント API](/ja/reference/account-api#account-usage)で確認します。
 
@@ -101,6 +103,7 @@ LogBrew の `code` を HTTP ステータスの名前で置き換えないでく�
 | レスポンス | 再試行のルール |
 | --- | --- |
 | `validation_failed`、`invalid_json`、`invalid_path`（`400`）、`invalid_multipart`（`400` または `413`）、`invalid_websocket_upgrade` | 先に、示されたリクエストの値を修正します。同じリクエストをもう一度送信しないでください。 |
+| `payload_too_large` | バッチを小さいリクエストに分けます。その後、各部分を送信します。同じ本文をもう一度送信しないでください。 |
 | `unauthorized` または `ingest_key_invalid` | 先に、正しい認証情報に置き換えるか、更新します。 |
 | `forbidden`、`role_forbidden`、`not_found` | 他の ID で再試行しないでください。自分が所有する一覧をもう一度読むか、所有者からアクセス権を得ます。 |
 | `method_not_allowed` | `next` のメソッドを使います。拒否されたメソッドで再送信しないでください。 |
@@ -145,14 +148,15 @@ LogBrew の `code` を HTTP ステータスの名前で置き換えないでく�
 
 ## リクエストの形のエラー
 
-`invalid_json` は、サーバーが本文をルートの JSON の形として受け付けられないことを示します。コンテンツタイプ、本文のサイズ、JSON の構文、必須のフィールド、フィールドの型を確認します。どの部分が失敗したかは、HTTP ステータスでわかります。
+`invalid_json` は、サーバーが本文をルートの JSON の形として受け付けられないことを示します。コンテンツタイプ、JSON の構文、必須のフィールド、フィールドの型を確認します。どの部分が失敗したかは、HTTP ステータスでわかります。
 
 | HTTP | 原因 |
 | --- | --- |
 | `400` | 本文が有効な JSON ではありません。 |
-| `413` | 本文が大きすぎます。 |
 | `415` | `Content-Type` ヘッダーが `application/json` ではありません。 |
 | `422` | JSON は有効ですが、フィールドが欠けているか、型が間違っています。 |
+
+JSON の本文が大きすぎる場合は、`invalid_json` ではなく、`payload_too_large` 付きの `413` が返ります。バッチを小さいリクエストに分けてください。
 
 エラー `invalid query parameters` を伴う `validation_failed` は、サーバーがクエリ文字列を読み取れないことを示します。パラメーターの名前と値の型を確認します。不明なクエリパラメーターを送信しないでください。各ルートのパラメーターは、[クエリフィルター](/ja/reference/telemetry-api-filters)に記載しています。
 
@@ -219,6 +223,21 @@ LogBrew の `code` を HTTP ステータスの名前で置き換えないでく�
     "code": "send_valid_json",
     "target": "request"
   }
+}
+```
+
+### <span id="json-body-too-large">JSON の本文が大きすぎる</span>
+
+```json
+{
+  "error": "request body is over 2097152 bytes",
+  "code": "payload_too_large",
+  "next": "send under limit_bytes per request; split a batch into smaller requests",
+  "next_action": {
+    "code": "split_batch",
+    "target": "request"
+  },
+  "limit_bytes": 2097152
 }
 ```
 

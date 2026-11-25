@@ -39,7 +39,7 @@ itu.
 3. Gunakan status dan `code` bersama-sama untuk memilih cabang di klien.
 4. Tampilkan `error` dan `next` sebagai teks biasa. Jangan render sebagai HTML atau jalankan sebagai perintah.
 5. Gunakan `next_action` untuk pemulihan otomatis. Jika klien tidak mengenali tindakannya, berhenti dan tampilkan error.
-6. Simpan nilai `limit`, `reset_at`, dan `retry_after_seconds` yang dikembalikan bersama permintaan yang gagal.
+6. Simpan nilai `limit`, `limit_bytes`, `reset_at`, dan `retry_after_seconds` yang dikembalikan bersama permintaan yang gagal.
 7. Sebelum mencoba lagi, gunakan [aturan percobaan ulang](#retry-rules).
 
 Jika respons tidak memiliki envelope JSON, simpan status HTTP dan catat
@@ -62,7 +62,7 @@ body, dan batasnya.
 
 | HTTP | `code` | Arti | Tindakan klien |
 | --- | --- | --- | --- |
-| `400`, `413`, `415`, atau `422` | `invalid_json` | Body bukan JSON yang valid, terlalu besar, memiliki content type yang salah, atau tidak cocok dengan bentuk JSON rute. | Kirim JSON yang valid dengan `Content-Type: application/json` dan kolom yang diperlukan rute. |
+| `400`, `415`, atau `422` | `invalid_json` | Body bukan JSON yang valid, memiliki content type yang salah, atau tidak cocok dengan bentuk JSON rute. | Kirim JSON yang valid dengan `Content-Type: application/json` dan kolom yang diperlukan rute. |
 | `400`, `413`, atau `500` | `invalid_multipart` | Server tidak dapat membaca unggahan `multipart/form-data`. | Untuk `400` atau `413`, perbaiki form atau ukurannya. Untuk `500`, gunakan [aturan percobaan ulang](#retry-rules). |
 | `400` atau `500` | `invalid_path` | Server tidak dapat membaca nilai di path URL, misalnya ID proyek atau ID masalah. | Untuk `400`, perbaiki ID dan tipenya. Untuk `500`, gunakan [aturan percobaan ulang](#retry-rules). |
 | `400`, `405`, atau `426` | `invalid_websocket_upgrade` | Koneksi feed langsung bukan upgrade WebSocket yang valid. | Hubungkan dengan `GET` dan header upgrade WebSocket. Lihat [Format respons peristiwa langsung](/id/reference/telemetry-response-shapes#live-event-response-format). |
@@ -78,6 +78,7 @@ body, dan batasnya.
 | `409` | `account_link_conflict` | Identitas login ini milik akun lain. | Selesaikan tautan akun di pengaturan akun. Jangan membuat akun kedua untuk identitas yang sama. |
 | `409` | `account_recovery_available` | Akun sedang dalam masa pemulihan. | Ikuti tindakan pemulihan yang dikembalikan. Rahasiakan token pemulihan. |
 | `410` | `account_recovery_expired` | Masa pemulihan akun sudah berakhir. | Masuk untuk membuat akun baru. |
+| `413` | `payload_too_large` | Body JSON lebih besar daripada yang diterima rute. Menambahkan `limit_bytes`. | Pecah batch menjadi permintaan yang lebih kecil. Kirim paling banyak `limit_bytes` di setiap permintaan. |
 | `422` | `validation_failed` | Nilai kueri, kolom, filter, kursor, header, atau rentang waktu tidak valid. | Perbaiki nilai yang disebutkan. Lalu kirim permintaan lagi. |
 | `422` | `invite_invalid` | Undangan meminta peran `owner`, atau Anda tidak dapat menerimanya: undangan kedaluwarsa, dicabut, atau tidak dikirim ke akun Anda. | Undang dengan peran `admin` atau `member`. Untuk menerima, minta undangan baru kepada pemilik atau admin. |
 | `422` | `organization_limit_exceeded` | Akun sudah mencapai jumlah organisasi maksimum. | Hapus organisasi atau hubungi dukungan. |
@@ -106,6 +107,7 @@ memiliki sebuah ID. Path API yang tidak dikenal mengembalikan `404` dengan
 | `invitation_limit_exceeded` | `invitations_per_day` (per organisasi) atau `invitations_per_inviter_per_day` (per akun pengundang, 20 per hari UTC) | `reset_at`: awal hari UTC berikutnya (RFC3339). |
 | `artifact_storage_limit_exceeded` | Nama batas penyimpanan, misalnya `artifact_completed_project_bytes` | Tidak ada. |
 | `rate_limited` | Tidak ada | `retry_after_seconds`: jumlah detik penuh untuk menunggu, minimal `1`. |
+| `payload_too_large` | Tidak ada | `limit_bytes`: ukuran body JSON terbesar yang diterima rute, dalam byte. Sebagian besar rute menerima `2097152` byte (2 MiB). |
 
 Baca kuota dan penggunaan saat ini dari
 [API akun](/id/reference/account-api#account-usage).
@@ -118,6 +120,7 @@ tidak cukup.
 | Respons | Aturan percobaan ulang |
 | --- | --- |
 | `validation_failed`, `invalid_json`, `invalid_path` (`400`), `invalid_multipart` (`400` atau `413`), atau `invalid_websocket_upgrade` | Perbaiki nilai permintaan yang disebutkan terlebih dahulu. Jangan kirim permintaan yang sama lagi. |
+| `payload_too_large` | Pecah batch menjadi permintaan yang lebih kecil. Lalu kirim setiap bagian. Jangan kirim body yang sama lagi. |
 | `unauthorized` atau `ingest_key_invalid` | Ganti atau perbarui kredensial yang benar terlebih dahulu. |
 | `forbidden`, `role_forbidden`, atau `not_found` | Jangan mencoba lagi dengan ID lain. Baca lagi daftar milik Anda, atau minta akses dari pemiliknya. |
 | `method_not_allowed` | Gunakan metode di `next`. Jangan kirim lagi metode yang ditolak. |
@@ -181,16 +184,18 @@ mengubah body percobaan ulang yang memakai kunci awal.
 
 ## Error bentuk permintaan
 
-`invalid_json` berarti server tidak dapat menerima body sesuai bentuk JSON
-rute. Periksa content type, ukuran body, sintaks JSON, kolom wajib, dan tipe
-kolom. Status HTTP menunjukkan bagian mana yang gagal:
+`invalid_json` berarti server tidak dapat menerima body sesuai bentuk JSON rute.
+Periksa content type, sintaks JSON, kolom wajib, dan tipe kolom. Status HTTP
+menunjukkan bagian mana yang gagal:
 
 | HTTP | Penyebab |
 | --- | --- |
 | `400` | Body bukan JSON yang valid. |
-| `413` | Body terlalu besar. |
 | `415` | Header `Content-Type` bukan `application/json`. |
 | `422` | JSON-nya valid, tetapi ada kolom yang tidak ada atau bertipe salah. |
+
+Body JSON yang terlalu besar mengembalikan `413` dengan `payload_too_large`,
+bukan `invalid_json`. Pecah batch menjadi permintaan yang lebih kecil.
 
 `validation_failed` dengan error `invalid query parameters` berarti server
 tidak dapat membaca string kueri. Periksa nama parameter dan tipe nilainya.
@@ -277,6 +282,21 @@ di setiap rute.
     "code": "send_valid_json",
     "target": "request"
   }
+}
+```
+
+### <span id="json-body-too-large">Body JSON terlalu besar</span>
+
+```json
+{
+  "error": "request body is over 2097152 bytes",
+  "code": "payload_too_large",
+  "next": "send under limit_bytes per request; split a batch into smaller requests",
+  "next_action": {
+    "code": "split_batch",
+    "target": "request"
+  },
+  "limit_bytes": 2097152
 }
 ```
 

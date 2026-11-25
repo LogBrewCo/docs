@@ -38,7 +38,7 @@ Some responses add fields, such as `limit`, `reset_at`, or
 3. Use the status and `code` together to select the client branch.
 4. Show `error` and `next` as plain text. Do not render them as HTML or run them as commands.
 5. Use `next_action` for automatic recovery. If the client does not recognize the action, stop and show the error.
-6. Keep the returned `limit`, `reset_at`, and `retry_after_seconds` values with the failed request.
+6. Keep the returned `limit`, `limit_bytes`, `reset_at`, and `retry_after_seconds` values with the failed request.
 7. Before you retry, use the [retry rules](#retry-rules).
 
 If the response has no JSON envelope, keep the HTTP status and record the code
@@ -61,7 +61,7 @@ body, and limits.
 
 | HTTP | `code` | Meaning | Client action |
 | --- | --- | --- | --- |
-| `400`, `413`, `415`, or `422` | `invalid_json` | The body is not valid JSON, is too large, has the wrong content type, or does not match the route's JSON shape. | Send valid JSON with `Content-Type: application/json` and the fields that the route needs. |
+| `400`, `415`, or `422` | `invalid_json` | The body is not valid JSON, has the wrong content type, or does not match the route's JSON shape. | Send valid JSON with `Content-Type: application/json` and the fields that the route needs. |
 | `400`, `413`, or `500` | `invalid_multipart` | The server cannot read a `multipart/form-data` upload. | For `400` or `413`, correct the form or its size. For `500`, use the [retry rules](#retry-rules). |
 | `400` or `500` | `invalid_path` | The server cannot read a value in the URL path, such as a project or issue ID. | For `400`, correct the ID and its type. For `500`, use the [retry rules](#retry-rules). |
 | `400`, `405`, or `426` | `invalid_websocket_upgrade` | A live feed connection is not a valid WebSocket upgrade. | Connect with `GET` and WebSocket upgrade headers. See the [live event format](/reference/telemetry-response-shapes#live-event-response-format). |
@@ -77,6 +77,7 @@ body, and limits.
 | `409` | `account_link_conflict` | The sign-in identity belongs to a different account. | Resolve the account link in account settings. Do not create a second account for the same identity. |
 | `409` | `account_recovery_available` | The account is in its recovery window. | Follow the returned recovery action. Keep the recovery token private. |
 | `410` | `account_recovery_expired` | The account recovery window ended. | Sign in to create a new account. |
+| `413` | `payload_too_large` | The JSON body is larger than the route accepts. Adds `limit_bytes`. | Split the batch into smaller requests. Send at most `limit_bytes` in each request. |
 | `422` | `validation_failed` | A query value, field, filter, cursor, header, or time range is not valid. | Correct the named value. Then send the request again. |
 | `422` | `invite_invalid` | The invitation asks for the `owner` role, or you cannot accept it: it is expired, revoked, or not sent to your account. | Invite with the `admin` or `member` role. To accept, ask an owner or admin for a new invitation. |
 | `422` | `organization_limit_exceeded` | The account has its maximum number of organizations. | Remove an organization or contact support. |
@@ -105,6 +106,7 @@ returns `404` with `not_found`.
 | `invitation_limit_exceeded` | `invitations_per_day` (per organization) or `invitations_per_inviter_per_day` (per inviting account, 20 for each UTC day) | `reset_at`: the start of the next UTC day (RFC3339). |
 | `artifact_storage_limit_exceeded` | A storage boundary name, such as `artifact_completed_project_bytes` | None. |
 | `rate_limited` | None | `retry_after_seconds`: whole seconds to wait, at least `1`. |
+| `payload_too_large` | None | `limit_bytes`: the largest JSON body that the route accepts, in bytes. Most routes accept `2097152` bytes (2 MiB). |
 
 Read the current allowance and use from the
 [account API](/reference/account-api#account-usage).
@@ -117,6 +119,7 @@ sufficient.
 | Response | Retry rule |
 | --- | --- |
 | `validation_failed`, `invalid_json`, `invalid_path` (`400`), `invalid_multipart` (`400` or `413`), or `invalid_websocket_upgrade` | Correct the named request value first. Do not send the same request again. |
+| `payload_too_large` | Split the batch into smaller requests. Then send each part. Do not send the same body again. |
 | `unauthorized` or `ingest_key_invalid` | Replace or refresh the correct credential first. |
 | `forbidden`, `role_forbidden`, or `not_found` | Do not retry with other IDs. Read an owned list again, or get access from the owner. |
 | `method_not_allowed` | Use the method in `next`. Do not send the rejected method again. |
@@ -182,15 +185,17 @@ not change the body of a retry that uses the original key.
 ## Request shape errors
 
 `invalid_json` means that the server cannot accept the body as the route's JSON
-shape. Examine the content type, body size, JSON syntax, required fields, and
-field types. The HTTP status shows which part failed:
+shape. Examine the content type, JSON syntax, required fields, and field
+types. The HTTP status shows which part failed:
 
 | HTTP | Cause |
 | --- | --- |
 | `400` | The body is not valid JSON. |
-| `413` | The body is too large. |
 | `415` | The `Content-Type` header is not `application/json`. |
 | `422` | The JSON is valid, but a field is missing or has the wrong type. |
+
+A JSON body that is too large returns `413` with `payload_too_large`, not
+`invalid_json`. Split the batch into smaller requests.
 
 `validation_failed` with the error `invalid query parameters` means that the
 server cannot read the query string. Examine the parameter names and value
@@ -275,6 +280,21 @@ different on each route.
     "code": "send_valid_json",
     "target": "request"
   }
+}
+```
+
+### JSON body too large
+
+```json
+{
+  "error": "request body is over 2097152 bytes",
+  "code": "payload_too_large",
+  "next": "send under limit_bytes per request; split a batch into smaller requests",
+  "next_action": {
+    "code": "split_batch",
+    "target": "request"
+  },
+  "limit_bytes": 2097152
 }
 ```
 

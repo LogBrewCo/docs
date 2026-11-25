@@ -40,7 +40,7 @@ quais.
 3. Use o status e o `code` juntos para escolher o caminho no cliente.
 4. Mostre `error` e `next` como texto simples. Não renderize esses textos como HTML nem os execute como comandos.
 5. Use `next_action` para a recuperação automática. Se o cliente não reconhecer a ação, pare e mostre o erro.
-6. Guarde os valores `limit`, `reset_at` e `retry_after_seconds` retornados junto com a requisição que falhou.
+6. Guarde os valores `limit`, `limit_bytes`, `reset_at` e `retry_after_seconds` retornados junto com a requisição que falhou.
 7. Antes de tentar de novo, siga as [regras de nova tentativa](#retry-rules).
 
 Se a resposta não tiver um envelope JSON, guarde o status HTTP e registre o
@@ -63,7 +63,7 @@ ao método, ao corpo e aos limites dele.
 
 | HTTP | `code` | Significado | Ação do cliente |
 | --- | --- | --- | --- |
-| `400`, `413`, `415` ou `422` | `invalid_json` | O corpo não é um JSON válido, é grande demais, tem o tipo de conteúdo errado ou não segue o formato JSON da rota. | Envie um JSON válido com `Content-Type: application/json` e os campos que a rota exige. |
+| `400`, `415` ou `422` | `invalid_json` | O corpo não é um JSON válido, tem o tipo de conteúdo errado ou não segue o formato JSON da rota. | Envie um JSON válido com `Content-Type: application/json` e os campos que a rota exige. |
 | `400`, `413` ou `500` | `invalid_multipart` | O servidor não consegue ler um upload `multipart/form-data`. | Com `400` ou `413`, corrija o formulário ou o tamanho dele. Com `500`, siga as [regras de nova tentativa](#retry-rules). |
 | `400` ou `500` | `invalid_path` | O servidor não consegue ler um valor do caminho da URL, como o ID de um projeto ou de um problema. | Com `400`, corrija o ID e o tipo dele. Com `500`, siga as [regras de nova tentativa](#retry-rules). |
 | `400`, `405` ou `426` | `invalid_websocket_upgrade` | Uma conexão com o feed ao vivo não é um upgrade de WebSocket válido. | Conecte com `GET` e os cabeçalhos de upgrade do WebSocket. Consulte o [formato dos eventos ao vivo](/pt-BR/reference/telemetry-response-shapes#live-event-response-format). |
@@ -79,6 +79,7 @@ ao método, ao corpo e aos limites dele.
 | `409` | `account_link_conflict` | A identidade de login pertence a outra conta. | Resolva o vínculo nas configurações da conta. Não crie uma segunda conta para a mesma identidade. |
 | `409` | `account_recovery_available` | A conta está no período de recuperação. | Siga a ação de recuperação retornada. Mantenha o token de recuperação em sigilo. |
 | `410` | `account_recovery_expired` | O período de recuperação da conta terminou. | Entre para criar uma conta nova. |
+| `413` | `payload_too_large` | O corpo JSON é maior do que a rota aceita. Adiciona `limit_bytes`. | Divida o lote em requisições menores. Envie no máximo `limit_bytes` em cada requisição. |
 | `422` | `validation_failed` | Um valor de consulta, campo, filtro, cursor, cabeçalho ou período não é válido. | Corrija o valor indicado. Depois, envie a requisição de novo. |
 | `422` | `invite_invalid` | O convite pede a função `owner`, ou você não pode aceitá-lo: ele expirou, foi revogado ou não foi enviado para a sua conta. | Convide com a função `admin` ou `member`. Para aceitar, peça um novo convite a um proprietário ou administrador. |
 | `422` | `organization_limit_exceeded` | A conta atingiu o número máximo de organizações. | Remova uma organização ou fale com o suporte. |
@@ -106,6 +107,7 @@ caminho de API desconhecido retorna `404` com `not_found`.
 | `invitation_limit_exceeded` | `invitations_per_day` (por organização) ou `invitations_per_inviter_per_day` (por conta que convida, 20 por dia em UTC) | `reset_at`: o início do próximo dia em UTC (RFC3339). |
 | `artifact_storage_limit_exceeded` | O nome de um limite de armazenamento, como `artifact_completed_project_bytes` | Nenhum. |
 | `rate_limited` | Nenhum | `retry_after_seconds`: segundos inteiros de espera, no mínimo `1`. |
+| `payload_too_large` | Nenhum | `limit_bytes`: o maior corpo JSON que a rota aceita, em bytes. A maioria das rotas aceita `2097152` bytes (2 MiB). |
 
 Leia a franquia e o uso atuais na
 [API de conta](/pt-BR/reference/account-api#account-usage).
@@ -118,6 +120,7 @@ basta.
 | Resposta | Regra de nova tentativa |
 | --- | --- |
 | `validation_failed`, `invalid_json`, `invalid_path` (`400`), `invalid_multipart` (`400` ou `413`) ou `invalid_websocket_upgrade` | Corrija primeiro o valor indicado na requisição. Não envie a mesma requisição de novo. |
+| `payload_too_large` | Divida o lote em requisições menores. Depois envie cada parte. Não envie o mesmo corpo de novo. |
 | `unauthorized` ou `ingest_key_invalid` | Troque ou renove primeiro a credencial certa. |
 | `forbidden`, `role_forbidden` ou `not_found` | Não tente de novo com outros IDs. Leia de novo uma lista dos seus recursos ou peça acesso ao proprietário. |
 | `method_not_allowed` | Use o método indicado em `next`. Não envie de novo o método rejeitado. |
@@ -182,16 +185,17 @@ altere o corpo de uma nova tentativa que usa a chave original.
 ## Erros no formato da requisição
 
 `invalid_json` significa que o servidor não aceita o corpo como o formato JSON
-da rota. Examine o tipo de conteúdo, o tamanho do corpo, a sintaxe JSON, os
-campos obrigatórios e os tipos dos campos. O status HTTP mostra qual parte
-falhou:
+da rota. Examine o tipo de conteúdo, a sintaxe JSON, os campos obrigatórios e os
+tipos dos campos. O status HTTP mostra qual parte falhou:
 
 | HTTP | Causa |
 | --- | --- |
 | `400` | O corpo não é um JSON válido. |
-| `413` | O corpo é grande demais. |
 | `415` | O cabeçalho `Content-Type` não é `application/json`. |
 | `422` | O JSON é válido, mas falta um campo ou um campo tem o tipo errado. |
+
+Um corpo JSON grande demais retorna `413` com `payload_too_large`, não
+`invalid_json`. Divida o lote em requisições menores.
 
 `validation_failed` com o erro `invalid query parameters` significa que o
 servidor não consegue ler a query string. Examine os nomes dos parâmetros e os
@@ -279,6 +283,21 @@ pode ser diferente em cada rota.
     "code": "send_valid_json",
     "target": "request"
   }
+}
+```
+
+### <span id="json-body-too-large">Corpo JSON grande demais</span>
+
+```json
+{
+  "error": "request body is over 2097152 bytes",
+  "code": "payload_too_large",
+  "next": "send under limit_bytes per request; split a batch into smaller requests",
+  "next_action": {
+    "code": "split_batch",
+    "target": "request"
+  },
+  "limit_bytes": 2097152
 }
 ```
 

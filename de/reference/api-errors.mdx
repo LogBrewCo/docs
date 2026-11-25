@@ -39,7 +39,7 @@ nennt sie.
 3. Wählen Sie den Zweig im Client anhand von Status und `code` zusammen.
 4. Zeigen Sie `error` und `next` als reinen Text an. Rendern Sie sie nicht als HTML, und führen Sie sie nicht als Befehle aus.
 5. Verwenden Sie `next_action` für die automatische Wiederherstellung. Kennt der Client die Aktion nicht, halten Sie an und zeigen den Fehler an.
-6. Bewahren Sie die gelieferten Werte von `limit`, `reset_at` und `retry_after_seconds` zusammen mit der fehlgeschlagenen Anfrage auf.
+6. Bewahren Sie die gelieferten Werte von `limit`, `limit_bytes`, `reset_at` und `retry_after_seconds` zusammen mit der fehlgeschlagenen Anfrage auf.
 7. Beachten Sie vor einer Wiederholung die [Wiederholungsregeln](#retry-rules).
 
 Hat die Antwort keinen JSON-Umschlag, behalten Sie den HTTP-Status und
@@ -62,7 +62,7 @@ zu seiner Authentifizierung, Methode, seinem Body und seinen Limits passen.
 
 | HTTP | `code` | Bedeutung | Aktion im Client |
 | --- | --- | --- | --- |
-| `400`, `413`, `415` oder `422` | `invalid_json` | Der Body ist kein gültiges JSON, ist zu groß, hat den falschen Content-Type oder passt nicht zur JSON-Struktur der Route. | Senden Sie gültiges JSON mit `Content-Type: application/json` und den Feldern, die die Route braucht. |
+| `400`, `415` oder `422` | `invalid_json` | Der Body ist kein gültiges JSON, hat den falschen Content-Type oder passt nicht zur JSON-Struktur der Route. | Senden Sie gültiges JSON mit `Content-Type: application/json` und den Feldern, die die Route braucht. |
 | `400`, `413` oder `500` | `invalid_multipart` | Der Server kann einen `multipart/form-data`-Upload nicht lesen. | Korrigieren Sie bei `400` oder `413` das Formular oder seine Größe. Bei `500` beachten Sie die [Wiederholungsregeln](#retry-rules). |
 | `400` oder `500` | `invalid_path` | Der Server kann einen Wert im URL-Pfad nicht lesen, zum Beispiel eine Projekt- oder Issue-ID. | Korrigieren Sie bei `400` die ID und ihren Typ. Bei `500` beachten Sie die [Wiederholungsregeln](#retry-rules). |
 | `400`, `405` oder `426` | `invalid_websocket_upgrade` | Eine Verbindung zum Live-Feed ist kein gültiges WebSocket-Upgrade. | Verbinden Sie sich mit `GET` und WebSocket-Upgrade-Headern. Siehe das [Format für Live-Ereignisse](/de/reference/telemetry-response-shapes#live-event-response-format). |
@@ -78,6 +78,7 @@ zu seiner Authentifizierung, Methode, seinem Body und seinen Limits passen.
 | `409` | `account_link_conflict` | Die Anmeldeidentität gehört zu einem anderen Konto. | Klären Sie die Kontoverknüpfung in den Kontoeinstellungen. Legen Sie kein zweites Konto für dieselbe Identität an. |
 | `409` | `account_recovery_available` | Das Konto befindet sich in seiner Wiederherstellungsfrist. | Folgen Sie der gelieferten Wiederherstellungsaktion. Halten Sie das Wiederherstellungs-Token geheim. |
 | `410` | `account_recovery_expired` | Die Wiederherstellungsfrist des Kontos ist abgelaufen. | Melden Sie sich an, um ein neues Konto anzulegen. |
+| `413` | `payload_too_large` | Der JSON-Body ist größer, als die Route annimmt. Enthält zusätzlich `limit_bytes`. | Teilen Sie den Batch in kleinere Anfragen auf. Senden Sie pro Anfrage höchstens `limit_bytes`. |
 | `422` | `validation_failed` | Ein Abfragewert, Feld, Filter, Cursor, Header oder Zeitraum ist ungültig. | Korrigieren Sie den genannten Wert. Senden Sie die Anfrage dann erneut. |
 | `422` | `invite_invalid` | Die Einladung verlangt die Rolle `owner`, oder Sie können sie nicht annehmen: Sie ist abgelaufen, widerrufen oder nicht an Ihr Konto gesendet. | Laden Sie mit der Rolle `admin` oder `member` ein. Bitten Sie zum Annehmen einen Eigentümer oder Admin um eine neue Einladung. |
 | `422` | `organization_limit_exceeded` | Das Konto hat seine maximale Anzahl an Organisationen erreicht. | Entfernen Sie eine Organisation, oder kontaktieren Sie den Support. |
@@ -105,6 +106,7 @@ Konto eine ID gehört. Ein unbekannter API-Pfad liefert `404` mit `not_found`.
 | `invitation_limit_exceeded` | `invitations_per_day` (pro Organisation) oder `invitations_per_inviter_per_day` (pro einladendem Konto, 20 pro UTC-Tag) | `reset_at`: der Beginn des nächsten UTC-Tages (RFC3339). |
 | `artifact_storage_limit_exceeded` | Der Name einer Speichergrenze, zum Beispiel `artifact_completed_project_bytes` | Keine. |
 | `rate_limited` | Keine | `retry_after_seconds`: ganze Sekunden Wartezeit, mindestens `1`. |
+| `payload_too_large` | Keine | `limit_bytes`: der größte JSON-Body in Bytes, den die Route annimmt. Die meisten Routen nehmen `2097152` Bytes (2 MiB) an. |
 
 Das aktuelle Kontingent und die Nutzung lesen Sie über die
 [Konto-API](/de/reference/account-api#account-usage).
@@ -117,6 +119,7 @@ Status allein reicht nicht aus.
 | Antwort | Wiederholungsregel |
 | --- | --- |
 | `validation_failed`, `invalid_json`, `invalid_path` (`400`), `invalid_multipart` (`400` oder `413`) oder `invalid_websocket_upgrade` | Korrigieren Sie zuerst den genannten Wert der Anfrage. Senden Sie dieselbe Anfrage nicht erneut. |
+| `payload_too_large` | Teilen Sie den Batch in kleinere Anfragen auf. Senden Sie dann jeden Teil. Senden Sie denselben Body nicht erneut. |
 | `unauthorized` oder `ingest_key_invalid` | Ersetzen oder erneuern Sie zuerst die richtigen Zugangsdaten. |
 | `forbidden`, `role_forbidden` oder `not_found` | Wiederholen Sie nicht mit anderen IDs. Lesen Sie erneut eine Liste Ihrer eigenen Ressourcen, oder lassen Sie sich vom Eigentümer Zugriff geben. |
 | `method_not_allowed` | Verwenden Sie die Methode aus `next`. Senden Sie die abgelehnte Methode nicht erneut. |
@@ -187,16 +190,17 @@ Schlüssel verwendet.
 ## <span id="request-shape-errors">Fehler in der Struktur der Anfrage</span>
 
 `invalid_json` bedeutet, dass der Server den Body nicht als JSON-Struktur der
-Route annehmen kann. Prüfen Sie Content-Type, Größe des Bodys, JSON-Syntax,
-Pflichtfelder und Feldtypen. Der HTTP-Status zeigt, welcher Teil
-fehlgeschlagen ist:
+Route annehmen kann. Prüfen Sie Content-Type, JSON-Syntax, Pflichtfelder und
+Feldtypen. Der HTTP-Status zeigt, welcher Teil fehlgeschlagen ist:
 
 | HTTP | Ursache |
 | --- | --- |
 | `400` | Der Body ist kein gültiges JSON. |
-| `413` | Der Body ist zu groß. |
 | `415` | Der Header `Content-Type` ist nicht `application/json`. |
 | `422` | Das JSON ist gültig, aber ein Feld fehlt oder hat den falschen Typ. |
+
+Ein zu großer JSON-Body gibt `413` mit `payload_too_large` zurück, nicht
+`invalid_json`. Teilen Sie den Batch in kleinere Anfragen auf.
 
 `validation_failed` mit dem Fehler `invalid query parameters` bedeutet, dass
 der Server den Query-String nicht lesen kann. Prüfen Sie die Parameternamen
@@ -287,6 +291,21 @@ Diese Beispiele zeigen die Struktur des Umschlags. Der Text von `error` und
     "code": "send_valid_json",
     "target": "request"
   }
+}
+```
+
+### <span id="json-body-too-large">JSON-Body zu groß</span>
+
+```json
+{
+  "error": "request body is over 2097152 bytes",
+  "code": "payload_too_large",
+  "next": "send under limit_bytes per request; split a batch into smaller requests",
+  "next_action": {
+    "code": "split_batch",
+    "target": "request"
+  },
+  "limit_bytes": 2097152
 }
 ```
 

@@ -38,7 +38,7 @@ Sommige responses voegen velden toe, zoals `limit`, `reset_at` of
 3. Kies met de status en `code` samen de juiste tak in je client.
 4. Toon `error` en `next` als platte tekst. Geef ze niet weer als HTML en voer ze niet uit als opdracht.
 5. Gebruik `next_action` voor automatisch herstel. Herkent de client de actie niet? Stop dan en toon de fout.
-6. Bewaar de teruggegeven waarden van `limit`, `reset_at` en `retry_after_seconds` bij het mislukte request.
+6. Bewaar de teruggegeven waarden van `limit`, `limit_bytes`, `reset_at` en `retry_after_seconds` bij het mislukte request.
 7. Gebruik de [regels voor nieuwe pogingen](#retry-rules) voordat je het opnieuw probeert.
 
 Heeft de response geen JSON-envelop? Bewaar dan de HTTP-status en noteer de
@@ -61,7 +61,7 @@ authenticatie, methode, body en limieten van dat endpoint.
 
 | HTTP | `code` | Betekenis | Actie in de client |
 | --- | --- | --- | --- |
-| `400`, `413`, `415` of `422` | `invalid_json` | De body is geen geldige JSON, is te groot, heeft het verkeerde contenttype of past niet bij de JSON-vorm van de route. | Verzend geldige JSON met `Content-Type: application/json` en de velden die de route nodig heeft. |
+| `400`, `415` of `422` | `invalid_json` | De body is geen geldige JSON, heeft het verkeerde contenttype of past niet bij de JSON-vorm van de route. | Verzend geldige JSON met `Content-Type: application/json` en de velden die de route nodig heeft. |
 | `400`, `413` of `500` | `invalid_multipart` | De server kan een upload met `multipart/form-data` niet lezen. | Corrigeer bij `400` of `413` het formulier of de grootte ervan. Gebruik bij `500` de [regels voor nieuwe pogingen](#retry-rules). |
 | `400` of `500` | `invalid_path` | De server kan een waarde in het URL-pad niet lezen, zoals een project- of issue-ID. | Corrigeer bij `400` het ID en het type ervan. Gebruik bij `500` de [regels voor nieuwe pogingen](#retry-rules). |
 | `400`, `405` of `426` | `invalid_websocket_upgrade` | Een verbinding met de livefeed is geen geldige WebSocket-upgrade. | Maak verbinding met `GET` en de headers voor een WebSocket-upgrade. Zie het [formaat voor live-events](/nl/reference/telemetry-response-shapes#live-event-response-format). |
@@ -77,6 +77,7 @@ authenticatie, methode, body en limieten van dat endpoint.
 | `409` | `account_link_conflict` | De inlogidentiteit hoort bij een ander account. | Los de accountkoppeling op in de accountinstellingen. Maak geen tweede account aan voor dezelfde identiteit. |
 | `409` | `account_recovery_available` | Het account zit in de herstelperiode. | Volg de teruggegeven herstelactie. Houd het hersteltoken privé. |
 | `410` | `account_recovery_expired` | De herstelperiode van het account is voorbij. | Log in om een nieuw account aan te maken. |
+| `413` | `payload_too_large` | De JSON-body is groter dan de route accepteert. Voegt `limit_bytes` toe. | Splits de batch in kleinere requests. Verzend per request hoogstens `limit_bytes`. |
 | `422` | `validation_failed` | Een querywaarde, veld, filter, cursor, header of tijdsbereik is ongeldig. | Corrigeer de genoemde waarde. Verzend het request daarna opnieuw. |
 | `422` | `invite_invalid` | De uitnodiging vraagt om de rol `owner`, of je kunt haar niet accepteren: ze is verlopen, ingetrokken of niet naar je account gestuurd. | Nodig uit met de rol `admin` of `member`. Vraag een eigenaar of beheerder om een nieuwe uitnodiging om te accepteren. |
 | `422` | `organization_limit_exceeded` | Het account heeft het maximale aantal organisaties. | Verwijder een organisatie of neem contact op met support. |
@@ -104,6 +105,7 @@ ID hoort. Een onbekend API-pad geeft `404` met `not_found`.
 | `invitation_limit_exceeded` | `invitations_per_day` (per organisatie) of `invitations_per_inviter_per_day` (per uitnodigend account, 20 per UTC-dag) | `reset_at`: het begin van de volgende UTC-dag (RFC3339). |
 | `artifact_storage_limit_exceeded` | De naam van een opslaggrens, zoals `artifact_completed_project_bytes` | Geen. |
 | `rate_limited` | Geen | `retry_after_seconds`: het aantal hele seconden om te wachten, minstens `1`. |
+| `payload_too_large` | Geen | `limit_bytes`: de grootste JSON-body die de route accepteert, in bytes. De meeste routes accepteren `2097152` bytes (2 MiB). |
 
 Lees het huidige toegestane gebruik en het werkelijke gebruik uit de
 [Account-API](/nl/reference/account-api#account-usage).
@@ -116,6 +118,7 @@ status alleen is niet genoeg.
 | Response | Regel voor een nieuwe poging |
 | --- | --- |
 | `validation_failed`, `invalid_json`, `invalid_path` (`400`), `invalid_multipart` (`400` of `413`) of `invalid_websocket_upgrade` | Corrigeer eerst de genoemde waarde in het request. Verzend hetzelfde request niet opnieuw. |
+| `payload_too_large` | Splits de batch in kleinere requests. Verzend daarna elk deel. Verzend dezelfde body niet opnieuw. |
 | `unauthorized` of `ingest_key_invalid` | Vervang of vernieuw eerst de juiste toegangsgegevens. |
 | `forbidden`, `role_forbidden` of `not_found` | Probeer het niet opnieuw met andere ID's. Vraag opnieuw een lijst op met resources van je account, of vraag toegang aan de eigenaar. |
 | `method_not_allowed` | Gebruik de methode uit `next`. Verzend de geweigerde methode niet opnieuw. |
@@ -181,16 +184,18 @@ Wijzig de body niet bij een nieuwe poging met de oorspronkelijke sleutel.
 ## <span id="request-shape-errors">Fouten in de vorm van het request</span>
 
 `invalid_json` betekent dat de server de body niet kan accepteren als de
-JSON-vorm van de route. Controleer het contenttype, de grootte van de body, de
-JSON-syntaxis, de verplichte velden en de veldtypen. De HTTP-status laat zien
-welk deel is mislukt:
+JSON-vorm van de route. Controleer het contenttype, de JSON-syntaxis, de
+verplichte velden en de veldtypen. De HTTP-status laat zien welk deel is
+mislukt:
 
 | HTTP | Oorzaak |
 | --- | --- |
 | `400` | De body is geen geldige JSON. |
-| `413` | De body is te groot. |
 | `415` | De header `Content-Type` is niet `application/json`. |
 | `422` | De JSON is geldig, maar een veld ontbreekt of heeft het verkeerde type. |
+
+Een te grote JSON-body geeft `413` met `payload_too_large`, niet `invalid_json`.
+Splits de batch in kleinere requests.
 
 `validation_failed` met de fout `invalid query parameters` betekent dat de
 server de querystring niet kan lezen. Controleer de namen van de parameters en
@@ -278,6 +283,21 @@ kan per route verschillen.
     "code": "send_valid_json",
     "target": "request"
   }
+}
+```
+
+### <span id="json-body-too-large">JSON-body te groot</span>
+
+```json
+{
+  "error": "request body is over 2097152 bytes",
+  "code": "payload_too_large",
+  "next": "send under limit_bytes per request; split a batch into smaller requests",
+  "next_action": {
+    "code": "split_batch",
+    "target": "request"
+  },
+  "limit_bytes": 2097152
 }
 ```
 
