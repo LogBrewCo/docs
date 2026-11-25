@@ -35,7 +35,7 @@ LogBrew API 错误使用统一的 JSON 错误响应格式。程序逻辑使用 `
 3. 结合状态和 `code` 选择客户端的处理分支。
 4. `error` 和 `next` 以纯文本展示。不要将它们渲染为 HTML，也不要当作命令执行。
 5. 使用 `next_action` 自动恢复。如果客户端无法识别该动作，停止处理并展示错误。
-6. 把返回的 `limit`、`reset_at` 和 `retry_after_seconds` 值与失败的请求一起保存。
+6. 把返回的 `limit`、`limit_bytes`、`reset_at` 和 `retry_after_seconds` 值与失败的请求一起保存。
 7. 重试之前，遵循[重试规则](#retry-rules)。
 
 如果响应体不是这种 JSON 格式，保留 HTTP 状态，并把错误码记为不可用。不要编造 LogBrew `code`。代理或网络故障可能导致这种结果。
@@ -50,7 +50,7 @@ LogBrew API 错误使用统一的 JSON 错误响应格式。程序逻辑使用 `
 
 | HTTP | `code` | 含义 | 客户端处理 |
 | --- | --- | --- | --- |
-| `400`、`413`、`415` 或 `422` | `invalid_json` | 请求体不是有效的 JSON、过大、内容类型错误，或不符合该路由的 JSON 结构。 | 发送有效的 JSON，带上 `Content-Type: application/json` 和该路由需要的字段。 |
+| `400`、`415` 或 `422` | `invalid_json` | 请求体不是有效的 JSON、内容类型错误，或不符合该路由的 JSON 结构。 | 发送有效的 JSON，带上 `Content-Type: application/json` 和该路由需要的字段。 |
 | `400`、`413` 或 `500` | `invalid_multipart` | 服务器无法读取 `multipart/form-data` 上传。 | 对于 `400` 或 `413`，修正表单或它的大小。对于 `500`，遵循[重试规则](#retry-rules)。 |
 | `400` 或 `500` | `invalid_path` | 服务器无法读取 URL 路径中的某个值，例如项目 ID 或问题 ID。 | 对于 `400`，修正 ID 及其类型。对于 `500`，遵循[重试规则](#retry-rules)。 |
 | `400`、`405` 或 `426` | `invalid_websocket_upgrade` | 实时动态连接不是有效的 WebSocket 升级请求。 | 使用 `GET` 和 WebSocket 升级请求头连接。参见[实时事件格式](/zh-Hans/reference/telemetry-response-shapes#live-event-response-format)。 |
@@ -66,6 +66,7 @@ LogBrew API 错误使用统一的 JSON 错误响应格式。程序逻辑使用 `
 | `409` | `account_link_conflict` | 该登录身份属于另一个账号。 | 在账号设置中处理账号关联。不要为同一身份再创建一个账号。 |
 | `409` | `account_recovery_available` | 账号处于恢复期内。 | 按返回的恢复动作操作。不要泄露恢复令牌。 |
 | `410` | `account_recovery_expired` | 账号恢复期已结束。 | 登录以创建新账号。 |
+| `413` | `payload_too_large` | JSON 请求体超过了该路由接受的大小。附加 `limit_bytes`。 | 把批次拆成更小的请求。每个请求最多发送 `limit_bytes`。 |
 | `422` | `validation_failed` | 某个查询值、字段、筛选条件、游标、请求头或时间范围无效。 | 修正错误中指出的值。然后再次发送请求。 |
 | `422` | `invite_invalid` | 邀请要求 `owner` 角色，或者你无法接受该邀请：邀请已过期、已撤销，或不是发给你的账号。 | 用 `admin` 或 `member` 角色发出邀请。要接受邀请，请向所有者或管理员索取新的邀请。 |
 | `422` | `organization_limit_exceeded` | 账号的组织数已达上限。 | 移除一个组织或联系支持团队。 |
@@ -91,6 +92,7 @@ LogBrew API 错误使用统一的 JSON 错误响应格式。程序逻辑使用 `
 | `invitation_limit_exceeded` | `invitations_per_day`（按组织）或 `invitations_per_inviter_per_day`（按发出邀请的账号，每个 UTC 日 20 条） | `reset_at`：下一个 UTC 日的开始时间（RFC3339）。 |
 | `artifact_storage_limit_exceeded` | 存储边界名称，例如 `artifact_completed_project_bytes` | 无。 |
 | `rate_limited` | 无 | `retry_after_seconds`：需要等待的整秒数，至少为 `1`。 |
+| `payload_too_large` | 无 | `limit_bytes`：该路由接受的最大 JSON 请求体，单位为字节。大多数路由接受 `2097152` 字节（2 MiB）。 |
 
 通过[账号 API](/zh-Hans/reference/account-api#account-usage) 读取当前额度和用量。
 
@@ -101,6 +103,7 @@ LogBrew API 错误使用统一的 JSON 错误响应格式。程序逻辑使用 `
 | 响应 | 重试规则 |
 | --- | --- |
 | `validation_failed`、`invalid_json`、`invalid_path`（`400`）、`invalid_multipart`（`400` 或 `413`）或 `invalid_websocket_upgrade` | 先修正错误中指出的请求值。不要原样再次发送同一请求。 |
+| `payload_too_large` | 把批次拆成更小的请求。然后逐个发送。不要再次发送同一请求体。 |
 | `unauthorized` 或 `ingest_key_invalid` | 先替换或刷新正确的凭据。 |
 | `forbidden`、`role_forbidden` 或 `not_found` | 不要换用其他 ID 重试。重新读取你拥有的列表，或向所有者申请访问权限。 |
 | `method_not_allowed` | 使用 `next` 中的方法。不要再次发送被拒绝的方法。 |
@@ -145,14 +148,15 @@ LogBrew API 错误使用统一的 JSON 错误响应格式。程序逻辑使用 `
 
 ## 请求格式错误
 
-`invalid_json` 表示服务器无法按该路由的 JSON 结构接受请求体。检查内容类型、请求体大小、JSON 语法、必填字段和字段类型。HTTP 状态说明了哪一部分出错：
+`invalid_json` 表示服务器无法按该路由的 JSON 结构接受请求体。检查内容类型、JSON 语法、必填字段和字段类型。HTTP 状态说明了哪一部分出错：
 
 | HTTP | 原因 |
 | --- | --- |
 | `400` | 请求体不是有效的 JSON。 |
-| `413` | 请求体过大。 |
 | `415` | `Content-Type` 请求头不是 `application/json`。 |
 | `422` | JSON 有效，但缺少字段或字段类型错误。 |
+
+过大的 JSON 请求体返回 `413` 和 `payload_too_large`，而不是 `invalid_json`。把批次拆成更小的请求。
 
 如果 `validation_failed` 的错误为 `invalid query parameters`，说明服务器无法读取查询字符串。检查参数名和值类型。不要发送未知的查询参数。[查询筛选条件](/zh-Hans/reference/telemetry-api-filters)列出了每个路由的参数。
 
@@ -219,6 +223,21 @@ LogBrew API 错误使用统一的 JSON 错误响应格式。程序逻辑使用 `
     "code": "send_valid_json",
     "target": "request"
   }
+}
+```
+
+### <span id="json-body-too-large">JSON 请求体过大</span>
+
+```json
+{
+  "error": "request body is over 2097152 bytes",
+  "code": "payload_too_large",
+  "next": "send under limit_bytes per request; split a batch into smaller requests",
+  "next_action": {
+    "code": "split_batch",
+    "target": "request"
+  },
+  "limit_bytes": 2097152
 }
 ```
 

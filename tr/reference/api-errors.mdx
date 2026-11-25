@@ -39,7 +39,7 @@ ekler. [Hata kodları](#error-codes) tablosu bu alanları adlandırır.
 3. İstemci dalını seçmek için durumu ve `code` değerini birlikte kullanın.
 4. `error` ve `next` alanlarını düz metin olarak gösterin. Bunları HTML olarak işlemeyin veya komut olarak çalıştırmayın.
 5. Otomatik kurtarma için `next_action` kullanın. İstemci aksiyonu tanımıyorsa durun ve hatayı gösterin.
-6. Dönen `limit`, `reset_at` ve `retry_after_seconds` değerlerini başarısız istekle birlikte saklayın.
+6. Dönen `limit`, `limit_bytes`, `reset_at` ve `retry_after_seconds` değerlerini başarısız istekle birlikte saklayın.
 7. Yeniden denemeden önce [yeniden deneme kurallarını](#retry-rules) uygulayın.
 
 Yanıtta JSON zarfı yoksa HTTP durumunu saklayın ve kodu kullanılamıyor olarak
@@ -62,7 +62,7 @@ uyan kodları döndürür.
 
 | HTTP | `code` | Anlamı | İstemci aksiyonu |
 | --- | --- | --- | --- |
-| `400`, `413`, `415` veya `422` | `invalid_json` | Gövde geçerli bir JSON değil, çok büyük, içerik türü yanlış veya rotanın JSON yapısıyla eşleşmiyor. | Geçerli JSON'u `Content-Type: application/json` ile ve rotanın gerektirdiği alanlarla gönderin. |
+| `400`, `415` veya `422` | `invalid_json` | Gövde geçerli bir JSON değil, içerik türü yanlış veya rotanın JSON yapısıyla eşleşmiyor. | Geçerli JSON'u `Content-Type: application/json` ile ve rotanın gerektirdiği alanlarla gönderin. |
 | `400`, `413` veya `500` | `invalid_multipart` | Sunucu bir `multipart/form-data` yüklemesini okuyamıyor. | `400` veya `413` için formu veya boyutunu düzeltin. `500` için [yeniden deneme kurallarını](#retry-rules) uygulayın. |
 | `400` veya `500` | `invalid_path` | Sunucu URL yolundaki proje veya sorun kimliği gibi bir değeri okuyamıyor. | `400` için kimliği ve türünü düzeltin. `500` için [yeniden deneme kurallarını](#retry-rules) uygulayın. |
 | `400`, `405` veya `426` | `invalid_websocket_upgrade` | Canlı akış bağlantısı geçerli bir WebSocket yükseltmesi değil. | `GET` ve WebSocket yükseltme başlıklarıyla bağlanın. Bkz. [canlı olay biçimi](/tr/reference/telemetry-response-shapes#live-event-response-format). |
@@ -78,6 +78,7 @@ uyan kodları döndürür.
 | `409` | `account_link_conflict` | Giriş kimliği başka bir hesaba ait. | Hesap bağlantısını hesap ayarlarından çözün. Aynı kimlik için ikinci bir hesap oluşturmayın. |
 | `409` | `account_recovery_available` | Hesap kurtarma süresi içinde. | Dönen kurtarma aksiyonunu izleyin. Kurtarma tokenını gizli tutun. |
 | `410` | `account_recovery_expired` | Hesap kurtarma süresi sona erdi. | Yeni bir hesap oluşturmak için giriş yapın. |
+| `413` | `payload_too_large` | JSON gövdesi, rotanın kabul ettiği boyuttan büyük. `limit_bytes` ekler. | Toplu gönderimi daha küçük isteklere bölün. Her istekte en fazla `limit_bytes` gönderin. |
 | `422` | `validation_failed` | Bir sorgu değeri, alan, filtre, cursor, başlık veya zaman aralığı geçerli değil. | Adı geçen değeri düzeltin. Ardından isteği yeniden gönderin. |
 | `422` | `invite_invalid` | Davet `owner` rolünü istiyor veya daveti kabul edemezsiniz: süresi doldu, iptal edildi ya da hesabınıza gönderilmedi. | `admin` veya `member` rolüyle davet edin. Kabul etmek için bir sahipten veya yöneticiden yeni davet isteyin. |
 | `422` | `organization_limit_exceeded` | Hesap en fazla organizasyon sayısına ulaştı. | Bir organizasyonu kaldırın veya destekle iletişime geçin. |
@@ -105,6 +106,7 @@ Bilinmeyen bir API yolu `not_found` ile `404` döndürür.
 | `invitation_limit_exceeded` | `invitations_per_day` (organizasyon başına) veya `invitations_per_inviter_per_day` (davet eden hesap başına, her UTC günü için 20) | `reset_at`: sonraki UTC gününün başlangıcı (RFC3339). |
 | `artifact_storage_limit_exceeded` | `artifact_completed_project_bytes` gibi bir depolama sınırı adı | Yok. |
 | `rate_limited` | Yok | `retry_after_seconds`: beklenecek tam saniye sayısı, en az `1`. |
+| `payload_too_large` | Yok | `limit_bytes`: rotanın kabul ettiği en büyük JSON gövdesi, bayt cinsinden. Çoğu rota `2097152` bayt (2 MiB) kabul eder. |
 
 Güncel kotayı ve kullanımı [hesap API'sinden](/tr/reference/account-api#account-usage)
 okuyun.
@@ -117,6 +119,7 @@ değildir.
 | Yanıt | Yeniden deneme kuralı |
 | --- | --- |
 | `validation_failed`, `invalid_json`, `invalid_path` (`400`), `invalid_multipart` (`400` veya `413`) ya da `invalid_websocket_upgrade` | Önce adı geçen istek değerini düzeltin. Aynı isteği yeniden göndermeyin. |
+| `payload_too_large` | Toplu gönderimi daha küçük isteklere bölün. Ardından her parçayı gönderin. Aynı gövdeyi yeniden göndermeyin. |
 | `unauthorized` veya `ingest_key_invalid` | Önce doğru kimlik bilgisini değiştirin veya yenileyin. |
 | `forbidden`, `role_forbidden` veya `not_found` | Başka kimliklerle yeniden denemeyin. Sahip olduğunuz bir listeyi yeniden okuyun veya sahibinden erişim alın. |
 | `method_not_allowed` | `next` içindeki yöntemi kullanın. Reddedilen yöntemi yeniden göndermeyin. |
@@ -181,16 +184,17 @@ Asıl anahtarı kullanan bir yeniden denemenin gövdesini değiştirmeyin.
 ## İstek yapısı hataları
 
 `invalid_json`, sunucunun gövdeyi rotanın JSON yapısı olarak kabul edemediği
-anlamına gelir. İçerik türünü, gövde boyutunu, JSON söz dizimini, zorunlu
-alanları ve alan türlerini inceleyin. HTTP durumu hangi kısmın başarısız
-olduğunu gösterir:
+anlamına gelir. İçerik türünü, JSON söz dizimini, zorunlu alanları ve alan
+türlerini inceleyin. HTTP durumu hangi kısmın başarısız olduğunu gösterir:
 
 | HTTP | Neden |
 | --- | --- |
 | `400` | Gövde geçerli bir JSON değil. |
-| `413` | Gövde çok büyük. |
 | `415` | `Content-Type` başlığı `application/json` değil. |
 | `422` | JSON geçerli, ancak bir alan eksik veya türü yanlış. |
+
+Çok büyük bir JSON gövdesi `invalid_json` değil, `payload_too_large` ile `413`
+döndürür. Toplu gönderimi daha küçük isteklere bölün.
 
 `invalid query parameters` hatasıyla birlikte `validation_failed`, sunucunun
 sorgu dizesini okuyamadığı anlamına gelir. Parametre adlarını ve değer
@@ -276,6 +280,21 @@ olabilir.
     "code": "send_valid_json",
     "target": "request"
   }
+}
+```
+
+### <span id="json-body-too-large">JSON gövdesi çok büyük</span>
+
+```json
+{
+  "error": "request body is over 2097152 bytes",
+  "code": "payload_too_large",
+  "next": "send under limit_bytes per request; split a batch into smaller requests",
+  "next_action": {
+    "code": "split_batch",
+    "target": "request"
+  },
+  "limit_bytes": 2097152
 }
 ```
 

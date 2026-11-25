@@ -38,7 +38,7 @@ Một số phản hồi có thêm trường, chẳng hạn `limit`, `reset_at` h
 3. Dùng cả trạng thái và `code` để chọn nhánh xử lý phía client.
 4. Hiển thị `error` và `next` dưới dạng văn bản thuần. Không render chúng thành HTML và không chạy chúng như lệnh.
 5. Dùng `next_action` để khôi phục tự động. Nếu client không nhận ra bước này, dừng lại và hiển thị lỗi.
-6. Lưu các giá trị `limit`, `reset_at` và `retry_after_seconds` được trả về cùng với yêu cầu thất bại.
+6. Lưu các giá trị `limit`, `limit_bytes`, `reset_at` và `retry_after_seconds` được trả về cùng với yêu cầu thất bại.
 7. Trước khi thử lại, áp dụng [quy tắc thử lại](#retry-rules).
 
 Nếu phản hồi không có envelope JSON, giữ trạng thái HTTP và ghi mã là không
@@ -61,7 +61,7 @@ cầu và giới hạn của nó.
 
 | HTTP | `code` | Ý nghĩa | Việc client cần làm |
 | --- | --- | --- | --- |
-| `400`, `413`, `415` hoặc `422` | `invalid_json` | Nội dung yêu cầu không phải JSON hợp lệ, quá lớn, sai content type hoặc không khớp với cấu trúc JSON của route. | Gửi JSON hợp lệ với `Content-Type: application/json` và các trường mà route cần. |
+| `400`, `415` hoặc `422` | `invalid_json` | Nội dung yêu cầu không phải JSON hợp lệ, sai content type hoặc không khớp với cấu trúc JSON của route. | Gửi JSON hợp lệ với `Content-Type: application/json` và các trường mà route cần. |
 | `400`, `413` hoặc `500` | `invalid_multipart` | Máy chủ không đọc được tệp tải lên dạng `multipart/form-data`. | Với `400` hoặc `413`, sửa form hoặc kích thước của form. Với `500`, áp dụng [quy tắc thử lại](#retry-rules). |
 | `400` hoặc `500` | `invalid_path` | Máy chủ không đọc được một giá trị trong đường dẫn URL, chẳng hạn ID dự án hoặc ID vấn đề. | Với `400`, sửa ID và kiểu của ID. Với `500`, áp dụng [quy tắc thử lại](#retry-rules). |
 | `400`, `405` hoặc `426` | `invalid_websocket_upgrade` | Kết nối luồng trực tiếp không phải yêu cầu nâng cấp WebSocket hợp lệ. | Kết nối bằng `GET` kèm header nâng cấp WebSocket. Xem [định dạng sự kiện trực tiếp](/vi/reference/telemetry-response-shapes#live-event-response-format). |
@@ -77,6 +77,7 @@ cầu và giới hạn của nó.
 | `409` | `account_link_conflict` | Danh tính đăng nhập thuộc về một tài khoản khác. | Xử lý liên kết tài khoản trong cài đặt tài khoản. Không tạo tài khoản thứ hai cho cùng danh tính. |
 | `409` | `account_recovery_available` | Tài khoản đang trong thời hạn khôi phục. | Làm theo bước khôi phục được trả về. Giữ bí mật token khôi phục. |
 | `410` | `account_recovery_expired` | Thời hạn khôi phục tài khoản đã kết thúc. | Đăng nhập để tạo tài khoản mới. |
+| `413` | `payload_too_large` | Nội dung JSON lớn hơn mức route chấp nhận. Có thêm `limit_bytes`. | Chia batch thành các yêu cầu nhỏ hơn. Mỗi yêu cầu chỉ gửi tối đa `limit_bytes`. |
 | `422` | `validation_failed` | Giá trị truy vấn, trường, bộ lọc, cursor, header hoặc khoảng thời gian không hợp lệ. | Sửa giá trị được nêu tên. Sau đó gửi lại yêu cầu. |
 | `422` | `invite_invalid` | Lời mời yêu cầu vai trò `owner`, hoặc bạn không thể chấp nhận lời mời: lời mời đã hết hạn, đã thu hồi hoặc không được gửi đến tài khoản của bạn. | Mời bằng vai trò `admin` hoặc `member`. Để chấp nhận, nhờ chủ sở hữu hoặc quản trị viên gửi lời mời mới. |
 | `422` | `organization_limit_exceeded` | Tài khoản đã đạt số tổ chức tối đa. | Xóa một tổ chức hoặc liên hệ hỗ trợ. |
@@ -104,6 +105,7 @@ dẫn API không xác định trả về `404` với `not_found`.
 | `invitation_limit_exceeded` | `invitations_per_day` (theo tổ chức) hoặc `invitations_per_inviter_per_day` (theo tài khoản gửi lời mời, 20 mỗi ngày UTC) | `reset_at`: thời điểm bắt đầu ngày UTC tiếp theo (RFC3339). |
 | `artifact_storage_limit_exceeded` | Tên một ngưỡng dung lượng, chẳng hạn `artifact_completed_project_bytes` | Không có. |
 | `rate_limited` | Không có | `retry_after_seconds`: số giây nguyên cần chờ, tối thiểu `1`. |
+| `payload_too_large` | Không có | `limit_bytes`: kích thước lớn nhất của nội dung JSON mà route chấp nhận, tính bằng byte. Phần lớn route chấp nhận `2097152` byte (2 MiB). |
 
 Đọc hạn mức và mức sử dụng hiện tại từ
 [Account API](/vi/reference/account-api#account-usage).
@@ -116,6 +118,7 @@ trạng thái là chưa đủ.
 | Phản hồi | Quy tắc thử lại |
 | --- | --- |
 | `validation_failed`, `invalid_json`, `invalid_path` (`400`), `invalid_multipart` (`400` hoặc `413`) hoặc `invalid_websocket_upgrade` | Sửa giá trị được nêu tên trong yêu cầu trước. Không gửi lại cùng yêu cầu. |
+| `payload_too_large` | Chia batch thành các yêu cầu nhỏ hơn. Sau đó gửi từng phần. Không gửi lại cùng nội dung. |
 | `unauthorized` hoặc `ingest_key_invalid` | Thay hoặc làm mới đúng thông tin xác thực trước. |
 | `forbidden`, `role_forbidden` hoặc `not_found` | Không thử lại với ID khác. Đọc lại một danh sách thuộc tài khoản, hoặc xin quyền truy cập từ chủ sở hữu. |
 | `method_not_allowed` | Dùng phương thức trong `next`. Không gửi lại phương thức đã bị từ chối. |
@@ -178,15 +181,17 @@ nội dung của lần thử lại dùng khóa ban đầu.
 ## Lỗi cấu trúc yêu cầu
 
 `invalid_json` nghĩa là máy chủ không thể nhận nội dung yêu cầu theo cấu trúc
-JSON của route. Kiểm tra content type, kích thước nội dung, cú pháp JSON, các
-trường bắt buộc và kiểu của trường. Trạng thái HTTP cho biết phần nào bị lỗi:
+JSON của route. Kiểm tra content type, cú pháp JSON, các trường bắt buộc và kiểu
+của trường. Trạng thái HTTP cho biết phần nào bị lỗi:
 
 | HTTP | Nguyên nhân |
 | --- | --- |
 | `400` | Nội dung không phải JSON hợp lệ. |
-| `413` | Nội dung quá lớn. |
 | `415` | Header `Content-Type` không phải `application/json`. |
 | `422` | JSON hợp lệ, nhưng một trường bị thiếu hoặc sai kiểu. |
+
+Nội dung JSON quá lớn trả về `413` với `payload_too_large`, không phải
+`invalid_json`. Chia batch thành các yêu cầu nhỏ hơn.
 
 `validation_failed` với lỗi `invalid query parameters` nghĩa là máy chủ không
 đọc được query string. Kiểm tra tên tham số và kiểu giá trị. Không gửi tham số
@@ -272,6 +277,21 @@ khác nhau trên mỗi route.
     "code": "send_valid_json",
     "target": "request"
   }
+}
+```
+
+### <span id="json-body-too-large">Nội dung JSON quá lớn</span>
+
+```json
+{
+  "error": "request body is over 2097152 bytes",
+  "code": "payload_too_large",
+  "next": "send under limit_bytes per request; split a batch into smaller requests",
+  "next_action": {
+    "code": "split_batch",
+    "target": "request"
+  },
+  "limit_bytes": 2097152
 }
 ```
 

@@ -38,7 +38,7 @@ Niektóre odpowiedzi zawierają dodatkowe pola, takie jak `limit`, `reset_at` lu
 3. Aby wybrać gałąź obsługi w kliencie, użyj razem statusu i `code`.
 4. `error` i `next` pokazuj jako zwykły tekst. Nie renderuj ich jako HTML i nie uruchamiaj jako poleceń.
 5. Do automatycznego naprawiania używaj `next_action`. Jeśli klient nie rozpoznaje działania, zatrzymaj się i pokaż błąd.
-6. Zachowaj zwrócone wartości `limit`, `reset_at` i `retry_after_seconds` razem z nieudanym żądaniem.
+6. Zachowaj zwrócone wartości `limit`, `limit_bytes`, `reset_at` i `retry_after_seconds` razem z nieudanym żądaniem.
 7. Zanim ponowisz żądanie, zastosuj [zasady ponawiania](#retry-rules).
 
 Jeśli odpowiedź nie ma koperty JSON, zachowaj status HTTP i zapisz, że kod jest
@@ -61,7 +61,7 @@ metodą, treścią żądania i limitami.
 
 | HTTP | `code` | Znaczenie | Działanie klienta |
 | --- | --- | --- | --- |
-| `400`, `413`, `415` lub `422` | `invalid_json` | Treść nie jest poprawnym JSON-em, jest za duża, ma niewłaściwy typ zawartości lub nie pasuje do struktury JSON wymaganej przez trasę. | Wyślij poprawny JSON z `Content-Type: application/json` i polami wymaganymi przez trasę. |
+| `400`, `415` lub `422` | `invalid_json` | Treść nie jest poprawnym JSON-em, ma niewłaściwy typ zawartości lub nie pasuje do struktury JSON wymaganej przez trasę. | Wyślij poprawny JSON z `Content-Type: application/json` i polami wymaganymi przez trasę. |
 | `400`, `413` lub `500` | `invalid_multipart` | Serwer nie może odczytać przesyłanych danych `multipart/form-data`. | Przy `400` lub `413` popraw formularz lub jego rozmiar. Przy `500` zastosuj [zasady ponawiania](#retry-rules). |
 | `400` lub `500` | `invalid_path` | Serwer nie może odczytać wartości w ścieżce URL, na przykład ID projektu lub problemu. | Przy `400` popraw ID i jego typ. Przy `500` zastosuj [zasady ponawiania](#retry-rules). |
 | `400`, `405` lub `426` | `invalid_websocket_upgrade` | Połączenie podglądu na żywo nie jest poprawnym żądaniem przejścia na WebSocket. | Połącz się metodą `GET` z nagłówkami przejścia na WebSocket. Zobacz [format zdarzeń na żywo](/pl/reference/telemetry-response-shapes#live-event-response-format). |
@@ -77,6 +77,7 @@ metodą, treścią żądania i limitami.
 | `409` | `account_link_conflict` | Tożsamość logowania należy do innego konta. | Rozwiąż powiązanie kont w ustawieniach konta. Nie twórz drugiego konta dla tej samej tożsamości. |
 | `409` | `account_recovery_available` | Konto jest w okresie odzyskiwania. | Wykonaj zwrócone działanie odzyskiwania. Zachowaj token odzyskiwania w tajemnicy. |
 | `410` | `account_recovery_expired` | Okres odzyskiwania konta się skończył. | Zaloguj się, aby utworzyć nowe konto. |
+| `413` | `payload_too_large` | Treść JSON jest większa, niż przyjmuje trasa. Odpowiedź zawiera też `limit_bytes`. | Podziel paczkę na mniejsze żądania. W każdym żądaniu wyślij najwyżej `limit_bytes`. |
 | `422` | `validation_failed` | Wartość zapytania, pole, filtr, kursor, nagłówek lub zakres czasu są nieprawidłowe. | Popraw wskazaną wartość. Potem wyślij żądanie ponownie. |
 | `422` | `invite_invalid` | Zaproszenie wymaga roli `owner` albo nie możesz go zaakceptować: wygasło, zostało cofnięte lub nie wysłano go na twoje konto. | Zaproś z rolą `admin` lub `member`. Aby zaakceptować, poproś właściciela lub administratora o nowe zaproszenie. |
 | `422` | `organization_limit_exceeded` | Konto ma już maksymalną liczbę organizacji. | Usuń organizację lub skontaktuj się z pomocą techniczną. |
@@ -104,6 +105,7 @@ Nie używaj tekstu błędu, aby ustalić, do którego konta należy ID. Nieznana
 | `invitation_limit_exceeded` | `invitations_per_day` (na organizację) lub `invitations_per_inviter_per_day` (na konto zapraszające, 20 na dzień UTC) | `reset_at`: początek następnego dnia UTC (RFC3339). |
 | `artifact_storage_limit_exceeded` | Nazwa granicy miejsca, na przykład `artifact_completed_project_bytes` | Brak. |
 | `rate_limited` | Brak | `retry_after_seconds`: liczba pełnych sekund oczekiwania, co najmniej `1`. |
+| `payload_too_large` | Brak | `limit_bytes`: największa treść JSON, jaką przyjmuje trasa, w bajtach. Większość tras przyjmuje `2097152` bajtów (2 MiB). |
 
 Bieżący przydział i wykorzystanie odczytasz przez
 [API konta](/pl/reference/account-api#account-usage).
@@ -115,6 +117,7 @@ O ponowieniu decyduj na podstawie kodu i operacji. Sam status nie wystarczy.
 | Odpowiedź | Zasada ponawiania |
 | --- | --- |
 | `validation_failed`, `invalid_json`, `invalid_path` (`400`), `invalid_multipart` (`400` lub `413`) lub `invalid_websocket_upgrade` | Najpierw popraw wskazaną wartość żądania. Nie wysyłaj ponownie tego samego żądania. |
+| `payload_too_large` | Podziel paczkę na mniejsze żądania. Potem wyślij każdą część. Nie wysyłaj ponownie tej samej treści. |
 | `unauthorized` lub `ingest_key_invalid` | Najpierw wymień lub odśwież właściwe poświadczenie. |
 | `forbidden`, `role_forbidden` lub `not_found` | Nie ponawiaj z innymi ID. Ponownie odczytaj listę zasobów należących do konta albo uzyskaj dostęp od właściciela. |
 | `method_not_allowed` | Użyj metody z `next`. Nie wysyłaj ponownie odrzuconej metody. |
@@ -178,16 +181,17 @@ zmieniaj treści ponowienia, które używa pierwotnego klucza.
 ## Błędy struktury żądania
 
 `invalid_json` oznacza, że serwer nie może przyjąć treści żądania jako JSON o
-strukturze wymaganej przez trasę. Sprawdź typ zawartości, rozmiar treści,
-składnię JSON, wymagane pola i typy pól. Status HTTP pokazuje, która część
-zawiodła:
+strukturze wymaganej przez trasę. Sprawdź typ zawartości, składnię JSON,
+wymagane pola i typy pól. Status HTTP pokazuje, która część zawiodła:
 
 | HTTP | Przyczyna |
 | --- | --- |
 | `400` | Treść nie jest poprawnym JSON-em. |
-| `413` | Treść jest za duża. |
 | `415` | Nagłówek `Content-Type` nie ma wartości `application/json`. |
 | `422` | JSON jest poprawny, ale brakuje pola albo pole ma niewłaściwy typ. |
+
+Za duża treść JSON zwraca `413` z `payload_too_large`, a nie `invalid_json`.
+Podziel paczkę na mniejsze żądania.
 
 `validation_failed` z błędem `invalid query parameters` oznacza, że serwer nie
 może odczytać ciągu zapytania. Sprawdź nazwy parametrów i typy wartości. Nie
@@ -275,6 +279,21 @@ zależności od trasy.
     "code": "send_valid_json",
     "target": "request"
   }
+}
+```
+
+### <span id="json-body-too-large">Za duża treść JSON</span>
+
+```json
+{
+  "error": "request body is over 2097152 bytes",
+  "code": "payload_too_large",
+  "next": "send under limit_bytes per request; split a batch into smaller requests",
+  "next_action": {
+    "code": "split_batch",
+    "target": "request"
+  },
+  "limit_bytes": 2097152
 }
 ```
 
