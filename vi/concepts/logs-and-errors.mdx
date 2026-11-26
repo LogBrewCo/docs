@@ -1,0 +1,244 @@
+---
+title: "Log lỗi (error log) là gì, ở đâu và khác gì theo dõi lỗi"
+sidebarTitle: "Log và lỗi"
+description: "Tìm hiểu log lỗi là gì, cách tìm error log trên macOS, Linux, Windows, Apache, Nginx và PHP, và khi nào một lỗi nên ghi vào log hay đưa vào theo dõi lỗi."
+---
+
+LogBrew là nền tảng observability (khả năng quan sát) cho lập trình viên và agent lập trình, có gói miễn phí rộng rãi và không cần thẻ thanh toán.
+
+Log lỗi (error log) là bản ghi các lỗi mà một ứng dụng, một máy chủ hoặc một hệ điều hành ghi ra khi chạy. Mỗi mục có thời gian, mức độ nghiêm trọng và thông điệp. Nhiều mục còn có stack trace. Mục log lỗi PHP 8.5 dưới đây lấy từ một lần chạy thật:
+
+```text
+[26-Nov-2026 08:25:26 UTC] PHP Fatal error:  Uncaught DivisionByZeroError: Division by zero in Command line code:1
+Stack trace:
+#0 Command line code(1): intdiv(1, 0)
+#1 {main}
+  thrown in Command line code on line 1
+```
+
+## Tìm log lỗi ở đâu
+
+| Hệ thống | Vị trí log lỗi |
+| --- | --- |
+| macOS | Unified log. Mở ứng dụng Console, hoặc dùng lệnh `log`. |
+| Linux dùng systemd | Journal của systemd. |
+| Windows | Event Viewer, sau đó chọn **Windows Logs** > **Application** hoặc **System**. |
+| Apache HTTP Server | Chỉ thị `ErrorLog`. Mặc định là `logs/error_log` trong thư mục gốc của máy chủ. Debian và Ubuntu dùng `/var/log/apache2/error.log`. |
+| Nginx | Chỉ thị `error_log`. Các gói Linux dùng `/var/log/nginx/error.log`. Homebrew dùng `/opt/homebrew/var/log/nginx/error.log`. |
+| PHP | Thiết lập `error_log`. Khi không có giá trị, PHP ghi vào log lỗi của web server, hoặc ra standard error khi chạy CLI. |
+
+Dùng các lệnh này để đọc lỗi, hoặc để in ra vị trí của log:
+
+```bash
+# macOS
+/usr/bin/log show --last 1h --predicate 'messageType == error' --style compact
+# Linux with systemd
+journalctl -p err -b
+# Windows PowerShell
+Get-WinEvent -FilterHashtable @{LogName='Application'; Level=2} -MaxEvents 20
+# Apache, Nginx, and PHP: print the error log setting
+httpd -V | grep DEFAULT_ERRORLOG
+nginx -V 2>&1 | tr ' ' '\n' | grep error-log-path
+php -i | grep '^error_log '
+```
+
+Trên macOS 27.2, lệnh `log` cho 1 dòng cho mỗi lỗi:
+
+```text
+Timestamp               Ty Process[PID:TID]
+2026-11-26 11:23:28.876 E  analyticsagent[50921:442060d] [com.apple.analyticsagent:query] [BluetoothStatusQuery] No controller info. Returning unknown
+```
+
+## Log lỗi và theo dõi lỗi
+
+Log lỗi giữ 1 mục cho mỗi lỗi. Theo dõi lỗi (error tracking) gom các lỗi có cùng nguyên nhân vào 1 vấn đề, và tính mỗi lỗi mới là một lần xảy ra của vấn đề đó.
+
+| | Log lỗi | Theo dõi lỗi |
+| --- | --- | --- |
+| 1 bản ghi | 1 dòng cho mỗi lỗi | 1 vấn đề cho mỗi nguyên nhân |
+| Cùng một lỗi 3 lần | 3 dòng | 1 vấn đề với 3 lần xảy ra |
+| Stack trace | Chỉ khi logger ghi ra | Tách thành các frame |
+| Bản phát hành và môi trường | Chỉ khi bạn thêm vào | Lưu trong mỗi lần xảy ra |
+| Trạng thái | Không có | `unresolved`, `resolved`, hoặc `archived` |
+| Cảnh báo | Bạn tự viết truy vấn hoặc phép đếm | Cảnh báo cho vấn đề mới và vấn đề tái diễn |
+
+Bạn cần cả hai. Log cho biết điều gì đã xảy ra trong 1 request. Vấn đề cho biết cùng một lỗi xảy ra thường xuyên đến mức nào, từ khi nào và trong bản phát hành nào.
+
+## Khi nào ghi lỗi vào log và khi nào báo cáo vấn đề
+
+- Ghi lỗi vào log khi code của bạn xử lý được sự cố. Ví dụ: thử lại, phương án dự phòng, hoặc phản hồi `503` yêu cầu client thử lại.
+- Báo cáo vấn đề khi sự cố là một bug. Ví dụ: một exception mà code của bạn không bắt.
+- Đừng báo cáo lỗi client `4xx` là vấn đề. Lỗi đó mô tả một request sai, không phải sự cố trong code của bạn. SDK Node.js của LogBrew mặc định tuân theo quy tắc này.
+
+## Thử nghiệm: 6 log lỗi và 1 vấn đề
+
+Bài thử này gửi log và lỗi từ một máy chủ Node.js đến LogBrew. Bài thử chạy ngày 2026-11-26 với Node.js 22.18, Pino 10.4, `@logbrew/node` 0.1.30 và `@logbrew/sdk` 0.1.48.
+
+<Steps>
+  <Step title="Lưu máy chủ thành checkout.js">
+    Route `/retry-later` xử lý sự cố và ghi một log lỗi. Route `/checkout` ném ra một lỗi mà code không bắt.
+
+    ```js
+    import { createServer } from "node:http";
+    import pino from "pino";
+    import {
+      createLogBrewNodeClient,
+      installLogBrewPinoInstrumentation,
+      withLogBrewHttpHandler
+    } from "@logbrew/node";
+
+    const client = createLogBrewNodeClient();
+    installLogBrewPinoInstrumentation({ client });
+    const logger = pino({ level: "info" });
+
+    class CardDeclinedError extends Error {
+      name = "CardDeclinedError";
+    }
+
+    const server = createServer(withLogBrewHttpHandler((req, res) => {
+      const url = new URL(req.url, "http://localhost");
+      const orderId = url.searchParams.get("order");
+      logger.info({ orderId }, "order created");
+      logger.warn({ orderId, attempt: 2 }, "payment retry");
+      if (url.pathname === "/retry-later") {
+        logger.error({ orderId, reason: "provider_timeout" }, "payment failed");
+        res.statusCode = 503;
+        res.end("try again later");
+        return;
+      }
+      throw new CardDeclinedError("card declined by the payment provider");
+    }, { client }));
+
+    await new Promise((resolve) => server.listen(0, resolve));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const runs = Number(process.argv[2] ?? 1);
+    for (let i = 1; i <= runs; i++) {
+      const handled = await fetch(`${base}/retry-later?order=ord_10${i}0`);
+      const crashed = await fetch(`${base}/checkout?order=ord_10${i}1`);
+      console.log(`run ${i}: /retry-later ${handled.status}, /checkout ${crashed.status}`);
+    }
+    server.close();
+    await client.shutdown();
+    ```
+  </Step>
+
+  <Step title="Đặt key và chạy máy chủ">
+    Dùng ingest key của dự án. Xem [Logging trong Node.js](/vi/guides/node-logging) để tạo key. Chạy máy chủ 1 lần với bản phát hành `checkout-api@2.4.0`. Sau đó chạy lại với bản phát hành `checkout-api@2.6.0`.
+
+    ```bash
+    npm install @logbrew/node @logbrew/sdk pino
+    export LOGBREW_SERVER_API_KEY="<ingest_key>"
+    export LOGBREW_SERVICE_NAME="checkout-api"
+    export LOGBREW_ENVIRONMENT="production"
+    LOGBREW_RELEASE="checkout-api@2.4.0" node checkout.js 3
+    LOGBREW_RELEASE="checkout-api@2.6.0" node checkout.js 3
+    ```
+
+    Mỗi lần chạy in ra cùng 3 dòng:
+
+    ```text
+    run 1: /retry-later 503, /checkout 500
+    run 2: /retry-later 503, /checkout 500
+    run 3: /retry-later 503, /checkout 500
+    ```
+  </Step>
+
+  <Step title="Đọc các log lỗi">
+    ```bash
+    logbrew read logs --severity error --release checkout-api@2.6.0 --since 1h --json
+    ```
+
+    Mỗi lần chạy lưu 15 log: 6 `info`, 6 `warning` và 3 `error`. Lệnh này trả về 3 log `error` của lần chạy thứ hai. Mỗi log có trace ID riêng. Đây là 1 log, đã rút gọn:
+
+    ```json
+    {
+      "level": "error",
+      "source": "pino",
+      "message": "payment failed",
+      "occurred_at": "2026-11-26T08:27:53.315Z",
+      "release": "checkout-api@2.6.0",
+      "service_name": "checkout-api",
+      "trace_id": "<trace_id>",
+      "attributes": {
+        "metadata": {
+          "context.orderId": "ord_1010",
+          "context.reason": "provider_timeout",
+          "pinoLevel": "error",
+          "pinoLevelNumber": 50
+        }
+      }
+    }
+    ```
+
+    6 log `error` của 2 lần chạy không mở vấn đề nào. LogBrew mở vấn đề từ các lỗi mà SDK báo cáo, không từ mức của một log.
+  </Step>
+
+  <Step title="Đọc vấn đề">
+    ```bash
+    logbrew read issues --release checkout-api@2.6.0 --since 1h --json
+    ```
+
+    6 lỗi không được bắt của 2 lần chạy tạo ra 1 vấn đề với 6 lần xảy ra. Bản phát hành mới không mở vấn đề mới. `first_seen_at` lấy từ lần chạy đầu, còn `release` là bản phát hành của lần xảy ra gần nhất. Đây là vấn đề, đã rút gọn:
+
+    ```json
+    {
+      "id": "<issue_id>",
+      "title": "GET /checkout failed",
+      "message": "card declined by the payment provider",
+      "fingerprint": "node.http:CardDeclinedError:checkout.js",
+      "severity": "error",
+      "status": "unresolved",
+      "occurrence_count": 6,
+      "first_seen_at": "2026-11-26T08:23:30.981Z",
+      "last_seen_at": "2026-11-26T08:27:54.388Z",
+      "release": "checkout-api@2.6.0",
+      "trace_id": "<trace_id>",
+      "diagnostics": {
+        "breadcrumbs": [
+          {"category": "log.pino", "level": "info", "message": "order created", "timestamp": "2026-11-26T08:27:54.388Z", "type": "debug"},
+          {"category": "log.pino", "level": "warning", "message": "payment retry", "timestamp": "2026-11-26T08:27:54.388Z", "type": "debug"}
+        ],
+        "exception": {"mechanism": {"handled": false, "type": "node.http"}, "type": "CardDeclinedError"}
+      }
+    }
+    ```
+
+    Fingerprint có 3 phần: nguồn ghi nhận, loại lỗi và tệp của frame trên cùng trong stack. Các lỗi có cùng fingerprint vào cùng một vấn đề.
+  </Step>
+
+  <Step title="Đọc log của request bị lỗi">
+    ```bash
+    logbrew read logs --trace "<trace_id>" --since 1h --json
+    ```
+
+    Lệnh trả về 2 log mà request `/checkout` cuối cùng đã ghi trước lỗi: `order created` và `payment retry`.
+  </Step>
+</Steps>
+
+## Cách LogBrew liên kết log và vấn đề
+
+- **Breadcrumb.** Các log mà một request ghi trước lỗi được đưa vào `diagnostics.breadcrumbs` của lần xảy ra. Chỉ log của cùng request được đưa vào.
+- **Trace ID.** Mỗi lần xảy ra giữ trace ID của request. Dùng ID này với `logbrew read logs --trace` để đọc mọi log của request đó.
+- **Bản phát hành và môi trường.** Log và vấn đề dùng cùng bộ lọc `release` và `environment`.
+
+Để điều tra một vấn đề từng bước, xem [Điều tra một vấn đề](/vi/guides/investigate-an-issue). Để nhận cảnh báo cho vấn đề mới và vấn đề tái diễn, xem [hướng dẫn cảnh báo](https://logbrew.co/en/guides/alerts).
+
+## Trang liên quan
+
+<CardGroup cols={2}>
+  <Card title="Structured logging" icon="braces" href="/vi/concepts/structured-logging">
+    Chọn trường và mức log dễ tìm kiếm.
+  </Card>
+
+  <Card title="Logging trong Node.js" icon="server" href="/vi/guides/node-logging">
+    Gửi log Winston và Pino kèm trace ID.
+  </Card>
+
+  <Card title="Logging trong Python" icon="code" href="/vi/guides/python-logging">
+    Gửi bản ghi từ module logging chuẩn.
+  </Card>
+
+  <Card title="Quản lý vấn đề" icon="bug" href="/vi/guides/issue-workflow">
+    Giải quyết, lưu trữ, giao và mở lại vấn đề.
+  </Card>
+</CardGroup>

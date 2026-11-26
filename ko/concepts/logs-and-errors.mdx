@@ -1,0 +1,244 @@
+---
+title: "오류 로그(에러 로그)란? 위치 찾기와 오류 추적의 차이"
+sidebarTitle: "로그와 오류"
+description: "오류 로그가 무엇인지, macOS, Linux, Windows, Apache, Nginx, PHP에서 에러 로그를 찾는 방법, 그리고 오류를 로그에 남길지 오류 추적으로 보낼지 알아보세요."
+---
+
+LogBrew는 개발자와 코딩 에이전트를 위한 옵저버빌리티 플랫폼입니다. 넉넉한 무료 요금제를 제공하며 카드 등록이 필요 없습니다.
+
+오류 로그(에러 로그)는 애플리케이션, 서버, 운영체제가 실행 중에 기록하는 오류의 기록입니다. 각 항목에는 시간, 심각도 수준, 메시지가 있습니다. 많은 항목에는 스택 트레이스도 있습니다. 아래 PHP 8.5 오류 로그 항목은 실제 실행에서 나온 것입니다.
+
+```text
+[26-Nov-2026 08:25:26 UTC] PHP Fatal error:  Uncaught DivisionByZeroError: Division by zero in Command line code:1
+Stack trace:
+#0 Command line code(1): intdiv(1, 0)
+#1 {main}
+  thrown in Command line code on line 1
+```
+
+## 오류 로그 위치
+
+| 시스템 | 오류 로그 위치 |
+| --- | --- |
+| macOS | 통합 로그(Unified Log). 콘솔 앱을 열거나 `log` 명령을 사용하세요. |
+| systemd를 쓰는 Linux | systemd 저널. |
+| Windows | 이벤트 뷰어에서 **Windows 로그** > **응용 프로그램** 또는 **시스템**을 여세요. |
+| Apache HTTP Server | `ErrorLog` 지시어. 기본값은 서버 루트의 `logs/error_log`입니다. Debian과 Ubuntu는 `/var/log/apache2/error.log`를 사용합니다. |
+| Nginx | `error_log` 지시어. Linux 패키지는 `/var/log/nginx/error.log`를 사용합니다. Homebrew는 `/opt/homebrew/var/log/nginx/error.log`를 사용합니다. |
+| PHP | `error_log` 설정. 값이 없으면 PHP는 웹 서버의 오류 로그에 기록하고, CLI에서는 표준 오류 출력에 기록합니다. |
+
+다음 명령으로 오류를 읽거나 로그 위치를 출력하세요.
+
+```bash
+# macOS
+/usr/bin/log show --last 1h --predicate 'messageType == error' --style compact
+# Linux with systemd
+journalctl -p err -b
+# Windows PowerShell
+Get-WinEvent -FilterHashtable @{LogName='Application'; Level=2} -MaxEvents 20
+# Apache, Nginx, and PHP: print the error log setting
+httpd -V | grep DEFAULT_ERRORLOG
+nginx -V 2>&1 | tr ' ' '\n' | grep error-log-path
+php -i | grep '^error_log '
+```
+
+macOS 27.2에서 `log` 명령은 오류 1건마다 1줄을 출력합니다.
+
+```text
+Timestamp               Ty Process[PID:TID]
+2026-11-26 11:23:28.876 E  analyticsagent[50921:442060d] [com.apple.analyticsagent:query] [BluetoothStatusQuery] No controller info. Returning unknown
+```
+
+## 오류 로그와 오류 추적
+
+오류 로그는 오류 1건마다 항목 1개를 남깁니다. 오류 추적(error tracking)은 원인이 같은 오류를 이슈 1개로 묶고, 새 오류를 그 이슈의 발생 건으로 셉니다.
+
+| | 오류 로그 | 오류 추적 |
+| --- | --- | --- |
+| 기록 1개 | 오류마다 1줄 | 원인마다 이슈 1개 |
+| 같은 오류 3번 | 3줄 | 발생 건 3개인 이슈 1개 |
+| 스택 트레이스 | 로거가 기록할 때만 | 프레임으로 분석 |
+| 릴리스와 환경 | 직접 추가할 때만 | 발생 건마다 저장 |
+| 상태 | 없음 | `unresolved`, `resolved`, 또는 `archived` |
+| 알림 | 검색이나 집계를 직접 작성 | 새 이슈와 재발한 이슈 알림 |
+
+둘 다 필요합니다. 로그는 요청 1개에서 무슨 일이 있었는지 알려 줍니다. 이슈는 같은 장애가 얼마나 자주, 언제부터, 어느 릴리스에서 일어나는지 알려 줍니다.
+
+## 오류를 로그에 남길 때와 이슈로 보고할 때
+
+- 코드가 장애를 처리하면 오류를 로그에 남기세요. 예를 들어 재시도, 폴백, 클라이언트에 다시 시도하라고 요청하는 `503` 응답이 있습니다.
+- 장애가 버그라면 이슈로 보고하세요. 예를 들어 코드가 잡지 않는 예외가 있습니다.
+- `4xx` 클라이언트 오류는 이슈로 보고하지 마세요. 이는 잘못된 요청을 뜻하며, 코드의 장애가 아닙니다. LogBrew Node.js SDK는 기본적으로 이 규칙을 따릅니다.
+
+## 직접 해 보기: 오류 로그 6개와 이슈 1개
+
+이 테스트는 Node.js 서버에서 LogBrew로 로그와 오류를 보냅니다. 2026-11-26에 Node.js 22.18, Pino 10.4, `@logbrew/node` 0.1.30, `@logbrew/sdk` 0.1.48로 실행했습니다.
+
+<Steps>
+  <Step title="서버를 checkout.js로 저장하기">
+    `/retry-later` 경로는 장애를 처리하고 오류 로그를 기록합니다. `/checkout` 경로는 코드가 잡지 않는 오류를 던집니다.
+
+    ```js
+    import { createServer } from "node:http";
+    import pino from "pino";
+    import {
+      createLogBrewNodeClient,
+      installLogBrewPinoInstrumentation,
+      withLogBrewHttpHandler
+    } from "@logbrew/node";
+
+    const client = createLogBrewNodeClient();
+    installLogBrewPinoInstrumentation({ client });
+    const logger = pino({ level: "info" });
+
+    class CardDeclinedError extends Error {
+      name = "CardDeclinedError";
+    }
+
+    const server = createServer(withLogBrewHttpHandler((req, res) => {
+      const url = new URL(req.url, "http://localhost");
+      const orderId = url.searchParams.get("order");
+      logger.info({ orderId }, "order created");
+      logger.warn({ orderId, attempt: 2 }, "payment retry");
+      if (url.pathname === "/retry-later") {
+        logger.error({ orderId, reason: "provider_timeout" }, "payment failed");
+        res.statusCode = 503;
+        res.end("try again later");
+        return;
+      }
+      throw new CardDeclinedError("card declined by the payment provider");
+    }, { client }));
+
+    await new Promise((resolve) => server.listen(0, resolve));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const runs = Number(process.argv[2] ?? 1);
+    for (let i = 1; i <= runs; i++) {
+      const handled = await fetch(`${base}/retry-later?order=ord_10${i}0`);
+      const crashed = await fetch(`${base}/checkout?order=ord_10${i}1`);
+      console.log(`run ${i}: /retry-later ${handled.status}, /checkout ${crashed.status}`);
+    }
+    server.close();
+    await client.shutdown();
+    ```
+  </Step>
+
+  <Step title="키를 설정하고 서버 실행하기">
+    프로젝트의 수집 키를 사용하세요. 키를 만드는 방법은 [Node.js 로깅](/ko/guides/node-logging)을 참고하세요. 먼저 릴리스 `checkout-api@2.4.0`으로 서버를 1번 실행하세요. 그다음 릴리스 `checkout-api@2.6.0`으로 다시 실행하세요.
+
+    ```bash
+    npm install @logbrew/node @logbrew/sdk pino
+    export LOGBREW_SERVER_API_KEY="<ingest_key>"
+    export LOGBREW_SERVICE_NAME="checkout-api"
+    export LOGBREW_ENVIRONMENT="production"
+    LOGBREW_RELEASE="checkout-api@2.4.0" node checkout.js 3
+    LOGBREW_RELEASE="checkout-api@2.6.0" node checkout.js 3
+    ```
+
+    각 실행은 같은 3줄을 출력합니다.
+
+    ```text
+    run 1: /retry-later 503, /checkout 500
+    run 2: /retry-later 503, /checkout 500
+    run 3: /retry-later 503, /checkout 500
+    ```
+  </Step>
+
+  <Step title="오류 로그 읽기">
+    ```bash
+    logbrew read logs --severity error --release checkout-api@2.6.0 --since 1h --json
+    ```
+
+    각 실행은 로그 15개를 저장했습니다. `info` 6개, `warning` 6개, `error` 3개입니다. 이 명령은 두 번째 실행의 `error` 로그 3개를 반환합니다. 각 로그에는 고유한 트레이스 ID가 있습니다. 그중 1개를 줄여서 보여 줍니다.
+
+    ```json
+    {
+      "level": "error",
+      "source": "pino",
+      "message": "payment failed",
+      "occurred_at": "2026-11-26T08:27:53.315Z",
+      "release": "checkout-api@2.6.0",
+      "service_name": "checkout-api",
+      "trace_id": "<trace_id>",
+      "attributes": {
+        "metadata": {
+          "context.orderId": "ord_1010",
+          "context.reason": "provider_timeout",
+          "pinoLevel": "error",
+          "pinoLevelNumber": 50
+        }
+      }
+    }
+    ```
+
+    2번의 실행에서 나온 `error` 로그 6개는 이슈를 만들지 않았습니다. LogBrew는 로그 수준이 아니라 SDK가 보고한 오류로 이슈를 만듭니다.
+  </Step>
+
+  <Step title="이슈 읽기">
+    ```bash
+    logbrew read issues --release checkout-api@2.6.0 --since 1h --json
+    ```
+
+    2번의 실행에서 잡히지 않은 오류 6개는 발생 건 6개인 이슈 1개가 되었습니다. 새 릴리스도 새 이슈를 만들지 않았습니다. `first_seen_at`은 첫 번째 실행의 시간이고, `release`는 마지막 발생 건의 릴리스입니다. 이슈를 줄여서 보여 줍니다.
+
+    ```json
+    {
+      "id": "<issue_id>",
+      "title": "GET /checkout failed",
+      "message": "card declined by the payment provider",
+      "fingerprint": "node.http:CardDeclinedError:checkout.js",
+      "severity": "error",
+      "status": "unresolved",
+      "occurrence_count": 6,
+      "first_seen_at": "2026-11-26T08:23:30.981Z",
+      "last_seen_at": "2026-11-26T08:27:54.388Z",
+      "release": "checkout-api@2.6.0",
+      "trace_id": "<trace_id>",
+      "diagnostics": {
+        "breadcrumbs": [
+          {"category": "log.pino", "level": "info", "message": "order created", "timestamp": "2026-11-26T08:27:54.388Z", "type": "debug"},
+          {"category": "log.pino", "level": "warning", "message": "payment retry", "timestamp": "2026-11-26T08:27:54.388Z", "type": "debug"}
+        ],
+        "exception": {"mechanism": {"handled": false, "type": "node.http"}, "type": "CardDeclinedError"}
+      }
+    }
+    ```
+
+    핑거프린트는 3부분으로 이루어집니다. 수집 출처, 오류 유형, 스택 맨 위 프레임의 파일입니다. 핑거프린트가 같은 오류는 같은 이슈로 묶입니다.
+  </Step>
+
+  <Step title="실패한 요청의 로그 읽기">
+    ```bash
+    logbrew read logs --trace "<trace_id>" --since 1h --json
+    ```
+
+    이 명령은 마지막 `/checkout` 요청이 오류 전에 기록한 로그 2개를 반환합니다. `order created`와 `payment retry`입니다.
+  </Step>
+</Steps>
+
+## LogBrew가 로그와 이슈를 연결하는 방법
+
+- **Breadcrumbs.** 요청이 오류 전에 기록한 로그는 발생 건의 `diagnostics.breadcrumbs`에 들어갑니다. 같은 요청의 로그만 들어갑니다.
+- **트레이스 ID.** 각 발생 건은 해당 요청의 트레이스 ID를 저장합니다. 이 ID를 `logbrew read logs --trace`와 함께 사용하면 그 요청의 모든 로그를 읽을 수 있습니다.
+- **릴리스와 환경.** 로그와 이슈는 같은 `release`와 `environment` 필터를 사용합니다.
+
+이슈를 단계별로 조사하려면 [이슈 조사하기](/ko/guides/investigate-an-issue)를 참고하세요. 새 이슈와 재발한 이슈 알림을 받으려면 [알림 가이드](https://logbrew.co/en/guides/alerts)를 참고하세요.
+
+## 관련 페이지
+
+<CardGroup cols={2}>
+  <Card title="구조화된 로깅" icon="braces" href="/ko/concepts/structured-logging">
+    검색하기 쉬운 로그 필드와 수준을 고르세요.
+  </Card>
+
+  <Card title="Node.js 로깅" icon="server" href="/ko/guides/node-logging">
+    Winston과 Pino 로그를 트레이스 ID와 함께 보내세요.
+  </Card>
+
+  <Card title="Python 로깅" icon="code" href="/ko/guides/python-logging">
+    표준 logging 모듈의 레코드를 보내세요.
+  </Card>
+
+  <Card title="이슈 관리" icon="bug" href="/ko/guides/issue-workflow">
+    이슈를 해결, 보관, 할당, 다시 열기 하세요.
+  </Card>
+</CardGroup>

@@ -1,0 +1,244 @@
+---
+title: "错误日志是什么、在哪里查看，以及与错误追踪的区别"
+sidebarTitle: "日志与错误"
+description: "了解什么是错误日志，在 macOS、Linux、Windows、Apache、Nginx 和 PHP 中找到错误日志，并判断一个错误应该写进日志还是交给错误追踪。"
+---
+
+LogBrew 是面向开发者和编程智能体的可观测性平台，提供充足的免费额度，无需绑卡。
+
+错误日志（error log）是应用、服务器或操作系统在运行时写下的错误记录。每条记录都有时间、严重级别和消息，很多记录还带有堆栈跟踪。下面这条 PHP 8.5 错误日志来自一次真实运行：
+
+```text
+[26-Nov-2026 08:25:26 UTC] PHP Fatal error:  Uncaught DivisionByZeroError: Division by zero in Command line code:1
+Stack trace:
+#0 Command line code(1): intdiv(1, 0)
+#1 {main}
+  thrown in Command line code on line 1
+```
+
+## 在哪里查看错误日志
+
+| 系统 | 错误日志位置 |
+| --- | --- |
+| macOS | 统一日志。打开“控制台” App，或使用 `log` 命令。 |
+| 使用 systemd 的 Linux | systemd 日志（journal）。 |
+| Windows | 事件查看器，然后打开 **Windows 日志** > **应用程序** 或 **系统**。 |
+| Apache HTTP Server | `ErrorLog` 指令。默认值是服务器根目录下的 `logs/error_log`。Debian 和 Ubuntu 使用 `/var/log/apache2/error.log`。 |
+| Nginx | `error_log` 指令。Linux 软件包使用 `/var/log/nginx/error.log`。Homebrew 使用 `/opt/homebrew/var/log/nginx/error.log`。 |
+| PHP | `error_log` 配置项。没有设置时，PHP 写入 Web 服务器的错误日志；在 CLI 中写入标准错误输出。 |
+
+使用以下命令查看错误，或输出日志所在位置：
+
+```bash
+# macOS
+/usr/bin/log show --last 1h --predicate 'messageType == error' --style compact
+# Linux with systemd
+journalctl -p err -b
+# Windows PowerShell
+Get-WinEvent -FilterHashtable @{LogName='Application'; Level=2} -MaxEvents 20
+# Apache, Nginx, and PHP: print the error log setting
+httpd -V | grep DEFAULT_ERRORLOG
+nginx -V 2>&1 | tr ' ' '\n' | grep error-log-path
+php -i | grep '^error_log '
+```
+
+在 macOS 27.2 上，`log` 命令为每个错误输出 1 行：
+
+```text
+Timestamp               Ty Process[PID:TID]
+2026-11-26 11:23:28.876 E  analyticsagent[50921:442060d] [com.apple.analyticsagent:query] [BluetoothStatusQuery] No controller info. Returning unknown
+```
+
+## 错误日志与错误追踪
+
+错误日志为每个错误保留 1 条记录。错误追踪把原因相同的错误归为 1 个问题，并把每个新错误计为该问题的一条发生记录。
+
+| | 错误日志 | 错误追踪 |
+| --- | --- | --- |
+| 1 条记录 | 每个错误 1 行 | 每个原因 1 个问题 |
+| 同一错误出现 3 次 | 3 行 | 1 个问题，3 条发生记录 |
+| 堆栈跟踪 | 只有日志库写出时才有 | 解析为帧 |
+| 版本与环境 | 只有你添加时才有 | 每条发生记录都会保存 |
+| 状态 | 无 | `unresolved`, `resolved`, 或 `archived` |
+| 告警 | 需要自己写搜索或计数 | 新问题和回归问题告警 |
+
+两者都需要。日志告诉你 1 个请求里发生了什么。问题告诉你同一故障出现得有多频繁、从什么时候开始、在哪个版本中出现。
+
+## 什么时候写日志，什么时候上报问题
+
+- 代码已经处理了故障时，把错误写进日志。例如重试、降级，或返回 `503` 让客户端稍后重试。
+- 故障是 bug 时，上报问题。例如代码没有捕获的异常。
+- 不要把 `4xx` 客户端错误上报为问题。它说明请求有误，而不是代码有故障。LogBrew Node.js SDK 默认遵循这条规则。
+
+## 动手试试：6 条错误日志和 1 个问题
+
+这个测试从一个 Node.js 服务器向 LogBrew 发送日志和错误。测试于 2026-11-26 运行，环境为 Node.js 22.18、Pino 10.4、`@logbrew/node` 0.1.30 和 `@logbrew/sdk` 0.1.48。
+
+<Steps>
+  <Step title="把服务器保存为 checkout.js">
+    `/retry-later` 路由处理故障并写一条错误日志。`/checkout` 路由抛出一个代码没有捕获的错误。
+
+    ```js
+    import { createServer } from "node:http";
+    import pino from "pino";
+    import {
+      createLogBrewNodeClient,
+      installLogBrewPinoInstrumentation,
+      withLogBrewHttpHandler
+    } from "@logbrew/node";
+
+    const client = createLogBrewNodeClient();
+    installLogBrewPinoInstrumentation({ client });
+    const logger = pino({ level: "info" });
+
+    class CardDeclinedError extends Error {
+      name = "CardDeclinedError";
+    }
+
+    const server = createServer(withLogBrewHttpHandler((req, res) => {
+      const url = new URL(req.url, "http://localhost");
+      const orderId = url.searchParams.get("order");
+      logger.info({ orderId }, "order created");
+      logger.warn({ orderId, attempt: 2 }, "payment retry");
+      if (url.pathname === "/retry-later") {
+        logger.error({ orderId, reason: "provider_timeout" }, "payment failed");
+        res.statusCode = 503;
+        res.end("try again later");
+        return;
+      }
+      throw new CardDeclinedError("card declined by the payment provider");
+    }, { client }));
+
+    await new Promise((resolve) => server.listen(0, resolve));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const runs = Number(process.argv[2] ?? 1);
+    for (let i = 1; i <= runs; i++) {
+      const handled = await fetch(`${base}/retry-later?order=ord_10${i}0`);
+      const crashed = await fetch(`${base}/checkout?order=ord_10${i}1`);
+      console.log(`run ${i}: /retry-later ${handled.status}, /checkout ${crashed.status}`);
+    }
+    server.close();
+    await client.shutdown();
+    ```
+  </Step>
+
+  <Step title="设置密钥并运行服务器">
+    使用项目的接入密钥。创建方法见 [Node.js 日志](/zh-Hans/guides/node-logging)。先用版本 `checkout-api@2.4.0` 运行 1 次服务器，再用版本 `checkout-api@2.6.0` 运行一次。
+
+    ```bash
+    npm install @logbrew/node @logbrew/sdk pino
+    export LOGBREW_SERVER_API_KEY="<ingest_key>"
+    export LOGBREW_SERVICE_NAME="checkout-api"
+    export LOGBREW_ENVIRONMENT="production"
+    LOGBREW_RELEASE="checkout-api@2.4.0" node checkout.js 3
+    LOGBREW_RELEASE="checkout-api@2.6.0" node checkout.js 3
+    ```
+
+    每次运行都输出同样的 3 行：
+
+    ```text
+    run 1: /retry-later 503, /checkout 500
+    run 2: /retry-later 503, /checkout 500
+    run 3: /retry-later 503, /checkout 500
+    ```
+  </Step>
+
+  <Step title="查看错误日志">
+    ```bash
+    logbrew read logs --severity error --release checkout-api@2.6.0 --since 1h --json
+    ```
+
+    每次运行保存了 15 条日志：6 条 `info`、6 条 `warning` 和 3 条 `error`。这条命令返回第二次运行的 3 条 `error` 日志，每条都有自己的追踪 ID。下面是其中 1 条（已精简）：
+
+    ```json
+    {
+      "level": "error",
+      "source": "pino",
+      "message": "payment failed",
+      "occurred_at": "2026-11-26T08:27:53.315Z",
+      "release": "checkout-api@2.6.0",
+      "service_name": "checkout-api",
+      "trace_id": "<trace_id>",
+      "attributes": {
+        "metadata": {
+          "context.orderId": "ord_1010",
+          "context.reason": "provider_timeout",
+          "pinoLevel": "error",
+          "pinoLevelNumber": 50
+        }
+      }
+    }
+    ```
+
+    2 次运行的 6 条 `error` 日志没有创建问题。LogBrew 根据 SDK 上报的错误创建问题，而不是根据日志级别。
+  </Step>
+
+  <Step title="查看问题">
+    ```bash
+    logbrew read issues --release checkout-api@2.6.0 --since 1h --json
+    ```
+
+    2 次运行中 6 个未捕获的错误合并成 1 个问题，共 6 条发生记录。新版本没有创建新问题。`first_seen_at` 来自第一次运行，`release` 是最后一条发生记录的版本。下面是这个问题（已精简）：
+
+    ```json
+    {
+      "id": "<issue_id>",
+      "title": "GET /checkout failed",
+      "message": "card declined by the payment provider",
+      "fingerprint": "node.http:CardDeclinedError:checkout.js",
+      "severity": "error",
+      "status": "unresolved",
+      "occurrence_count": 6,
+      "first_seen_at": "2026-11-26T08:23:30.981Z",
+      "last_seen_at": "2026-11-26T08:27:54.388Z",
+      "release": "checkout-api@2.6.0",
+      "trace_id": "<trace_id>",
+      "diagnostics": {
+        "breadcrumbs": [
+          {"category": "log.pino", "level": "info", "message": "order created", "timestamp": "2026-11-26T08:27:54.388Z", "type": "debug"},
+          {"category": "log.pino", "level": "warning", "message": "payment retry", "timestamp": "2026-11-26T08:27:54.388Z", "type": "debug"}
+        ],
+        "exception": {"mechanism": {"handled": false, "type": "node.http"}, "type": "CardDeclinedError"}
+      }
+    }
+    ```
+
+    指纹由 3 部分组成：采集来源、错误类型和栈顶帧所在的文件。指纹相同的错误归入同一个问题。
+  </Step>
+
+  <Step title="查看失败请求的日志">
+    ```bash
+    logbrew read logs --trace "<trace_id>" --since 1h --json
+    ```
+
+    这条命令返回最后一个 `/checkout` 请求在出错前写下的 2 条日志：`order created` 和 `payment retry`。
+  </Step>
+</Steps>
+
+## LogBrew 如何关联日志和问题
+
+- **Breadcrumbs。** 请求在出错前写下的日志会进入该发生记录的 `diagnostics.breadcrumbs`。只有同一请求的日志会进入。
+- **追踪 ID。** 每条发生记录都保存其请求的追踪 ID。把它传给 `logbrew read logs --trace`，即可查看该请求的全部日志。
+- **版本与环境。** 日志和问题使用相同的 `release` 和 `environment` 过滤条件。
+
+要逐步排查一个问题，请参阅 [排查问题](/zh-Hans/guides/investigate-an-issue)。要接收新问题和回归问题的告警，请参阅 [告警指南](https://logbrew.co/en/guides/alerts)。
+
+## 相关页面
+
+<CardGroup cols={2}>
+  <Card title="结构化日志" icon="braces" href="/zh-Hans/concepts/structured-logging">
+    选择便于搜索的日志字段和级别。
+  </Card>
+
+  <Card title="Node.js 日志" icon="server" href="/zh-Hans/guides/node-logging">
+    发送带追踪 ID 的 Winston 和 Pino 日志。
+  </Card>
+
+  <Card title="Python 日志" icon="code" href="/zh-Hans/guides/python-logging">
+    从标准 logging 模块发送记录。
+  </Card>
+
+  <Card title="管理问题" icon="bug" href="/zh-Hans/guides/issue-workflow">
+    解决、归档、分配和重新打开问题。
+  </Card>
+</CardGroup>

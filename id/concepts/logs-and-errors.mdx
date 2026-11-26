@@ -1,0 +1,244 @@
+---
+title: "Log error: pengertian, lokasinya, dan pelacakan error"
+sidebarTitle: "Log dan error"
+description: "Pelajari apa itu log error, temukan error log di macOS, Linux, Windows, Apache, Nginx, dan PHP, dan lihat kapan error masuk ke log atau ke pelacakan error."
+---
+
+LogBrew adalah platform observabilitas untuk developer dan agen coding, dengan paket gratis yang besar dan tanpa perlu kartu kredit.
+
+Log error (error log) adalah catatan error yang ditulis aplikasi, server, atau sistem operasi saat berjalan. Setiap entri punya waktu, tingkat keparahan, dan pesan. Banyak entri juga punya stack trace. Entri log error PHP 8.5 ini berasal dari run nyata:
+
+```text
+[26-Nov-2026 08:25:26 UTC] PHP Fatal error:  Uncaught DivisionByZeroError: Division by zero in Command line code:1
+Stack trace:
+#0 Command line code(1): intdiv(1, 0)
+#1 {main}
+  thrown in Command line code on line 1
+```
+
+## Lokasi log error
+
+| Sistem | Lokasi log error |
+| --- | --- |
+| macOS | Unified log. Buka aplikasi Console, atau gunakan perintah `log`. |
+| Linux dengan systemd | Journal systemd. |
+| Windows | Event Viewer, lalu **Windows Logs** > **Application** atau **System**. |
+| Apache HTTP Server | Direktif `ErrorLog`. Default-nya `logs/error_log` di root server. Debian dan Ubuntu memakai `/var/log/apache2/error.log`. |
+| Nginx | Direktif `error_log`. Paket Linux memakai `/var/log/nginx/error.log`. Homebrew memakai `/opt/homebrew/var/log/nginx/error.log`. |
+| PHP | Pengaturan `error_log`. Jika kosong, PHP menulis ke log error web server, atau ke standard error di CLI. |
+
+Gunakan perintah ini untuk membaca error, atau untuk menampilkan lokasi log:
+
+```bash
+# macOS
+/usr/bin/log show --last 1h --predicate 'messageType == error' --style compact
+# Linux with systemd
+journalctl -p err -b
+# Windows PowerShell
+Get-WinEvent -FilterHashtable @{LogName='Application'; Level=2} -MaxEvents 20
+# Apache, Nginx, and PHP: print the error log setting
+httpd -V | grep DEFAULT_ERRORLOG
+nginx -V 2>&1 | tr ' ' '\n' | grep error-log-path
+php -i | grep '^error_log '
+```
+
+Di macOS 27.2, perintah `log` memberi 1 baris untuk setiap error:
+
+```text
+Timestamp               Ty Process[PID:TID]
+2026-11-26 11:23:28.876 E  analyticsagent[50921:442060d] [com.apple.analyticsagent:query] [BluetoothStatusQuery] No controller info. Returning unknown
+```
+
+## Log error dan pelacakan error
+
+Log error menyimpan 1 entri untuk setiap error. Pelacakan error (error tracking) mengelompokkan error dengan penyebab yang sama ke 1 masalah, dan menghitung setiap error baru sebagai kemunculan masalah itu.
+
+| | Log error | Pelacakan error |
+| --- | --- | --- |
+| 1 record | 1 baris untuk setiap error | 1 masalah untuk setiap penyebab |
+| Error yang sama 3 kali | 3 baris | 1 masalah dengan 3 kemunculan |
+| Stack trace | Hanya jika logger menulisnya | Diurai menjadi frame |
+| Rilis dan environment | Hanya jika Anda menambahkannya | Disimpan di setiap kemunculan |
+| Status | Tidak ada | `unresolved`, `resolved`, atau `archived` |
+| Alert | Anda menulis sendiri pencarian atau hitungan | Alert untuk masalah baru dan masalah yang muncul lagi |
+
+Anda butuh keduanya. Log memberi tahu apa yang terjadi di 1 request. Masalah memberi tahu seberapa sering kegagalan yang sama terjadi, sejak kapan, dan di rilis mana.
+
+## Kapan mencatat error di log dan kapan melaporkan masalah
+
+- Catat error di log jika kode Anda menangani kegagalan itu. Contohnya retry, fallback, atau respons `503` yang meminta klien mencoba lagi.
+- Laporkan masalah jika kegagalan itu adalah bug. Contohnya exception yang tidak ditangkap kode Anda.
+- Jangan laporkan error klien `4xx` sebagai masalah. Error itu menggambarkan request yang salah, bukan kegagalan di kode Anda. SDK Node.js LogBrew mengikuti aturan ini secara default.
+
+## Coba: 6 log error dan 1 masalah
+
+Tes ini mengirim log dan error dari server Node.js ke LogBrew. Tes berjalan pada 2026-11-26 dengan Node.js 22.18, Pino 10.4, `@logbrew/node` 0.1.30, dan `@logbrew/sdk` 0.1.48.
+
+<Steps>
+  <Step title="Simpan server sebagai checkout.js">
+    Route `/retry-later` menangani kegagalan dan menulis log error. Route `/checkout` melempar error yang tidak ditangkap kode.
+
+    ```js
+    import { createServer } from "node:http";
+    import pino from "pino";
+    import {
+      createLogBrewNodeClient,
+      installLogBrewPinoInstrumentation,
+      withLogBrewHttpHandler
+    } from "@logbrew/node";
+
+    const client = createLogBrewNodeClient();
+    installLogBrewPinoInstrumentation({ client });
+    const logger = pino({ level: "info" });
+
+    class CardDeclinedError extends Error {
+      name = "CardDeclinedError";
+    }
+
+    const server = createServer(withLogBrewHttpHandler((req, res) => {
+      const url = new URL(req.url, "http://localhost");
+      const orderId = url.searchParams.get("order");
+      logger.info({ orderId }, "order created");
+      logger.warn({ orderId, attempt: 2 }, "payment retry");
+      if (url.pathname === "/retry-later") {
+        logger.error({ orderId, reason: "provider_timeout" }, "payment failed");
+        res.statusCode = 503;
+        res.end("try again later");
+        return;
+      }
+      throw new CardDeclinedError("card declined by the payment provider");
+    }, { client }));
+
+    await new Promise((resolve) => server.listen(0, resolve));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const runs = Number(process.argv[2] ?? 1);
+    for (let i = 1; i <= runs; i++) {
+      const handled = await fetch(`${base}/retry-later?order=ord_10${i}0`);
+      const crashed = await fetch(`${base}/checkout?order=ord_10${i}1`);
+      console.log(`run ${i}: /retry-later ${handled.status}, /checkout ${crashed.status}`);
+    }
+    server.close();
+    await client.shutdown();
+    ```
+  </Step>
+
+  <Step title="Atur key dan jalankan server">
+    Gunakan ingest key proyek Anda. Untuk membuatnya, lihat [Logging Node.js](/id/guides/node-logging). Jalankan server 1 kali dengan rilis `checkout-api@2.4.0`. Lalu jalankan lagi dengan rilis `checkout-api@2.6.0`.
+
+    ```bash
+    npm install @logbrew/node @logbrew/sdk pino
+    export LOGBREW_SERVER_API_KEY="<ingest_key>"
+    export LOGBREW_SERVICE_NAME="checkout-api"
+    export LOGBREW_ENVIRONMENT="production"
+    LOGBREW_RELEASE="checkout-api@2.4.0" node checkout.js 3
+    LOGBREW_RELEASE="checkout-api@2.6.0" node checkout.js 3
+    ```
+
+    Setiap run mencetak 3 baris yang sama:
+
+    ```text
+    run 1: /retry-later 503, /checkout 500
+    run 2: /retry-later 503, /checkout 500
+    run 3: /retry-later 503, /checkout 500
+    ```
+  </Step>
+
+  <Step title="Baca log error">
+    ```bash
+    logbrew read logs --severity error --release checkout-api@2.6.0 --since 1h --json
+    ```
+
+    Setiap run menyimpan 15 log: 6 `info`, 6 `warning`, dan 3 `error`. Perintah ini mengembalikan 3 log `error` dari run kedua. Masing-masing punya trace ID sendiri. Ini salah 1-nya, dipersingkat:
+
+    ```json
+    {
+      "level": "error",
+      "source": "pino",
+      "message": "payment failed",
+      "occurred_at": "2026-11-26T08:27:53.315Z",
+      "release": "checkout-api@2.6.0",
+      "service_name": "checkout-api",
+      "trace_id": "<trace_id>",
+      "attributes": {
+        "metadata": {
+          "context.orderId": "ord_1010",
+          "context.reason": "provider_timeout",
+          "pinoLevel": "error",
+          "pinoLevelNumber": 50
+        }
+      }
+    }
+    ```
+
+    6 log `error` dari 2 run tidak membuka masalah. LogBrew membuka masalah dari error yang dilaporkan SDK, bukan dari level sebuah log.
+  </Step>
+
+  <Step title="Baca masalahnya">
+    ```bash
+    logbrew read issues --release checkout-api@2.6.0 --since 1h --json
+    ```
+
+    6 error yang tidak tertangkap dari 2 run menjadi 1 masalah dengan 6 kemunculan. Rilis baru tidak membuka masalah baru. `first_seen_at` berasal dari run pertama, dan `release` adalah rilis dari kemunculan terakhir. Ini masalahnya, dipersingkat:
+
+    ```json
+    {
+      "id": "<issue_id>",
+      "title": "GET /checkout failed",
+      "message": "card declined by the payment provider",
+      "fingerprint": "node.http:CardDeclinedError:checkout.js",
+      "severity": "error",
+      "status": "unresolved",
+      "occurrence_count": 6,
+      "first_seen_at": "2026-11-26T08:23:30.981Z",
+      "last_seen_at": "2026-11-26T08:27:54.388Z",
+      "release": "checkout-api@2.6.0",
+      "trace_id": "<trace_id>",
+      "diagnostics": {
+        "breadcrumbs": [
+          {"category": "log.pino", "level": "info", "message": "order created", "timestamp": "2026-11-26T08:27:54.388Z", "type": "debug"},
+          {"category": "log.pino", "level": "warning", "message": "payment retry", "timestamp": "2026-11-26T08:27:54.388Z", "type": "debug"}
+        ],
+        "exception": {"mechanism": {"handled": false, "type": "node.http"}, "type": "CardDeclinedError"}
+      }
+    }
+    ```
+
+    Fingerprint punya 3 bagian: sumber capture, tipe error, dan file dari frame teratas stack. Error dengan fingerprint yang sama masuk ke masalah yang sama.
+  </Step>
+
+  <Step title="Baca log dari request yang gagal">
+    ```bash
+    logbrew read logs --trace "<trace_id>" --since 1h --json
+    ```
+
+    Perintah ini mengembalikan 2 log yang ditulis request `/checkout` terakhir sebelum error: `order created` dan `payment retry`.
+  </Step>
+</Steps>
+
+## Cara LogBrew menghubungkan log dan masalah
+
+- **Breadcrumb.** Log yang ditulis request sebelum error masuk ke `diagnostics.breadcrumbs` pada kemunculan itu. Hanya log dari request yang sama yang masuk.
+- **Trace ID.** Setiap kemunculan menyimpan trace ID dari request-nya. Gunakan ID itu dengan `logbrew read logs --trace` untuk membaca semua log request tersebut.
+- **Rilis dan environment.** Log dan masalah memakai filter `release` dan `environment` yang sama.
+
+Untuk menginvestigasi masalah langkah demi langkah, lihat [Investigasi masalah](/id/guides/investigate-an-issue). Untuk mendapat alert tentang masalah baru dan masalah yang muncul lagi, lihat [panduan alert](https://logbrew.co/en/guides/alerts).
+
+## Halaman terkait
+
+<CardGroup cols={2}>
+  <Card title="Structured logging" icon="braces" href="/id/concepts/structured-logging">
+    Pilih field dan level log yang mudah dicari.
+  </Card>
+
+  <Card title="Logging Node.js" icon="server" href="/id/guides/node-logging">
+    Kirim log Winston dan Pino beserta trace ID-nya.
+  </Card>
+
+  <Card title="Logging Python" icon="code" href="/id/guides/python-logging">
+    Kirim record dari modul logging standar.
+  </Card>
+
+  <Card title="Kelola masalah" icon="bug" href="/id/guides/issue-workflow">
+    Selesaikan, arsipkan, tetapkan, dan buka lagi masalah.
+  </Card>
+</CardGroup>

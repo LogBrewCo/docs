@@ -1,0 +1,244 @@
+---
+title: "Log błędów: czym jest, gdzie go znaleźć i śledzenie błędów"
+sidebarTitle: "Logi i błędy"
+description: "Dowiedz się, czym jest log błędów, znajdź error log w macOS, Linuksie, Windows, Apache, Nginx i PHP i sprawdź, kiedy błąd trafia do logu, a kiedy do śledzenia błędów."
+---
+
+LogBrew to platforma obserwowalności dla programistów i agentów kodujących. Ma hojny darmowy plan i nie wymaga karty.
+
+Log błędów (error log) to zapis błędów, które aplikacja, serwer lub system operacyjny zapisuje w trakcie działania. Każdy wpis ma czas, poziom ważności i komunikat. Wiele wpisów ma też stack trace. Ten wpis z logu błędów PHP 8.5 pochodzi z prawdziwego uruchomienia:
+
+```text
+[26-Nov-2026 08:25:26 UTC] PHP Fatal error:  Uncaught DivisionByZeroError: Division by zero in Command line code:1
+Stack trace:
+#0 Command line code(1): intdiv(1, 0)
+#1 {main}
+  thrown in Command line code on line 1
+```
+
+## Gdzie znaleźć log błędów
+
+| System | Miejsce logu błędów |
+| --- | --- |
+| macOS | Ujednolicony dziennik (unified log). Otwórz aplikację Konsola albo użyj polecenia `log`. |
+| Linux z systemd | Dziennik systemd (journal). |
+| Windows | Podgląd zdarzeń, potem **Dzienniki systemu Windows** > **Aplikacja** lub **System**. |
+| Apache HTTP Server | Dyrektywa `ErrorLog`. Domyślnie to `logs/error_log` w katalogu głównym serwera. Debian i Ubuntu używają `/var/log/apache2/error.log`. |
+| Nginx | Dyrektywa `error_log`. Pakiety dla Linuksa używają `/var/log/nginx/error.log`. Homebrew używa `/opt/homebrew/var/log/nginx/error.log`. |
+| PHP | Ustawienie `error_log`. Gdy nie ma wartości, PHP zapisuje do logu błędów serwera WWW, a w CLI do standardowego wyjścia błędów. |
+
+Użyj tych poleceń, aby odczytać błędy lub wyświetlić miejsce logu:
+
+```bash
+# macOS
+/usr/bin/log show --last 1h --predicate 'messageType == error' --style compact
+# Linux with systemd
+journalctl -p err -b
+# Windows PowerShell
+Get-WinEvent -FilterHashtable @{LogName='Application'; Level=2} -MaxEvents 20
+# Apache, Nginx, and PHP: print the error log setting
+httpd -V | grep DEFAULT_ERRORLOG
+nginx -V 2>&1 | tr ' ' '\n' | grep error-log-path
+php -i | grep '^error_log '
+```
+
+W macOS 27.2 polecenie `log` daje 1 wiersz na każdy błąd:
+
+```text
+Timestamp               Ty Process[PID:TID]
+2026-11-26 11:23:28.876 E  analyticsagent[50921:442060d] [com.apple.analyticsagent:query] [BluetoothStatusQuery] No controller info. Returning unknown
+```
+
+## Logi błędów a śledzenie błędów
+
+Log błędów ma 1 wpis na każdy błąd. Śledzenie błędów (error tracking) grupuje błędy o tej samej przyczynie w 1 problem i liczy każdy nowy błąd jako wystąpienie tego problemu.
+
+| | Log błędów | Śledzenie błędów |
+| --- | --- | --- |
+| 1 rekord | 1 wiersz na każdy błąd | 1 problem na każdą przyczynę |
+| Ten sam błąd 3 razy | 3 wiersze | 1 problem z 3 wystąpieniami |
+| Stack trace | Tylko gdy logger go zapisze | Podzielony na ramki |
+| Wydanie i środowisko | Tylko gdy je dodasz | Zapisane przy każdym wystąpieniu |
+| Status | Brak | `unresolved`, `resolved`, lub `archived` |
+| Alerty | Sam piszesz wyszukiwanie lub liczenie | Alerty o nowych i powracających problemach |
+
+Potrzebujesz obu. Log mówi, co się stało w 1 żądaniu. Problem mówi, jak często ta sama awaria się powtarza, od kiedy i w którym wydaniu.
+
+## Kiedy zapisać błąd w logu, a kiedy zgłosić problem
+
+- Zapisz błąd w logu, gdy Twój kod obsługuje awarię. Przykłady to ponowna próba, rozwiązanie zastępcze lub odpowiedź `503`, która prosi klienta o ponowną próbę.
+- Zgłoś problem, gdy awaria jest bugiem. Przykład to wyjątek, którego Twój kod nie przechwytuje.
+- Nie zgłaszaj błędu klienta `4xx` jako problemu. Opisuje on błędne żądanie, a nie awarię Twojego kodu. SDK LogBrew dla Node.js domyślnie stosuje tę zasadę.
+
+## Sprawdź to: 6 logów błędów i 1 problem
+
+Ten test wysyła logi i błędy z serwera Node.js do LogBrew. Działał 2026-11-26 na Node.js 22.18, Pino 10.4, `@logbrew/node` 0.1.30 i `@logbrew/sdk` 0.1.48.
+
+<Steps>
+  <Step title="Zapisz serwer jako checkout.js">
+    Trasa `/retry-later` obsługuje awarię i zapisuje log błędu. Trasa `/checkout` rzuca błąd, którego kod nie przechwytuje.
+
+    ```js
+    import { createServer } from "node:http";
+    import pino from "pino";
+    import {
+      createLogBrewNodeClient,
+      installLogBrewPinoInstrumentation,
+      withLogBrewHttpHandler
+    } from "@logbrew/node";
+
+    const client = createLogBrewNodeClient();
+    installLogBrewPinoInstrumentation({ client });
+    const logger = pino({ level: "info" });
+
+    class CardDeclinedError extends Error {
+      name = "CardDeclinedError";
+    }
+
+    const server = createServer(withLogBrewHttpHandler((req, res) => {
+      const url = new URL(req.url, "http://localhost");
+      const orderId = url.searchParams.get("order");
+      logger.info({ orderId }, "order created");
+      logger.warn({ orderId, attempt: 2 }, "payment retry");
+      if (url.pathname === "/retry-later") {
+        logger.error({ orderId, reason: "provider_timeout" }, "payment failed");
+        res.statusCode = 503;
+        res.end("try again later");
+        return;
+      }
+      throw new CardDeclinedError("card declined by the payment provider");
+    }, { client }));
+
+    await new Promise((resolve) => server.listen(0, resolve));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const runs = Number(process.argv[2] ?? 1);
+    for (let i = 1; i <= runs; i++) {
+      const handled = await fetch(`${base}/retry-later?order=ord_10${i}0`);
+      const crashed = await fetch(`${base}/checkout?order=ord_10${i}1`);
+      console.log(`run ${i}: /retry-later ${handled.status}, /checkout ${crashed.status}`);
+    }
+    server.close();
+    await client.shutdown();
+    ```
+  </Step>
+
+  <Step title="Ustaw klucz i uruchom serwer">
+    Użyj klucza ingest swojego projektu. Jak go utworzyć, opisuje strona [Logowanie w Node.js](/pl/guides/node-logging). Uruchom serwer 1 raz z wydaniem `checkout-api@2.4.0`. Potem uruchom go ponownie z wydaniem `checkout-api@2.6.0`.
+
+    ```bash
+    npm install @logbrew/node @logbrew/sdk pino
+    export LOGBREW_SERVER_API_KEY="<ingest_key>"
+    export LOGBREW_SERVICE_NAME="checkout-api"
+    export LOGBREW_ENVIRONMENT="production"
+    LOGBREW_RELEASE="checkout-api@2.4.0" node checkout.js 3
+    LOGBREW_RELEASE="checkout-api@2.6.0" node checkout.js 3
+    ```
+
+    Każde uruchomienie wypisuje te same 3 wiersze:
+
+    ```text
+    run 1: /retry-later 503, /checkout 500
+    run 2: /retry-later 503, /checkout 500
+    run 3: /retry-later 503, /checkout 500
+    ```
+  </Step>
+
+  <Step title="Odczytaj logi błędów">
+    ```bash
+    logbrew read logs --severity error --release checkout-api@2.6.0 --since 1h --json
+    ```
+
+    Każde uruchomienie zapisało 15 logów: 6 `info`, 6 `warning` i 3 `error`. To polecenie zwraca 3 logi `error` z drugiego uruchomienia. Każdy ma własny identyfikator trace. Oto 1 z nich w skrócie:
+
+    ```json
+    {
+      "level": "error",
+      "source": "pino",
+      "message": "payment failed",
+      "occurred_at": "2026-11-26T08:27:53.315Z",
+      "release": "checkout-api@2.6.0",
+      "service_name": "checkout-api",
+      "trace_id": "<trace_id>",
+      "attributes": {
+        "metadata": {
+          "context.orderId": "ord_1010",
+          "context.reason": "provider_timeout",
+          "pinoLevel": "error",
+          "pinoLevelNumber": 50
+        }
+      }
+    }
+    ```
+
+    6 logów `error` z 2 uruchomień nie otworzyło żadnego problemu. LogBrew otwiera problemy z błędów zgłaszanych przez SDK, a nie z poziomu logu.
+  </Step>
+
+  <Step title="Odczytaj problem">
+    ```bash
+    logbrew read issues --release checkout-api@2.6.0 --since 1h --json
+    ```
+
+    6 nieprzechwyconych błędów z 2 uruchomień utworzyło 1 problem z 6 wystąpieniami. Nowe wydanie nie otworzyło nowego problemu. `first_seen_at` pochodzi z pierwszego uruchomienia, a `release` to wydanie ostatniego wystąpienia. Oto problem w skrócie:
+
+    ```json
+    {
+      "id": "<issue_id>",
+      "title": "GET /checkout failed",
+      "message": "card declined by the payment provider",
+      "fingerprint": "node.http:CardDeclinedError:checkout.js",
+      "severity": "error",
+      "status": "unresolved",
+      "occurrence_count": 6,
+      "first_seen_at": "2026-11-26T08:23:30.981Z",
+      "last_seen_at": "2026-11-26T08:27:54.388Z",
+      "release": "checkout-api@2.6.0",
+      "trace_id": "<trace_id>",
+      "diagnostics": {
+        "breadcrumbs": [
+          {"category": "log.pino", "level": "info", "message": "order created", "timestamp": "2026-11-26T08:27:54.388Z", "type": "debug"},
+          {"category": "log.pino", "level": "warning", "message": "payment retry", "timestamp": "2026-11-26T08:27:54.388Z", "type": "debug"}
+        ],
+        "exception": {"mechanism": {"handled": false, "type": "node.http"}, "type": "CardDeclinedError"}
+      }
+    }
+    ```
+
+    Odcisk palca ma 3 części: źródło przechwycenia, typ błędu i plik górnej ramki stosu. Błędy z tym samym odciskiem palca trafiają do tego samego problemu.
+  </Step>
+
+  <Step title="Odczytaj logi nieudanego żądania">
+    ```bash
+    logbrew read logs --trace "<trace_id>" --since 1h --json
+    ```
+
+    Polecenie zwraca 2 logi, które ostatnie żądanie `/checkout` zapisało przed błędem: `order created` i `payment retry`.
+  </Step>
+</Steps>
+
+## Jak LogBrew łączy logi i problemy
+
+- **Breadcrumby.** Logi, które żądanie zapisuje przed błędem, trafiają do `diagnostics.breadcrumbs` wystąpienia. Trafiają tam tylko logi tego samego żądania.
+- **Identyfikator trace.** Każde wystąpienie zachowuje identyfikator trace swojego żądania. Użyj go z `logbrew read logs --trace`, aby odczytać wszystkie logi tego żądania.
+- **Wydanie i środowisko.** Logi i problemy używają tych samych filtrów `release` i `environment`.
+
+Aby zbadać problem krok po kroku, zobacz [Zbadaj problem](/pl/guides/investigate-an-issue). Aby dostawać alerty o nowych i powracających problemach, zobacz [przewodnik po alertach](https://logbrew.co/en/guides/alerts).
+
+## Powiązane strony
+
+<CardGroup cols={2}>
+  <Card title="Logowanie strukturalne" icon="braces" href="/pl/concepts/structured-logging">
+    Wybierz pola i poziomy logów, które łatwo przeszukać.
+  </Card>
+
+  <Card title="Logowanie w Node.js" icon="server" href="/pl/guides/node-logging">
+    Wysyłaj logi Winston i Pino z ich identyfikatorami trace.
+  </Card>
+
+  <Card title="Logowanie w Pythonie" icon="code" href="/pl/guides/python-logging">
+    Wysyłaj rekordy ze standardowego modułu logging.
+  </Card>
+
+  <Card title="Zarządzanie problemami" icon="bug" href="/pl/guides/issue-workflow">
+    Rozwiązuj, archiwizuj, przypisuj i ponownie otwieraj problemy.
+  </Card>
+</CardGroup>
