@@ -49,7 +49,7 @@ Other install paths include the GitHub Release installers,
 | Section | What it covers |
 | --- | --- |
 | Start | Product overview and first working CLI flow. |
-| Concepts | Telemetry, distributed tracing, product analytics, releases, and projects. |
+| Concepts | Telemetry, structured logging, error logs and error tracking, distributed tracing, product analytics, releases, and projects. |
 | Guides | SDK setup, OpenTelemetry (OTLP), Supabase, safe capture, key rotation, product events, source maps, CLI usage, AI-agent workflow, troubleshooting, and issue triage. |
 | Reference | Terminology, CLI grammar, telemetry API, filters, response shapes, errors, and account API. |
 

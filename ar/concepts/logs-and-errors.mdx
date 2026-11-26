@@ -1,0 +1,244 @@
+---
+title: "سجل الأخطاء: ما هو، وأين تجده، والفرق بينه وبين تتبع الأخطاء"
+sidebarTitle: "السجلات والأخطاء"
+description: "تعرّف على سجل الأخطاء، وابحث عن ملف error log في macOS وLinux وWindows وApache وNginx وPHP، واعرف متى يذهب الخطأ إلى السجل ومتى يذهب إلى تتبع الأخطاء."
+---
+
+LogBrew منصة لقابلية الملاحظة (Observability) للمطوّرين ووكلاء البرمجة، مع خطة مجانية سخية ودون الحاجة إلى بطاقة دفع.
+
+سجل الأخطاء (error log) هو سجل الأخطاء التي يكتبها تطبيق أو خادم أو نظام تشغيل أثناء عمله. لكل إدخال وقت ومستوى خطورة ورسالة. وكثير من الإدخالات فيها أيضًا تتبّع المكدّس (stack trace). هذا الإدخال من سجل أخطاء PHP 8.5 مأخوذ من تشغيل حقيقي:
+
+```text
+[26-Nov-2026 08:25:26 UTC] PHP Fatal error:  Uncaught DivisionByZeroError: Division by zero in Command line code:1
+Stack trace:
+#0 Command line code(1): intdiv(1, 0)
+#1 {main}
+  thrown in Command line code on line 1
+```
+
+## أين تجد سجل الأخطاء
+
+| النظام | مكان سجل الأخطاء |
+| --- | --- |
+| macOS | السجل الموحّد (Unified Log). افتح تطبيق Console، أو استخدم الأمر `log`. |
+| Linux مع systemd | سجل systemd (journal). |
+| Windows | عارض الأحداث، ثم **سجلات Windows** > **التطبيق** أو **النظام**. |
+| Apache HTTP Server | التوجيه `ErrorLog`. القيمة الافتراضية هي `logs/error_log` في جذر الخادم. يستخدم Debian وUbuntu المسار `/var/log/apache2/error.log`. |
+| Nginx | التوجيه `error_log`. تستخدم حزم Linux المسار `/var/log/nginx/error.log`. ويستخدم Homebrew المسار `/opt/homebrew/var/log/nginx/error.log`. |
+| PHP | الإعداد `error_log`. عندما لا تكون له قيمة، يكتب PHP في سجل أخطاء خادم الويب، أو في مخرج الأخطاء القياسي في CLI. |
+
+استخدم هذه الأوامر لقراءة الأخطاء، أو لعرض مكان السجل:
+
+```bash
+# macOS
+/usr/bin/log show --last 1h --predicate 'messageType == error' --style compact
+# Linux with systemd
+journalctl -p err -b
+# Windows PowerShell
+Get-WinEvent -FilterHashtable @{LogName='Application'; Level=2} -MaxEvents 20
+# Apache, Nginx, and PHP: print the error log setting
+httpd -V | grep DEFAULT_ERRORLOG
+nginx -V 2>&1 | tr ' ' '\n' | grep error-log-path
+php -i | grep '^error_log '
+```
+
+في macOS 27.2، يعطي الأمر `log` سطرًا واحدًا لكل خطأ:
+
+```text
+Timestamp               Ty Process[PID:TID]
+2026-11-26 11:23:28.876 E  analyticsagent[50921:442060d] [com.apple.analyticsagent:query] [BluetoothStatusQuery] No controller info. Returning unknown
+```
+
+## سجلات الأخطاء وتتبع الأخطاء
+
+يحتفظ سجل الأخطاء بإدخال واحد لكل خطأ. أما تتبع الأخطاء (error tracking) فيجمع الأخطاء ذات السبب الواحد في مشكلة واحدة، ويعدّ كل خطأ جديد حدوثًا لتلك المشكلة.
+
+| | سجل الأخطاء | تتبع الأخطاء |
+| --- | --- | --- |
+| سجل واحد | سطر واحد لكل خطأ | مشكلة واحدة لكل سبب |
+| الخطأ نفسه 3 مرات | 3 أسطر | مشكلة واحدة فيها 3 مرات حدوث |
+| تتبّع المكدّس | فقط عندما يكتبه المسجِّل | مقسّم إلى إطارات |
+| الإصدار والبيئة | فقط عندما تضيفهما | محفوظان مع كل حدوث |
+| الحالة | لا توجد | `unresolved`, `resolved`, أو `archived` |
+| التنبيهات | تكتب بنفسك بحثًا أو عدًّا | تنبيهات للمشكلات الجديدة والمشكلات التي عادت |
+
+تحتاج إلى الاثنين. يخبرك السجل بما حدث في طلب واحد. وتخبرك المشكلة بعدد مرات تكرار العطل نفسه، ومنذ متى، وفي أي إصدار.
+
+## متى تسجّل الخطأ في السجل ومتى تبلّغ عنه كمشكلة
+
+- سجّل الخطأ في السجل عندما يعالج الكود العطل. من الأمثلة إعادة المحاولة، أو بديل احتياطي، أو استجابة `503` تطلب من العميل المحاولة مرة أخرى.
+- بلّغ عن مشكلة عندما يكون العطل خللًا برمجيًا (bug). مثال ذلك استثناء لا يلتقطه الكود.
+- لا تبلّغ عن خطأ عميل `4xx` كمشكلة. فهو يصف طلبًا خاطئًا، لا عطلًا في الكود. تتبع حزمة LogBrew SDK لـ Node.js هذه القاعدة افتراضيًا.
+
+## جرّبه: 6 سجلات أخطاء ومشكلة واحدة
+
+يرسل هذا الاختبار سجلات وأخطاء من خادم Node.js إلى LogBrew. جرى تشغيله في 2026-11-26 باستخدام Node.js 22.18 وPino 10.4 و`@logbrew/node` 0.1.30 و`@logbrew/sdk` 0.1.48.
+
+<Steps>
+  <Step title="احفظ الخادم باسم checkout.js">
+    يعالج المسار `/retry-later` العطل ويكتب سجل خطأ. ويرمي المسار `/checkout` خطأً لا يلتقطه الكود.
+
+    ```js
+    import { createServer } from "node:http";
+    import pino from "pino";
+    import {
+      createLogBrewNodeClient,
+      installLogBrewPinoInstrumentation,
+      withLogBrewHttpHandler
+    } from "@logbrew/node";
+
+    const client = createLogBrewNodeClient();
+    installLogBrewPinoInstrumentation({ client });
+    const logger = pino({ level: "info" });
+
+    class CardDeclinedError extends Error {
+      name = "CardDeclinedError";
+    }
+
+    const server = createServer(withLogBrewHttpHandler((req, res) => {
+      const url = new URL(req.url, "http://localhost");
+      const orderId = url.searchParams.get("order");
+      logger.info({ orderId }, "order created");
+      logger.warn({ orderId, attempt: 2 }, "payment retry");
+      if (url.pathname === "/retry-later") {
+        logger.error({ orderId, reason: "provider_timeout" }, "payment failed");
+        res.statusCode = 503;
+        res.end("try again later");
+        return;
+      }
+      throw new CardDeclinedError("card declined by the payment provider");
+    }, { client }));
+
+    await new Promise((resolve) => server.listen(0, resolve));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const runs = Number(process.argv[2] ?? 1);
+    for (let i = 1; i <= runs; i++) {
+      const handled = await fetch(`${base}/retry-later?order=ord_10${i}0`);
+      const crashed = await fetch(`${base}/checkout?order=ord_10${i}1`);
+      console.log(`run ${i}: /retry-later ${handled.status}, /checkout ${crashed.status}`);
+    }
+    server.close();
+    await client.shutdown();
+    ```
+  </Step>
+
+  <Step title="اضبط المفتاح وشغّل الخادم">
+    استخدم مفتاح الاستيعاب الخاص بمشروعك. لإنشائه، راجع [تسجيل السجلات في Node.js](/ar/guides/node-logging). شغّل الخادم مرة واحدة بالإصدار `checkout-api@2.4.0`. ثم شغّله مرة أخرى بالإصدار `checkout-api@2.6.0`.
+
+    ```bash
+    npm install @logbrew/node @logbrew/sdk pino
+    export LOGBREW_SERVER_API_KEY="<ingest_key>"
+    export LOGBREW_SERVICE_NAME="checkout-api"
+    export LOGBREW_ENVIRONMENT="production"
+    LOGBREW_RELEASE="checkout-api@2.4.0" node checkout.js 3
+    LOGBREW_RELEASE="checkout-api@2.6.0" node checkout.js 3
+    ```
+
+    يطبع كل تشغيل الأسطر الثلاثة نفسها:
+
+    ```text
+    run 1: /retry-later 503, /checkout 500
+    run 2: /retry-later 503, /checkout 500
+    run 3: /retry-later 503, /checkout 500
+    ```
+  </Step>
+
+  <Step title="اقرأ سجلات الأخطاء">
+    ```bash
+    logbrew read logs --severity error --release checkout-api@2.6.0 --since 1h --json
+    ```
+
+    حفظ كل تشغيل 15 سجلًا: 6 من `info` و6 من `warning` و3 من `error`. يعيد هذا الأمر سجلات `error` الثلاثة من التشغيل الثاني. لكل منها معرّف تتبّع خاص بها. هذا واحد منها بعد الاختصار:
+
+    ```json
+    {
+      "level": "error",
+      "source": "pino",
+      "message": "payment failed",
+      "occurred_at": "2026-11-26T08:27:53.315Z",
+      "release": "checkout-api@2.6.0",
+      "service_name": "checkout-api",
+      "trace_id": "<trace_id>",
+      "attributes": {
+        "metadata": {
+          "context.orderId": "ord_1010",
+          "context.reason": "provider_timeout",
+          "pinoLevel": "error",
+          "pinoLevelNumber": 50
+        }
+      }
+    }
+    ```
+
+    لم تفتح سجلات `error` الستة من التشغيلين أي مشكلة. يفتح LogBrew المشكلات من الأخطاء التي تبلّغ عنها SDK، لا من مستوى السجل.
+  </Step>
+
+  <Step title="اقرأ المشكلة">
+    ```bash
+    logbrew read issues --release checkout-api@2.6.0 --since 1h --json
+    ```
+
+    كوّنت الأخطاء الستة غير الملتقطة من التشغيلين مشكلة واحدة فيها 6 مرات حدوث. لم يفتح الإصدار الجديد مشكلة جديدة. تأتي قيمة `first_seen_at` من التشغيل الأول، وقيمة `release` هي إصدار آخر حدوث. هذه المشكلة بعد الاختصار:
+
+    ```json
+    {
+      "id": "<issue_id>",
+      "title": "GET /checkout failed",
+      "message": "card declined by the payment provider",
+      "fingerprint": "node.http:CardDeclinedError:checkout.js",
+      "severity": "error",
+      "status": "unresolved",
+      "occurrence_count": 6,
+      "first_seen_at": "2026-11-26T08:23:30.981Z",
+      "last_seen_at": "2026-11-26T08:27:54.388Z",
+      "release": "checkout-api@2.6.0",
+      "trace_id": "<trace_id>",
+      "diagnostics": {
+        "breadcrumbs": [
+          {"category": "log.pino", "level": "info", "message": "order created", "timestamp": "2026-11-26T08:27:54.388Z", "type": "debug"},
+          {"category": "log.pino", "level": "warning", "message": "payment retry", "timestamp": "2026-11-26T08:27:54.388Z", "type": "debug"}
+        ],
+        "exception": {"mechanism": {"handled": false, "type": "node.http"}, "type": "CardDeclinedError"}
+      }
+    }
+    ```
+
+    للبصمة 3 أجزاء: مصدر الالتقاط، ونوع الخطأ، وملف الإطار الأعلى في المكدّس. تذهب الأخطاء ذات البصمة نفسها إلى المشكلة نفسها.
+  </Step>
+
+  <Step title="اقرأ سجلات الطلب الفاشل">
+    ```bash
+    logbrew read logs --trace "<trace_id>" --since 1h --json
+    ```
+
+    يعيد الأمر السجلين اللذين كتبهما آخر طلب `/checkout` قبل الخطأ: `order created` و`payment retry`.
+  </Step>
+</Steps>
+
+## كيف يربط LogBrew السجلات بالمشكلات
+
+- **Breadcrumbs.** تدخل السجلات التي يكتبها الطلب قبل الخطأ في `diagnostics.breadcrumbs` الخاصة بالحدوث. ولا تدخل إلا سجلات الطلب نفسه.
+- **معرّف التتبّع.** يحتفظ كل حدوث بمعرّف التتبّع الخاص بطلبه. استخدمه مع `logbrew read logs --trace` لقراءة كل سجلات ذلك الطلب.
+- **الإصدار والبيئة.** تستخدم السجلات والمشكلات عوامل التصفية نفسها `release` و`environment`.
+
+للتحقيق في مشكلة خطوة بخطوة، راجع [التحقيق في مشكلة](/ar/guides/investigate-an-issue). ولتلقي تنبيهات المشكلات الجديدة والمشكلات التي عادت، راجع [دليل التنبيهات](https://logbrew.co/en/guides/alerts).
+
+## صفحات ذات صلة
+
+<CardGroup cols={2}>
+  <Card title="التسجيل المنظم" icon="braces" href="/ar/concepts/structured-logging">
+    اختر حقول السجلات ومستوياتها بحيث يسهل البحث فيها.
+  </Card>
+
+  <Card title="تسجيل السجلات في Node.js" icon="server" href="/ar/guides/node-logging">
+    أرسل سجلات Winston وPino مع معرّفات التتبّع.
+  </Card>
+
+  <Card title="تسجيل السجلات في Python" icon="code" href="/ar/guides/python-logging">
+    أرسل السجلات من وحدة logging القياسية.
+  </Card>
+
+  <Card title="إدارة المشكلات" icon="bug" href="/ar/guides/issue-workflow">
+    احلّ المشكلات وأرشفها وأسندها وأعد فتحها.
+  </Card>
+</CardGroup>

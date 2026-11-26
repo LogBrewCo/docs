@@ -1,0 +1,244 @@
+---
+title: "エラーログとは：場所の調べ方とエラートラッキングとの違い"
+sidebarTitle: "ログとエラー"
+description: "エラーログとは何か、macOS、Linux、Windows、Apache、Nginx、PHP のエラーログの場所、エラーをログに残すべきかエラートラッキングに送るべきかを説明します。"
+---
+
+LogBrew は、開発者とコーディングエージェントのための Observability（可観測性）プラットフォームです。無料枠が充実していて、カードの登録は不要です。
+
+エラーログとは、アプリケーション、サーバー、OS が実行中に書き出すエラーの記録です。各エントリには、時刻、重大度レベル、メッセージがあります。多くのエントリにはスタックトレースも含まれます。次の PHP 8.5 のエラーログのエントリは、実際の実行で出力されたものです。
+
+```text
+[26-Nov-2026 08:25:26 UTC] PHP Fatal error:  Uncaught DivisionByZeroError: Division by zero in Command line code:1
+Stack trace:
+#0 Command line code(1): intdiv(1, 0)
+#1 {main}
+  thrown in Command line code on line 1
+```
+
+## エラーログの場所
+
+| システム | エラーログの場所 |
+| --- | --- |
+| macOS | 統合ログ（Unified Log）。コンソール App を開くか、`log` コマンドを使います。 |
+| systemd を使う Linux | systemd のジャーナル。 |
+| Windows | イベント ビューアーで **Windows ログ** > **Application** または **System** を開きます。 |
+| Apache HTTP Server | `ErrorLog` ディレクティブ。デフォルトはサーバールートの `logs/error_log` です。Debian と Ubuntu は `/var/log/apache2/error.log` を使います。 |
+| Nginx | `error_log` ディレクティブ。Linux のパッケージは `/var/log/nginx/error.log` を使います。Homebrew は `/opt/homebrew/var/log/nginx/error.log` を使います。 |
+| PHP | `error_log` 設定。値がない場合、PHP は Web サーバーのエラーログに書き込みます。CLI では標準エラー出力に書き込みます。 |
+
+次のコマンドで、エラーを読むか、ログの場所を表示できます。
+
+```bash
+# macOS
+/usr/bin/log show --last 1h --predicate 'messageType == error' --style compact
+# Linux with systemd
+journalctl -p err -b
+# Windows PowerShell
+Get-WinEvent -FilterHashtable @{LogName='Application'; Level=2} -MaxEvents 20
+# Apache, Nginx, and PHP: print the error log setting
+httpd -V | grep DEFAULT_ERRORLOG
+nginx -V 2>&1 | tr ' ' '\n' | grep error-log-path
+php -i | grep '^error_log '
+```
+
+macOS 27.2 では、`log` コマンドはエラー 1 件につき 1 行を出力します。
+
+```text
+Timestamp               Ty Process[PID:TID]
+2026-11-26 11:23:28.876 E  analyticsagent[50921:442060d] [com.apple.analyticsagent:query] [BluetoothStatusQuery] No controller info. Returning unknown
+```
+
+## エラーログとエラートラッキング
+
+エラーログは、エラー 1 件ごとに 1 エントリを残します。エラートラッキングは、原因が同じエラーを 1 つの課題にまとめ、新しいエラーをその課題の発生事象として数えます。
+
+| | エラーログ | エラートラッキング |
+| --- | --- | --- |
+| 1 件の記録 | エラーごとに 1 行 | 原因ごとに 1 つの課題 |
+| 同じエラーが 3 回 | 3 行 | 発生事象 3 件の課題 1 つ |
+| スタックトレース | ロガーが書き出した場合のみ | フレームに分解 |
+| リリースと環境 | 自分で追加した場合のみ | 発生事象ごとに保存 |
+| ステータス | なし | `unresolved`, `resolved`, または `archived` |
+| アラート | 検索や集計を自分で書く | 新しい課題と再発した課題のアラート |
+
+両方が必要です。ログは 1 つのリクエストで何が起きたかを示します。課題は、同じ障害がどのくらいの頻度で、いつから、どのリリースで起きているかを示します。
+
+## エラーをログに残す場合と課題として報告する場合
+
+- コードが障害を処理する場合は、エラーをログに残します。たとえば、リトライ、フォールバック、クライアントに再試行を求める `503` レスポンスです。
+- 障害がバグの場合は、課題として報告します。たとえば、コードがキャッチしない例外です。
+- `4xx` のクライアントエラーは課題として報告しません。これは不正なリクエストを表すもので、コードの障害ではありません。LogBrew Node.js SDK は、デフォルトでこのルールに従います。
+
+## 試す：エラーログ 6 件と課題 1 つ
+
+このテストでは、Node.js サーバーから LogBrew にログとエラーを送ります。2026-11-26 に Node.js 22.18、Pino 10.4、`@logbrew/node` 0.1.30、`@logbrew/sdk` 0.1.48 で実行しました。
+
+<Steps>
+  <Step title="サーバーを checkout.js として保存する">
+    `/retry-later` ルートは障害を処理し、エラーログを書き出します。`/checkout` ルートは、コードがキャッチしないエラーをスローします。
+
+    ```js
+    import { createServer } from "node:http";
+    import pino from "pino";
+    import {
+      createLogBrewNodeClient,
+      installLogBrewPinoInstrumentation,
+      withLogBrewHttpHandler
+    } from "@logbrew/node";
+
+    const client = createLogBrewNodeClient();
+    installLogBrewPinoInstrumentation({ client });
+    const logger = pino({ level: "info" });
+
+    class CardDeclinedError extends Error {
+      name = "CardDeclinedError";
+    }
+
+    const server = createServer(withLogBrewHttpHandler((req, res) => {
+      const url = new URL(req.url, "http://localhost");
+      const orderId = url.searchParams.get("order");
+      logger.info({ orderId }, "order created");
+      logger.warn({ orderId, attempt: 2 }, "payment retry");
+      if (url.pathname === "/retry-later") {
+        logger.error({ orderId, reason: "provider_timeout" }, "payment failed");
+        res.statusCode = 503;
+        res.end("try again later");
+        return;
+      }
+      throw new CardDeclinedError("card declined by the payment provider");
+    }, { client }));
+
+    await new Promise((resolve) => server.listen(0, resolve));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const runs = Number(process.argv[2] ?? 1);
+    for (let i = 1; i <= runs; i++) {
+      const handled = await fetch(`${base}/retry-later?order=ord_10${i}0`);
+      const crashed = await fetch(`${base}/checkout?order=ord_10${i}1`);
+      console.log(`run ${i}: /retry-later ${handled.status}, /checkout ${crashed.status}`);
+    }
+    server.close();
+    await client.shutdown();
+    ```
+  </Step>
+
+  <Step title="キーを設定してサーバーを実行する">
+    プロジェクトの取り込みキーを使います。作成方法は [Node.js のログ](/ja/guides/node-logging) を参照してください。まずリリース `checkout-api@2.4.0` でサーバーを 1 回実行します。次にリリース `checkout-api@2.6.0` でもう一度実行します。
+
+    ```bash
+    npm install @logbrew/node @logbrew/sdk pino
+    export LOGBREW_SERVER_API_KEY="<ingest_key>"
+    export LOGBREW_SERVICE_NAME="checkout-api"
+    export LOGBREW_ENVIRONMENT="production"
+    LOGBREW_RELEASE="checkout-api@2.4.0" node checkout.js 3
+    LOGBREW_RELEASE="checkout-api@2.6.0" node checkout.js 3
+    ```
+
+    どちらの実行でも、同じ 3 行が出力されます。
+
+    ```text
+    run 1: /retry-later 503, /checkout 500
+    run 2: /retry-later 503, /checkout 500
+    run 3: /retry-later 503, /checkout 500
+    ```
+  </Step>
+
+  <Step title="エラーログを読む">
+    ```bash
+    logbrew read logs --severity error --release checkout-api@2.6.0 --since 1h --json
+    ```
+
+    各実行で 15 件のログが保存されました。内訳は `info` が 6 件、`warning` が 6 件、`error` が 3 件です。このコマンドは、2 回目の実行の `error` ログ 3 件を返します。それぞれに固有のトレース ID があります。そのうち 1 件を短くしたものを示します。
+
+    ```json
+    {
+      "level": "error",
+      "source": "pino",
+      "message": "payment failed",
+      "occurred_at": "2026-11-26T08:27:53.315Z",
+      "release": "checkout-api@2.6.0",
+      "service_name": "checkout-api",
+      "trace_id": "<trace_id>",
+      "attributes": {
+        "metadata": {
+          "context.orderId": "ord_1010",
+          "context.reason": "provider_timeout",
+          "pinoLevel": "error",
+          "pinoLevelNumber": 50
+        }
+      }
+    }
+    ```
+
+    2 回の実行で出た 6 件の `error` ログは、課題を作成しませんでした。LogBrew は、ログのレベルではなく、SDK が報告したエラーから課題を作成します。
+  </Step>
+
+  <Step title="課題を読む">
+    ```bash
+    logbrew read issues --release checkout-api@2.6.0 --since 1h --json
+    ```
+
+    2 回の実行で発生した 6 件のキャッチされないエラーは、発生事象 6 件の課題 1 つになりました。新しいリリースでも新しい課題は作成されませんでした。`first_seen_at` は 1 回目の実行の時刻で、`release` は最後の発生事象のリリースです。課題を短くしたものを示します。
+
+    ```json
+    {
+      "id": "<issue_id>",
+      "title": "GET /checkout failed",
+      "message": "card declined by the payment provider",
+      "fingerprint": "node.http:CardDeclinedError:checkout.js",
+      "severity": "error",
+      "status": "unresolved",
+      "occurrence_count": 6,
+      "first_seen_at": "2026-11-26T08:23:30.981Z",
+      "last_seen_at": "2026-11-26T08:27:54.388Z",
+      "release": "checkout-api@2.6.0",
+      "trace_id": "<trace_id>",
+      "diagnostics": {
+        "breadcrumbs": [
+          {"category": "log.pino", "level": "info", "message": "order created", "timestamp": "2026-11-26T08:27:54.388Z", "type": "debug"},
+          {"category": "log.pino", "level": "warning", "message": "payment retry", "timestamp": "2026-11-26T08:27:54.388Z", "type": "debug"}
+        ],
+        "exception": {"mechanism": {"handled": false, "type": "node.http"}, "type": "CardDeclinedError"}
+      }
+    }
+    ```
+
+    フィンガープリントは 3 つの要素でできています。取得元、エラーの型、スタックの一番上のフレームのファイルです。フィンガープリントが同じエラーは同じ課題にまとまります。
+  </Step>
+
+  <Step title="失敗したリクエストのログを読む">
+    ```bash
+    logbrew read logs --trace "<trace_id>" --since 1h --json
+    ```
+
+    このコマンドは、最後の `/checkout` リクエストがエラーの前に書き出した 2 件のログを返します。`order created` と `payment retry` です。
+  </Step>
+</Steps>
+
+## LogBrew がログと課題を結び付けるしくみ
+
+- **Breadcrumbs。** リクエストがエラーの前に書き出したログは、発生事象の `diagnostics.breadcrumbs` に入ります。入るのは同じリクエストのログだけです。
+- **トレース ID。** 各発生事象は、そのリクエストのトレース ID を保持します。この ID を `logbrew read logs --trace` に渡すと、そのリクエストのすべてのログを読めます。
+- **リリースと環境。** ログと課題は、同じ `release` と `environment` のフィルターを使います。
+
+課題を順を追って調べるには、[課題を調査する](/ja/guides/investigate-an-issue) を参照してください。新しい課題と再発した課題のアラートを受け取るには、[アラートのガイド](https://logbrew.co/en/guides/alerts) を参照してください。
+
+## 関連ページ
+
+<CardGroup cols={2}>
+  <Card title="構造化ログ" icon="braces" href="/ja/concepts/structured-logging">
+    検索しやすいログのフィールドとレベルを選びます。
+  </Card>
+
+  <Card title="Node.js のログ" icon="server" href="/ja/guides/node-logging">
+    Winston と Pino のログをトレース ID 付きで送ります。
+  </Card>
+
+  <Card title="Python logging" icon="code" href="/ja/guides/python-logging">
+    標準の logging モジュールからレコードを送ります。
+  </Card>
+
+  <Card title="課題を管理する" icon="bug" href="/ja/guides/issue-workflow">
+    課題を解決、アーカイブ、割り当て、再オープンします。
+  </Card>
+</CardGroup>

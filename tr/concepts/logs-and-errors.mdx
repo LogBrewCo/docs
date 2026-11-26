@@ -1,0 +1,244 @@
+---
+title: "Hata logu nedir, nerede bulunur ve hata takibinden farkı"
+sidebarTitle: "Loglar ve hatalar"
+description: "Hata logunun ne olduğunu öğrenin; macOS, Linux, Windows, Apache, Nginx ve PHP'de hata logunu bulun ve bir hatanın loga mı yoksa hata takibine mi ait olduğunu görün."
+---
+
+LogBrew, geliştiriciler ve kodlama asistanları için bir gözlemlenebilirlik platformudur. Cömert bir ücretsiz planı vardır ve kart gerektirmez.
+
+Hata logu (error log), bir uygulamanın, sunucunun veya işletim sisteminin çalışırken yazdığı hataların kaydıdır. Her kayıtta bir zaman, bir önem düzeyi ve bir mesaj vardır. Birçok kayıtta yığın izi (stack trace) de bulunur. Aşağıdaki PHP 8.5 hata logu kaydı gerçek bir çalıştırmadan alındı:
+
+```text
+[26-Nov-2026 08:25:26 UTC] PHP Fatal error:  Uncaught DivisionByZeroError: Division by zero in Command line code:1
+Stack trace:
+#0 Command line code(1): intdiv(1, 0)
+#1 {main}
+  thrown in Command line code on line 1
+```
+
+## Hata logu nerede bulunur
+
+| Sistem | Hata logunun yeri |
+| --- | --- |
+| macOS | Birleşik log (unified log). Konsol uygulamasını açın veya `log` komutunu kullanın. |
+| systemd kullanan Linux | systemd günlüğü (journal). |
+| Windows | Olay Görüntüleyicisi'ni açın, sonra **Windows Günlükleri** > **Uygulama** veya **Sistem** bölümünü seçin. |
+| Apache HTTP Server | `ErrorLog` yönergesi. Varsayılan değer, sunucu kök dizinindeki `logs/error_log` dosyasıdır. Debian ve Ubuntu `/var/log/apache2/error.log` kullanır. |
+| Nginx | `error_log` yönergesi. Linux paketleri `/var/log/nginx/error.log` kullanır. Homebrew `/opt/homebrew/var/log/nginx/error.log` kullanır. |
+| PHP | `error_log` ayarı. Ayar boşsa PHP, web sunucusunun hata loguna, CLI'da ise standart hata akışına yazar. |
+
+Hataları okumak veya logun yerini yazdırmak için bu komutları kullanın:
+
+```bash
+# macOS
+/usr/bin/log show --last 1h --predicate 'messageType == error' --style compact
+# Linux with systemd
+journalctl -p err -b
+# Windows PowerShell
+Get-WinEvent -FilterHashtable @{LogName='Application'; Level=2} -MaxEvents 20
+# Apache, Nginx, and PHP: print the error log setting
+httpd -V | grep DEFAULT_ERRORLOG
+nginx -V 2>&1 | tr ' ' '\n' | grep error-log-path
+php -i | grep '^error_log '
+```
+
+macOS 27.2'de `log` komutu her hata için 1 satır verir:
+
+```text
+Timestamp               Ty Process[PID:TID]
+2026-11-26 11:23:28.876 E  analyticsagent[50921:442060d] [com.apple.analyticsagent:query] [BluetoothStatusQuery] No controller info. Returning unknown
+```
+
+## Hata logları ve hata takibi
+
+Hata logu her hata için 1 kayıt tutar. Hata takibi aynı nedenden gelen hataları 1 sorunda toplar ve her yeni hatayı o sorunun bir oluşumu olarak sayar.
+
+| | Hata logu | Hata takibi |
+| --- | --- | --- |
+| 1 kayıt | Her hata için 1 satır | Her neden için 1 sorun |
+| Aynı hata 3 kez | 3 satır | 3 oluşumlu 1 sorun |
+| Yığın izi | Yalnızca logger onu yazarsa | Çerçevelere ayrılır |
+| Sürüm ve ortam | Yalnızca siz eklerseniz | Her oluşumda saklanır |
+| Durum | Yok | `unresolved`, `resolved`, veya `archived` |
+| Uyarılar | Aramayı veya sayımı siz yazarsınız | Yeni ve tekrarlayan sorunlar için uyarılar |
+
+İkisine de ihtiyacınız var. Log, 1 istekte ne olduğunu gösterir. Sorun ise aynı hatanın ne sıklıkla, ne zamandan beri ve hangi sürümde olduğunu gösterir.
+
+## Hata ne zaman loglanır, ne zaman sorun olarak bildirilir
+
+- Kodunuz hatayı ele alıyorsa hatayı loglayın. Örnekler: yeniden deneme, yedek yol veya istemciden tekrar denemesini isteyen bir `503` yanıtı.
+- Hata bir yazılım hatasıysa (bug) sorun olarak bildirin. Örnek: kodunuzun yakalamadığı bir istisna.
+- `4xx` istemci hatalarını sorun olarak bildirmeyin. Bu hata kodunuzdaki bir arızayı değil, hatalı bir isteği anlatır. LogBrew Node.js SDK'sı varsayılan olarak bu kurala uyar.
+
+## Deneyin: 6 hata logu ve 1 sorun
+
+Bu test, bir Node.js sunucusundan LogBrew'a log ve hata gönderir. Test 2026-11-26 tarihinde Node.js 22.18, Pino 10.4, `@logbrew/node` 0.1.30 ve `@logbrew/sdk` 0.1.48 ile çalıştı.
+
+<Steps>
+  <Step title="Sunucuyu checkout.js olarak kaydedin">
+    `/retry-later` rotası hatayı ele alır ve bir hata logu yazar. `/checkout` rotası, kodun yakalamadığı bir hata fırlatır.
+
+    ```js
+    import { createServer } from "node:http";
+    import pino from "pino";
+    import {
+      createLogBrewNodeClient,
+      installLogBrewPinoInstrumentation,
+      withLogBrewHttpHandler
+    } from "@logbrew/node";
+
+    const client = createLogBrewNodeClient();
+    installLogBrewPinoInstrumentation({ client });
+    const logger = pino({ level: "info" });
+
+    class CardDeclinedError extends Error {
+      name = "CardDeclinedError";
+    }
+
+    const server = createServer(withLogBrewHttpHandler((req, res) => {
+      const url = new URL(req.url, "http://localhost");
+      const orderId = url.searchParams.get("order");
+      logger.info({ orderId }, "order created");
+      logger.warn({ orderId, attempt: 2 }, "payment retry");
+      if (url.pathname === "/retry-later") {
+        logger.error({ orderId, reason: "provider_timeout" }, "payment failed");
+        res.statusCode = 503;
+        res.end("try again later");
+        return;
+      }
+      throw new CardDeclinedError("card declined by the payment provider");
+    }, { client }));
+
+    await new Promise((resolve) => server.listen(0, resolve));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const runs = Number(process.argv[2] ?? 1);
+    for (let i = 1; i <= runs; i++) {
+      const handled = await fetch(`${base}/retry-later?order=ord_10${i}0`);
+      const crashed = await fetch(`${base}/checkout?order=ord_10${i}1`);
+      console.log(`run ${i}: /retry-later ${handled.status}, /checkout ${crashed.status}`);
+    }
+    server.close();
+    await client.shutdown();
+    ```
+  </Step>
+
+  <Step title="Anahtarı ayarlayın ve sunucuyu çalıştırın">
+    Projenizin ingest anahtarını kullanın. Anahtarı oluşturmak için [Node.js loglama](/tr/guides/node-logging) sayfasına bakın. Sunucuyu önce `checkout-api@2.4.0` sürümüyle 1 kez çalıştırın. Sonra `checkout-api@2.6.0` sürümüyle tekrar çalıştırın.
+
+    ```bash
+    npm install @logbrew/node @logbrew/sdk pino
+    export LOGBREW_SERVER_API_KEY="<ingest_key>"
+    export LOGBREW_SERVICE_NAME="checkout-api"
+    export LOGBREW_ENVIRONMENT="production"
+    LOGBREW_RELEASE="checkout-api@2.4.0" node checkout.js 3
+    LOGBREW_RELEASE="checkout-api@2.6.0" node checkout.js 3
+    ```
+
+    Her çalıştırma aynı 3 satırı yazar:
+
+    ```text
+    run 1: /retry-later 503, /checkout 500
+    run 2: /retry-later 503, /checkout 500
+    run 3: /retry-later 503, /checkout 500
+    ```
+  </Step>
+
+  <Step title="Hata loglarını okuyun">
+    ```bash
+    logbrew read logs --severity error --release checkout-api@2.6.0 --since 1h --json
+    ```
+
+    Her çalıştırma 15 log sakladı: 6 `info`, 6 `warning` ve 3 `error`. Bu komut ikinci çalıştırmanın 3 `error` logunu döndürür. Her birinin kendi trace kimliği vardır. Aşağıda biri kısaltılmış olarak yer alıyor:
+
+    ```json
+    {
+      "level": "error",
+      "source": "pino",
+      "message": "payment failed",
+      "occurred_at": "2026-11-26T08:27:53.315Z",
+      "release": "checkout-api@2.6.0",
+      "service_name": "checkout-api",
+      "trace_id": "<trace_id>",
+      "attributes": {
+        "metadata": {
+          "context.orderId": "ord_1010",
+          "context.reason": "provider_timeout",
+          "pinoLevel": "error",
+          "pinoLevelNumber": 50
+        }
+      }
+    }
+    ```
+
+    2 çalıştırmanın 6 `error` logu sorun açmadı. LogBrew, sorunları log düzeyinden değil, SDK'nın bildirdiği hatalardan açar.
+  </Step>
+
+  <Step title="Sorunu okuyun">
+    ```bash
+    logbrew read issues --release checkout-api@2.6.0 --since 1h --json
+    ```
+
+    2 çalıştırmadaki 6 yakalanmamış hata, 6 oluşumlu 1 sorun oluşturdu. Yeni sürüm yeni bir sorun açmadı. `first_seen_at` ilk çalıştırmadan gelir, `release` ise son oluşumun sürümüdür. Sorun kısaltılmış olarak aşağıda:
+
+    ```json
+    {
+      "id": "<issue_id>",
+      "title": "GET /checkout failed",
+      "message": "card declined by the payment provider",
+      "fingerprint": "node.http:CardDeclinedError:checkout.js",
+      "severity": "error",
+      "status": "unresolved",
+      "occurrence_count": 6,
+      "first_seen_at": "2026-11-26T08:23:30.981Z",
+      "last_seen_at": "2026-11-26T08:27:54.388Z",
+      "release": "checkout-api@2.6.0",
+      "trace_id": "<trace_id>",
+      "diagnostics": {
+        "breadcrumbs": [
+          {"category": "log.pino", "level": "info", "message": "order created", "timestamp": "2026-11-26T08:27:54.388Z", "type": "debug"},
+          {"category": "log.pino", "level": "warning", "message": "payment retry", "timestamp": "2026-11-26T08:27:54.388Z", "type": "debug"}
+        ],
+        "exception": {"mechanism": {"handled": false, "type": "node.http"}, "type": "CardDeclinedError"}
+      }
+    }
+    ```
+
+    Parmak izinin 3 parçası vardır: yakalama kaynağı, hata türü ve en üstteki yığın çerçevesinin dosyası. Aynı parmak izine sahip hatalar aynı soruna girer.
+  </Step>
+
+  <Step title="Başarısız isteğin loglarını okuyun">
+    ```bash
+    logbrew read logs --trace "<trace_id>" --since 1h --json
+    ```
+
+    Komut, son `/checkout` isteğinin hatadan önce yazdığı 2 logu döndürür: `order created` ve `payment retry`.
+  </Step>
+</Steps>
+
+## LogBrew logları ve sorunları nasıl bağlar
+
+- **Breadcrumbs.** Bir isteğin hatadan önce yazdığı loglar, oluşumun `diagnostics.breadcrumbs` alanına girer. Yalnızca aynı isteğin logları girer.
+- **Trace kimliği.** Her oluşum, isteğinin trace kimliğini saklar. O isteğin tüm loglarını okumak için bu kimliği `logbrew read logs --trace` ile kullanın.
+- **Sürüm ve ortam.** Loglar ve sorunlar aynı `release` ve `environment` filtrelerini kullanır.
+
+Bir sorunu adım adım incelemek için [Bir sorunu inceleyin](/tr/guides/investigate-an-issue) sayfasına bakın. Yeni ve tekrarlayan sorunlar için uyarı almak üzere [uyarı rehberine](https://logbrew.co/en/guides/alerts) bakın.
+
+## İlgili sayfalar
+
+<CardGroup cols={2}>
+  <Card title="Yapılandırılmış loglama" icon="braces" href="/tr/concepts/structured-logging">
+    Aranabilir log alanları ve düzeyleri seçin.
+  </Card>
+
+  <Card title="Node.js loglama" icon="server" href="/tr/guides/node-logging">
+    Winston ve Pino loglarını trace kimlikleriyle gönderin.
+  </Card>
+
+  <Card title="Python loglama" icon="code" href="/tr/guides/python-logging">
+    Standart logging modülünden kayıt gönderin.
+  </Card>
+
+  <Card title="Sorunları yönetin" icon="bug" href="/tr/guides/issue-workflow">
+    Sorunları çözün, arşivleyin, atayın ve yeniden açın.
+  </Card>
+</CardGroup>

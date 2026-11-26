@@ -1,0 +1,244 @@
+---
+title: "Error log: wat het is, waar je het vindt en error tracking"
+sidebarTitle: "Logs en fouten"
+description: "Lees wat een error log is, vind de foutlog op macOS, Linux, Windows, Apache, Nginx en PHP, en zie wanneer een fout in een log hoort en wanneer in error tracking."
+---
+
+LogBrew is een observability-platform voor developers en coding agents, met een royaal gratis abonnement en zonder creditcard.
+
+Een error log (foutlog) is een verslag van de fouten die een applicatie, een server of een besturingssysteem schrijft terwijl het draait. Elke regel heeft een tijd, een ernstniveau en een bericht. Veel regels hebben ook een stack trace. Deze regel uit de error log van PHP 8.5 komt uit een echte run:
+
+```text
+[26-Nov-2026 08:25:26 UTC] PHP Fatal error:  Uncaught DivisionByZeroError: Division by zero in Command line code:1
+Stack trace:
+#0 Command line code(1): intdiv(1, 0)
+#1 {main}
+  thrown in Command line code on line 1
+```
+
+## Waar je de error log vindt
+
+| Systeem | Locatie van de error log |
+| --- | --- |
+| macOS | Unified log. Open de app Console, of gebruik het commando `log`. |
+| Linux met systemd | Het systemd-journal. |
+| Windows | Logboeken, daarna **Windows-logboeken** > **Toepassing** of **Systeem**. |
+| Apache HTTP Server | De directive `ErrorLog`. De standaard is `logs/error_log` in de server root. Debian en Ubuntu gebruiken `/var/log/apache2/error.log`. |
+| Nginx | De directive `error_log`. Linux-pakketten gebruiken `/var/log/nginx/error.log`. Homebrew gebruikt `/opt/homebrew/var/log/nginx/error.log`. |
+| PHP | De instelling `error_log`. Zonder waarde schrijft PHP naar de error log van de webserver, of naar standard error in de CLI. |
+
+Gebruik deze commando's om de fouten te lezen, of om te tonen waar de log staat:
+
+```bash
+# macOS
+/usr/bin/log show --last 1h --predicate 'messageType == error' --style compact
+# Linux with systemd
+journalctl -p err -b
+# Windows PowerShell
+Get-WinEvent -FilterHashtable @{LogName='Application'; Level=2} -MaxEvents 20
+# Apache, Nginx, and PHP: print the error log setting
+httpd -V | grep DEFAULT_ERRORLOG
+nginx -V 2>&1 | tr ' ' '\n' | grep error-log-path
+php -i | grep '^error_log '
+```
+
+Op macOS 27.2 geeft het commando `log` 1 regel per fout:
+
+```text
+Timestamp               Ty Process[PID:TID]
+2026-11-26 11:23:28.876 E  analyticsagent[50921:442060d] [com.apple.analyticsagent:query] [BluetoothStatusQuery] No controller info. Returning unknown
+```
+
+## Error logs en error tracking
+
+Een error log bewaart 1 regel per fout. Error tracking groepeert fouten met dezelfde oorzaak in 1 issue, en telt elke nieuwe fout als een voorval van dat issue.
+
+| | Error log | Error tracking |
+| --- | --- | --- |
+| 1 record | 1 regel per fout | 1 issue per oorzaak |
+| Dezelfde fout 3 keer | 3 regels | 1 issue met 3 voorvallen |
+| Stack trace | Alleen als de logger hem schrijft | Opgedeeld in frames |
+| Release en omgeving | Alleen als je ze toevoegt | Opgeslagen bij elk voorval |
+| Status | Geen | `unresolved`, `resolved`, of `archived` |
+| Alerts | Je schrijft zelf een zoekopdracht of een telling | Alerts voor nieuwe en teruggekeerde issues |
+
+Je hebt ze allebei nodig. De log vertelt wat er in 1 request gebeurde. Het issue vertelt hoe vaak dezelfde fout optreedt, sinds wanneer en in welke release.
+
+## Wanneer je een fout logt en wanneer je een issue meldt
+
+- Log de fout als je code de fout afhandelt. Voorbeelden zijn een retry, een fallback of een `503`-response die de client vraagt het opnieuw te proberen.
+- Meld een issue als de fout een bug is. Een voorbeeld is een exception die je code niet afvangt.
+- Meld een `4xx`-clientfout niet als issue. Die beschrijft een fout request, geen fout in je code. De LogBrew Node.js SDK volgt deze regel standaard.
+
+## Test het: 6 error logs en 1 issue
+
+Deze test stuurt logs en fouten van een Node.js-server naar LogBrew. Hij draaide op 2026-11-26 met Node.js 22.18, Pino 10.4, `@logbrew/node` 0.1.30 en `@logbrew/sdk` 0.1.48.
+
+<Steps>
+  <Step title="Sla de server op als checkout.js">
+    De route `/retry-later` handelt de fout af en schrijft een error log. De route `/checkout` gooit een fout die de code niet afvangt.
+
+    ```js
+    import { createServer } from "node:http";
+    import pino from "pino";
+    import {
+      createLogBrewNodeClient,
+      installLogBrewPinoInstrumentation,
+      withLogBrewHttpHandler
+    } from "@logbrew/node";
+
+    const client = createLogBrewNodeClient();
+    installLogBrewPinoInstrumentation({ client });
+    const logger = pino({ level: "info" });
+
+    class CardDeclinedError extends Error {
+      name = "CardDeclinedError";
+    }
+
+    const server = createServer(withLogBrewHttpHandler((req, res) => {
+      const url = new URL(req.url, "http://localhost");
+      const orderId = url.searchParams.get("order");
+      logger.info({ orderId }, "order created");
+      logger.warn({ orderId, attempt: 2 }, "payment retry");
+      if (url.pathname === "/retry-later") {
+        logger.error({ orderId, reason: "provider_timeout" }, "payment failed");
+        res.statusCode = 503;
+        res.end("try again later");
+        return;
+      }
+      throw new CardDeclinedError("card declined by the payment provider");
+    }, { client }));
+
+    await new Promise((resolve) => server.listen(0, resolve));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const runs = Number(process.argv[2] ?? 1);
+    for (let i = 1; i <= runs; i++) {
+      const handled = await fetch(`${base}/retry-later?order=ord_10${i}0`);
+      const crashed = await fetch(`${base}/checkout?order=ord_10${i}1`);
+      console.log(`run ${i}: /retry-later ${handled.status}, /checkout ${crashed.status}`);
+    }
+    server.close();
+    await client.shutdown();
+    ```
+  </Step>
+
+  <Step title="Stel de key in en start de server">
+    Gebruik de ingest key van je project. Zie [Node.js logging](/nl/guides/node-logging) om die te maken. Start de server 1 keer met release `checkout-api@2.4.0`. Start hem daarna opnieuw met release `checkout-api@2.6.0`.
+
+    ```bash
+    npm install @logbrew/node @logbrew/sdk pino
+    export LOGBREW_SERVER_API_KEY="<ingest_key>"
+    export LOGBREW_SERVICE_NAME="checkout-api"
+    export LOGBREW_ENVIRONMENT="production"
+    LOGBREW_RELEASE="checkout-api@2.4.0" node checkout.js 3
+    LOGBREW_RELEASE="checkout-api@2.6.0" node checkout.js 3
+    ```
+
+    Elke run print dezelfde 3 regels:
+
+    ```text
+    run 1: /retry-later 503, /checkout 500
+    run 2: /retry-later 503, /checkout 500
+    run 3: /retry-later 503, /checkout 500
+    ```
+  </Step>
+
+  <Step title="Lees de error logs">
+    ```bash
+    logbrew read logs --severity error --release checkout-api@2.6.0 --since 1h --json
+    ```
+
+    Elke run sloeg 15 logs op: 6 `info`, 6 `warning` en 3 `error`. Dit commando geeft de 3 `error`-logs van de tweede run terug. Elk heeft een eigen trace-ID. Dit is er 1, ingekort:
+
+    ```json
+    {
+      "level": "error",
+      "source": "pino",
+      "message": "payment failed",
+      "occurred_at": "2026-11-26T08:27:53.315Z",
+      "release": "checkout-api@2.6.0",
+      "service_name": "checkout-api",
+      "trace_id": "<trace_id>",
+      "attributes": {
+        "metadata": {
+          "context.orderId": "ord_1010",
+          "context.reason": "provider_timeout",
+          "pinoLevel": "error",
+          "pinoLevelNumber": 50
+        }
+      }
+    }
+    ```
+
+    De 6 `error`-logs van de 2 runs openden geen issue. LogBrew opent issues vanuit fouten die de SDK meldt, niet vanuit het niveau van een log.
+  </Step>
+
+  <Step title="Lees het issue">
+    ```bash
+    logbrew read issues --release checkout-api@2.6.0 --since 1h --json
+    ```
+
+    De 6 niet-afgevangen fouten van de 2 runs maakten 1 issue met 6 voorvallen. De nieuwe release opende geen nieuw issue. `first_seen_at` komt uit de eerste run, en `release` is de release van het laatste voorval. Dit is het issue, ingekort:
+
+    ```json
+    {
+      "id": "<issue_id>",
+      "title": "GET /checkout failed",
+      "message": "card declined by the payment provider",
+      "fingerprint": "node.http:CardDeclinedError:checkout.js",
+      "severity": "error",
+      "status": "unresolved",
+      "occurrence_count": 6,
+      "first_seen_at": "2026-11-26T08:23:30.981Z",
+      "last_seen_at": "2026-11-26T08:27:54.388Z",
+      "release": "checkout-api@2.6.0",
+      "trace_id": "<trace_id>",
+      "diagnostics": {
+        "breadcrumbs": [
+          {"category": "log.pino", "level": "info", "message": "order created", "timestamp": "2026-11-26T08:27:54.388Z", "type": "debug"},
+          {"category": "log.pino", "level": "warning", "message": "payment retry", "timestamp": "2026-11-26T08:27:54.388Z", "type": "debug"}
+        ],
+        "exception": {"mechanism": {"handled": false, "type": "node.http"}, "type": "CardDeclinedError"}
+      }
+    }
+    ```
+
+    De vingerafdruk heeft 3 delen: de bron van de capture, het fouttype en het bestand van het bovenste stack frame. Fouten met dezelfde vingerafdruk komen in hetzelfde issue.
+  </Step>
+
+  <Step title="Lees de logs van het mislukte request">
+    ```bash
+    logbrew read logs --trace "<trace_id>" --since 1h --json
+    ```
+
+    Het commando geeft de 2 logs terug die het laatste `/checkout`-request vóór de fout schreef: `order created` en `payment retry`.
+  </Step>
+</Steps>
+
+## Hoe LogBrew logs en issues verbindt
+
+- **Breadcrumbs.** De logs die een request vóór een fout schrijft, komen in `diagnostics.breadcrumbs` van het voorval. Alleen logs van hetzelfde request komen erin.
+- **Trace-ID.** Elk voorval bewaart de trace-ID van zijn request. Gebruik die met `logbrew read logs --trace` om alle logs van dat request te lezen.
+- **Release en omgeving.** Logs en issues gebruiken dezelfde filters `release` en `environment`.
+
+Zie [Een issue onderzoeken](/nl/guides/investigate-an-issue) om een issue stap voor stap te onderzoeken. Zie de [alerting-gids](https://logbrew.co/en/guides/alerts) om alerts te krijgen voor nieuwe en teruggekeerde issues.
+
+## Gerelateerde pagina's
+
+<CardGroup cols={2}>
+  <Card title="Structured logging" icon="braces" href="/nl/concepts/structured-logging">
+    Kies logvelden en niveaus waarop je kunt zoeken.
+  </Card>
+
+  <Card title="Node.js logging" icon="server" href="/nl/guides/node-logging">
+    Stuur Winston- en Pino-logs met hun trace-ID's.
+  </Card>
+
+  <Card title="Python logging" icon="code" href="/nl/guides/python-logging">
+    Stuur records uit de standaardmodule logging.
+  </Card>
+
+  <Card title="Issues beheren" icon="bug" href="/nl/guides/issue-workflow">
+    Issues oplossen, archiveren, toewijzen en heropenen.
+  </Card>
+</CardGroup>
