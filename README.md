@@ -83,6 +83,19 @@ python3 scripts/check_locales.py
 Every locale is in the `docs.json` language switcher. A new locale joins it
 only when all its pages exist.
 
+## Copy check
+
+The copy check reads every page and every navigation label in `docs.json`. It
+fails on words and phrases that make text sound machine-written, such as
+"seamless", "in order to", or "let me know if". English pages use the English
+list in `scripts/copy-slop-patterns.json`. A translated page uses only the list
+for its own language. Run the check after changing a page or a label:
+
+```bash
+bun test scripts/check-copy-slop.test.ts
+bun scripts/check-copy-slop.ts
+```
+
 ## Layout check
 
 The layout check opens every page in every language at 320, 390, 768, and
