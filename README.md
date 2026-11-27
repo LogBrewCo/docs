@@ -27,6 +27,7 @@ before proposing code changes.
 Install the native CLI, then ask it for the built-in examples.
 
 ```bash
+brew trust --formula LogBrewCo/tap/logbrew
 brew install LogBrewCo/tap/logbrew
 logbrew examples
 logbrew --json status
